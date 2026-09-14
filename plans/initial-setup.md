@@ -19,4 +19,5 @@ Human-facing documentation uses HTML, as required by `/home/logan/AGENTS.md`.
 
 ## Progress
 
-- Planning recorded. Repository started with an empty `.gitignore` and no source files. Rust is not currently on PATH; Neovim 0.12.4 is present.
+- Planning recorded. Repository started with an empty `.gitignore` and no source files. Rust was not on PATH; Neovim 0.12.4 was present.
+- Step 1 complete: HTML home, prototype rules, and 45 work units in 14 modules. All 75 initial external documentation links and local navigation targets checked successfully. Independent review found no high, medium, or low issues.

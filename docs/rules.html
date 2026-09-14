@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prototype rules — Learning Lord</title>
+  <style>body{font:17px/1.6 system-ui,sans-serif;max-width:58rem;margin:2rem auto;padding:0 1rem;color:#20252b;background:#faf9f6}a{color:#145a80}h2{margin-top:2rem}li{margin:.5rem 0}table{border-collapse:collapse;width:100%}th,td{text-align:left;vertical-align:top;border:1px solid #bbb;padding:.6rem}code{font-size:.9em}</style>
+</head>
+<body>
+<nav aria-label="Documentation"><a href="../index.html">Home</a> · <a href="curriculum.html">Curriculum</a> · <a href="tooling.html">Tooling</a></nav>
+<main>
+<h1>Prototype rules</h1>
+<p>Scope agreed with the learner. Inspired by Lords and Villeins, with families choosing what and where to build. This is an open-ended, local sandbox; balance and visual polish are not completion criteria.</p>
+<p><strong>Status:</strong> these rules describe the target game, not implemented behavior. Specific numeric values below are adjustable starter defaults. Record intentional rule changes here as the game develops.</p>
+
+<h2 id="authority">Player and shared control</h2>
+<ul>
+  <li>The player invites families, assigns unallocated land, sets each zone’s tax arrangement, controls public land use, designates public buildings, and sets the player stock’s buy/sell policies.</li>
+  <li>The player owns a treasury and stored goods. Public construction and stewardry payments spend these resources.</li>
+  <li>One server owns one settlement. Every connected browser manages the same player role, with equal control and no accounts. The server decides whether a command is valid against the current world.</li>
+  <li>Family building decisions are autonomous. The player does not place private family buildings or assign individual work tasks.</li>
+</ul>
+
+<h2 id="land">Land, buildings, and movement</h2>
+<ul>
+  <li>The world is a finite square tile grid. Zones are groups of tiles assigned to one family or retained as public land. A tile cannot belong to two zones.</li>
+  <li>Buildings may occupy multiple tiles. Their footprints must fit within their designated zone, remain in bounds, and never overlap existing buildings or accepted construction sites.</li>
+  <li>Members walk to destinations and physically haul goods. Paths respect terrain and building obstacles. Work requires reaching a valid work location; unreachable work remains blocked.</li>
+  <li>Starter simplifications: orthogonal movement, no member-to-member collision, and an accessible interaction tile for each building instead of simulated interiors.</li>
+  <li>Changing a route’s obstacles must not let an already moving member walk through a new building. Ownership, storage location, and goods in transit must remain consistent.</li>
+</ul>
+
+<h2 id="families">Families, members, and goals</h2>
+<ul>
+  <li>A family owns land, money, inventory, and buildings, and has goals for meeting needs, producing goods, trading, and expanding.</li>
+  <li>Each member has skills and individual food, rest, and social needs. Members choose activity that serves family goals while meeting their own needs.</li>
+  <li>Incoming families have initial member skills. Skills improve through relevant completed work and affect work effectiveness.</li>
+  <li>Members work for their own family. A builder family selling construction services is a business contract between families, not employment of its members by another household.</li>
+  <li>Ordinary game decision logic selects goals and actions. No language model or external AI agent is part of the game.</li>
+  <li>Initial social behavior is spending time with another member. Crime, relationships, marriage, births, and outside employment are later extensions.</li>
+  <li>Unmet needs reduce or block productive activity, with recovery when the need is met. No death, eviction, debt collection, or game-over condition is required initially.</li>
+</ul>
+
+<h2 id="production">Production and construction</h2>
+<ul>
+  <li>Production needs suitable land/buildings, member work, time, and any recipe inputs. Outputs enter physical storage; inputs cannot be consumed twice.</li>
+  <li>The initial professions are food producer, timber producer, and builder. Use food and timber as the first resources; more elaborate processing chains come later.</li>
+  <li>Families decide when they need a building, which kind, and where it fits on their land. An impossible or unaffordable plan stays visibly blocked without creating duplicate requests.</li>
+  <li>Private and public construction both hire a builder family. The customer provides materials and pays the builder family a service fee; builders travel to the site and perform construction over time.</li>
+  <li>Default contract terms: agree a fixed fee when a request is accepted, pay it when construction completes, and do not complete without the required materials and payment. Prevent multiple outstanding commitments from spending the same resources. Cancelling contracts and refunds are outside the initial scope.</li>
+  <li>A builder family can construct its own buildings using its own labor and materials without paying itself. Start with a functioning builder household so the town can expand.</li>
+  <li>Public buildings need no operating staff after construction. Initial public uses are a warehouse for player stock and a meeting place satisfying social needs.</li>
+</ul>
+
+<h2 id="market">Market and player stock</h2>
+<ul>
+  <li>Families trade with other families and with the player’s stock. All parties have finite goods and money. The player’s policies independently enable buying and selling per resource and set a buy-up-to quantity and a sell-down-to reserve.</li>
+  <li>Each resource has one settlement-wide market price, shared by every buyer and seller. Trades use the current price when the exchange completes; queued demand is not a guaranteed quote.</li>
+  <li>Actual exchanges require affordable quantities, available stock, and physical delivery. Money and goods change ownership exactly once. A pending order or a hauling task is not itself a completed trade.</li>
+  <li>Prices update every configurable number of simulation ticks. Higher demand relative to supply increases prices; excess supply lowers prices. Unmet demand must count, so a stockout does not look like lack of interest.</li>
+  <li>Use a finite observation period: repeatedly reconsidering the same unmet need must not manufacture additional demand. Ignore demand that has been cancelled or satisfied.</li>
+  <li>Prices stay positive and within chosen limits. No activity leaves the price unchanged. The exact adjustment formula and limits are a learner design decision, documented when implemented.</li>
+  <li>Goods and money are conserved by trade. Production, consumption, and construction are explicit sources or sinks of goods. Taxes and service fees transfer existing money or goods.</li>
+</ul>
+
+<h2 id="taxes">Fee farm and stewardry</h2>
+<p>The reference defines fee farm as a money tax and stewardry as surrendering zone production in exchange for payments to the family. The prototype keeps those distinctions but simplifies its calendar. Source: <a href="https://www.wiki.lordsandvilleins.com/subdom/wiki/index.php?title=Taxes">Lords and Villeins Wiki: Taxes</a>.</p>
+<table>
+  <thead><tr><th scope="col">Arrangement</th><th scope="col">Prototype behavior</th></tr></thead>
+  <tbody>
+    <tr><th scope="row">Fee farm</th><td>The player sets a money amount per family-owned zone. Once each season the family pays up to that amount from available funds to the treasury. Any shortfall is forgiven, with no carried debt.</td></tr>
+    <tr><th scope="row">Stewardry</th><td>For a production zone, all output produced under this arrangement belongs to the player and must be hauled to player storage. The player sets a seasonal payment to the family. The treasury pays what it can; any unpaid balance is forgiven. The family still owns its buildings, money, and unrelated inventory.</td></tr>
+  </tbody>
+</table>
+<ul>
+  <li>Public land is untaxed. Family zones default to fee farm at zero; stewardry applies only to production zones. Socage, clergy, and king’s taxes are excluded.</li>
+  <li>Both monetary settlements happen once at a season boundary. A family with multiple zones receives a deterministic settlement order; document that order. Construction commitments and other spending must not reuse money allocated elsewhere.</li>
+  <li>Changing an arrangement affects future production and the next seasonal payment. It does not retroactively seize existing goods. A full newly configured seasonal amount applies at the next boundary; no proration initially.</li>
+  <li>Stewardry output cannot also be sold as family stock. Physical goods awaiting collection must remain accounted for even if the player warehouse is unreachable or full.</li>
+  <li>No extra treasury penalty or automatic cancellation follows an underfunded stewardry payment. The player can change the arrangement.</li>
+</ul>
+
+<h2 id="time">Time and persistence</h2>
+<ul>
+  <li>Simulation time advances in fixed ticks. Pause and 1×, 2×, and 4× speed controls affect the rate, not the outcome of a given sequence of ticks and commands.</li>
+  <li>The server does not advance simulation time when no browsers are connected. Reconnecting resumes the previously requested running speed, unless the player had explicitly paused. No offline catch-up.</li>
+  <li>Starter calendar: 60 simulation ticks per day, 10 days per season, one price update per day. At 1×, target 10 ticks per real second. These are test-friendly placeholders, not balance commitments.</li>
+  <li>Manual save/load and autosave store the complete resumable world, including skills, needs, goals, ongoing work, goods in transit, pending trades/contracts, prices and demand, taxes, and simulation time.</li>
+  <li>Autosave checks every 60 seconds of server wall-clock time and writes when world state has changed, even if paused. Save after the last disconnect and on graceful shutdown when changed. Autosaves do not advance simulation time.</li>
+  <li>Use a local save slot and a separate autosave slot. A failed or interrupted write must preserve the previous valid save. Loading invalid or unsupported data must leave the running world intact and report an error.</li>
+  <li>Loading replaces the shared world for all clients. Connected browsers must discard stale state and commands belonging to the previous world. Connection counts are live server state, not restored save data.</li>
+</ul>
+
+<h2 id="start">Starter settlement</h2>
+<p>Adjustable initial fixture: a 32×32 map, three families with two members each (food, timber, building), basic homes and workplaces, a public warehouse and meeting place, and unassigned land. Give every family food, timber, and money sufficient to begin activity; give the player a stocked warehouse and treasury. Record exact quantities in the fixture when implementing unit 2.4.</p>
+<p>The player can invite from a fixed list of additional families, with no population cap required for the first prototype. An invited family brings members, skills, money, and supplies but receives land only through player assignment. No procedural generation, immigration simulation, or recruitment cost is required.</p>
+
+<h2 id="completion">Prototype completion</h2>
+<p>From the browser, invite a family, assign land, observe members meeting needs and producing goods, and watch the family hire builders for a private building. Designate a public building and see it completed. Change player trading policies, observe a price response to shortages, and collect fee farm and stewardry settlements. Save during active hauling or construction, reload, and continue consistently. Open a second browser and manage the same town; close both and verify that simulation time stops.</p>
+<p>Simple colored tiles, symbols, and readable inspection panels are sufficient. No authentication, internet deployment, sprite pipeline, individual wages, complex relationships, or production balancing is required.</p>
+</main>
+</body>
+</html>
