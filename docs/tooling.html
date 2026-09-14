@@ -84,6 +84,15 @@ cargo build --workspace --target wasm32-unknown-unknown</code></pre>
         </ul>
         <p>These are optional commands for the supplied configuration. Your personal configuration may already provide mappings or Rust support; do not enable a second rust-analyzer client there. Reference: <a href="https://neovim.io/doc/user/lsp.html">Neovim LSP documentation</a>.</p>
       </section>
+
+      <section aria-labelledby="conjure">
+        <h2 id="conjure">Conjure and the Rust REPL</h2>
+        <p>Your personal Neovim configuration includes Conjure, which starts <code>evcxr</code> for Rust buffers. This is a separate REPL executable, supplied by the <code>evcxr_repl</code> Cargo package. If Conjure reports that it cannot find it, run these commands from the repository root after loading the Cargo environment:</p>
+        <pre><code>rustup component add rust-src
+cargo install --locked evcxr_repl</code></pre>
+        <p>Restart Neovim from that shell. Inside Neovim, <code>:echo exepath('evcxr')</code> should show its installed path. Repeat the source-component command after changing the project's pinned Rust version if the REPL needs it.</p>
+        <p>The supplied plugin-free Neovim configuration does not use Conjure. Reference: <a href="https://github.com/evcxr/evcxr/blob/main/evcxr_repl/README.md">Evcxr installation and usage</a>.</p>
+      </section>
     </main>
   </body>
 </html>
