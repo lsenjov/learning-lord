@@ -21,3 +21,5 @@ Human-facing documentation uses HTML, as required by `/home/logan/AGENTS.md`.
 
 - Planning recorded. Repository started with an empty `.gitignore` and no source files. Rust was not on PATH; Neovim 0.12.4 was present.
 - Step 1 complete: HTML home, prototype rules, and 45 work units in 14 modules. All 75 initial external documentation links and local navigation targets checked successfully. Independent review found no high, medium, or low issues.
+- Step 2 complete: user-local Rust 1.98.1, pinned toolchain with rustfmt/Clippy/rust-analyzer and the Wasm target; minimal Cargo workspace; optional plugin-free Neovim configuration; HTML tooling guide. No game exercises implemented and no sudo used.
+- Validation passed: formatting, Clippy with warnings denied, native tests (zero initial tests), native execution, Wasm build, and headless Neovim rust-analyzer attachment. A fresh review agent independently repeated these checks and reported no findings. Final documentation adds explicit editor commands and two checked official setup references.
