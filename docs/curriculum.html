@@ -314,10 +314,10 @@
 
 <section aria-labelledby="m12">
 <h2 id="m12">12 · Build the Rust/Wasm browser</h2>
-<p>Start with browser APIs through wasm-bindgen and web-sys, a canvas map, and ordinary page controls. Add wasm-pack when beginning this module. Small HTML/CSS and JavaScript loader glue are acceptable; the frontend application logic is Rust. No JavaScript framework or game engine is required.</p>
+<p>Start with the supplied Trunk, wasm-bindgen, and web-sys browser scaffold, then add a canvas map and ordinary page controls. Small HTML/CSS and JavaScript loader glue are acceptable; the frontend application logic is Rust. No JavaScript framework or game engine is required.</p>
 <article id="u12-1"><h3>12.1 · Build and load a browser crate</h3><dl>
-<dt>Read</dt><dd><a href="https://wasm-bindgen.github.io/wasm-bindgen/">wasm-bindgen guide</a>; <a href="https://rustwasm.github.io/docs/wasm-pack/commands/build.html">wasm-pack build and web target</a>; <a href="https://doc.rust-lang.org/rustc/platform-support/wasm32-unknown-unknown.html">Wasm target limits</a>.</dd>
-<dt>Work</dt><dd>Add the browser crate and repeatable packaging/serving commands. Load a visible Rust-produced status in the browser over local HTTP.</dd>
+<dt>Read</dt><dd><a href="https://wasm-bindgen.github.io/wasm-bindgen/">wasm-bindgen guide</a>; <a href="https://trunk-rs.github.io/trunk/">Trunk guide</a>; <a href="https://doc.rust-lang.org/rustc/platform-support/wasm32-unknown-unknown.html">Wasm target limits</a>.</dd>
+<dt>Work</dt><dd>Inspect the supplied browser crate and repeatable Trunk build/serve commands. Build it and load its visible Rust-produced status over local HTTP.</dd>
 <dt>Done when</dt><dd>A clean checkout can build and load the frontend, generated files stay out of Git, and browser console failures are visible. Compiling a Wasm file alone is not completion.</dd>
 </dl></article>
 <article id="u12-2"><h3>12.2 · Draw and inspect the town</h3><dl>

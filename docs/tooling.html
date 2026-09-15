@@ -46,7 +46,7 @@
         </ul>
       </nav>
       <h1>Tooling</h1>
-      <p>The repository contains a Rust 2024 workspace and a setup-only binary. Browser frontend setup belongs to its curriculum lesson.</p>
+      <p>The repository contains a Rust 2024 workspace, a setup-only native binary, and a minimal Rust/WebAssembly browser scaffold.</p>
     </header>
 
     <main>
@@ -65,10 +65,14 @@
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p learning-lord
-cargo build --workspace --target wasm32-unknown-unknown</code></pre>
-        <p>The final command checks that the setup binary compiles for WebAssembly. It does not create a runnable browser frontend.</p>
+cargo build --workspace
+trunk build
+trunk serve</code></pre>
+        <p><code>trunk build</code> packages the browser crate into the ignored <code>crates/browser/dist</code> directory. <code>trunk serve</code> watches the browser files, rebuilds after changes, reloads the page, and serves it at <a href="http://127.0.0.1:8080">http://127.0.0.1:8080</a>. Stop it with <kbd>Ctrl</kbd>+<kbd>C</kbd>.</p>
+        <p>This reloads the whole page after a successful build; it does not preserve application state. If Trunk rejects an existing <code>NO_COLOR=1</code> environment setting, run <code>NO_COLOR=true trunk serve</code> (or <code>NO_COLOR=true trunk build</code>).</p>
         <p>The starter prints <code>Learning Lord tooling is ready.</code> and has zero tests. Add behavioral tests as you implement the lessons. To apply formatting rather than check it, run <code>cargo fmt --all</code>.</p>
-        <p>Once the native server and browser crates are added, scope the Wasm build to the browser/shared crates; the entire workspace will no longer be a Wasm target. Module 12 adds the actual browser packaging and serving commands.</p>
+        <p>The browser page starts as <code>Loading…</code>; Rust replaces it with <code>Hello world</code> after the WebAssembly module loads. During <code>trunk serve</code>, build failures appear on the page and in the browser console; load or runtime failures appear in the console.</p>
+        <p>This machine uses a prebuilt Trunk release. On another machine, follow the <a href="https://trunk-rs.github.io/trunk/guide/getting-started/installation.html">official Trunk installation guide</a>; it documents prebuilt releases and <code>cargo install --locked trunk</code>. Trunk builds the <code>wasm32-unknown-unknown</code> target listed in <code>rust-toolchain.toml</code>, packages the wasm-bindgen loader, and provides the local development server.</p>
       </section>
 
       <section aria-labelledby="neovim">
