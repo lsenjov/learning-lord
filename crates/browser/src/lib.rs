@@ -14,7 +14,14 @@ pub fn start() -> Result<(), JsValue> {
 
     status.set_text_content(Some("Hello world"));
 
+    let _socket = open_socket();
+
+    Ok(())
+}
+
+fn open_socket() -> web_sys::WebSocket {
     let socket = web_sys::WebSocket::new("ws://127.0.0.1:1234").expect("connect");
+    console::log_1(&format!("Opening").into());
 
     let onmessage = Closure::wrap(Box::new(|e: MessageEvent| {
         if let Some(text) = e.data().as_string() {
@@ -34,10 +41,11 @@ pub fn start() -> Result<(), JsValue> {
 
     let onclose = Closure::wrap(Box::new(|| {
         console::log_1(&"Disconnected!".into());
+        open_socket();
     }) as Box<dyn Fn()>);
 
     socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
     onclose.forget();
 
-    Ok(())
+    socket
 }
