@@ -1,4 +1,5 @@
 mod behaviour;
+mod items;
 mod server;
 
 #[tokio::main]
