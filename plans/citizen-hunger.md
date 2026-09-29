@@ -28,3 +28,7 @@
 ## Progress
 
 - Plan recorded before implementation.
+- Implementation complete: UUID v4 creation, validated `Citizen` data under `AgentKind`, encapsulated universe state, and immutable millisecond advancement with explicit numeric errors.
+- Updated the desktop getter, README, and design notes. The frontend remains an empty scaffold without automatic ticking.
+- Validation passed: all 10 integration tests, workspace tests/build, formatting, Clippy with warnings denied, and diff checks.
+- Independent review found no high, medium, or low issues.

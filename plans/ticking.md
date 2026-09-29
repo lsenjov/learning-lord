@@ -6,11 +6,24 @@
 - A universe contains agents: animals, citizens, and collectives.
 - Collectives include families, guilds, businesses, foreign traders, and kingdoms.
 - Agents can have relationships with one another.
+- Agent IDs are UUID v4s, generated when an agent is created and preserved when universes are cloned.
+- Agent kinds hold their specific data. Citizens have metabolic hunger; collectives do not have metabolic hunger of their own.
+
+## Numeric representation
+
+- Continuous simulation measurements, including hunger, rates, and wellbeing, use `f64`.
+- Simulation time and elapsed durations use `u64` milliseconds.
+- Money uses signed `i64` values in a defined smallest currency unit.
+- Discrete counts and tile coordinates remain integers.
 
 ## Needs
 
 - Agents have needs.
 - Some needs increase over time, such as hunger and the need for rest.
+- Citizen hunger is a signed energy deficit: below zero is satiation, zero is the boundary, and above zero is a need for food.
+- Hunger increases with elapsed simulation time. Initially, each citizen has an explicit constant hunger rate per game hour and an explicit starting hunger value.
+- Starting hunger must be finite. Hunger rates must be finite and nonnegative. Hunger is not clamped at zero or at the starvation threshold.
+- Eating will reduce hunger by the food's nourishment value; it will not reset a timer. Eating is outside the first implementation step.
 - Other needs have a constant baseline, such as a peasant's clothing need of 40.
 - Goods can reduce a need. Peasant clothing might reduce clothing need by 50.
 - As clothing degrades, its reduction becomes smaller, so the effective clothing need increases.
@@ -62,6 +75,9 @@
 
 - Time is measured in ticks, with milliseconds represented by a `u64`.
 - A universe has a current time.
+- Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's hunger for the elapsed duration.
+- Invalid advances, including clock overflow or nonfinite hunger results, leave the source snapshot unchanged.
+- Small advances should agree with one equivalent large advance within floating-point tolerance when no intervening action changes the rate.
 - Ticking a single agent advances its needs and actions by a given amount of time within the universe.
 - Ticking the universe ticks all agents.
 - Ticks will generally be shorter than a second.

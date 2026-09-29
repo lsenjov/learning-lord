@@ -26,7 +26,7 @@ fn setup(mut commands: Commands, simulation: Res<Simulation>) {
     commands.spawn((
         Text2d::new(format!(
             "Learning Lord\n{} agents",
-            simulation.0.agents.len()
+            simulation.0.agents().len()
         )),
         TextFont {
             font_size: FontSize::Px(32.0),

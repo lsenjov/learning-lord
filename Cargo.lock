@@ -2627,6 +2627,7 @@ name = "learning-lord-simulation"
 version = "0.1.0"
 dependencies = [
  "imbl",
+ "uuid",
 ]
 
 [[package]]

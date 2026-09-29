@@ -7,8 +7,17 @@ A local, single-player town simulation for learning Rust. The current scope is a
 - `crates/simulation`: engine-independent world data using `imbl` persistent collections.
 - `crates/desktop`: a Bevy desktop executable that owns the current universe and displays its agent count.
 - Prediction branches will remain simulation data, independent of rendering.
-- The universe starts empty. Agent IDs and names are the only agent data currently defined.
+- The universe starts empty at simulation time zero. Agents have UUID v4 IDs, names, and a kind; citizens currently have hunger and a constant hourly hunger rate.
 - Cloning a universe shares collection storage. Changes to an owned clone leave the original and sibling snapshots unchanged.
+
+## Simulation
+
+- `Citizen::new(hunger, hunger_per_hour)` validates explicit starting values. Hunger must be finite; its hourly growth rate must also be finite and nonnegative.
+- Negative hunger represents satiation. Positive hunger represents a need for food. Neither side is clamped.
+- `universe.with_citizen(name, citizen)` returns a new universe and the new agent's UUID. Existing IDs and the original universe remain unchanged.
+- `universe.advance(elapsed_ms)` returns a new universe with its clock advanced once and every citizen's hunger increased by `hunger_per_hour * elapsed_ms / 3_600_000`. Time is `u64` milliseconds; hunger calculations use `f64`.
+- Clock overflow or nonfinite hunger results return a `SimulationError`, leaving the source universe unchanged. Small advances agree with an equivalent large advance within floating-point tolerance.
+- Read state through `current_time_ms()`, `agents()`, and the citizen's `hunger()` and `hunger_per_hour()` getters.
 
 ## Run
 
@@ -18,7 +27,7 @@ The initial target is Linux with a Wayland or X11 desktop session and a working 
 cargo run --locked
 ```
 
-The window displays `Learning Lord` and `0 agents`. Close it with the window manager's close button or shortcut. There is no server, browser build, simulation ticking, or prediction worker yet.
+The window displays `Learning Lord` and `0 agents`; it does not create citizens or advance the simulation automatically. Close it with the window manager's close button or shortcut. Eating, wellbeing, and prediction workers are not implemented yet.
 
 ## Development
 
