@@ -10,6 +10,7 @@ Items need to do a number of things.
 - have a quality (higher quality is worth more and more useful)
  */
 
+/*
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -21,3 +22,4 @@ struct Item {
 //static ITEMS: std::collections::HashMap<String, Item> = std::collections::HashMap<String, Item>::new();
 
 static ITEMS: LazyLock<HashMap<String, Item>> = LazyLock::new(|| HashMap::new());
+*/

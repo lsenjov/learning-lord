@@ -1,4 +1,3 @@
-use crate::citizens::behaviour;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;

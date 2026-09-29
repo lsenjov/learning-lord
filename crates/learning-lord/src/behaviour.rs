@@ -47,24 +47,38 @@ Lookahead a certain amount of time? Prioritise needs first, then past there is w
 use im::HashMap;
 use uuid::Uuid;
 
-const DIST_TO_MARKET: u32 = 100;
-
-#[derive(Clone, Debug)]
-enum AgentType {
-    Animal,
-    Citizen,
-    Family,
+#[derive(Clone, Debug, PartialEq)]
+struct Universe {
+    agents: HashMap<Uuid, Agent>,
+}
+impl Universe {
+    pub fn new() -> Self {
+        Self {
+            agents: HashMap::<Uuid, Agent>::new(),
+        }
+    }
 }
 
-#[derive(Clone, Debug)]
+// Ticks this agent forward in the universe
+trait Tick {
+    fn tick(&self, u: Universe, ticks: u64) -> Universe;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Citizen {}
+
+#[derive(Clone, Debug, PartialEq)]
+enum AgentType {
+    //Animal,
+    Citizen(),
+    //Family,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct Agent {
     id: Uuid,
     name: String,
     agent_type: AgentType,
-    // Assets and goals are named
-    assets: HashMap<String, u32>,
-    goals: HashMap<String, u32>,
-    loyalties: HashMap<Uuid, u32>,
 }
 
 fn random_citizen() -> Agent {
@@ -72,57 +86,36 @@ fn random_citizen() -> Agent {
     Agent {
         id: uuid,
         name: String::from("Some citizen"),
-        agent_type: AgentType::Citizen,
-        assets: HashMap::<String, u32>::new(),
-        goals: HashMap::<String, u32>::new(),
-        loyalties: HashMap::<Uuid, u32>::new(),
+        agent_type: AgentType::Citizen(),
     }
 }
-//impl fmt::Display for Agent {
-//    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//        write!(f, "{} ({})", self.name, self.id)
-//    }
-//}
 
-fn add_random_citizen(m: &mut HashMap<Uuid, Agent>) -> Uuid {
+fn add_random_citizen_u(u: Universe) -> (Universe, Uuid) {
     let cit = random_citizen();
-    m.insert(cit.id, cit.clone());
-    cit.id
-}
-
-fn create_family(m: &mut HashMap<Uuid, Agent>, family_name: String, family_size: u32) {
-    let family_id = Uuid::new_v4();
-    let family = Agent {
-        id: family_id,
-        name: String::from(format!("Family {family_name}")),
-        agent_type: AgentType::Family,
-        assets: HashMap::<String, u32>::new(),
-        goals: HashMap::<String, u32>::new(),
-        loyalties: HashMap::<Uuid, u32>::new(),
-    };
-    m.insert(family.id, family);
-    for i in 0..family_size {
-        println!(
-            "Creating family member num {} for family {}",
-            i.to_string(),
-            family_name
-        );
-        let cit_id = add_random_citizen(m);
-        let Some(cit_agent) = m.get_mut(&cit_id) else {
-            continue;
-        };
-        cit_agent.loyalties.insert(family_id, 50);
-        let Some(fam_agent) = m.get_mut(&family_id) else {
-            continue;
-        };
-        fam_agent.loyalties.insert(cit_id, 50);
-    }
+    let cit_id = cit.id;
+    let mut u2 = u.clone();
+    u2.agents = u.agents.clone().update(cit.id, cit);
+    (u2, cit_id)
 }
 
 pub fn run_sim() {
     let mut agents = HashMap::<Uuid, Agent>::new();
-    add_random_citizen(&mut agents);
-    create_family(&mut agents, "Arble".into(), 3);
-    create_family(&mut agents, "Orgle".into(), 5);
     println!("{:#?}", agents);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Universe;
+    use crate::behaviour::add_random_citizen_u;
+
+    #[test]
+    fn add_random_citizen_test() {
+        let u = Universe::new();
+        let u_base = u.clone();
+
+        let (u2, cit_id) = add_random_citizen_u(u.clone());
+        assert_eq!(u, u_base); // Ensure immutability
+        assert_ne!(u_base, u2); // Things have changed
+        assert!(u2.agents.get(&cit_id).unwrap().name.len() > 0) // Name exists
+    }
 }
