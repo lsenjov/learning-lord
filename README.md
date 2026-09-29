@@ -1,12 +1,12 @@
 # Learning Lord
 
-A local, single-player town simulation for learning Rust. The current scope is a minimal scaffold; the game design is in [plans/ticking.md](plans/ticking.md).
+A local, single-player town simulation for learning Rust, with a desktop inspector for time and citizen behaviour. The game design is in [plans/ticking.md](plans/ticking.md).
 
 ## Structure
 
 - `crates/simulation`: engine-independent world data using `imbl` persistent collections.
 - `crates/simulation/src/planning.rs`: citizen prediction and execution of committed action batches.
-- `crates/desktop`: a Bevy desktop executable that owns the current universe and displays its agent count.
+- `crates/desktop`: a Bevy desktop executable with time controls, a simulation clock, and citizen readouts. A single simulation worker owns the current universe and publishes its latest completed snapshot to the UI.
 - Prediction branches will remain simulation data, independent of rendering.
 - The universe starts empty at simulation time zero. Agents have UUID v4 IDs, names, and a kind; citizens have hunger, a constant hourly hunger rate, an optional action in progress, and optional plan execution state.
 - Cloning a universe shares collection storage. Changes to an owned clone leave the original and sibling snapshots unchanged.
@@ -65,7 +65,21 @@ The initial target is Linux with a Wayland or X11 desktop session and a working 
 cargo run --locked
 ```
 
-The window displays `Learning Lord` and `0 agents`; it does not create citizens or advance the simulation automatically. Close it with the window manager's close button or shortcut. Food inventory, relationships, and prediction worker threads are not implemented yet.
+The desktop starts paused with Ada at hunger zero and planning enabled. The clock shows elapsed days, hours, minutes, and seconds, starting at `Day 0 | 00:00:00`. Citizen readouts show hunger, wellbeing, the current action and its remaining time, the rest of the planned actions in order, and time until replanning. Actions beyond the two-hour commitment are forecasts and may change when replanning occurs.
+
+- **Run / Pause** (or **Space**) controls automatic advancement.
+- **1x, 2x, 3x, 5x, 10x, 20x** select simulation speed without unpausing.
+- **Advance 30 minutes** (or **Right arrow**) advances exactly 1,800,000 simulation milliseconds while paused, independent of speed. The button is unavailable while running.
+- At **1x**, one real second advances the universe by **60,000 ms**. Automatic update starts are capped at 60 per real second by default. The worker measures elapsed monotonic time, including processing delays, and increases subsequent time jumps when work takes longer. It retains fractional milliseconds and does not queue fixed catch-up ticks.
+- Pausing lets an in-progress update finish. Paused time does not accumulate; unapplied time accrued while running is retained for the next automatic update after resuming. Simulation errors pause advancement and appear in the window.
+
+To use a different maximum automatic update rate, set a positive integer at launch:
+
+```sh
+LEARNING_LORD_MAX_UPDATES_PER_SECOND=30 cargo run --locked
+```
+
+This changes update frequency, not simulation speed. Rendering and input remain on the UI thread; at most one simulation advance runs at a time. Close the window normally to stop the worker after its in-progress update. Food inventory, relationships, and parallel prediction workers are not implemented yet.
 
 ## Development
 

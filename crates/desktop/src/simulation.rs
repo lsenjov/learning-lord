@@ -1,0 +1,439 @@
+use bevy::prelude::Resource;
+use learning_lord_simulation::{SimulationError, Universe};
+use std::{
+    num::NonZeroU32,
+    sync::{Arc, Mutex, mpsc},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+pub const SPEEDS: [u32; 6] = [1, 2, 3, 5, 10, 20];
+pub const STEP_MS: u64 = 30 * 60 * 1000;
+const NANOS_PER_MS: u128 = 1_000_000;
+
+pub fn update_rate() -> Result<NonZeroU32, String> {
+    match std::env::var("LEARNING_LORD_MAX_UPDATES_PER_SECOND") {
+        Ok(value) => value
+            .parse::<NonZeroU32>()
+            .map_err(|_| "LEARNING_LORD_MAX_UPDATES_PER_SECOND must be a positive integer".into()),
+        Err(std::env::VarError::NotPresent) => Ok(NonZeroU32::new(60).unwrap()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Command {
+    SetRunning(bool),
+    SetSpeed(u32),
+    Step,
+    Shutdown,
+}
+
+struct TimedCommand {
+    command: Command,
+    at: Instant,
+}
+
+#[derive(Clone)]
+pub struct Snapshot {
+    pub universe: Universe,
+    pub error: Option<String>,
+}
+
+#[derive(Resource)]
+pub struct SimulationWorker {
+    commands: mpsc::Sender<TimedCommand>,
+    snapshot: Arc<Mutex<Snapshot>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SimulationWorker {
+    pub fn spawn(universe: Universe, updates_per_second: NonZeroU32) -> Self {
+        let snapshot = Arc::new(Mutex::new(Snapshot {
+            universe: universe.clone(),
+            error: None,
+        }));
+        let published = Arc::clone(&snapshot);
+        let (commands, receiver) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("simulation".into())
+            .spawn(move || run_worker(universe, updates_per_second, receiver, published))
+            .expect("could not start the simulation worker");
+        Self {
+            commands,
+            snapshot,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn send(&self, command: Command) -> Result<(), String> {
+        self.commands
+            .send(TimedCommand {
+                command,
+                at: Instant::now(),
+            })
+            .map_err(|_| "The simulation worker has stopped.".into())
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.snapshot
+            .lock()
+            .expect("snapshot lock poisoned")
+            .clone()
+    }
+}
+
+impl Drop for SimulationWorker {
+    fn drop(&mut self) {
+        let _ = self.send(Command::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct Pacing {
+    running: bool,
+    speed: u32,
+    interval: Duration,
+    accounted_at: Duration,
+    last_update: Duration,
+    pending_simulated_ns: u128,
+}
+
+impl Pacing {
+    fn new(updates_per_second: NonZeroU32) -> Self {
+        Self {
+            running: false,
+            speed: 1,
+            interval: Duration::from_nanos(
+                1_000_000_000u64.div_ceil(updates_per_second.get().into()),
+            ),
+            accounted_at: Duration::ZERO,
+            last_update: Duration::ZERO,
+            pending_simulated_ns: 0,
+        }
+    }
+
+    fn account_until(&mut self, now: Duration) {
+        // A command can arrive just after an update starts; never count that interval twice.
+        let now = now.max(self.accounted_at);
+        if self.running {
+            self.pending_simulated_ns +=
+                (now - self.accounted_at).as_nanos() * 60 * self.speed as u128;
+        }
+        self.accounted_at = now;
+    }
+
+    fn set_running(&mut self, running: bool, now: Duration) {
+        self.account_until(now);
+        if running && !self.running {
+            self.last_update = self.accounted_at;
+        }
+        self.running = running;
+    }
+
+    fn set_speed(&mut self, speed: u32, now: Duration) {
+        self.account_until(now);
+        self.speed = speed;
+    }
+
+    fn wait_duration(&self, now: Duration) -> Option<Duration> {
+        self.running.then(|| {
+            self.interval
+                .saturating_sub(now.saturating_sub(self.last_update))
+        })
+    }
+
+    fn take_update(&mut self, now: Duration) -> Result<Option<u64>, SimulationError> {
+        if self.wait_duration(now) != Some(Duration::ZERO) {
+            return Ok(None);
+        }
+        self.account_until(now);
+        let elapsed_ms = u64::try_from(self.pending_simulated_ns / NANOS_PER_MS)
+            .map_err(|_| SimulationError::TimeOverflow)?;
+        self.pending_simulated_ns %= NANOS_PER_MS;
+        self.last_update = now;
+        Ok(Some(elapsed_ms))
+    }
+}
+
+struct WorkerState {
+    universe: Universe,
+    pacing: Pacing,
+    error: Option<String>,
+}
+
+impl WorkerState {
+    fn advance(&mut self, elapsed_ms: u64) {
+        match self.universe.advance(elapsed_ms) {
+            Ok(universe) => self.universe = universe,
+            Err(error) => self.fail(error),
+        }
+    }
+
+    fn fail(&mut self, error: SimulationError) {
+        self.error = Some(error.to_string());
+        self.pacing.running = false;
+    }
+
+    fn apply(&mut self, command: Command, at: Duration) -> bool {
+        if matches!(command, Command::Shutdown) {
+            return false;
+        }
+        if self.error.is_some() {
+            return true;
+        }
+        match command {
+            Command::SetRunning(running) => self.pacing.set_running(running, at),
+            Command::SetSpeed(speed) => self.pacing.set_speed(speed, at),
+            Command::Step if !self.pacing.running => self.advance(STEP_MS),
+            Command::Step | Command::Shutdown => {}
+        }
+        true
+    }
+
+    fn publish(&self, published: &Mutex<Snapshot>) {
+        *published.lock().expect("snapshot lock poisoned") = Snapshot {
+            universe: self.universe.clone(),
+            error: self.error.clone(),
+        };
+    }
+}
+
+fn run_worker(
+    universe: Universe,
+    updates_per_second: NonZeroU32,
+    commands: mpsc::Receiver<TimedCommand>,
+    published: Arc<Mutex<Snapshot>>,
+) {
+    let epoch = Instant::now();
+    let mut state = WorkerState {
+        universe,
+        pacing: Pacing::new(updates_per_second),
+        error: None,
+    };
+    loop {
+        match commands.try_recv() {
+            Ok(command) => {
+                if !state.apply(command.command, command.at.saturating_duration_since(epoch)) {
+                    break;
+                }
+                state.publish(&published);
+                continue;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        let now = epoch.elapsed();
+        if state.pacing.wait_duration(now) == Some(Duration::ZERO) {
+            match state.pacing.take_update(now) {
+                Ok(Some(elapsed_ms)) => state.advance(elapsed_ms),
+                Err(error) => state.fail(error),
+                Ok(None) => {}
+            }
+            state.publish(&published);
+            continue;
+        }
+
+        let received = match state.pacing.wait_duration(now) {
+            Some(wait) => match commands.recv_timeout(wait) {
+                Ok(command) => Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => commands.recv().ok(),
+        };
+        let Some(command) = received else { break };
+        if !state.apply(command.command, command.at.saturating_duration_since(epoch)) {
+            break;
+        }
+        state.publish(&published);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use learning_lord_simulation::Citizen;
+
+    fn pacing(rate: u32) -> Pacing {
+        let mut pacing = Pacing::new(NonZeroU32::new(rate).unwrap());
+        pacing.set_running(true, Duration::ZERO);
+        pacing
+    }
+
+    #[test]
+    fn update_cap_changes_frequency_without_changing_simulation_speed() {
+        for (rate, interval_ns) in [(60, 16_666_667), (30, 33_333_334)] {
+            let mut pacing = pacing(rate);
+            assert_eq!(
+                pacing.take_update(Duration::from_nanos(interval_ns - 1)),
+                Ok(None)
+            );
+            let first = pacing
+                .take_update(Duration::from_nanos(interval_ns))
+                .unwrap()
+                .unwrap();
+            assert_eq!(first, 60_000 / rate as u64);
+            assert_eq!(
+                pacing.take_update(Duration::from_nanos(interval_ns)),
+                Ok(None)
+            );
+            let later = pacing.take_update(Duration::from_secs(1)).unwrap().unwrap();
+            assert_eq!(first + later, 60_000);
+        }
+    }
+
+    #[test]
+    fn slow_processing_produces_one_larger_jump() {
+        let mut pacing = pacing(60);
+        assert_eq!(
+            pacing.take_update(Duration::from_millis(17)),
+            Ok(Some(1_020))
+        );
+        assert_eq!(
+            pacing.take_update(Duration::from_millis(117)),
+            Ok(Some(6_000))
+        );
+        assert_eq!(pacing.take_update(Duration::from_millis(117)), Ok(None));
+    }
+
+    #[test]
+    fn fractional_milliseconds_are_preserved() {
+        let mut pacing = pacing(60);
+        let mut total = 0;
+        for index in 1..=1000 {
+            total += pacing
+                .take_update(Duration::from_nanos(index * 17_123_456))
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(total, 1_027_407);
+        assert_eq!(pacing.pending_simulated_ns, 360_000);
+    }
+
+    #[test]
+    fn speeds_scale_elapsed_time_and_changes_preserve_the_previous_rate() {
+        for speed in SPEEDS {
+            let mut pacing = pacing(60);
+            pacing.set_speed(speed, Duration::ZERO);
+            assert_eq!(
+                pacing.take_update(Duration::from_secs(1)),
+                Ok(Some(60_000 * speed as u64))
+            );
+        }
+        let mut pacing = pacing(60);
+        pacing.set_speed(2, Duration::from_millis(250));
+        assert_eq!(
+            pacing.take_update(Duration::from_secs(1)),
+            Ok(Some(105_000))
+        );
+    }
+
+    #[test]
+    fn paused_time_is_excluded_even_when_commands_wait_for_a_busy_worker() {
+        let mut pacing = pacing(60);
+        assert_eq!(
+            pacing.take_update(Duration::from_millis(17)),
+            Ok(Some(1_020))
+        );
+        pacing.set_running(false, Duration::from_millis(50));
+        assert_eq!(pacing.take_update(Duration::from_secs(9)), Ok(None));
+        pacing.set_running(true, Duration::from_secs(10));
+        assert_eq!(
+            pacing.take_update(Duration::from_millis(10_100)),
+            Ok(Some(7_980))
+        );
+    }
+
+    #[test]
+    fn late_command_timestamps_do_not_recount_elapsed_time() {
+        let mut pacing = pacing(60);
+        assert_eq!(
+            pacing.take_update(Duration::from_millis(20)),
+            Ok(Some(1_200))
+        );
+        pacing.set_speed(2, Duration::from_millis(19));
+        assert_eq!(
+            pacing.take_update(Duration::from_millis(40)),
+            Ok(Some(2_400))
+        );
+    }
+
+    #[test]
+    fn paused_steps_are_exact_and_ignore_speed_while_running_steps_are_rejected() {
+        let (universe, id) = Universe::default().with_citizen("Ada", Citizen::new(0.0).unwrap());
+        let universe = universe.start_planning(id).unwrap();
+        let original = universe.clone();
+        let mut state = WorkerState {
+            universe,
+            pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
+            error: None,
+        };
+        state.apply(Command::SetSpeed(20), Duration::ZERO);
+        state.apply(Command::Step, Duration::from_secs(10));
+        assert_eq!(state.universe.current_time_ms(), STEP_MS);
+        assert_eq!(state.universe, original.advance(STEP_MS).unwrap());
+        state.apply(Command::SetRunning(true), Duration::from_secs(11));
+        state.apply(Command::Step, Duration::from_secs(12));
+        assert_eq!(state.universe.current_time_ms(), STEP_MS);
+        assert_eq!(original.current_time_ms(), 0);
+    }
+
+    #[test]
+    fn worker_processes_ordered_commands_publishes_latest_state_and_shuts_down() {
+        let original = Universe::default();
+        let worker = SimulationWorker::spawn(original.clone(), NonZeroU32::new(30).unwrap());
+        worker.send(Command::SetSpeed(20)).unwrap();
+        worker.send(Command::Step).unwrap();
+        worker.send(Command::Step).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = worker.snapshot();
+            assert!(snapshot.error.is_none());
+            if snapshot.universe.current_time_ms() == 2 * STEP_MS {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not process the manual steps"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(original.current_time_ms(), 0);
+        let commands = worker.commands.clone();
+        drop(worker);
+        assert!(
+            commands
+                .send(TimedCommand {
+                    command: Command::Step,
+                    at: Instant::now()
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn overflow_pauses_the_worker_and_preserves_the_last_snapshot() {
+        let universe = Universe::default().advance(u64::MAX).unwrap();
+        let mut state = WorkerState {
+            universe: universe.clone(),
+            pacing: pacing(60),
+            error: None,
+        };
+        state.advance(1);
+        assert_eq!(state.universe, universe);
+        assert!(!state.pacing.running);
+        assert!(state.error.is_some());
+        assert!(state.apply(Command::SetRunning(true), Duration::from_secs(1)));
+        assert!(!state.pacing.running);
+        assert!(!state.apply(Command::Shutdown, Duration::from_secs(1)));
+        let mut pacing = pacing(60);
+        assert_eq!(
+            pacing.take_update(Duration::from_secs(u64::MAX)),
+            Err(SimulationError::TimeOverflow)
+        );
+    }
+}

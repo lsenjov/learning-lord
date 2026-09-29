@@ -91,7 +91,10 @@
 - Small advances should agree with one equivalent large advance within floating-point tolerance when no intervening action changes the rate.
 - Ticking a single agent advances its needs and actions by a given amount of time within the universe.
 - Ticking the universe ticks all agents.
-- Ticks will generally be shorter than a second.
+- The desktop starts paused and maps one real second to 60,000 simulation milliseconds at 1x. Speed controls multiply this by 1, 2, 3, 5, 10, or 20.
+- A single simulation worker measures real elapsed monotonic time and starts at most 60 automatic updates per real second by default. The cap is configurable with `LEARNING_LORD_MAX_UPDATES_PER_SECOND`, including 30. Processing delays produce larger time jumps while preserving fractional milliseconds.
+- Paused time is excluded. An in-progress update finishes when pausing, and unapplied running time is retained until resume. Manual stepping while paused advances exactly 30 simulation minutes independent of speed.
+- The desktop displays elapsed days, hours, minutes, and seconds from the latest completed universe snapshot.
 - Planned citizens start the next action at completion rather than losing time to tick boundaries.
 - Individual agents do not need activating in the middle of an action.
 
