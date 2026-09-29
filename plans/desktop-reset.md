@@ -27,3 +27,5 @@
 - Implementation plan recorded.
 - Step 1 complete: replaced the old workspace with the `imbl` simulation crate and removed obsolete implementation, browser/server files, documentation, and editor tooling.
 - Step 1 validation: snapshot isolation test, formatting, Clippy with warnings denied, and diff checks passed. Independent review found no high, medium, or low issues.
+- Step 2 complete: added a Bevy 0.19.1 desktop executable, a resource containing the simulation universe, and a startup screen showing the current agent count. Added run and development instructions.
+- Step 2 validation: workspace build and tests, formatting, Clippy with warnings denied, and diff checks passed. Launched through `cargo run --locked` on Wayland/Vulkan, visually verified the empty-universe screen, and closed through the window manager with exit code 0. Independent review found no high, medium, or low issues.
