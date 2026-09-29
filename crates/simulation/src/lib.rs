@@ -12,6 +12,12 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
+        match &self.kind {
+            AgentKind::Citizen(citizen) => citizen.personal_wellbeing(),
+        }
+    }
+
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
         let kind = match &self.kind {
             AgentKind::Citizen(citizen) => AgentKind::Citizen(citizen.advance(elapsed_ms)?),
@@ -54,6 +60,14 @@ impl Citizen {
 
     pub fn hunger_per_hour(&self) -> f64 {
         self.hunger_per_hour
+    }
+
+    pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
+        let wellbeing = -self.hunger.max(0.0) - 4.0 * (self.hunger - 100.0).max(0.0);
+        if !wellbeing.is_finite() {
+            return Err(SimulationError::WellbeingOverflow);
+        }
+        Ok(wellbeing)
     }
 
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
@@ -129,6 +143,7 @@ pub enum SimulationError {
     InvalidHungerRate,
     TimeOverflow,
     HungerOverflow,
+    WellbeingOverflow,
 }
 
 impl fmt::Display for SimulationError {
@@ -138,6 +153,7 @@ impl fmt::Display for SimulationError {
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
             Self::TimeOverflow => "elapsed time exceeds the simulation clock's range",
             Self::HungerOverflow => "advancing time would produce nonfinite hunger",
+            Self::WellbeingOverflow => "personal wellbeing exceeds the finite score range",
         };
         formatter.write_str(message)
     }

@@ -58,6 +58,70 @@ fn hunger_rate_must_be_finite_and_nonnegative() {
 }
 
 #[test]
+fn personal_wellbeing_penalizes_hunger_and_weights_starvation_without_a_jump() {
+    for (hunger, expected) in [
+        (-f64::MAX, 0.0),
+        (-20.0, 0.0),
+        (-0.25, 0.0),
+        (0.0, 0.0),
+        (0.25, -0.25),
+        (20.0, -20.0),
+        (99.75, -99.75),
+        (100.0, -100.0),
+        (100.25, -101.25),
+        (120.0, -200.0),
+    ] {
+        let citizen = Citizen::new(hunger, 2.0).unwrap();
+
+        assert_eq!(
+            citizen.personal_wellbeing(),
+            Ok(expected),
+            "hunger {hunger}"
+        );
+    }
+}
+
+#[test]
+fn personal_wellbeing_reflects_each_snapshot_without_changing_it() {
+    let (original, id) =
+        Universe::default().with_citizen("Ada", Citizen::new(-20.0, 120.0).unwrap());
+    let snapshot = original.clone();
+    let advanced = original.advance(HOUR_MS).unwrap();
+
+    assert_eq!(original.agents()[&id].personal_wellbeing(), Ok(0.0));
+    assert_eq!(advanced.agents()[&id].personal_wellbeing(), Ok(-100.0));
+    assert_eq!(citizen(&advanced, id).personal_wellbeing(), Ok(-100.0));
+    assert_eq!(original, snapshot);
+    assert_eq!(citizen(&advanced, id).hunger(), 100.0);
+}
+
+#[test]
+fn personal_wellbeing_rejects_overflow_without_changing_the_citizen() {
+    for hunger in [f64::MAX / 4.0, f64::MAX] {
+        let (universe, id) =
+            Universe::default().with_citizen("Ada", Citizen::new(hunger, 0.0).unwrap());
+        let snapshot = universe.clone();
+
+        assert_eq!(
+            citizen(&universe, id).personal_wellbeing(),
+            Err(SimulationError::WellbeingOverflow)
+        );
+        assert_eq!(
+            universe.agents()[&id].personal_wellbeing(),
+            Err(SimulationError::WellbeingOverflow)
+        );
+        assert_eq!(universe, snapshot);
+    }
+    assert!(
+        Citizen::new(f64::MAX / 8.0, 0.0)
+            .unwrap()
+            .personal_wellbeing()
+            .unwrap()
+            .is_finite()
+    );
+}
+
+#[test]
 fn citizen_advances_its_needs_without_a_universe_and_preserves_the_source() {
     let original = Citizen::new(-0.25, 3600.0).unwrap();
 

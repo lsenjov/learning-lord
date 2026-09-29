@@ -14,6 +14,7 @@ A local, single-player town simulation for learning Rust. The current scope is a
 
 - `Citizen::new(hunger, hunger_per_hour)` validates explicit starting values. Hunger must be finite; its hourly growth rate must also be finite and nonnegative.
 - Negative hunger represents satiation. Positive hunger represents a need for food. Neither side is clamped.
+- `citizen.personal_wellbeing()` calculates `-max(hunger, 0) - 4 * max(hunger - 100, 0)` from current state. Higher is better: satiation scores zero, hunger costs one point per unit up to 100, and each unit beyond 100 costs five. `agent.personal_wellbeing()` delegates to its kind. Both return `Result<f64, SimulationError>`, rejecting score overflow.
 - `universe.with_citizen(name, citizen)` returns a new universe and the new agent's UUID. Existing IDs and the original universe remain unchanged.
 - `citizen.advance(elapsed_ms)` returns a new citizen with hunger increased by `hunger_per_hour * elapsed_ms / 3_600_000`, preserving the original citizen. It needs no universe. Time is `u64` milliseconds; hunger calculations use `f64`.
 - `agent.advance(elapsed_ms)` delegates to its kind and returns an updated agent. `universe.advance(elapsed_ms)` advances its clock once and delegates to each agent in a cloned universe.
@@ -28,7 +29,7 @@ The initial target is Linux with a Wayland or X11 desktop session and a working 
 cargo run --locked
 ```
 
-The window displays `Learning Lord` and `0 agents`; it does not create citizens or advance the simulation automatically. Close it with the window manager's close button or shortcut. Eating, wellbeing, and prediction workers are not implemented yet.
+The window displays `Learning Lord` and `0 agents`; it does not create citizens or advance the simulation automatically. Close it with the window manager's close button or shortcut. Eating, relationships, and prediction workers are not implemented yet.
 
 ## Development
 

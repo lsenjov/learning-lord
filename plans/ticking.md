@@ -31,10 +31,13 @@
 ## Personal wellbeing
 
 - An agent's personal wellbeing score is calculated from its needs and other attributes.
-- Hunger above 0 means it is time for a meal.
-- Hunger above 100 means the agent is starving and has a greater effect on wellbeing.
-- Sleep and clothing are important factors.
-- Total wealth is a secondary factor.
+- Currently, `Citizen::personal_wellbeing()` calculates a hunger-only score on demand without a universe or stored score. `Agent::personal_wellbeing()` delegates to its kind.
+- Higher scores are better. The formula is `-max(hunger, 0) - 4 * max(hunger - 100, 0)`.
+- Hunger at or below 0 scores zero. Satiation delays future hunger rather than granting an immediate wellbeing bonus.
+- Hunger above 0 costs one point per unit up to 100. Each unit beyond 100 costs five points, with no jump at the starvation threshold.
+- A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
+- Sleep and clothing will be important factors later.
+- Total wealth will be a secondary factor.
 - A collective's wellbeing could depend primarily on its members' needs, or it might depend only on money. This is still undecided.
 
 ## Relationships
