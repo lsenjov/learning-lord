@@ -19,3 +19,8 @@
 ## Progress
 
 - Plan recorded before implementation.
+- Complete: added pure four-hour search, inspectable plans, and execution of committed two-hour batches in `planning.rs`.
+- Added opt-in planning on citizens, agents, and universe snapshots. Advances continue across action and batch boundaries while preserving their source, including on errors.
+- Updated README and design notes. Eight new tests cover exhaustive optimality, completion-state averages, deterministic ties, commitment/replanning, tick equivalence, errors, and independent branches.
+- Validation passed: all 31 tests, workspace build, formatting, Clippy with warnings denied, and diff checks.
+- Independent review found no high, medium, or low issues.

@@ -67,16 +67,17 @@
 
 - Agents have actions, each with an estimated duration and a result.
 - Currently, citizens can eat or wait; each action takes 30 simulation minutes. Only one action can be active at a time, and hunger continues growing throughout both.
-- Starting an action returns a new snapshot without advancing time. Eating grants 50 nourishment on completion; waiting has no completion effect. Finished actions clear, leaving the citizen idle until explicitly given another action.
-- Action selection and prediction are not implemented yet. The following bullets describe the intended planner.
-- When choosing what to do, an agent selects from available actions and creates a universe for each possible outcome.
-- It continues exploring actions until a given amount of simulated time has passed for each plan.
-- Universes are immutable and intended to be quick to iterate on.
-- The wellbeing score after each action is recorded.
-- The plan with the highest average wellbeing score is chosen.
-- Other agents are frozen during prediction.
-- Predictions can use assumptions, such as the price last paid to hire workers. Prices are expected to fluctuate slowly enough for this to be useful.
-- If executing a plan fails, the agent can recalculate.
+- Starting an action returns a new snapshot without advancing time. Eating grants 50 nourishment on completion; waiting has no completion effect. Unplanned citizens remain idle after finishing their manually started action.
+- Planning searches all 256 sequences of eight actions over a four-hour horizon, using independent citizen snapshots. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
+- A plan's score is the average personal wellbeing at its eight action completions. Wellbeing between completions is not included yet.
+- The highest-scoring plan wins. Search tries waiting before eating and retains the first sequence when scores tie.
+- Planning is enabled explicitly on an idle citizen with `start_planning()`, also available through agents and universes. The search and batch executor live in the separate planning module and reuse citizen action and need calculations.
+- Execute the first two hours (four actions) of the selected plan without reconsidering between actions. On finishing that batch, search again from the actual state and start the next batch.
+- Continue immediately into the next committed action or batch, accounting for all elapsed time even when a tick crosses multiple boundaries.
+- Prediction does not advance other agents or the world clock. Actual universe advancement still advances every agent.
+- Numeric errors during search or execution return an error and preserve the original snapshot.
+- Future predictions can use assumptions, such as the price last paid to hire workers. Prices are expected to fluctuate slowly enough for this to be useful.
+- Future execution failures caused by world interactions can trigger replanning.
 
 ## Time and ticking
 
@@ -84,13 +85,13 @@
 - A universe has a current time.
 - Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's hunger and action for the elapsed duration.
 - Agents delegate advancement to their kind. Citizens advance their own needs and actions without requiring a universe; each advancement returns a new value and preserves its source.
-- If an advance crosses action completion, advance needs to that point, apply the action's effect, and advance through the remaining time idle.
+- If an advance crosses action completion, advance needs to that point and apply the action's effect. Unplanned citizens spend the remaining time idle; planned citizens continue their committed actions, replanning every two hours.
 - Invalid advances, including clock overflow or nonfinite hunger results, leave the source snapshot unchanged.
 - Small advances should agree with one equivalent large advance within floating-point tolerance when no intervening action changes the rate.
 - Ticking a single agent advances its needs and actions by a given amount of time within the universe.
 - Ticking the universe ticks all agents.
 - Ticks will generally be shorter than a second.
-- It is acceptable for an agent to remain idle briefly after finishing a task within a tick.
+- Planned citizens start the next action at completion rather than losing time to tick boundaries.
 - Individual agents do not need activating in the middle of an action.
 
 ## Negotiation

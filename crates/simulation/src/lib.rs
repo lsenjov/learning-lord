@@ -2,6 +2,8 @@ use imbl::HashMap;
 use std::fmt;
 use uuid::Uuid;
 
+pub mod planning;
+
 pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
 pub const MEAL_NOURISHMENT: f64 = 50.0;
 pub const ACTION_DURATION_MS: u64 = 30 * 60 * 1000;
@@ -16,6 +18,16 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub fn start_planning(&self) -> Result<Self, SimulationError> {
+        let kind = match &self.kind {
+            AgentKind::Citizen(citizen) => AgentKind::Citizen(citizen.start_planning()?),
+        };
+        Ok(Self {
+            name: self.name.clone(),
+            kind,
+        })
+    }
+
     pub fn start_action(&self, action: CitizenAction) -> Result<Self, SimulationError> {
         let kind = match &self.kind {
             AgentKind::Citizen(citizen) => AgentKind::Citizen(citizen.start_action(action)?),
@@ -75,6 +87,7 @@ pub struct Citizen {
     hunger: f64,
     hunger_per_hour: f64,
     active_action: Option<ActiveAction>,
+    plan_execution: Option<planning::PlanExecution>,
 }
 
 impl Citizen {
@@ -93,6 +106,7 @@ impl Citizen {
             hunger,
             hunger_per_hour,
             active_action: None,
+            plan_execution: None,
         })
     }
 
@@ -108,8 +122,16 @@ impl Citizen {
         self.active_action
     }
 
+    pub fn plan_execution(&self) -> Option<&planning::PlanExecution> {
+        self.plan_execution.as_ref()
+    }
+
+    pub fn start_planning(&self) -> Result<Self, SimulationError> {
+        planning::start(self)
+    }
+
     pub fn start_action(&self, action: CitizenAction) -> Result<Self, SimulationError> {
-        if self.active_action.is_some() {
+        if self.active_action.is_some() || self.plan_execution.is_some() {
             return Err(SimulationError::CitizenBusy);
         }
         let mut citizen = self.clone();
@@ -131,6 +153,9 @@ impl Citizen {
     }
 
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
+        if let Some(execution) = &self.plan_execution {
+            return execution.advance(self, elapsed_ms);
+        }
         let mut citizen = self.clone();
         if elapsed_ms == 0 {
             return Ok(citizen);
@@ -223,6 +248,14 @@ impl Universe {
     ) -> Result<Self, SimulationError> {
         let agent = self.agents.get(&id).ok_or(SimulationError::AgentNotFound)?;
         let updated = agent.start_action(action)?;
+        let mut universe = self.clone();
+        universe.agents.insert(id, updated);
+        Ok(universe)
+    }
+
+    pub fn start_planning(&self, id: AgentId) -> Result<Self, SimulationError> {
+        let agent = self.agents.get(&id).ok_or(SimulationError::AgentNotFound)?;
+        let updated = agent.start_planning()?;
         let mut universe = self.clone();
         universe.agents.insert(id, updated);
         Ok(universe)
