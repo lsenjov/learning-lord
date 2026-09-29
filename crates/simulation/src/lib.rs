@@ -87,7 +87,7 @@ pub struct Citizen {
     hunger: f64,
     hunger_per_hour: f64,
     active_action: Option<ActiveAction>,
-    plan_execution: Option<planning::PlanExecution>,
+    active_plan: Option<planning::ActivePlan>,
 }
 
 impl Citizen {
@@ -106,7 +106,7 @@ impl Citizen {
             hunger,
             hunger_per_hour,
             active_action: None,
-            plan_execution: None,
+            active_plan: None,
         })
     }
 
@@ -122,8 +122,8 @@ impl Citizen {
         self.active_action
     }
 
-    pub fn plan_execution(&self) -> Option<&planning::PlanExecution> {
-        self.plan_execution.as_ref()
+    pub fn active_plan(&self) -> Option<&planning::ActivePlan> {
+        self.active_plan.as_ref()
     }
 
     pub fn start_planning(&self) -> Result<Self, SimulationError> {
@@ -131,7 +131,7 @@ impl Citizen {
     }
 
     pub fn start_action(&self, action: CitizenAction) -> Result<Self, SimulationError> {
-        if self.active_action.is_some() || self.plan_execution.is_some() {
+        if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
         }
         let mut citizen = self.clone();
@@ -153,7 +153,7 @@ impl Citizen {
     }
 
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
-        if let Some(execution) = &self.plan_execution {
+        if let Some(execution) = &self.active_plan {
             return execution.advance(self, elapsed_ms);
         }
         let mut citizen = self.clone();

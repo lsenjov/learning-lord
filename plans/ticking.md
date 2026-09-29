@@ -68,11 +68,12 @@
 - Agents have actions, each with an estimated duration and a result.
 - Currently, citizens can eat or wait; each action takes 30 simulation minutes. Only one action can be active at a time, and hunger continues growing throughout both.
 - Starting an action returns a new snapshot without advancing time. Eating grants 50 nourishment on completion; waiting has no completion effect. Unplanned citizens remain idle after finishing their manually started action.
-- Planning searches all 256 sequences of eight actions over a four-hour horizon, using independent citizen snapshots. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
-- A plan's score is the average personal wellbeing at its eight action completions. Wellbeing between completions is not included yet.
-- The highest-scoring plan wins. Search tries waiting before eating and retains the first sequence when scores tie.
+- Planning explores action sequences until the completed action that reaches or crosses a four-hour horizon, using independent citizen snapshots. The horizon is a duration, not an action count; current 30-minute actions yield 256 sequences of eight actions. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
+- A plan's score is the average personal wellbeing at all its action completions, including the action crossing the horizon. Plans have variable-length action sequences. Wellbeing between completions is not included yet.
+- The highest-scoring plan wins. Any equally good plan is acceptable on ties. The current search tries waiting before eating and retains the first optimum.
 - Planning is enabled explicitly on an idle citizen with `start_planning()`, also available through agents and universes. The search and batch executor live in the separate planning module and reuse citizen action and need calculations.
-- Execute the first two hours (four actions) of the selected plan without reconsidering between actions. On finishing that batch, search again from the actual state and start the next batch.
+- Execute the selected plan for two simulation hours without reconsidering between actions. Finish any action crossing that time boundary, then search again from the actual state and start the next batch.
+- The citizen stores an optional `ActivePlan`, available through `active_plan()`, with the selected plan, current action index, and elapsed batch time including partial actions.
 - Continue immediately into the next committed action or batch, accounting for all elapsed time even when a tick crosses multiple boundaries.
 - Prediction does not advance other agents or the world clock. Actual universe advancement still advances every agent.
 - Numeric errors during search or execution return an error and preserve the original snapshot.
@@ -85,7 +86,7 @@
 - A universe has a current time.
 - Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's hunger and action for the elapsed duration.
 - Agents delegate advancement to their kind. Citizens advance their own needs and actions without requiring a universe; each advancement returns a new value and preserves its source.
-- If an advance crosses action completion, advance needs to that point and apply the action's effect. Unplanned citizens spend the remaining time idle; planned citizens continue their committed actions, replanning every two hours.
+- If an advance crosses action completion, advance needs to that point and apply the action's effect. Unplanned citizens spend the remaining time idle; planned citizens continue their committed actions, replanning at the first action completion at or after two hours.
 - Invalid advances, including clock overflow or nonfinite hunger results, leave the source snapshot unchanged.
 - Small advances should agree with one equivalent large advance within floating-point tolerance when no intervening action changes the rate.
 - Ticking a single agent advances its needs and actions by a given amount of time within the universe.

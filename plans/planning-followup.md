@@ -16,3 +16,8 @@
 ## Progress
 
 - Plan recorded before implementation.
+- Complete: prediction uses a four-hour remaining-duration budget and a variable-length action list; scores average the actual completion count without overflowing a sum.
+- `ActivePlan` tracks elapsed execution time, including partial actions, and replans at the first action completion at or after two hours. Renamed the citizen field/getter to `active_plan` and updated documentation.
+- Tie tests now verify the selected sequence's optimal score instead of prescribing a winner. Added private boundary fixtures for prediction overrun and a delayed action crossing the commitment boundary; gameplay durations remain unchanged.
+- Validation passed: all 33 tests, workspace build, formatting, Clippy with warnings denied, and diff checks.
+- Independent review found no high, medium, or low issues.

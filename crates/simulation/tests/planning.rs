@@ -15,6 +15,18 @@ fn assert_close(actual: f64, expected: f64) {
     assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
 }
 
+fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
+    let mut predicted = original.clone();
+    let mut sum = 0.0;
+    for &action in actions {
+        predicted = predicted.start_action(action).unwrap();
+        let duration_ms = predicted.active_action().unwrap().remaining_ms();
+        predicted = predicted.advance(duration_ms).unwrap();
+        sum += predicted.personal_wellbeing().unwrap();
+    }
+    sum / actions.len() as f64
+}
+
 #[test]
 fn search_matches_all_256_sequences_and_preserves_the_source() {
     for hunger in [-140.0, -80.0, -5.0, 25.0, 140.0] {
@@ -22,60 +34,38 @@ fn search_matches_all_256_sequences_and_preserves_the_source() {
         let snapshot = original.clone();
         let chosen = plan(&original).unwrap();
         let mut best_score = f64::NEG_INFINITY;
-        let mut best_actions = [CitizenAction::Wait; 8];
 
         for sequence in 0..256 {
-            let actions = std::array::from_fn(|index| {
+            let actions: [CitizenAction; 8] = std::array::from_fn(|index| {
                 if sequence & (1 << (7 - index)) == 0 {
                     CitizenAction::Wait
                 } else {
                     CitizenAction::Eat
                 }
             });
-            let mut predicted = original.clone();
-            let mut sum = 0.0;
-            for action in actions {
-                predicted = predicted
-                    .start_action(action)
-                    .unwrap()
-                    .advance(HALF_HOUR_MS)
-                    .unwrap();
-                sum += predicted.personal_wellbeing().unwrap();
-            }
-            if sum / 8.0 > best_score {
-                best_score = sum / 8.0;
-                best_actions = actions;
-            }
+            best_score = best_score.max(score_actions(&original, &actions));
         }
 
-        assert_eq!(chosen.actions(), &best_actions);
+        assert_eq!(
+            chosen.actions().len() as u64 * HALF_HOUR_MS,
+            4 * 60 * 60 * 1000
+        );
+        assert_close(score_actions(&original, chosen.actions()), best_score);
         assert_close(chosen.average_wellbeing(), best_score);
         assert_eq!(original, snapshot);
     }
 }
 
 #[test]
-fn scoring_averages_completion_states_and_keeps_the_first_equal_plan() {
+fn scoring_averages_completion_states_and_accepts_any_optimal_tied_plan() {
     let starving = Citizen::with_hunger_rate(150.0, 0.0).unwrap();
     let chosen = plan(&starving).unwrap();
-    assert_eq!(
-        chosen.actions(),
-        &[
-            CitizenAction::Eat,
-            CitizenAction::Eat,
-            CitizenAction::Eat,
-            CitizenAction::Wait,
-            CitizenAction::Wait,
-            CitizenAction::Wait,
-            CitizenAction::Wait,
-            CitizenAction::Wait,
-        ]
-    );
-    assert_eq!(chosen.average_wellbeing(), -18.75);
+    assert_close(score_actions(&starving, chosen.actions()), -18.75);
+    assert_close(chosen.average_wellbeing(), -18.75);
 
     let satiated = Citizen::with_hunger_rate(-50.0, 0.0).unwrap();
     let chosen = plan(&satiated).unwrap();
-    assert_eq!(chosen.actions(), &[CitizenAction::Wait; 8]);
+    assert_eq!(score_actions(&satiated, chosen.actions()), 0.0);
     assert_eq!(chosen.average_wellbeing(), 0.0);
 }
 
@@ -86,18 +76,19 @@ fn large_finite_scores_can_be_averaged_without_overflowing() {
 }
 
 #[test]
-fn execution_keeps_four_actions_then_replans_at_exactly_two_hours() {
+fn execution_keeps_its_plan_for_two_hours_then_replans() {
     let original = Citizen::new(170.0).unwrap();
-    let initial_plan = plan(&original).unwrap();
     let mut executing = original.start_planning().unwrap();
+    let initial_plan = executing.active_plan().unwrap().plan().clone();
     let mut manual = original.clone();
 
     assert_eq!(executing.hunger(), original.hunger());
     assert_eq!(executing.advance(0).unwrap(), executing);
+    assert_eq!(executing.active_plan().unwrap().elapsed_ms(), 0);
 
     for index in 0..4 {
-        assert_eq!(executing.plan_execution().unwrap().plan(), &initial_plan);
-        assert_eq!(executing.plan_execution().unwrap().action_index(), index);
+        assert_eq!(executing.active_plan().unwrap().plan(), &initial_plan);
+        assert_eq!(executing.active_plan().unwrap().action_index(), index);
         assert_eq!(
             executing.active_action().unwrap().action(),
             initial_plan.actions()[index]
@@ -113,31 +104,43 @@ fn execution_keeps_four_actions_then_replans_at_exactly_two_hours() {
             .unwrap();
 
         let almost_done = executing.advance(HALF_HOUR_MS - 1).unwrap();
-        assert_eq!(almost_done.plan_execution().unwrap().plan(), &initial_plan);
-        assert_eq!(almost_done.plan_execution().unwrap().action_index(), index);
+        assert_eq!(almost_done.active_plan().unwrap().plan(), &initial_plan);
+        assert_eq!(almost_done.active_plan().unwrap().action_index(), index);
+        assert_eq!(
+            almost_done.active_plan().unwrap().elapsed_ms(),
+            (index as u64 + 1) * HALF_HOUR_MS - 1
+        );
         assert_eq!(almost_done.active_action().unwrap().remaining_ms(), 1);
         executing = almost_done.advance(1).unwrap();
         assert_close(executing.hunger(), manual.hunger());
     }
 
     let next_plan = plan(&manual).unwrap();
-    let execution = executing.plan_execution().unwrap();
+    let execution = executing.active_plan().unwrap();
     assert_eq!(execution.action_index(), 0);
-    assert_eq!(execution.plan(), &next_plan);
+    assert_eq!(execution.elapsed_ms(), 0);
+    assert_close(
+        execution.plan().average_wellbeing(),
+        next_plan.average_wellbeing(),
+    );
+    assert_close(
+        score_actions(&manual, execution.plan().actions()),
+        next_plan.average_wellbeing(),
+    );
     assert_ne!(
         execution.plan().average_wellbeing(),
         initial_plan.average_wellbeing()
     );
     assert_eq!(
         executing.active_action().unwrap().action(),
-        next_plan.actions()[0]
+        execution.plan().actions()[0]
     );
     assert_eq!(
         executing.active_action().unwrap().remaining_ms(),
         HALF_HOUR_MS
     );
     assert_eq!(original.active_action(), None);
-    assert_eq!(original.plan_execution(), None);
+    assert_eq!(original.active_plan(), None);
 }
 
 #[test]
@@ -152,12 +155,14 @@ fn small_and_large_ticks_agree_across_multiple_batches_and_partial_actions() {
 
     assert_close(small_ticks.hunger(), large_tick.hunger());
     assert_eq!(small_ticks.active_action(), large_tick.active_action());
-    let small_execution = small_ticks.plan_execution().unwrap();
-    let large_execution = large_tick.plan_execution().unwrap();
+    let small_execution = small_ticks.active_plan().unwrap();
+    let large_execution = large_tick.active_plan().unwrap();
     assert_eq!(
         small_execution.action_index(),
         large_execution.action_index()
     );
+    assert_eq!(small_execution.elapsed_ms(), 37_123_000 % TWO_HOURS_MS);
+    assert_eq!(small_execution.elapsed_ms(), large_execution.elapsed_ms());
     assert_eq!(
         small_execution.plan().actions(),
         large_execution.plan().actions()
@@ -198,9 +203,18 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
     assert_eq!(planned.current_time_ms(), 0);
     assert_eq!(planned.agents()[&other_id], original.agents()[&other_id]);
     assert_eq!(planned.agents()[&id].name, "Ada");
-    assert_eq!(
-        planned.agents()[&id],
-        original.agents()[&id].start_planning().unwrap()
+    let directly_planned = original.agents()[&id].start_planning().unwrap();
+    assert_close(
+        directly_planned.personal_wellbeing().unwrap(),
+        planned.agents()[&id].personal_wellbeing().unwrap(),
+    );
+    assert_close(
+        citizen(&planned, id)
+            .active_plan()
+            .unwrap()
+            .plan()
+            .average_wellbeing(),
+        plan(citizen(&original, id)).unwrap().average_wellbeing(),
     );
     assert_eq!(planned.advance(0).unwrap(), planned);
     assert_eq!(
@@ -217,11 +231,8 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
     assert_eq!(second.current_time_ms(), TWO_HOURS_MS * 2);
     assert_close(citizen(&first, other_id).hunger(), 100.0 / 12.0);
     assert_close(citizen(&second, other_id).hunger(), 100.0 / 6.0);
-    assert!(citizen(&first, other_id).plan_execution().is_none());
-    assert_eq!(
-        citizen(&first, id).plan_execution().unwrap().action_index(),
-        0
-    );
+    assert!(citizen(&first, other_id).active_plan().is_none());
+    assert_eq!(citizen(&first, id).active_plan().unwrap().action_index(), 0);
     assert_eq!(planned, planned_snapshot);
     assert_eq!(original, snapshot);
 

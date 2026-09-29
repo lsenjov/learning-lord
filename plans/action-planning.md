@@ -2,9 +2,9 @@
 
 ## Agreed scope
 
-- Explore all eight-action eat/wait sequences over four simulation hours (256 sequences).
-- Rank sequences by average personal wellbeing at action completion. Keep the first sequence found on ties.
-- Commit to the first four actions, covering two hours. Replan only when that batch finishes.
+- Explore eat/wait sequences until a completed action reaches or crosses four simulation hours. The current 30-minute actions yield eight actions per sequence and 256 candidates.
+- Rank sequences by average personal wellbeing at action completion. Any optimal tied sequence is acceptable.
+- Commit to two simulation hours. Finish any action crossing that time boundary before replanning.
 - Predict using independent citizen snapshots; current actions have no interactions with the rest of the universe.
 - Keep search and batch execution in a separate planning module, reusing citizen action and need calculations.
 - Enable automatic planning explicitly with `start_planning()` on an idle citizen, agent, or universe agent. Ordinary unplanned citizens retain manual action control.
@@ -24,3 +24,4 @@
 - Updated README and design notes. Eight new tests cover exhaustive optimality, completion-state averages, deterministic ties, commitment/replanning, tick equivalence, errors, and independent branches.
 - Validation passed: all 31 tests, workspace build, formatting, Clippy with warnings denied, and diff checks.
 - Independent review found no high, medium, or low issues.
+- The walkthrough identified duration-based horizons, tie-test changes, and the `ActivePlan` naming correction. Follow-up implementation is tracked in [planning-followup.md](planning-followup.md).

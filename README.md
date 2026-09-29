@@ -38,11 +38,11 @@ fn main() -> Result<(), SimulationError> {
 
 ## Planning
 
-- `planning::plan(&citizen)` searches all 256 sequences of eight eat/wait actions over four simulation hours. It returns a `Plan` with `actions()` and `average_wellbeing()`, without changing the citizen or advancing the world.
-- Plans are ranked by average wellbeing at the eight action completions. This does not measure wellbeing between completions. Search tries waiting before eating and keeps the first sequence on equal scores.
+- `planning::plan(&citizen)` explores eat/wait sequences until a completed action reaches or crosses four simulation hours (`HORIZON_MS`). It returns a variable-length `Plan` with `actions()` and `average_wellbeing()`, without changing the citizen or advancing the world. The current 30-minute actions produce eight-action sequences and 256 candidates.
+- Plans are ranked by average wellbeing across their completed actions, including the action crossing the horizon. This does not measure wellbeing between completions. Any optimal tied plan is acceptable; the current search tries waiting before eating and keeps its first optimum.
 - `citizen.start_planning()`, `agent.start_planning()`, or `universe.start_planning(id)` returns a new snapshot with planning enabled and the first action started, without advancing time. The citizen must be idle. Busy citizens return `CitizenBusy`; unknown IDs return `AgentNotFound`.
-- Execution commits to the first four actions (two hours). `advance()` starts the next committed action immediately on completion. After the fourth, it searches again from the actual citizen state and begins a new batch, including when a single tick crosses several batches.
-- `citizen.plan_execution()` exposes the chosen four-hour `plan()` and the zero-based `action_index()` within its committed first four actions. The active action holds its remaining time. Manual actions and restarting planning are rejected while a batch is executing.
+- Execution commits to two simulation hours (`COMMITMENT_MS`). `advance()` starts the next action immediately on completion, continuing the selected plan until elapsed time reaches that limit. If an action crosses the limit, it finishes before replanning. The executor then searches from the actual citizen state and starts a new batch, including when a single tick crosses several batches.
+- `citizen.active_plan()` returns the stored `ActivePlan`, exposing its chosen `plan()`, zero-based `action_index()`, and `elapsed_ms()` since the current batch began, including partial actions. The active action holds its remaining time. Manual actions and restarting planning are rejected while a batch is executing.
 - Prediction only advances citizen snapshots. During actual universe advancement, every agent advances normally. Search is synchronous and propagates numeric errors; failed planning or execution leaves the source snapshot unchanged.
 
 ```rust
