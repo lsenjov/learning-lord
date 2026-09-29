@@ -11,6 +11,18 @@ pub struct Agent {
     pub kind: AgentKind,
 }
 
+impl Agent {
+    pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
+        let kind = match &self.kind {
+            AgentKind::Citizen(citizen) => AgentKind::Citizen(citizen.advance(elapsed_ms)?),
+        };
+        Ok(Self {
+            name: self.name.clone(),
+            kind,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentKind {
     Citizen(Citizen),
@@ -42,6 +54,22 @@ impl Citizen {
 
     pub fn hunger_per_hour(&self) -> f64 {
         self.hunger_per_hour
+    }
+
+    pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
+        if elapsed_ms == 0 {
+            return Ok(self.clone());
+        }
+
+        let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
+        let hunger = self.hunger + self.hunger_per_hour * elapsed_hours;
+        if !hunger.is_finite() {
+            return Err(SimulationError::HungerOverflow);
+        }
+        Ok(Self {
+            hunger,
+            hunger_per_hour: self.hunger_per_hour,
+        })
     }
 }
 
@@ -87,17 +115,8 @@ impl Universe {
             return Ok(universe);
         }
 
-        let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
         for (_, agent) in universe.agents.iter_mut() {
-            match &mut agent.kind {
-                AgentKind::Citizen(citizen) => {
-                    let hunger = citizen.hunger + citizen.hunger_per_hour * elapsed_hours;
-                    if !hunger.is_finite() {
-                        return Err(SimulationError::HungerOverflow);
-                    }
-                    citizen.hunger = hunger;
-                }
-            }
+            *agent = agent.advance(elapsed_ms)?;
         }
         universe.current_time_ms = current_time_ms;
         Ok(universe)

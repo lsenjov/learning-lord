@@ -32,3 +32,10 @@
 - Updated the desktop getter, README, and design notes. The frontend remains an empty scaffold without automatic ticking.
 - Validation passed: all 10 integration tests, workspace tests/build, formatting, Clippy with warnings denied, and diff checks.
 - Independent review found no high, medium, or low issues.
+
+## Follow-up: agent-owned advancement
+
+- Move hunger arithmetic and its result validation into `Citizen::advance(elapsed_ms)`, returning a new citizen without requiring a universe.
+- Add `Agent::advance` to delegate to its kind. Keep `Universe::advance` responsible for the clock and advancing agents in its cloned state.
+- Retain snapshot isolation and existing numeric behaviour. Verify direct citizen advancement and errors alongside the existing universe tests, then review and commit.
+- Complete: all 12 tests, workspace build, formatting, Clippy with warnings denied, and diff checks passed. Independent review found no high, medium, or low issues.

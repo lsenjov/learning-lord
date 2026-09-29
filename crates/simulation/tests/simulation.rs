@@ -58,6 +58,30 @@ fn hunger_rate_must_be_finite_and_nonnegative() {
 }
 
 #[test]
+fn citizen_advances_its_needs_without_a_universe_and_preserves_the_source() {
+    let original = Citizen::new(-0.25, 3600.0).unwrap();
+
+    let advanced = original.advance(500).unwrap();
+
+    assert_eq!(advanced.hunger(), 0.25);
+    assert_eq!(advanced.hunger_per_hour(), 3600.0);
+    assert_eq!(original.hunger(), -0.25);
+    assert_eq!(original.advance(0).unwrap(), original);
+}
+
+#[test]
+fn citizen_rejects_hunger_overflow_without_changing_its_needs() {
+    let original = Citizen::new(f64::MAX, f64::MAX).unwrap();
+
+    assert_eq!(
+        original.advance(HOUR_MS),
+        Err(SimulationError::HungerOverflow)
+    );
+    assert_eq!(original.hunger(), f64::MAX);
+    assert_eq!(original.hunger_per_hour(), f64::MAX);
+}
+
+#[test]
 fn advancing_updates_each_citizen_and_the_clock_once() {
     let (universe, satiated_id) =
         Universe::default().with_citizen("Ada", Citizen::new(-5.0, 10.0).unwrap());

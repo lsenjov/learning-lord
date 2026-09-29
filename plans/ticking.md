@@ -76,6 +76,7 @@
 - Time is measured in ticks, with milliseconds represented by a `u64`.
 - A universe has a current time.
 - Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's hunger for the elapsed duration.
+- Agents delegate advancement to their kind. Citizens advance their own needs without requiring a universe; each advancement returns a new value and preserves its source.
 - Invalid advances, including clock overflow or nonfinite hunger results, leave the source snapshot unchanged.
 - Small advances should agree with one equivalent large advance within floating-point tolerance when no intervening action changes the rate.
 - Ticking a single agent advances its needs and actions by a given amount of time within the universe.

@@ -15,7 +15,8 @@ A local, single-player town simulation for learning Rust. The current scope is a
 - `Citizen::new(hunger, hunger_per_hour)` validates explicit starting values. Hunger must be finite; its hourly growth rate must also be finite and nonnegative.
 - Negative hunger represents satiation. Positive hunger represents a need for food. Neither side is clamped.
 - `universe.with_citizen(name, citizen)` returns a new universe and the new agent's UUID. Existing IDs and the original universe remain unchanged.
-- `universe.advance(elapsed_ms)` returns a new universe with its clock advanced once and every citizen's hunger increased by `hunger_per_hour * elapsed_ms / 3_600_000`. Time is `u64` milliseconds; hunger calculations use `f64`.
+- `citizen.advance(elapsed_ms)` returns a new citizen with hunger increased by `hunger_per_hour * elapsed_ms / 3_600_000`, preserving the original citizen. It needs no universe. Time is `u64` milliseconds; hunger calculations use `f64`.
+- `agent.advance(elapsed_ms)` delegates to its kind and returns an updated agent. `universe.advance(elapsed_ms)` advances its clock once and delegates to each agent in a cloned universe.
 - Clock overflow or nonfinite hunger results return a `SimulationError`, leaving the source universe unchanged. Small advances agree with an equivalent large advance within floating-point tolerance.
 - Read state through `current_time_ms()`, `agents()`, and the citizen's `hunger()` and `hunger_per_hour()` getters.
 
