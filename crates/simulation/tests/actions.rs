@@ -1,0 +1,197 @@
+use learning_lord_simulation::{Citizen, CitizenAction, SimulationError, Universe};
+
+const MINUTE_MS: u64 = 60_000;
+const HALF_HOUR_MS: u64 = 30 * MINUTE_MS;
+const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
+
+fn assert_close(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
+}
+
+#[test]
+fn two_meals_balance_a_day_of_standard_hunger_including_time_spent_eating() {
+    let original = Citizen::new(-25.0).unwrap();
+    assert_close(original.advance(DAY_MS).unwrap().hunger(), 75.0);
+    assert_eq!(original.active_action(), None);
+
+    let mut citizen = original.clone();
+    for _ in 0..2 {
+        citizen = citizen.advance(DAY_MS / 2 - HALF_HOUR_MS).unwrap();
+        citizen = citizen.start_action(CitizenAction::Eat).unwrap();
+        citizen = citizen.advance(HALF_HOUR_MS).unwrap();
+    }
+
+    assert_close(citizen.hunger(), -25.0);
+    assert_eq!(citizen.active_action(), None);
+    assert_eq!(original.hunger(), -25.0);
+}
+
+#[test]
+fn actions_finish_at_thirty_minutes_and_meals_only_nourish_on_completion() {
+    for (action, completed_hunger) in [(CitizenAction::Eat, -50.0), (CitizenAction::Wait, 0.0)] {
+        let original = Citizen::with_hunger_rate(0.0, 0.0).unwrap();
+        let started = original.start_action(action).unwrap();
+        let active = started.active_action().unwrap();
+        assert_eq!(active.action(), action);
+        assert_eq!(active.remaining_ms(), HALF_HOUR_MS);
+        assert_eq!(started.hunger(), 0.0);
+        assert_eq!(original.active_action(), None);
+        assert_eq!(started.advance(0).unwrap(), started);
+
+        let almost_done = started.advance(HALF_HOUR_MS - 1).unwrap();
+        assert_eq!(almost_done.hunger(), 0.0);
+        assert_eq!(almost_done.active_action().unwrap().remaining_ms(), 1);
+        let completed = almost_done.advance(1).unwrap();
+        assert_eq!(completed.hunger(), completed_hunger);
+        assert_eq!(completed.active_action(), None);
+        assert_eq!(completed.advance(DAY_MS).unwrap(), completed);
+        assert!(completed.start_action(CitizenAction::Eat).is_ok());
+        assert_eq!(almost_done.active_action().unwrap().remaining_ms(), 1);
+    }
+}
+
+#[test]
+fn busy_citizens_reject_both_actions_without_replacing_the_current_action() {
+    for current in [CitizenAction::Eat, CitizenAction::Wait] {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .start_action(current)
+            .unwrap()
+            .advance(MINUTE_MS)
+            .unwrap();
+        let snapshot = citizen.clone();
+        for requested in [CitizenAction::Eat, CitizenAction::Wait] {
+            assert_eq!(
+                citizen.start_action(requested),
+                Err(SimulationError::CitizenBusy)
+            );
+        }
+        assert_eq!(citizen, snapshot);
+    }
+}
+
+#[test]
+fn hunger_advances_during_actions_and_after_their_completion() {
+    for (action, expected_hunger) in [
+        (CitizenAction::Eat, 100.0 / 24.0 - 50.0),
+        (CitizenAction::Wait, 100.0 / 24.0),
+    ] {
+        let started = Citizen::new(0.0).unwrap().start_action(action).unwrap();
+        let midway = started.advance(15 * MINUTE_MS).unwrap();
+        assert_close(midway.hunger(), 100.0 / 96.0);
+        assert_eq!(
+            midway.active_action().unwrap().remaining_ms(),
+            15 * MINUTE_MS
+        );
+
+        let completed = started.advance(60 * MINUTE_MS).unwrap();
+        assert_close(completed.hunger(), expected_hunger);
+        assert_eq!(completed.active_action(), None);
+        assert_eq!(started.hunger(), 0.0);
+    }
+}
+
+#[test]
+fn small_ticks_and_one_large_tick_agree_across_action_completion() {
+    for action in [CitizenAction::Eat, CitizenAction::Wait] {
+        let original = Citizen::new(-80.0).unwrap().start_action(action).unwrap();
+        let mut small_ticks = original.clone();
+        for _ in 0..240 {
+            small_ticks = small_ticks.advance(17_000).unwrap();
+        }
+        let large_tick = original.advance(240 * 17_000).unwrap();
+
+        assert_close(small_ticks.hunger(), large_tick.hunger());
+        assert_eq!(small_ticks.active_action(), None);
+        assert_eq!(large_tick.active_action(), None);
+    }
+}
+
+#[test]
+fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
+    for (hunger, eating_is_better) in [(-80.0, false), (50.0, true)] {
+        let citizen = Citizen::new(hunger).unwrap();
+        let eat = citizen
+            .start_action(CitizenAction::Eat)
+            .unwrap()
+            .advance(HALF_HOUR_MS)
+            .unwrap();
+        let wait = citizen
+            .start_action(CitizenAction::Wait)
+            .unwrap()
+            .advance(HALF_HOUR_MS)
+            .unwrap();
+
+        assert_eq!(
+            eat.personal_wellbeing().unwrap() > wait.personal_wellbeing().unwrap(),
+            eating_is_better
+        );
+    }
+}
+
+#[test]
+fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
+    let (original, id) = Universe::default().with_citizen("Ada", Citizen::new(0.0).unwrap());
+    let (original, other_id) = original.with_citizen("Bea", Citizen::new(10.0).unwrap());
+    let original = original.advance(MINUTE_MS).unwrap();
+    let snapshot = original.clone();
+    let eating = original.start_action(id, CitizenAction::Eat).unwrap();
+    let waiting = original.start_action(id, CitizenAction::Wait).unwrap();
+    let eating_snapshot = eating.clone();
+
+    assert_eq!(eating.current_time_ms(), MINUTE_MS);
+    assert_eq!(waiting.current_time_ms(), MINUTE_MS);
+    assert_eq!(eating.agents()[&other_id], original.agents()[&other_id]);
+    assert_eq!(eating.agents()[&id].name, "Ada");
+    assert_eq!(
+        eating.start_action(id, CitizenAction::Wait),
+        Err(SimulationError::CitizenBusy)
+    );
+
+    let (eaten, waited) = std::thread::scope(|scope| {
+        let eat = scope.spawn(|| eating.advance(HALF_HOUR_MS).unwrap());
+        let wait = scope.spawn(|| waiting.advance(HALF_HOUR_MS).unwrap());
+        (eat.join().unwrap(), wait.join().unwrap())
+    });
+
+    assert_eq!(eaten.current_time_ms(), 31 * MINUTE_MS);
+    assert_eq!(waited.current_time_ms(), eaten.current_time_ms());
+    assert_eq!(eaten.agents()[&other_id], waited.agents()[&other_id]);
+    assert_eq!(eaten.agents()[&id].personal_wellbeing(), Ok(0.0));
+    assert!(waited.agents()[&id].personal_wellbeing().unwrap() < 0.0);
+    assert_eq!(eating, eating_snapshot);
+    assert_eq!(original, snapshot);
+
+    let (_, missing_id) = Universe::default().with_citizen("Missing", Citizen::new(0.0).unwrap());
+    assert_eq!(
+        original.start_action(missing_id, CitizenAction::Eat),
+        Err(SimulationError::AgentNotFound)
+    );
+    assert_eq!(original, snapshot);
+}
+
+#[test]
+fn failed_advances_preserve_action_progress_even_when_failure_is_after_completion() {
+    for action in [CitizenAction::Eat, CitizenAction::Wait] {
+        for hunger in [0.0, f64::MAX] {
+            let citizen = Citizen::with_hunger_rate(hunger, f64::MAX)
+                .unwrap()
+                .start_action(action)
+                .unwrap();
+            let snapshot = citizen.clone();
+            assert_eq!(
+                citizen.advance(120 * MINUTE_MS),
+                Err(SimulationError::HungerOverflow)
+            );
+            assert_eq!(citizen, snapshot);
+
+            let (universe, _) = Universe::default().with_citizen("Ada", citizen);
+            let snapshot = universe.clone();
+            assert_eq!(
+                universe.advance(120 * MINUTE_MS),
+                Err(SimulationError::HungerOverflow)
+            );
+            assert_eq!(universe, snapshot);
+        }
+    }
+}

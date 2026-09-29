@@ -18,3 +18,8 @@
 ## Progress
 
 - Plan recorded before implementation.
+- Complete: added standard-rate citizen creation, overfull scoring, 30-minute eating/waiting actions, and immutable action-start APIs on citizens, agents, and universes.
+- Advances apply meal nourishment at completion and account for all remaining elapsed time. Busy and unknown-agent requests return explicit errors without changing their source.
+- Updated README and design notes. Added eight action tests and extended existing scoring coverage.
+- Validation passed: all 23 tests, workspace build, formatting, Clippy with warnings denied, and diff checks.
+- Independent review found no high, medium, or low issues.

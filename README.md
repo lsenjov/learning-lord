@@ -7,19 +7,33 @@ A local, single-player town simulation for learning Rust. The current scope is a
 - `crates/simulation`: engine-independent world data using `imbl` persistent collections.
 - `crates/desktop`: a Bevy desktop executable that owns the current universe and displays its agent count.
 - Prediction branches will remain simulation data, independent of rendering.
-- The universe starts empty at simulation time zero. Agents have UUID v4 IDs, names, and a kind; citizens currently have hunger and a constant hourly hunger rate.
+- The universe starts empty at simulation time zero. Agents have UUID v4 IDs, names, and a kind; citizens have hunger, a constant hourly hunger rate, and an optional action in progress.
 - Cloning a universe shares collection storage. Changes to an owned clone leave the original and sibling snapshots unchanged.
 
 ## Simulation
 
-- `Citizen::new(hunger, hunger_per_hour)` validates explicit starting values. Hunger must be finite; its hourly growth rate must also be finite and nonnegative.
+- `Citizen::new(hunger)` starts an idle citizen with explicit finite hunger and the standard rate of 100 hunger per 24 simulation hours. `Citizen::with_hunger_rate(hunger, hunger_per_hour)` accepts a custom finite, nonnegative rate.
 - Negative hunger represents satiation. Positive hunger represents a need for food. Neither side is clamped.
-- `citizen.personal_wellbeing()` calculates `-max(hunger, 0) - 4 * max(hunger - 100, 0)` from current state. Higher is better: satiation scores zero, hunger costs one point per unit up to 100, and each unit beyond 100 costs five. `agent.personal_wellbeing()` delegates to its kind. Both return `Result<f64, SimulationError>`, rejecting score overflow.
+- `citizen.personal_wellbeing()` calculates `-max(hunger, 0) - 4 * max(hunger - 100, 0) - max(-hunger - 100, 0)` from current state. Higher is better: hunger from -100 to 0 scores zero; each unit below -100 costs one point for overfull discomfort. Positive hunger costs one point per unit up to 100, and each unit beyond 100 costs five. `agent.personal_wellbeing()` delegates to its kind. Both return `Result<f64, SimulationError>`, rejecting score overflow.
 - `universe.with_citizen(name, citizen)` returns a new universe and the new agent's UUID. Existing IDs and the original universe remain unchanged.
-- `citizen.advance(elapsed_ms)` returns a new citizen with hunger increased by `hunger_per_hour * elapsed_ms / 3_600_000`, preserving the original citizen. It needs no universe. Time is `u64` milliseconds; hunger calculations use `f64`.
+- `citizen.start_action(CitizenAction::Eat)` or `CitizenAction::Wait` returns a new citizen busy for 30 simulation minutes. Starting an action does not advance time. Eating subtracts 50 hunger on completion; waiting has no completion effect. Two meals balance one day of standard hunger growth.
+- `agent.start_action(action)` delegates to its kind. `universe.start_action(id, action)` returns a new snapshot with the specified agent's action started, preserving the clock and other agents. Starting another action while busy returns `CitizenBusy`; an unknown ID returns `AgentNotFound`.
+- `citizen.advance(elapsed_ms)` returns a new citizen, advancing hunger by `hunger_per_hour * elapsed_ms / 3_600_000` and progressing its action. Hunger grows during eating and waiting. When an action completes within a tick, its effect applies at that point and the remaining time passes idle. No next action is chosen automatically. The original citizen is preserved, and no universe is required. Time is `u64` milliseconds; hunger calculations use `f64`.
 - `agent.advance(elapsed_ms)` delegates to its kind and returns an updated agent. `universe.advance(elapsed_ms)` advances its clock once and delegates to each agent in a cloned universe.
 - Clock overflow or nonfinite hunger results return a `SimulationError`, leaving the source universe unchanged. Small advances agree with an equivalent large advance within floating-point tolerance.
-- Read state through `current_time_ms()`, `agents()`, and the citizen's `hunger()` and `hunger_per_hour()` getters.
+- Read state through `current_time_ms()`, `agents()`, and the citizen's `hunger()`, `hunger_per_hour()`, and `active_action()` getters. An active action exposes its `action()` and `remaining_ms()`.
+
+```rust
+use learning_lord_simulation::{Citizen, CitizenAction, SimulationError, Universe};
+
+fn main() -> Result<(), SimulationError> {
+    let (original, id) = Universe::default().with_citizen("Ada", Citizen::new(50.0)?);
+    let eating = original.start_action(id, CitizenAction::Eat)?;
+    let after_meal = eating.advance(30 * 60 * 1000)?;
+    println!("Wellbeing: {}", after_meal.agents()[&id].personal_wellbeing()?);
+    Ok(())
+}
+```
 
 ## Run
 
@@ -29,7 +43,7 @@ The initial target is Linux with a Wayland or X11 desktop session and a working 
 cargo run --locked
 ```
 
-The window displays `Learning Lord` and `0 agents`; it does not create citizens or advance the simulation automatically. Close it with the window manager's close button or shortcut. Eating, relationships, and prediction workers are not implemented yet.
+The window displays `Learning Lord` and `0 agents`; it does not create citizens or advance the simulation automatically. Close it with the window manager's close button or shortcut. Food inventory, relationships, action selection, and prediction workers are not implemented yet.
 
 ## Development
 

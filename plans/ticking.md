@@ -21,9 +21,9 @@
 - Agents have needs.
 - Some needs increase over time, such as hunger and the need for rest.
 - Citizen hunger is a signed energy deficit: below zero is satiation, zero is the boundary, and above zero is a need for food.
-- Hunger increases with elapsed simulation time. Initially, each citizen has an explicit constant hunger rate per game hour and an explicit starting hunger value.
+- Hunger increases with elapsed simulation time. The standard rate is 100 hunger per 24 game hours, balanced by two meals of 50 nourishment each. Starting hunger is explicit; custom constant hourly rates remain available.
 - Starting hunger must be finite. Hunger rates must be finite and nonnegative. Hunger is not clamped at zero or at the starvation threshold.
-- Eating will reduce hunger by the food's nourishment value; it will not reset a timer. Eating is outside the first implementation step.
+- Eating takes 30 simulation minutes and reduces hunger by 50 on completion. Hunger continues growing during the meal. Food inventory and availability are not modeled yet.
 - Other needs have a constant baseline, such as a peasant's clothing need of 40.
 - Goods can reduce a need. Peasant clothing might reduce clothing need by 50.
 - As clothing degrades, its reduction becomes smaller, so the effective clothing need increases.
@@ -32,8 +32,9 @@
 
 - An agent's personal wellbeing score is calculated from its needs and other attributes.
 - Currently, `Citizen::personal_wellbeing()` calculates a hunger-only score on demand without a universe or stored score. `Agent::personal_wellbeing()` delegates to its kind.
-- Higher scores are better. The formula is `-max(hunger, 0) - 4 * max(hunger - 100, 0)`.
-- Hunger at or below 0 scores zero. Satiation delays future hunger rather than granting an immediate wellbeing bonus.
+- Higher scores are better. The formula is `-max(hunger, 0) - 4 * max(hunger - 100, 0) - max(-hunger - 100, 0)`.
+- Hunger from -100 to 0 scores zero. Satiation delays future hunger rather than granting an immediate wellbeing bonus.
+- Hunger below -100 represents being overfull, costing one point per excess unit with no jump at the threshold.
 - Hunger above 0 costs one point per unit up to 100. Each unit beyond 100 costs five points, with no jump at the starvation threshold.
 - A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
 - Sleep and clothing will be important factors later.
@@ -65,6 +66,9 @@
 ## Actions and planning
 
 - Agents have actions, each with an estimated duration and a result.
+- Currently, citizens can eat or wait; each action takes 30 simulation minutes. Only one action can be active at a time, and hunger continues growing throughout both.
+- Starting an action returns a new snapshot without advancing time. Eating grants 50 nourishment on completion; waiting has no completion effect. Finished actions clear, leaving the citizen idle until explicitly given another action.
+- Action selection and prediction are not implemented yet. The following bullets describe the intended planner.
 - When choosing what to do, an agent selects from available actions and creates a universe for each possible outcome.
 - It continues exploring actions until a given amount of simulated time has passed for each plan.
 - Universes are immutable and intended to be quick to iterate on.
@@ -78,8 +82,9 @@
 
 - Time is measured in ticks, with milliseconds represented by a `u64`.
 - A universe has a current time.
-- Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's hunger for the elapsed duration.
-- Agents delegate advancement to their kind. Citizens advance their own needs without requiring a universe; each advancement returns a new value and preserves its source.
+- Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's hunger and action for the elapsed duration.
+- Agents delegate advancement to their kind. Citizens advance their own needs and actions without requiring a universe; each advancement returns a new value and preserves its source.
+- If an advance crosses action completion, advance needs to that point, apply the action's effect, and advance through the remaining time idle.
 - Invalid advances, including clock overflow or nonfinite hunger results, leave the source snapshot unchanged.
 - Small advances should agree with one equivalent large advance within floating-point tolerance when no intervening action changes the rate.
 - Ticking a single agent advances its needs and actions by a given amount of time within the universe.
