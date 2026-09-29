@@ -1,7 +1,0 @@
-[build]
-target = "crates/browser/index.html"
-dist = "crates/browser/dist"
-
-[serve]
-addresses = ["127.0.0.1"]
-port = 8080

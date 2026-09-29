@@ -25,3 +25,5 @@
 ## Progress
 
 - Implementation plan recorded.
+- Step 1 complete: replaced the old workspace with the `imbl` simulation crate and removed obsolete implementation, browser/server files, documentation, and editor tooling.
+- Step 1 validation: snapshot isolation test, formatting, Clippy with warnings denied, and diff checks passed. Independent review found no high, medium, or low issues.
