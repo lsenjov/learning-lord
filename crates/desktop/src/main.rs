@@ -1,3 +1,4 @@
+mod debug_export;
 mod map_view;
 mod simulation;
 
@@ -45,6 +46,7 @@ enum Control {
     ToggleRunning,
     Step,
     Restart,
+    Export,
     Speed(u32),
 }
 
@@ -57,6 +59,7 @@ enum Readout {
     Citizen,
     Error,
     RunButton,
+    ExportStatus,
 }
 
 fn main() -> Result<(), String> {
@@ -78,6 +81,7 @@ fn main() -> Result<(), String> {
         .insert_resource(DisplaySnapshot(worker.snapshot()))
         .insert_resource(worker)
         .init_resource::<Controls>()
+        .init_resource::<debug_export::DebugExport>()
         .init_resource::<InputFocus>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -155,7 +159,11 @@ fn setup(mut commands: Commands) {
                 row.spawn(button(Control::Restart)).with_children(|button| {
                     button.spawn(text("Restart universe", 20.0, TEXT));
                 });
+                row.spawn(button(Control::Export)).with_children(|button| {
+                    button.spawn(text("Export universe", 20.0, TEXT));
+                });
             });
+            root.spawn((text("", 14.0, MUTED), Readout::ExportStatus));
             root.spawn(text("Simulation speed", 16.0, MUTED));
             root.spawn(Node {
                 column_gap: px(10),
@@ -233,6 +241,7 @@ fn apply_control(control: Control, controls: &mut Controls, worker: &SimulationW
         return;
     }
     let command = match control {
+        Control::Export => return,
         Control::Restart => {
             controls.running = false;
             controls.speed = 1;
@@ -264,6 +273,8 @@ fn handle_controls(
     mut focus: ResMut<InputFocus>,
     mut controls: ResMut<Controls>,
     worker: Res<SimulationWorker>,
+    snapshot: Res<DisplaySnapshot>,
+    mut exporter: ResMut<debug_export::DebugExport>,
 ) {
     if keyboard.just_pressed(KeyCode::Space) {
         apply_control(Control::ToggleRunning, &mut controls, &worker);
@@ -274,7 +285,11 @@ fn handle_controls(
     for (entity, interaction, control) in &buttons {
         if *interaction == Interaction::Pressed {
             focus.set(entity, FocusCause::Pressed);
-            apply_control(*control, &mut controls, &worker);
+            if matches!(control, Control::Export) {
+                exporter.export(&snapshot.0.universe, std::time::SystemTime::now());
+            } else {
+                apply_control(*control, &mut controls, &worker);
+            }
         }
     }
 }
@@ -470,6 +485,7 @@ fn decision_readout(universe: &Universe) -> String {
 
 fn refresh_display(
     controls: Res<Controls>,
+    exporter: Res<debug_export::DebugExport>,
     snapshot: Res<DisplaySnapshot>,
     mut readouts: Query<(&Readout, &mut Text)>,
     mut buttons: Query<(&Control, &Interaction, &mut BackgroundColor)>,
@@ -495,6 +511,7 @@ fn refresh_display(
             ),
             Readout::Citizen => citizen_readout(&snapshot.0.universe),
             Readout::Decision => decision_readout(&snapshot.0.universe),
+            Readout::ExportStatus => exporter.status.clone(),
             Readout::Error => controls.error.clone().unwrap_or_default(),
             Readout::RunButton => if controls.running { "Pause" } else { "Run" }.into(),
         };
@@ -503,9 +520,10 @@ fn refresh_display(
         }
     }
     for (control, interaction, mut color) in &mut buttons {
-        let disabled = controls.restart_pending
-            || controls.error.is_some() && !matches!(control, Control::Restart)
-            || matches!(control, Control::Step) && controls.running;
+        let disabled = !matches!(control, Control::Export)
+            && (controls.restart_pending
+                || controls.error.is_some() && !matches!(control, Control::Restart)
+                || matches!(control, Control::Step) && controls.running);
         let selected = matches!(control, Control::Speed(speed) if *speed == controls.speed);
         color.0 = if disabled {
             Color::srgb(0.09, 0.10, 0.11)
@@ -619,6 +637,7 @@ mod tests {
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
             .init_resource::<Controls>()
+            .init_resource::<debug_export::DebugExport>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
             .add_systems(Startup, setup)
@@ -743,6 +762,50 @@ mod tests {
             .unwrap()
             .1;
         assert!(market_text.0.contains("coins/kg"));
+
+        let directory = std::env::temp_dir().join(format!(
+            "learning-lord-export-ui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.world_mut()
+            .resource_mut::<debug_export::DebugExport>()
+            .directory = directory.clone();
+        app.world_mut().resource_mut::<Controls>().error = Some("Simulation error".into());
+        let expected = app.world().resource::<DisplaySnapshot>().0.universe.clone();
+        let export = buttons
+            .iter()
+            .find(|(_, control)| matches!(control, Control::Export))
+            .unwrap()
+            .0;
+        app.world_mut()
+            .entity_mut(export)
+            .insert(Interaction::Pressed);
+        app.update();
+        let files: Vec<_> = std::fs::read_dir(&directory).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let saved = std::fs::read_to_string(files[0].as_ref().unwrap().path()).unwrap();
+        assert!(saved.contains(&format!("{expected:#?}")));
+        assert_eq!(
+            app.world().resource::<DisplaySnapshot>().0.universe,
+            expected
+        );
+        assert_eq!(
+            app.world().resource::<Controls>().error.as_deref(),
+            Some("Simulation error")
+        );
+        let status = app
+            .world_mut()
+            .query::<(&Readout, &Text)>()
+            .iter(app.world())
+            .find(|(readout, _)| matches!(readout, Readout::ExportStatus))
+            .unwrap()
+            .1;
+        assert!(status.0.starts_with("Exported "));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
