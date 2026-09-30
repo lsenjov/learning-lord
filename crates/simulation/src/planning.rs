@@ -340,10 +340,7 @@ mod tests {
                 }
             }
             let hunger = &decision.candidates[0];
-            assert_eq!(
-                hunger.forecast.is_some(),
-                prices.coins_per_kg(crate::marketplace::Good::Pebbles) == 4.0
-            );
+            assert!(hunger.forecast.is_some());
             assert_eq!(citizen, snapshot);
         }
     }

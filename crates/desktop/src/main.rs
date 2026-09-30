@@ -527,7 +527,7 @@ mod tests {
     use learning_lord_simulation::Citizen;
 
     #[test]
-    fn decision_panel_distinguishes_missing_candidates_and_uses_saved_prices() {
+    fn decision_panel_shows_reachable_hunger_and_uses_saved_prices() {
         use learning_lord_simulation::marketplace::Prices;
         let prices = Prices::new(2.0, 1.0).unwrap();
         let (universe, id) =
@@ -537,7 +537,8 @@ mod tests {
         assert!(decision_readout(&universe).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
         let text = decision_readout(&planned);
-        assert!(text.contains("Hunger\nUnavailable:"));
+        assert!(text.contains("Hunger"));
+        assert!(!text.contains("Unavailable:"));
         assert!(text.contains("Sleep"));
         assert!(text.contains("Wealth"));
         assert_eq!(text.matches("[chosen first]").count(), 1);

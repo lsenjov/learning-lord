@@ -340,9 +340,16 @@ fn best_variant_from(
         .into_iter()
         .filter(|action| action.effects().contains(&goal))
     {
-        for ready in prepare(&initial, action, MEAL_NOURISHMENT, 0, prior_actions)? {
-            if let Some(candidate) = ready.perform(action, prior_actions)? {
-                consider(candidate)?;
+        let targets: &[f64] = if action == CitizenAction::Eat {
+            &[30.0, MEAL_NOURISHMENT]
+        } else {
+            &[MEAL_NOURISHMENT]
+        };
+        for &target in targets {
+            for ready in prepare(&initial, action, target, 0, prior_actions)? {
+                if let Some(candidate) = ready.perform(action, prior_actions)? {
+                    consider(candidate)?;
+                }
             }
         }
         // Existing small meals remain useful when acquiring a full meal would delay relief.
@@ -370,10 +377,14 @@ mod tests {
     }
 
     fn full_meals(citizen: &Citizen) -> Vec<Prediction> {
+        meals(citizen, MEAL_NOURISHMENT)
+    }
+
+    fn meals(citizen: &Citizen, nutrition: f64) -> Vec<Prediction> {
         prepare(
             &Prediction::new(citizen, Cooldowns::default()),
             CitizenAction::Eat,
-            MEAL_NOURISHMENT,
+            nutrition,
             0,
             0,
         )
@@ -381,6 +392,86 @@ mod tests {
         .into_iter()
         .filter_map(|ready| ready.perform(CitizenAction::Eat, 0).unwrap())
         .collect()
+    }
+
+    #[test]
+    fn smaller_meal_is_reachable_from_empty_and_full_meal_after_gathering() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 300.0, y: 400.0 },
+            Position { x: -400.0, y: 0.0 },
+            Position { x: 0.0, y: 600.0 },
+        )
+        .unwrap();
+        let source = hungry(0.0).with_map(map).unwrap();
+        assert!(full_meals(&source).is_empty());
+        let mut expected = vec![CitizenAction::Travel(Location::Forest)];
+        expected.extend([CitizenAction::Forage; 6]);
+        expected.push(CitizenAction::Eat);
+        let variants = meals(&source, 30.0);
+        let foraged = variants.iter().find(|v| v.actions == expected).unwrap();
+        assert_eq!(
+            foraged.elapsed_ms,
+            5 * 60_000 + 6 * ACTION_DURATION_MS + 60_000
+        );
+        let chosen = best_variant(&source, Effect::ReduceHunger, Cooldowns::default(), 0)
+            .unwrap()
+            .unwrap();
+        assert!(variants.iter().any(|v| v.actions == chosen.actions));
+        assert!(
+            super::super::plan(&source)
+                .unwrap()
+                .decision()
+                .unwrap()
+                .candidates
+                .iter()
+                .find(|candidate| candidate.goal == Effect::ReduceHunger)
+                .unwrap()
+                .forecast
+                .is_some()
+        );
+
+        let mut prefix = Prediction::new(&source, Cooldowns::default())
+            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .unwrap()
+            .unwrap();
+        for _ in 0..4 {
+            prefix = prefix.perform(CitizenAction::Forage, 0).unwrap().unwrap();
+        }
+        assert!(prefix.elapsed_ms >= super::super::COMMITMENT_MS);
+        assert_eq!(prefix.citizen.berries_grams(), 40.0);
+        let mut expected_full = vec![CitizenAction::Forage; 6];
+        expected_full.push(CitizenAction::Eat);
+        assert!(
+            full_meals(&prefix.citizen)
+                .iter()
+                .any(|v| v.actions == expected_full)
+        );
+    }
+
+    #[test]
+    fn smaller_target_allows_partial_purchase_without_capping_eating_or_buying() {
+        let funded = hungry(0.0).with_coins(0.06).unwrap();
+        let variants = meals(&funded, 30.0);
+        let bought = variants
+            .iter()
+            .find(|v| v.actions == [CitizenAction::BuyBerries, CitizenAction::Eat])
+            .unwrap();
+        assert_eq!(bought.elapsed_ms, TRADE_DURATION_MS + 60_000);
+        assert_eq!(bought.citizen.berries_grams(), 0.0);
+        let rich = hungry(0.0).with_coins(1.0).unwrap();
+        let variants = meals(&rich, 30.0);
+        let bought = variants
+            .iter()
+            .find(|v| v.actions == [CitizenAction::BuyBerries, CitizenAction::Eat])
+            .unwrap();
+        assert_eq!(bought.elapsed_ms, TRADE_DURATION_MS + 100_000);
+        let existing = meals(&hungry(80.0), 30.0);
+        assert!(
+            existing
+                .iter()
+                .any(|v| v.actions == [CitizenAction::Eat] && v.elapsed_ms == 80_000)
+        );
     }
 
     #[test]
@@ -418,7 +509,8 @@ mod tests {
     #[test]
     fn local_variant_winner_is_selected_before_goal_sequencing() {
         let source = hungry(0.0).with_prices(crate::marketplace::Prices::new(1.0, 4.0).unwrap());
-        let variants = full_meals(&source);
+        let mut variants = meals(&source, 30.0);
+        variants.extend(full_meals(&source));
         let best_score = variants
             .iter()
             .map(|v| v.average().unwrap())
@@ -456,13 +548,12 @@ mod tests {
         assert_eq!(chosen.citizen.pebbles_grams(), 0.0);
         assert!(chosen.citizen.berries_grams() < 1e-10);
         let short = hungry(0.0).with_pebbles(49.0).unwrap();
-        let chosen = best_variant(&short, Effect::ReduceHunger, Cooldowns::default(), 0)
-            .unwrap()
-            .unwrap();
-        assert!(
-            chosen.actions.contains(&CitizenAction::FindRocks)
-                || chosen.actions.contains(&CitizenAction::Forage)
-        );
+        let full = full_meals(&short);
+        assert!(!full.is_empty());
+        assert!(full.iter().all(
+            |variant| variant.actions.contains(&CitizenAction::FindRocks)
+                || variant.actions.contains(&CitizenAction::Forage)
+        ));
     }
 
     #[test]
