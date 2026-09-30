@@ -467,6 +467,7 @@ mod tests {
         let mut best = super::super::Plan {
             actions: Vec::new(),
             average_wellbeing: f64::NEG_INFINITY,
+            decision: None,
         };
         super::super::search(prefix.clone(), super::super::HORIZON_MS, &mut best).unwrap();
         let mut expected = prefix.actions;

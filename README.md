@@ -121,3 +121,10 @@ cargo test -p learning-lord-simulation --locked
 - The universe owns the market seed and prices, synchronizing the price context on citizen snapshots. Standalone citizens use `Prices::default()` (1 and 2 coins/kg) unless given `with_prices(...)`; inserting one into a universe uses that universe’s prices. `Universe::with_prices(...)` allows explicit setup prices until the next scheduled update.
 - Split universe advancement at each 04:00 boundary. Active trades retain their quote; actions starting exactly at the boundary use the new prices. Revalue inventories immediately, but keep existing plans until normal replanning. Predictions assume current prices remain stable throughout the forecast.
 - Market draws are addressed by seed and update period, preserving independent branches and tick partitioning. Empty universes can jump directly to the final applicable price update.
+
+## Last planning decision
+
+- The desktop shows the best starting Hunger, Sleep and Wealth sequences from the last replan, their duration and average completion wellbeing. Repeated actions are grouped for readability.
+- Goal avg covers only the displayed goal sequence. Plan avg covers the best complete plan starting with that sequence; this determines the chosen first goal. An available but unchosen goal is distinct from an unavailable goal.
+- Unavailable means no executable sequence was found within the four-hour prerequisite limit and action rules; the report does not attribute failure to a particular resource or cooldown.
+- `Plan::decision()` exposes the saved candidates, selected starting goal and prices used. The report is captured during the existing search, shared across snapshot clones, and replaced on replanning. Price changes do not rewrite past decisions. No additional planning is performed for the display.

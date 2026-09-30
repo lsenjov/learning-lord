@@ -51,6 +51,7 @@ enum Control {
 enum Readout {
     Clock,
     Market,
+    Decision,
     Status,
     Citizen,
     Error,
@@ -120,14 +121,14 @@ fn setup(mut commands: Commands) {
         .spawn(Node {
             width: percent(100),
             height: percent(100),
-            padding: UiRect::all(px(28)),
+            padding: UiRect::all(px(20)),
             flex_direction: FlexDirection::Column,
-            row_gap: px(12),
+            row_gap: px(8),
             ..default()
         })
         .with_children(|root| {
             root.spawn(text("LEARNING LORD", 18.0, MUTED));
-            root.spawn((text("Day 0 | 00:00:00", 44.0, TEXT), Readout::Clock));
+            root.spawn((text("Day 0 | 00:00:00", 32.0, TEXT), Readout::Clock));
             root.spawn((text("Paused | 1x", 20.0, MUTED), Readout::Status));
             root.spawn((text("", 18.0, TEXT), Readout::Market));
             root.spawn(Node {
@@ -168,17 +169,28 @@ fn setup(mut commands: Commands) {
                 16.0,
                 MUTED,
             ));
-            root.spawn((
-                Node {
-                    padding: UiRect::all(px(24)),
-                    margin: UiRect::top(px(8)),
-                    border_radius: BorderRadius::all(px(12)),
-                    ..default()
-                },
-                BackgroundColor(PANEL),
-            ))
-            .with_children(|panel| {
-                panel.spawn((text("", 22.0, TEXT), Readout::Citizen));
+            root.spawn(Node {
+                width: percent(100),
+                column_gap: px(12),
+                ..default()
+            })
+            .with_children(|row| {
+                for (readout, size) in [(Readout::Citizen, 18.0), (Readout::Decision, 14.0)] {
+                    row.spawn((
+                        Node {
+                            flex_basis: percent(50),
+                            flex_grow: 1.0,
+                            min_width: px(0),
+                            padding: UiRect::all(px(16)),
+                            border_radius: BorderRadius::all(px(12)),
+                            ..default()
+                        },
+                        BackgroundColor(PANEL),
+                    ))
+                    .with_children(|panel| {
+                        panel.spawn((text("", size, TEXT), readout));
+                    });
+                }
             });
             root.spawn(text(
                 "Space: run / pause     Right arrow: advance 30 minutes while paused",
@@ -308,15 +320,8 @@ fn citizen_readout(universe: &Universe) -> String {
                 .actions()
                 .iter()
                 .skip(active.action_index() + 1)
-                .map(|action| match action {
-                    CitizenAction::Eat => "Eat",
-                    CitizenAction::Wait => "Wait",
-                    CitizenAction::Sleep => "Sleep",
-                    CitizenAction::Forage => "Forage",
-                    CitizenAction::FindRocks => "Find rocks",
-                    CitizenAction::BuyBerries => "Buy berries",
-                    CitizenAction::SellPebbles => "Sell pebbles",
-                })
+                .copied()
+                .map(action_label)
                 .collect::<Vec<_>>()
                 .join(" > ");
             let upcoming = if upcoming.is_empty() {
@@ -354,6 +359,95 @@ fn citizen_readout(universe: &Universe) -> String {
     )
 }
 
+fn action_label(action: CitizenAction) -> &'static str {
+    match action {
+        CitizenAction::Eat => "Eat",
+        CitizenAction::Wait => "Wait",
+        CitizenAction::Sleep => "Sleep",
+        CitizenAction::Forage => "Forage",
+        CitizenAction::FindRocks => "Find rocks",
+        CitizenAction::BuyBerries => "Buy berries",
+        CitizenAction::SellPebbles => "Sell pebbles",
+    }
+}
+
+fn sequence_readout(actions: &[CitizenAction]) -> String {
+    let mut labels = Vec::new();
+    let mut index = 0;
+    while index < actions.len() {
+        let action = actions[index];
+        let count = actions[index..]
+            .iter()
+            .take_while(|&&next| next == action)
+            .count();
+        let label = action_label(action);
+        labels.push(if count == 1 {
+            label.to_string()
+        } else {
+            format!("{label} x{count}")
+        });
+        index += count;
+    }
+    labels.join(" > ")
+}
+
+fn decision_readout(universe: &Universe) -> String {
+    use learning_lord_simulation::planning::goals::Effect;
+    let Some(agent) = universe.agents().values().next() else {
+        return "Last planning decision\nNo citizen selected".into();
+    };
+    let AgentKind::Citizen(citizen) = &agent.kind;
+    let Some(decision) = citizen
+        .active_plan()
+        .and_then(|active| active.plan().decision())
+    else {
+        return "Last planning decision\nNo planning decision yet".into();
+    };
+    let mut lines = vec![
+        "Last planning decision".to_string(),
+        format!(
+            "Prices used: berries {:.3}, pebbles {:.3} coins/kg",
+            decision.prices.coins_per_kg(Good::Berries),
+            decision.prices.coins_per_kg(Good::Pebbles)
+        ),
+    ];
+    for candidate in &decision.candidates {
+        let name = match candidate.goal {
+            Effect::ReduceHunger => "Hunger",
+            Effect::ReduceTiredness => "Sleep",
+            Effect::IncreaseWealth => "Wealth",
+            _ => unreachable!("decision candidates are goals"),
+        };
+        let selected = if candidate.goal == decision.selected_goal {
+            " [chosen first]"
+        } else {
+            ""
+        };
+        lines.push(format!("\n{name}{selected}"));
+        if let Some(forecast) = &candidate.forecast {
+            let seconds = forecast.duration_ms.div_ceil(1000);
+            lines.push(format!(
+                "{:02}:{:02}:{:02} | Goal avg {:.2} | Plan avg {:.2}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60,
+                forecast.average_wellbeing,
+                forecast.full_plan_wellbeing
+            ));
+            lines.push(sequence_readout(&forecast.actions));
+        } else {
+            lines.push(format!(
+                "Unavailable: {}",
+                candidate.unavailable_reason().unwrap()
+            ));
+        }
+    }
+    lines.push(
+        "\nChosen by full-plan average wellbeing.\nGoal avg scores only the sequence shown.".into(),
+    );
+    lines.join("\n")
+}
+
 fn refresh_display(
     controls: Res<Controls>,
     snapshot: Res<DisplaySnapshot>,
@@ -380,6 +474,7 @@ fn refresh_display(
                 controls.speed
             ),
             Readout::Citizen => citizen_readout(&snapshot.0.universe),
+            Readout::Decision => decision_readout(&snapshot.0.universe),
             Readout::Error => controls.error.clone().unwrap_or_default(),
             Readout::RunButton => if controls.running { "Pause" } else { "Run" }.into(),
         };
@@ -410,6 +505,42 @@ fn refresh_display(
 mod tests {
     use super::*;
     use learning_lord_simulation::Citizen;
+
+    #[test]
+    fn decision_panel_distinguishes_missing_candidates_and_uses_saved_prices() {
+        use learning_lord_simulation::marketplace::Prices;
+        let prices = Prices::new(2.0, 1.0).unwrap();
+        let (universe, id) = Universe::default()
+            .with_prices(prices)
+            .with_citizen("Ada", Citizen::new(0.0).unwrap());
+        assert!(decision_readout(&universe).contains("No planning decision yet"));
+        let planned = universe.start_planning(id).unwrap();
+        let text = decision_readout(&planned);
+        assert!(text.contains("Hunger\nUnavailable:"));
+        assert!(text.contains("Sleep"));
+        assert!(text.contains("Wealth"));
+        assert_eq!(text.matches("[chosen first]").count(), 1);
+        assert!(text.contains("Goal avg"));
+        assert!(text.contains("Plan avg"));
+        assert!(text.contains("berries 2.000, pebbles 1.000"));
+        assert_eq!(
+            decision_readout(
+                &planned
+                    .with_prices(Prices::new(1.0, 4.0).unwrap())
+                    .advance(1)
+                    .unwrap()
+            ),
+            text
+        );
+        assert_eq!(
+            sequence_readout(&[
+                CitizenAction::Forage,
+                CitizenAction::Forage,
+                CitizenAction::Eat
+            ]),
+            "Forage x2 > Eat"
+        );
+    }
 
     #[test]
     fn readout_shows_berries_upcoming_actions_and_commitment() {

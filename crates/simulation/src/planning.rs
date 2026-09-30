@@ -1,6 +1,7 @@
 use crate::{BERRY_NUTRITION_PER_GRAM, Citizen, CitizenAction, SimulationError};
 pub mod goals;
 use goals::{Cooldowns, Effect, Prediction};
+use std::sync::Arc;
 
 pub const HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
 pub const COMMITMENT_MS: u64 = 2 * 60 * 60 * 1000;
@@ -8,12 +9,46 @@ pub const REPLAN_MIN_NUTRITION: f64 = 20.0;
 pub const EAT_PLAN_COOLDOWN_MS: u64 = 4 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct GoalForecast {
+    pub actions: Vec<CitizenAction>,
+    pub duration_ms: u64,
+    pub average_wellbeing: f64,
+    pub full_plan_wellbeing: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GoalDecision {
+    pub goal: Effect,
+    pub forecast: Option<GoalForecast>,
+}
+
+impl GoalDecision {
+    pub fn unavailable_reason(&self) -> Option<&'static str> {
+        self.forecast.is_none().then_some(
+            "No executable sequence within the four-hour prerequisite limit and action rules.",
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanningDecision {
+    pub candidates: Vec<GoalDecision>,
+    pub selected_goal: Effect,
+    pub prices: crate::marketplace::Prices,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     actions: Vec<CitizenAction>,
     average_wellbeing: f64,
+    decision: Option<Arc<PlanningDecision>>,
 }
 
 impl Plan {
+    pub fn decision(&self) -> Option<&PlanningDecision> {
+        self.decision.as_deref()
+    }
+
     pub fn actions(&self) -> &[CitizenAction] {
         &self.actions
     }
@@ -116,16 +151,51 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
     if citizen.active_action().is_some() || citizen.active_plan().is_some() {
         return Err(SimulationError::CitizenBusy);
     }
-    let mut best = Plan {
+    let mut best = empty_plan();
+    let mut candidates = Vec::new();
+    let mut selected_goal = Effect::ReduceTiredness;
+    for goal in [
+        Effect::ReduceHunger,
+        Effect::ReduceTiredness,
+        Effect::IncreaseWealth,
+    ] {
+        let forecast =
+            if let Some(variant) = goals::best_variant(citizen, goal, Cooldowns::default(), 0)? {
+                let actions = variant.actions.clone();
+                let duration_ms = variant.elapsed_ms;
+                let average_wellbeing = variant.average()?;
+                let mut continuation = empty_plan();
+                search(variant, HORIZON_MS, &mut continuation)?;
+                let full_plan_wellbeing = continuation.average_wellbeing;
+                if full_plan_wellbeing > best.average_wellbeing {
+                    best = continuation;
+                    selected_goal = goal;
+                }
+                Some(GoalForecast {
+                    actions,
+                    duration_ms,
+                    average_wellbeing,
+                    full_plan_wellbeing,
+                })
+            } else {
+                None
+            };
+        candidates.push(GoalDecision { goal, forecast });
+    }
+    best.decision = Some(Arc::new(PlanningDecision {
+        candidates,
+        selected_goal,
+        prices: citizen.prices(),
+    }));
+    Ok(best)
+}
+
+fn empty_plan() -> Plan {
+    Plan {
         actions: Vec::new(),
         average_wellbeing: f64::NEG_INFINITY,
-    };
-    search(
-        Prediction::new(citizen, Cooldowns::default()),
-        HORIZON_MS,
-        &mut best,
-    )?;
-    Ok(best)
+        decision: None,
+    }
 }
 
 fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), SimulationError> {
@@ -135,6 +205,7 @@ fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), Sim
             *best = Plan {
                 actions: state.actions,
                 average_wellbeing: score,
+                decision: None,
             };
         }
         return Ok(());
@@ -185,11 +256,113 @@ mod tests {
             plan: Plan {
                 actions,
                 average_wellbeing: -1.0,
+                decision: None,
             },
             action_index: 0,
             elapsed_ms: 0,
         });
         citizen
+    }
+
+    #[test]
+    fn decision_records_existing_candidates_and_preserves_search_result() {
+        use crate::marketplace::Prices;
+        for prices in [
+            Prices::new(2.0, 1.0).unwrap(),
+            Prices::new(1.0, 4.0).unwrap(),
+        ] {
+            let citizen = Citizen::with_needs(50.0, -100.0)
+                .unwrap()
+                .with_prices(prices);
+            let snapshot = citizen.clone();
+            let chosen = plan(&citizen).unwrap();
+            let mut reference = empty_plan();
+            search(
+                Prediction::new(&citizen, Cooldowns::default()),
+                HORIZON_MS,
+                &mut reference,
+            )
+            .unwrap();
+            assert_eq!(chosen.actions(), reference.actions());
+            assert_eq!(chosen.average_wellbeing(), reference.average_wellbeing());
+            let decision = chosen.decision().unwrap();
+            assert_eq!(decision.candidates.len(), 3);
+            assert_eq!(decision.prices, prices);
+            for candidate in &decision.candidates {
+                let expected =
+                    goals::best_variant(&citizen, candidate.goal, Cooldowns::default(), 0).unwrap();
+                match (&candidate.forecast, expected) {
+                    (Some(forecast), Some(expected)) => {
+                        assert_eq!(forecast.actions, expected.actions);
+                        assert_eq!(forecast.duration_ms, expected.elapsed_ms);
+                        assert_eq!(forecast.average_wellbeing, expected.average().unwrap());
+                        assert!(forecast.full_plan_wellbeing <= chosen.average_wellbeing());
+                        if candidate.goal == decision.selected_goal {
+                            assert!(chosen.actions().starts_with(&forecast.actions));
+                            assert_eq!(forecast.full_plan_wellbeing, chosen.average_wellbeing());
+                        }
+                    }
+                    (None, None) => assert!(
+                        candidate
+                            .unavailable_reason()
+                            .unwrap()
+                            .contains("four-hour")
+                    ),
+                    _ => panic!("report differs from goal search"),
+                }
+            }
+            let hunger = &decision.candidates[0];
+            assert_eq!(
+                hunger.forecast.is_some(),
+                prices.coins_per_kg(crate::marketplace::Good::Pebbles) == 4.0
+            );
+            assert_eq!(citizen, snapshot);
+        }
+    }
+
+    #[test]
+    fn report_remains_a_snapshot_until_replanning() {
+        use crate::marketplace::Prices;
+        let source = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .start_planning()
+            .unwrap();
+        let report = source
+            .active_plan()
+            .unwrap()
+            .plan()
+            .decision
+            .clone()
+            .unwrap();
+        let repriced = source.with_prices(Prices::new(2.0, 1.0).unwrap());
+        let partial = repriced.advance(1).unwrap();
+        assert!(Arc::ptr_eq(
+            &report,
+            partial
+                .active_plan()
+                .unwrap()
+                .plan()
+                .decision
+                .as_ref()
+                .unwrap()
+        ));
+        let mut next = partial;
+        for _ in 0..20 {
+            let duration = next.active_action().unwrap().remaining_ms();
+            next = next.advance(duration).unwrap();
+            let current = next
+                .active_plan()
+                .unwrap()
+                .plan()
+                .decision
+                .as_ref()
+                .unwrap();
+            if !Arc::ptr_eq(&report, current) {
+                assert_eq!(current.prices, Prices::new(2.0, 1.0).unwrap());
+                return;
+            }
+        }
+        panic!("expected a replan");
     }
 
     #[test]
@@ -326,6 +499,7 @@ mod tests {
             plan: Plan {
                 actions: vec![CitizenAction::Eat, CitizenAction::Wait],
                 average_wellbeing: 0.0,
+                decision: None,
             },
             action_index: 0,
             elapsed_ms: 0,
