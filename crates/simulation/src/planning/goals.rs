@@ -123,6 +123,7 @@ pub(super) struct Prediction {
     score: WeightedWellbeing,
     goal_score: WeightedWellbeing,
     pub cooldowns: Cooldowns,
+    last_gathering_order: Option<CitizenAction>,
 }
 
 impl Prediction {
@@ -134,6 +135,7 @@ impl Prediction {
             score: WeightedWellbeing::default(),
             goal_score: WeightedWellbeing::default(),
             cooldowns,
+            last_gathering_order: None,
         }
     }
 
@@ -159,6 +161,12 @@ impl Prediction {
         next.citizen = citizen;
         next.score.add(before, after, duration)?;
         next.goal_score.add(before, after, duration)?;
+        if !matches!(
+            action,
+            CitizenAction::Forage | CitizenAction::FindRocks | CitizenAction::Travel(_)
+        ) {
+            next.last_gathering_order = None;
+        }
         next.actions.push(action);
         next.elapsed_ms += duration;
         next.cooldowns = self.cooldowns.after(action, duration);
@@ -230,20 +238,60 @@ fn satisfy(
         .into_iter()
         .filter(|action| action.effects().contains(&requirement.resource))
     {
-        let prepared = prepare(
+        for next in order_variants(
             state,
             action,
             requirement.amount,
-            reserved_ms + action.predicted_duration(),
+            reserved_ms,
             prior_actions,
-        )?;
-        for ready in prepared {
-            if let Some(next) = ready.perform(action, prior_actions)?
-                && quantity(&next.citizen, requirement.resource)
-                    > quantity(&state.citizen, requirement.resource)
+        )? {
+            if quantity(&next.citizen, requirement.resource)
+                > quantity(&state.citizen, requirement.resource)
+                && next.elapsed_ms + reserved_ms <= GOAL_HORIZON_MS
             {
                 variants.extend(satisfy(&next, requirement, reserved_ms, prior_actions)?);
             }
+        }
+    }
+    Ok(variants)
+}
+
+fn gathering_segments(horizon_ms: u64, duration_ms: u64) -> u64 {
+    horizon_ms / duration_ms
+}
+
+fn order_variants(
+    state: &Prediction,
+    action: CitizenAction,
+    amount: f64,
+    reserved_ms: u64,
+    prior_actions: usize,
+) -> Result<Vec<Prediction>, SimulationError> {
+    let gathering = matches!(action, CitizenAction::Forage | CitizenAction::FindRocks);
+    if gathering && state.last_gathering_order == Some(action) {
+        return Ok(Vec::new());
+    }
+    let mut variants = Vec::new();
+    for ready in prepare(state, action, amount, reserved_ms, prior_actions)? {
+        // Nested resource acquisition can change the preceding order.
+        if gathering && ready.last_gathering_order == Some(action) {
+            continue;
+        }
+        let limit = if gathering {
+            gathering_segments(super::HORIZON_MS, action.predicted_duration())
+        } else {
+            1
+        };
+        let mut next = ready;
+        for _ in 0..limit {
+            let Some(mut performed) = next.perform(action, prior_actions)? else {
+                break;
+            };
+            if gathering {
+                performed.last_gathering_order = Some(action);
+            }
+            variants.push(performed.clone());
+            next = performed;
         }
     }
     Ok(variants)
@@ -294,6 +342,7 @@ pub(super) fn best_variant_after(
 ) -> Result<Option<Prediction>, SimulationError> {
     let mut initial = Prediction::new(&prefix.citizen, prefix.cooldowns);
     initial.score = prefix.score;
+    initial.last_gathering_order = prefix.last_gathering_order;
     best_variant_from(initial, goal, prefix.actions.len())
 }
 
@@ -326,10 +375,8 @@ fn best_variant_from(
             &[MEAL_NOURISHMENT]
         };
         for &target in targets {
-            for ready in prepare(&initial, action, target, 0, prior_actions)? {
-                if let Some(candidate) = ready.perform(action, prior_actions)? {
-                    consider(candidate)?;
-                }
+            for candidate in order_variants(&initial, action, target, 0, prior_actions)? {
+                consider(candidate)?;
             }
         }
         // Existing small meals remain useful when acquiring a full meal would delay relief.
@@ -372,6 +419,93 @@ mod tests {
         .into_iter()
         .filter_map(|ready| ready.perform(CitizenAction::Eat, 0).unwrap())
         .collect()
+    }
+
+    #[test]
+    fn gathering_order_bounds_follow_the_primitive_duration() {
+        assert_eq!(gathering_segments(super::super::HORIZON_MS, 30 * 60_000), 8);
+        assert_eq!(gathering_segments(super::super::HORIZON_MS, 60 * 60_000), 4);
+    }
+
+    #[test]
+    fn gathering_order_metadata_survives_goals_and_nested_supply() {
+        let initial = Prediction::new(&hungry(0.0), Cooldowns::default());
+        let orders = order_variants(&initial, CitizenAction::Forage, 0.0, 0, 0).unwrap();
+        assert_eq!(
+            orders.len(),
+            gathering_segments(super::super::HORIZON_MS, ACTION_DURATION_MS) as usize
+        );
+        let gathered = &orders[1];
+        assert_eq!(gathered.actions, [CitizenAction::Forage; 2]);
+        assert!(
+            order_variants(gathered, CitizenAction::Forage, 0.0, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let wealth = best_variant_after(gathered, Effect::IncreaseWealth)
+            .unwrap()
+            .unwrap();
+        assert!(
+            wealth
+                .actions
+                .iter()
+                .all(|action| *action == CitizenAction::FindRocks)
+        );
+        let hunger = best_variant_after(gathered, Effect::ReduceHunger)
+            .unwrap()
+            .unwrap();
+        assert!(!hunger.actions.contains(&CitizenAction::Forage));
+        let eaten = orders[5].perform(CitizenAction::Eat, 0).unwrap().unwrap();
+        assert!(
+            !order_variants(&eaten, CitizenAction::Forage, 0.0, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let reset = Prediction::new(&gathered.citizen, Cooldowns::default());
+        assert!(
+            !order_variants(&reset, CitizenAction::Forage, 0.0, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn gathering_orders_charge_travel_once_and_preserve_segment_predictions() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 100.0, y: 0.0 },
+            Position::default(),
+            Position::default(),
+        )
+        .unwrap();
+        let source = hungry(0.0).with_map(map).unwrap();
+        let initial = Prediction::new(
+            &source,
+            Cooldowns {
+                eat: 100_000_000,
+                buy: 0,
+                sell: 0,
+            },
+        );
+        let orders = order_variants(&initial, CitizenAction::Forage, 0.0, 0, 0).unwrap();
+        let order = &orders[2];
+        assert_eq!(
+            order.actions,
+            [
+                CitizenAction::Travel(Location::Forest),
+                CitizenAction::Forage,
+                CitizenAction::Forage,
+                CitizenAction::Forage
+            ]
+        );
+        let mut replay = initial;
+        for action in &order.actions {
+            replay = replay.perform(*action, 0).unwrap().unwrap();
+        }
+        assert_eq!(order.citizen, replay.citizen);
+        assert_eq!(order.elapsed_ms, replay.elapsed_ms);
+        assert_eq!(order.average().unwrap(), replay.average().unwrap());
+        assert_eq!(order.cooldowns.eat, replay.cooldowns.eat);
     }
 
     #[test]
@@ -475,7 +609,7 @@ mod tests {
                     && v.actions.contains(&CitizenAction::BuyBerries))
         );
         for variant in variants {
-            assert_eq!(variant.citizen.berries_grams(), 0.0);
+            assert!(variant.citizen.berries_grams() >= 0.0);
             assert_eq!(variant.actions.last(), Some(&CitizenAction::Eat));
             assert!(variant.citizen.hunger() < source.hunger());
         }
@@ -831,13 +965,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            chosen.actions,
-            [
-                CitizenAction::Travel(Location::River),
-                CitizenAction::FindRocks
-            ]
+            chosen.actions.first(),
+            Some(&CitizenAction::Travel(Location::River))
         );
-        assert!((chosen.goal_average().unwrap() - rocks_average).abs() < 1e-12);
+        assert!(
+            chosen.actions[1..]
+                .iter()
+                .all(|action| *action == CitizenAction::FindRocks)
+        );
+        assert!(chosen.actions.len() > 2);
+        assert!(chosen.goal_average().unwrap() > rocks_average);
         let fresh = best_variant(&prefix.citizen, Effect::IncreaseWealth, prefix.cooldowns, 0)
             .unwrap()
             .unwrap();
@@ -952,12 +1089,13 @@ mod tests {
             let chosen = best_variant(&source, Effect::IncreaseWealth, Cooldowns::default(), 0)
                 .unwrap()
                 .unwrap();
-            assert_eq!(chosen.actions, [expected]);
+            let segments = gathering_segments(super::super::HORIZON_MS, ACTION_DURATION_MS);
+            assert_eq!(chosen.actions, vec![expected; segments as usize]);
             assert_eq!(chosen.citizen.prices(), source.prices());
             if expected == CitizenAction::FindRocks {
-                assert_eq!(chosen.citizen.pebbles_grams(), 5.0);
+                assert_eq!(chosen.citizen.pebbles_grams(), 5.0 * segments as f64);
             } else {
-                assert_eq!(chosen.citizen.berries_grams(), 10.0);
+                assert_eq!(chosen.citizen.berries_grams(), 10.0 * segments as f64);
             }
         }
     }

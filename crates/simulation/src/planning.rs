@@ -260,6 +260,52 @@ mod tests {
     }
 
     #[test]
+    fn gathering_order_execution_delivers_each_primitive_random_yield() {
+        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
+        let mut planned = executing(&citizen, vec![CitizenAction::Forage; 4]);
+        let mut replay = citizen.clone();
+        for _ in 0..3 {
+            replay = replay
+                .start_action(CitizenAction::Forage)
+                .unwrap()
+                .advance(crate::ACTION_DURATION_MS)
+                .unwrap();
+            planned = planned.advance(crate::ACTION_DURATION_MS).unwrap();
+            assert_eq!(planned.berries_grams(), replay.berries_grams());
+            assert_eq!(planned.forage_rng, replay.forage_rng);
+        }
+    }
+
+    #[test]
+    fn commitment_replans_between_segments_without_truncating_the_forecast() {
+        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
+        let chosen = plan(&citizen).unwrap();
+        let wealth = chosen
+            .decision()
+            .unwrap()
+            .candidates
+            .iter()
+            .find(|candidate| candidate.goal == Effect::IncreaseWealth)
+            .unwrap()
+            .forecast
+            .as_ref()
+            .unwrap();
+        assert!(wealth.duration_ms > COMMITMENT_MS);
+        let actions = wealth.actions.clone();
+        let source = executing(&citizen, actions.clone());
+        let before = source.advance(COMMITMENT_MS - 1).unwrap();
+        assert_eq!(before.active_plan().unwrap().plan().actions(), actions);
+        assert_eq!(
+            before.active_plan().unwrap().elapsed_ms(),
+            COMMITMENT_MS - 1
+        );
+        let replanned = before.advance(1).unwrap();
+        assert_eq!(replanned.active_plan().unwrap().elapsed_ms(), 0);
+        assert!(replanned.active_plan().unwrap().plan().decision().is_some());
+        assert!(replanned.berries_grams() > citizen.berries_grams());
+    }
+
+    #[test]
     fn commitment_waits_for_travel_to_finish_before_replanning() {
         use crate::locations::{Location, Map, Position};
         let map = Map::new(
