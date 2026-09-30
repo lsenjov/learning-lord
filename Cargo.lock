@@ -2251,6 +2251,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2704,6 +2705,7 @@ name = "learning-lord-simulation"
 version = "0.1.0"
 dependencies = [
  "imbl",
+ "rand",
  "uuid",
 ]
 

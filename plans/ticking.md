@@ -14,6 +14,7 @@
 - Continuous simulation measurements, including hunger, tiredness, rates, and wellbeing, use `f64`.
 - Simulation time and elapsed durations use `u64` milliseconds.
 - Money uses signed `i64` values in a defined smallest currency unit.
+- Inventory goods are measured in grams as `f64`. Berries are the first good implemented.
 - Discrete counts and tile coordinates remain integers.
 
 ## Needs
@@ -21,9 +22,10 @@
 - Agents have needs.
 - Some needs increase over time, such as hunger and the need for rest.
 - Citizen hunger is a signed energy deficit: below zero is satiation, zero is the boundary, and above zero is a need for food.
-- Hunger increases with elapsed simulation time. The standard rate is 100 hunger per 24 game hours, balanced by two meals of 50 nourishment each. Starting hunger is explicit; custom constant hourly rates remain available.
+- Hunger increases with elapsed simulation time. The standard rate is 100 hunger per 24 game hours, balanced by 200 grams of berries (two full meals of 50 nutrition each). Starting hunger is explicit; custom constant hourly rates remain available.
 - Starting hunger must be finite. Hunger rates must be finite and nonnegative. Hunger is not clamped at zero or at the starvation threshold.
-- Eating takes 30 simulation minutes and gradually reduces hunger by 50 over the meal. Half a meal provides 25 nourishment alongside normal hunger growth. Food inventory and availability are not modeled yet.
+- Citizens start with no berries. Berries provide 0.5 nutrition per gram and take one second per gram to eat. Eat selects up to 50 nutrition from current inventory when starting, using smaller portions when needed and skipping empty meals. The portion determines duration, rounded up to the nearest millisecond, and is consumed gradually alongside its hunger reduction.
+- Forage takes 30 minutes and adds a uniform random 5–15 grams of berries on completion. Average yield is 10 grams: 20 forage actions (10 hours) yield the 200 grams needed per day on average.
 - Tiredness grows by 100 per 24 simulation hours, including during sleep. Below zero represents being rested; tiredness has a minimum of -100 and no upper cap.
 - Sleep takes eight simulation hours and gradually reduces tiredness by 100 over that duration, subject to the floor. Eight hours of sleep balances one day of tiredness growth when recovery is not lost at the floor. Hunger keeps growing during sleep.
 - Existing citizen constructors start tiredness at zero. `Citizen::with_needs(hunger, tiredness)` accepts finite starting needs with the standard hunger rate and clamps starting tiredness at -100.
@@ -70,16 +72,20 @@
 ## Actions and planning
 
 - Agents have actions, each with an estimated duration and a result.
-- Currently, citizens can Eat or Wait for 30 simulation minutes, or Sleep for eight hours. Only one action can be active at a time; both needs continue growing during all actions.
-- Starting an action returns a new snapshot without advancing time. Eat gradually grants 50 nourishment; Sleep gradually grants 100 tiredness recovery; Wait grants no recovery. Completion gives no extra reduction. Unplanned citizens remain idle after finishing their manually started action. Interruption is not implemented.
-- Planning explores action sequences until the completed action that reaches or crosses a four-hour horizon, using independent citizen snapshots. The horizon is a duration, not an action count; there are 256 eight-action eat/wait sequences and 255 sequences ending in sleep. Sleep finishes in predictions even across the horizon, so a prediction can reach 11.5 hours. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
+- Currently, citizens can Eat for a duration determined by available berries, Wait or Forage for 30 minutes, or Sleep for eight hours. Only one action can be active at a time; both needs continue growing during all actions.
+- Starting an action returns a new snapshot without advancing time. Eat gradually consumes its selected berry portion and restores hunger; Sleep gradually grants 100 tiredness recovery; Wait grants no recovery. Completion gives no extra need reduction; Forage grants its berry yield on completion. Unplanned citizens remain idle after finishing their manually started action. Interruption is not implemented.
+- Planning explores action sequences until the completed action that reaches or crosses a four-hour horizon, using independent citizen snapshots. The horizon is a duration, not an action count. Forage predictions add the 10-gram average; inventory determines predicted meal sizes and durations. Sleep finishes in predictions even across the horizon. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
 - A plan's score is the average personal wellbeing at all its action completions, including the action crossing the horizon. Plans have variable-length action sequences. Wellbeing between completions and duration weighting are not included.
-- The highest-scoring plan wins. Any equally good plan is acceptable on ties. The current search tries Wait, Eat, then Sleep and retains the first optimum.
+- Within each prediction, Eat becomes eligible again four simulation hours after its previous completion. Every new plan resets this restriction, regardless of actual recent eating. Current four-hour predictions therefore contain at most one Eat; longer predictions can contain more. The restriction lives in the search, not in persistent citizen state.
+- The highest-scoring permitted plan wins. Any equally good plan is acceptable on ties. Search tries Wait, Eat, Sleep, then Forage. Unused berry stock has no direct wellbeing value, so extra foraging can tie with waiting.
 - Planning is enabled explicitly on an idle citizen with `start_planning()`, also available through agents and universes. The search and batch executor live in the separate planning module and reuse citizen action and need calculations.
 - Execute the selected plan for two simulation hours without reconsidering between actions. Finish any action crossing that time boundary, then search again from the actual state and start the next batch.
+- Exception: before starting a non-first Eat, the **replan check** triggers if actual inventory provides less than 20 nutrition. Replan from actual state; the first action of the new plan is exempt. At least 20 nutrition allows the meal to proceed, eating up to 50 nutrition. A meal already underway is not interrupted. Prediction excludes empty meals and later meals that would already trigger this check.
+- Actual forage yields can change meal sizes and durations. Follow the remaining plan unless the replan check triggers, the time commitment is reached, or the action list is exhausted.
 - The citizen stores an optional `ActivePlan`, available through `active_plan()`, with the selected plan, current action index, and elapsed batch time including partial actions.
 - Continue immediately into the next committed action or batch, accounting for all elapsed time even when a tick crosses multiple boundaries.
 - Prediction does not advance other agents or the world clock. Actual universe advancement still advances every agent.
+- Each citizen snapshot owns its forage random generator. Cloning preserves the stream, so branches can advance independently and tick partitioning preserves yields. Prediction always uses average yield and leaves the random stream unchanged.
 - Numeric errors during search or execution return an error and preserve the original snapshot.
 - Future predictions can use assumptions, such as the price last paid to hire workers. Prices are expected to fluctuate slowly enough for this to be useful.
 - Future execution failures caused by world interactions can trigger replanning.
@@ -98,7 +104,7 @@
 - The desktop starts paused and maps one real second to 60,000 simulation milliseconds at 1x. Speed controls multiply this by 1, 2, 3, 5, 10, or 20.
 - A single simulation worker measures real elapsed monotonic time and starts at most 60 automatic updates per real second by default. The cap is configurable with `LEARNING_LORD_MAX_UPDATES_PER_SECOND`, including 30. Processing delays produce larger time jumps while preserving fractional milliseconds.
 - Paused time is excluded. An in-progress update finishes when pausing, and unapplied running time is retained until resume. Manual stepping while paused advances exactly 30 simulation minutes independent of speed.
-- The desktop displays elapsed days, hours, minutes, and seconds from the latest completed universe snapshot, plus hunger, tiredness, wellbeing, current action, upcoming actions, and time until replanning after an action completes.
+- The desktop displays elapsed days, hours, minutes, and seconds from the latest completed universe snapshot, plus berry grams, hunger, tiredness, wellbeing, current action, upcoming actions, and remaining commitment time. The latter is not an exact replanning forecast because meal durations vary and the replan check can trigger earlier.
 - Planned citizens start the next action at completion rather than losing time to tick boundaries.
 - Individual agents do not need activating in the middle of an action.
 

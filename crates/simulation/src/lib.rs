@@ -1,4 +1,5 @@
 use imbl::HashMap;
+use rand::{RngExt, rngs::SmallRng};
 use std::fmt;
 use uuid::Uuid;
 
@@ -10,6 +11,11 @@ pub const MEAL_NOURISHMENT: f64 = 50.0;
 pub const ACTION_DURATION_MS: u64 = 30 * 60 * 1000;
 pub const SLEEP_DURATION_MS: u64 = 8 * 60 * 60 * 1000;
 pub const SLEEP_RECOVERY: f64 = 100.0;
+pub const BERRY_NUTRITION_PER_GRAM: f64 = 0.5;
+pub const BERRY_EATING_MS_PER_GRAM: f64 = 1000.0;
+pub const FORAGE_MIN_GRAMS: f64 = 5.0;
+pub const FORAGE_MAX_GRAMS: f64 = 15.0;
+pub const FORAGE_AVERAGE_GRAMS: f64 = (FORAGE_MIN_GRAMS + FORAGE_MAX_GRAMS) / 2.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AgentId(pub Uuid);
@@ -68,21 +74,16 @@ pub enum CitizenAction {
     Eat,
     Wait,
     Sleep,
+    Forage,
 }
 
-impl CitizenAction {
-    pub fn duration_ms(self) -> u64 {
-        match self {
-            Self::Eat | Self::Wait => ACTION_DURATION_MS,
-            Self::Sleep => SLEEP_DURATION_MS,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ActiveAction {
     action: CitizenAction,
     remaining_ms: u64,
+    duration_ms: u64,
+    meal_grams: f64,
+    berries_after_meal: f64,
 }
 
 impl ActiveAction {
@@ -93,6 +94,10 @@ impl ActiveAction {
     pub fn remaining_ms(&self) -> u64 {
         self.remaining_ms
     }
+
+    pub fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +105,8 @@ pub struct Citizen {
     hunger: f64,
     hunger_per_hour: f64,
     tiredness: f64,
+    berries_grams: f64,
+    forage_rng: SmallRng,
     active_action: Option<ActiveAction>,
     active_plan: Option<planning::ActivePlan>,
 }
@@ -129,6 +136,8 @@ impl Citizen {
             hunger,
             hunger_per_hour,
             tiredness: 0.0,
+            berries_grams: 0.0,
+            forage_rng: rand::make_rng(),
             active_action: None,
             active_plan: None,
         })
@@ -144,6 +153,35 @@ impl Citizen {
 
     pub fn tiredness(&self) -> f64 {
         self.tiredness
+    }
+
+    pub fn berries_grams(&self) -> f64 {
+        self.berries_grams
+    }
+
+    pub fn with_berries(&self, grams: f64) -> Result<Self, SimulationError> {
+        if !grams.is_finite() || grams < 0.0 {
+            return Err(SimulationError::InvalidBerries);
+        }
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.berries_grams = grams;
+        Ok(citizen)
+    }
+
+    pub fn action_duration_ms(&self, action: CitizenAction) -> u64 {
+        match action {
+            CitizenAction::Eat => (self.meal_grams() * BERRY_EATING_MS_PER_GRAM).ceil() as u64,
+            CitizenAction::Wait | CitizenAction::Forage => ACTION_DURATION_MS,
+            CitizenAction::Sleep => SLEEP_DURATION_MS,
+        }
+    }
+
+    fn meal_grams(&self) -> f64 {
+        self.berries_grams
+            .min(MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM)
     }
 
     pub fn active_action(&self) -> Option<ActiveAction> {
@@ -163,9 +201,21 @@ impl Citizen {
             return Err(SimulationError::CitizenBusy);
         }
         let mut citizen = self.clone();
+        let duration_ms = self.action_duration_ms(action);
+        if duration_ms == 0 {
+            return Ok(citizen);
+        }
+        let meal_grams = if action == CitizenAction::Eat {
+            self.meal_grams()
+        } else {
+            0.0
+        };
         citizen.active_action = Some(ActiveAction {
             action,
-            remaining_ms: action.duration_ms(),
+            remaining_ms: duration_ms,
+            duration_ms,
+            meal_grams,
+            berries_after_meal: self.berries_grams - meal_grams,
         });
         Ok(citizen)
     }
@@ -185,6 +235,14 @@ impl Citizen {
         if let Some(execution) = &self.active_plan {
             return execution.advance(self, elapsed_ms);
         }
+        self.advance_action(elapsed_ms, false)
+    }
+
+    pub(crate) fn advance_predicted(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
+        self.advance_action(elapsed_ms, true)
+    }
+
+    fn advance_action(&self, elapsed_ms: u64, prediction: bool) -> Result<Self, SimulationError> {
         let mut citizen = self.clone();
         if elapsed_ms == 0 {
             return Ok(citizen);
@@ -192,10 +250,28 @@ impl Citizen {
 
         if let Some(mut active) = citizen.active_action {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
-            citizen.advance_needs(action_elapsed_ms, Some(active.action))?;
+            citizen.advance_needs(action_elapsed_ms, Some(active))?;
             active.remaining_ms -= action_elapsed_ms;
 
+            if active.action == CitizenAction::Eat {
+                citizen.berries_grams = active.berries_after_meal
+                    + active.meal_grams * (active.remaining_ms as f64 / active.duration_ms as f64);
+            }
+
             if active.remaining_ms == 0 {
+                if active.action == CitizenAction::Forage {
+                    let yield_grams = if prediction {
+                        FORAGE_AVERAGE_GRAMS
+                    } else {
+                        citizen
+                            .forage_rng
+                            .random_range(FORAGE_MIN_GRAMS..=FORAGE_MAX_GRAMS)
+                    };
+                    citizen.berries_grams += yield_grams;
+                    if !citizen.berries_grams.is_finite() {
+                        return Err(SimulationError::BerriesOverflow);
+                    }
+                }
                 citizen.active_action = None;
             } else {
                 citizen.active_action = Some(active);
@@ -210,19 +286,18 @@ impl Citizen {
     fn advance_needs(
         &mut self,
         elapsed_ms: u64,
-        action: Option<CitizenAction>,
+        active: Option<ActiveAction>,
     ) -> Result<(), SimulationError> {
         let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
-        let nourishment_per_hour = if action == Some(CitizenAction::Eat) {
-            MEAL_NOURISHMENT * 3_600_000.0 / CitizenAction::Eat.duration_ms() as f64
-        } else {
-            0.0
-        };
-        let recovery_per_hour = if action == Some(CitizenAction::Sleep) {
-            SLEEP_RECOVERY * 3_600_000.0 / SLEEP_DURATION_MS as f64
-        } else {
-            0.0
-        };
+        let nourishment_per_hour = active.map_or(0.0, |action| {
+            action.meal_grams * BERRY_NUTRITION_PER_GRAM * 3_600_000.0 / action.duration_ms as f64
+        });
+        let recovery_per_hour =
+            if active.is_some_and(|action| action.action == CitizenAction::Sleep) {
+                SLEEP_RECOVERY * 3_600_000.0 / SLEEP_DURATION_MS as f64
+            } else {
+                0.0
+            };
         let hunger = self.hunger + (self.hunger_per_hour - nourishment_per_hour) * elapsed_hours;
         if !hunger.is_finite() {
             return Err(SimulationError::HungerOverflow);
@@ -312,9 +387,11 @@ pub enum SimulationError {
     InvalidHunger,
     InvalidHungerRate,
     InvalidTiredness,
+    InvalidBerries,
     TimeOverflow,
     HungerOverflow,
     TirednessOverflow,
+    BerriesOverflow,
     WellbeingOverflow,
     CitizenBusy,
     AgentNotFound,
@@ -326,9 +403,11 @@ impl fmt::Display for SimulationError {
             Self::InvalidHunger => "hunger must be finite",
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
             Self::InvalidTiredness => "tiredness must be finite",
+            Self::InvalidBerries => "berry grams must be finite and nonnegative",
             Self::TimeOverflow => "elapsed time exceeds the simulation clock's range",
             Self::HungerOverflow => "advancing time would produce nonfinite hunger",
             Self::TirednessOverflow => "advancing time would produce nonfinite tiredness",
+            Self::BerriesOverflow => "foraging would produce nonfinite berry grams",
             Self::WellbeingOverflow => "personal wellbeing exceeds the finite score range",
             Self::CitizenBusy => "citizen is already performing an action",
             Self::AgentNotFound => "agent does not exist in this universe",
@@ -338,3 +417,36 @@ impl fmt::Display for SimulationError {
 }
 
 impl std::error::Error for SimulationError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    #[test]
+    fn prediction_uses_average_yield_without_advancing_the_random_stream() {
+        let mut citizen = Citizen::new(0.0).unwrap();
+        citizen.forage_rng = SmallRng::seed_from_u64(42);
+        let started = citizen.start_action(CitizenAction::Forage).unwrap();
+        let predicted = started.advance_predicted(ACTION_DURATION_MS).unwrap();
+        assert_eq!(predicted.berries_grams(), 10.0);
+        assert_eq!(predicted.forage_rng, citizen.forage_rng);
+        let actual = started.advance(ACTION_DURATION_MS).unwrap();
+        assert_ne!(actual.forage_rng, citizen.forage_rng);
+        assert!((5.0..=15.0).contains(&actual.berries_grams()));
+
+        let mut total = 0.0;
+        for _ in 0..2000 {
+            let next = citizen
+                .start_action(CitizenAction::Forage)
+                .unwrap()
+                .advance(ACTION_DURATION_MS)
+                .unwrap();
+            let yield_grams = next.berries_grams() - citizen.berries_grams();
+            assert!((5.0..=15.0).contains(&yield_grams));
+            total += yield_grams;
+            citizen = next;
+        }
+        assert!((total / 2000.0 - 10.0).abs() < 0.2);
+    }
+}
