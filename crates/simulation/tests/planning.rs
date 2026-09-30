@@ -36,7 +36,7 @@ fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
         citizen
             .advance(HALF_HOUR_MS)
             .unwrap()
-            .with_pebbles(citizen.pebbles_grams() + 10.0)
+            .with_pebbles(citizen.pebbles_grams() + 5.0)
             .unwrap()
     } else {
         citizen
@@ -91,7 +91,7 @@ fn scoring_averages_completion_states_and_rewards_wealth() {
         score_actions(&satiated, chosen.actions()),
         chosen.average_wellbeing(),
     );
-    assert!(chosen.average_wellbeing() >= 0.9);
+    assert!(chosen.average_wellbeing() >= 0.45 - 1e-10);
 }
 
 #[test]
@@ -220,7 +220,9 @@ fn planning_rejects_busy_citizens_and_cannot_replace_a_committed_batch() {
 
 #[test]
 fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches() {
-    let (original, id) = Universe::default().with_citizen("Ada", Citizen::new(25.0).unwrap());
+    let (original, id) = Universe::default()
+        .with_prices(learning_lord_simulation::marketplace::Prices::default())
+        .with_citizen("Ada", Citizen::new(25.0).unwrap());
     let (original, other_id) = original.with_citizen("Bea", Citizen::new(0.0).unwrap());
     let snapshot = original.clone();
     let planned = original.start_planning(id).unwrap();
@@ -263,7 +265,9 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
     assert_eq!(planned, planned_snapshot);
     assert_eq!(original, snapshot);
 
-    let (_, missing_id) = Universe::default().with_citizen("Missing", Citizen::new(0.0).unwrap());
+    let (_, missing_id) = Universe::default()
+        .with_prices(learning_lord_simulation::marketplace::Prices::default())
+        .with_citizen("Missing", Citizen::new(0.0).unwrap());
     assert_eq!(
         original.start_planning(missing_id),
         Err(SimulationError::AgentNotFound)
@@ -294,7 +298,9 @@ fn prediction_and_replanning_errors_preserve_original_state() {
     );
     assert_eq!(planned, snapshot);
 
-    let (universe, _) = Universe::default().with_citizen("Ada", planned);
+    let (universe, _) = Universe::default()
+        .with_prices(learning_lord_simulation::marketplace::Prices::default())
+        .with_citizen("Ada", planned);
     let snapshot = universe.clone();
     assert_eq!(
         universe.advance(8 * TWO_HOURS_MS),

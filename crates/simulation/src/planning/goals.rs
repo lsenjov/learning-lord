@@ -1,8 +1,7 @@
 use super::{EAT_PLAN_COOLDOWN_MS, REPLAN_MIN_NUTRITION};
 use crate::{
     ACTION_DURATION_MS, BERRY_EATING_MS_PER_GRAM, BERRY_NUTRITION_PER_GRAM, Citizen, CitizenAction,
-    MEAL_NOURISHMENT, SLEEP_DURATION_MS, SimulationError, TRADE_DURATION_MS,
-    marketplace::{Good, coins_per_kg, value},
+    MEAL_NOURISHMENT, SLEEP_DURATION_MS, SimulationError, TRADE_DURATION_MS, marketplace::Good,
 };
 
 pub const GOAL_HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
@@ -44,11 +43,14 @@ impl CitizenAction {
             Self::Eat => (Effect::Berries, amount / BERRY_NUTRITION_PER_GRAM),
             Self::BuyBerries => (
                 Effect::Coins,
-                value(Good::Berries, (amount - citizen.berries_grams()).max(0.0)),
+                citizen
+                    .prices()
+                    .value(Good::Berries, (amount - citizen.berries_grams()).max(0.0)),
             ),
             Self::SellPebbles => (
                 Effect::Pebbles,
-                (amount - citizen.coins()).max(0.0) / coins_per_kg(Good::Pebbles) * 1000.0,
+                (amount - citizen.coins()).max(0.0) / citizen.prices().coins_per_kg(Good::Pebbles)
+                    * 1000.0,
             ),
             _ => return None,
         };
@@ -322,7 +324,7 @@ mod tests {
         let mut foraged = vec![CitizenAction::Forage; 6];
         foraged.push(CitizenAction::Eat);
         assert!(variants.iter().any(|v| v.actions == foraged));
-        let mut traded = vec![CitizenAction::FindRocks; 3];
+        let mut traded = vec![CitizenAction::FindRocks; 6];
         traded.extend([
             CitizenAction::SellPebbles,
             CitizenAction::BuyBerries,
@@ -349,7 +351,7 @@ mod tests {
 
     #[test]
     fn local_variant_winner_is_selected_before_goal_sequencing() {
-        let source = hungry(0.0);
+        let source = hungry(0.0).with_prices(crate::marketplace::Prices::new(1.0, 4.0).unwrap());
         let variants = full_meals(&source);
         let best_score = variants
             .iter()
@@ -448,8 +450,9 @@ mod tests {
     fn final_goal_is_completed_after_the_outer_horizon() {
         let citizen = Citizen::with_needs(50.0, -100.0)
             .unwrap()
-            .with_pebbles(10.0)
-            .unwrap();
+            .with_pebbles(5.0)
+            .unwrap()
+            .with_prices(crate::marketplace::Prices::new(1.0, 4.0).unwrap());
         let mut prefix = Prediction::new(&citizen, Cooldowns::default());
         prefix.elapsed_ms = 7 * ACTION_DURATION_MS;
         let goal = best_variant(
@@ -538,5 +541,28 @@ mod tests {
     fn scoring_handles_opposite_extremes_without_overflow() {
         assert_eq!(average(&[-f64::MAX, f64::MAX]), Ok(0.0));
         assert_eq!(average(&[f64::MAX, -f64::MAX]), Ok(0.0));
+    }
+
+    #[test]
+    fn wealth_goal_uses_current_prices_and_half_pebble_yield() {
+        use crate::marketplace::Prices;
+        for (berries, pebbles, expected) in [
+            (1.0, 1.0, CitizenAction::Forage),
+            (1.0, 4.0, CitizenAction::FindRocks),
+        ] {
+            let source = Citizen::with_needs(-50.0, -100.0)
+                .unwrap()
+                .with_prices(Prices::new(berries, pebbles).unwrap());
+            let chosen = best_variant(&source, Effect::IncreaseWealth, Cooldowns::default(), 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(chosen.actions, [expected]);
+            assert_eq!(chosen.citizen.prices(), source.prices());
+            if expected == CitizenAction::FindRocks {
+                assert_eq!(chosen.citizen.pebbles_grams(), 5.0);
+            } else {
+                assert_eq!(chosen.citizen.berries_grams(), 10.0);
+            }
+        }
     }
 }

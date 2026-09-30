@@ -1,5 +1,5 @@
 use bevy::prelude::Resource;
-use learning_lord_simulation::{SimulationError, Universe};
+use learning_lord_simulation::{Citizen, SimulationError, Universe};
 use std::{
     num::NonZeroU32,
     sync::{Arc, Mutex, mpsc},
@@ -26,6 +26,7 @@ pub enum Command {
     SetRunning(bool),
     SetSpeed(u32),
     Step,
+    Restart,
     Shutdown,
 }
 
@@ -38,6 +39,7 @@ struct TimedCommand {
 pub struct Snapshot {
     pub universe: Universe,
     pub error: Option<String>,
+    pub generation: u64,
 }
 
 #[derive(Resource)]
@@ -52,6 +54,7 @@ impl SimulationWorker {
         let snapshot = Arc::new(Mutex::new(Snapshot {
             universe: universe.clone(),
             error: None,
+            generation: 0,
         }));
         let published = Arc::clone(&snapshot);
         let (commands, receiver) = mpsc::channel();
@@ -158,10 +161,16 @@ impl Pacing {
     }
 }
 
+pub fn new_universe() -> Result<Universe, SimulationError> {
+    let (universe, id) = Universe::default().with_citizen("Ada", Citizen::new(0.0)?);
+    universe.start_planning(id)
+}
+
 struct WorkerState {
     universe: Universe,
     pacing: Pacing,
     error: Option<String>,
+    generation: u64,
 }
 
 impl WorkerState {
@@ -181,6 +190,23 @@ impl WorkerState {
         if matches!(command, Command::Shutdown) {
             return false;
         }
+        if matches!(command, Command::Restart) {
+            self.generation += 1;
+            match new_universe() {
+                Ok(universe) => {
+                    self.universe = universe;
+                    self.error = None;
+                    let at = at.max(self.pacing.accounted_at);
+                    self.pacing.running = false;
+                    self.pacing.speed = 1;
+                    self.pacing.accounted_at = at;
+                    self.pacing.last_update = at;
+                    self.pacing.pending_simulated_ns = 0;
+                }
+                Err(error) => self.fail(error),
+            }
+            return true;
+        }
         if self.error.is_some() {
             return true;
         }
@@ -188,7 +214,7 @@ impl WorkerState {
             Command::SetRunning(running) => self.pacing.set_running(running, at),
             Command::SetSpeed(speed) => self.pacing.set_speed(speed, at),
             Command::Step if !self.pacing.running => self.advance(STEP_MS),
-            Command::Step | Command::Shutdown => {}
+            Command::Step | Command::Shutdown | Command::Restart => {}
         }
         true
     }
@@ -197,6 +223,7 @@ impl WorkerState {
         *published.lock().expect("snapshot lock poisoned") = Snapshot {
             universe: self.universe.clone(),
             error: self.error.clone(),
+            generation: self.generation,
         };
     }
 }
@@ -212,6 +239,7 @@ fn run_worker(
         universe,
         pacing: Pacing::new(updates_per_second),
         error: None,
+        generation: 0,
     };
     loop {
         match commands.try_recv() {
@@ -262,6 +290,42 @@ mod tests {
         let mut pacing = Pacing::new(NonZeroU32::new(rate).unwrap());
         pacing.set_running(true, Duration::ZERO);
         pacing
+    }
+
+    #[test]
+    fn restart_replaces_universe_and_clears_error_speed_and_time_debt() {
+        let universe = new_universe().unwrap().advance(STEP_MS).unwrap();
+        let old_ids: Vec<_> = universe.agents().keys().copied().collect();
+        let old_prices = universe.prices();
+        let mut state = WorkerState {
+            universe,
+            pacing: pacing(30),
+            error: Some("old error".into()),
+            generation: 0,
+        };
+        state.pacing.speed = 20;
+        state.pacing.pending_simulated_ns = 123456789;
+        assert!(state.apply(Command::Restart, Duration::from_secs(10)));
+        assert_eq!(state.universe.current_time_ms(), 0);
+        assert_eq!(state.universe.agents().len(), 1);
+        assert!(!state.universe.agents().contains_key(&old_ids[0]));
+        assert_ne!(state.universe.prices(), old_prices);
+        assert!(state.error.is_none());
+        assert!(!state.pacing.running);
+        assert_eq!(state.pacing.speed, 1);
+        assert_eq!(state.pacing.pending_simulated_ns, 0);
+        assert_eq!(state.generation, 1);
+        state.apply(Command::SetRunning(true), Duration::from_secs(20));
+        assert_eq!(
+            state.pacing.take_update(Duration::from_secs(21)),
+            Ok(Some(60_000))
+        );
+        let learning_lord_simulation::AgentKind::Citizen(citizen) =
+            &state.universe.agents().values().next().unwrap().kind;
+        assert_eq!(citizen.hunger(), 0.0);
+        assert_eq!(citizen.tiredness(), 0.0);
+        assert_eq!(citizen.coins(), 0.0);
+        assert!(citizen.active_plan().is_some());
     }
 
     #[test]
@@ -371,6 +435,7 @@ mod tests {
             universe,
             pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
             error: None,
+            generation: 0,
         };
         state.apply(Command::SetSpeed(20), Duration::ZERO);
         state.apply(Command::Step, Duration::from_secs(10));
@@ -422,6 +487,7 @@ mod tests {
             universe: universe.clone(),
             pacing: pacing(60),
             error: None,
+            generation: 0,
         };
         state.advance(1);
         assert_eq!(state.universe, universe);

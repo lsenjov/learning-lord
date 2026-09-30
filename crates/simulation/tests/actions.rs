@@ -182,10 +182,12 @@ fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
 
 #[test]
 fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
-    let (original, id) = Universe::default().with_citizen(
-        "Ada",
-        Citizen::new(0.0).unwrap().with_berries(100.0).unwrap(),
-    );
+    let (original, id) = Universe::default()
+        .with_prices(learning_lord_simulation::marketplace::Prices::default())
+        .with_citizen(
+            "Ada",
+            Citizen::new(0.0).unwrap().with_berries(100.0).unwrap(),
+        );
     let (original, other_id) = original.with_citizen("Bea", Citizen::new(10.0).unwrap());
     let original = original.advance(MINUTE_MS).unwrap();
     let snapshot = original.clone();
@@ -219,7 +221,9 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     assert_eq!(eating, eating_snapshot);
     assert_eq!(original, snapshot);
 
-    let (_, missing_id) = Universe::default().with_citizen("Missing", Citizen::new(0.0).unwrap());
+    let (_, missing_id) = Universe::default()
+        .with_prices(learning_lord_simulation::marketplace::Prices::default())
+        .with_citizen("Missing", Citizen::new(0.0).unwrap());
     assert_eq!(
         original.start_action(missing_id, CitizenAction::Eat),
         Err(SimulationError::AgentNotFound)
@@ -248,7 +252,9 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
             );
             assert_eq!(citizen, snapshot);
 
-            let (universe, _) = Universe::default().with_citizen("Ada", citizen);
+            let (universe, _) = Universe::default()
+                .with_prices(learning_lord_simulation::marketplace::Prices::default())
+                .with_citizen("Ada", citizen);
             let snapshot = universe.clone();
             assert_eq!(
                 universe.advance(120 * MINUTE_MS),

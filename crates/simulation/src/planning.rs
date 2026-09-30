@@ -49,6 +49,7 @@ impl ActivePlan {
         &self,
         source: &Citizen,
         mut elapsed_ms: u64,
+        end_prices: Option<crate::marketplace::Prices>,
     ) -> Result<Citizen, SimulationError> {
         let mut citizen = source.clone();
         citizen.active_plan = None;
@@ -67,6 +68,11 @@ impl ActivePlan {
                 .checked_add(step_ms)
                 .ok_or(SimulationError::TimeOverflow)?;
 
+            if elapsed_ms == 0
+                && let Some(prices) = end_prices
+            {
+                citizen.prices = prices;
+            }
             if citizen.active_action().is_none() {
                 execution.action_index += 1;
                 citizen = execution.start_next_action(citizen)?;
@@ -184,6 +190,49 @@ mod tests {
             elapsed_ms: 0,
         });
         citizen
+    }
+
+    #[test]
+    fn action_starting_at_the_daily_boundary_uses_new_prices() {
+        use crate::{
+            AgentKind, Universe,
+            marketplace::{Good, Prices, UPDATE_TIME_MS},
+        };
+        let citizen = Citizen::new(0.0).unwrap().with_coins(1.0).unwrap();
+        let planned = executing(
+            &citizen,
+            vec![
+                CitizenAction::Wait,
+                CitizenAction::BuyBerries,
+                CitizenAction::Eat,
+                CitizenAction::Sleep,
+            ],
+        );
+        let universe = Universe::default()
+            .with_prices(Prices::default())
+            .advance(UPDATE_TIME_MS - crate::ACTION_DURATION_MS)
+            .unwrap();
+        let (universe, id) = universe.with_citizen("Ada", planned);
+        let boundary = universe.advance(crate::ACTION_DURATION_MS).unwrap();
+        let AgentKind::Citizen(buyer) = &boundary.agents()[&id].kind;
+        assert_eq!(
+            buyer.active_action().unwrap().action(),
+            CitizenAction::BuyBerries
+        );
+        assert_eq!(
+            buyer.active_action().unwrap().remaining_ms(),
+            crate::TRADE_DURATION_MS
+        );
+        let after = boundary.advance(crate::TRADE_DURATION_MS).unwrap();
+        let AgentKind::Citizen(buyer) = &after.agents()[&id].kind;
+        assert_eq!(
+            buyer.coins(),
+            1.0 - boundary.prices().value(Good::Berries, 100.0)
+        );
+        let combined = universe
+            .advance(crate::ACTION_DURATION_MS + crate::TRADE_DURATION_MS)
+            .unwrap();
+        assert_eq!(after, combined);
     }
 
     #[test]

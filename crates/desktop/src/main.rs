@@ -5,7 +5,7 @@ use bevy::{
     prelude::*,
 };
 use learning_lord_simulation::{
-    AgentKind, Citizen, CitizenAction, Universe, planning::COMMITMENT_MS,
+    AgentKind, CitizenAction, Universe, marketplace::Good, planning::COMMITMENT_MS,
 };
 use simulation::{Command as SimulationCommand, SPEEDS, SimulationWorker, Snapshot};
 
@@ -20,6 +20,8 @@ struct Controls {
     running: bool,
     speed: u32,
     error: Option<String>,
+    generation: u64,
+    restart_pending: bool,
 }
 
 impl Default for Controls {
@@ -28,6 +30,8 @@ impl Default for Controls {
             running: false,
             speed: 1,
             error: None,
+            generation: 0,
+            restart_pending: false,
         }
     }
 }
@@ -39,12 +43,14 @@ struct DisplaySnapshot(Snapshot);
 enum Control {
     ToggleRunning,
     Step,
+    Restart,
     Speed(u32),
 }
 
 #[derive(Component)]
 enum Readout {
     Clock,
+    Market,
     Status,
     Citizen,
     Error,
@@ -53,11 +59,7 @@ enum Readout {
 
 fn main() -> Result<(), String> {
     let rate = simulation::update_rate()?;
-    let citizen = Citizen::new(0.0).map_err(|error| error.to_string())?;
-    let (universe, id) = Universe::default().with_citizen("Ada", citizen);
-    let universe = universe
-        .start_planning(id)
-        .map_err(|error| error.to_string())?;
+    let universe = simulation::new_universe().map_err(|error| error.to_string())?;
     let worker = SimulationWorker::spawn(universe, rate);
 
     App::new()
@@ -118,15 +120,16 @@ fn setup(mut commands: Commands) {
         .spawn(Node {
             width: percent(100),
             height: percent(100),
-            padding: UiRect::all(px(40)),
+            padding: UiRect::all(px(28)),
             flex_direction: FlexDirection::Column,
-            row_gap: px(18),
+            row_gap: px(12),
             ..default()
         })
         .with_children(|root| {
             root.spawn(text("LEARNING LORD", 18.0, MUTED));
             root.spawn((text("Day 0 | 00:00:00", 44.0, TEXT), Readout::Clock));
             root.spawn((text("Paused | 1x", 20.0, MUTED), Readout::Status));
+            root.spawn((text("", 18.0, TEXT), Readout::Market));
             root.spawn(Node {
                 column_gap: px(12),
                 row_gap: px(12),
@@ -140,6 +143,9 @@ fn setup(mut commands: Commands) {
                     });
                 row.spawn(button(Control::Step)).with_children(|button| {
                     button.spawn(text("Advance 30 minutes", 20.0, TEXT));
+                });
+                row.spawn(button(Control::Restart)).with_children(|button| {
+                    button.spawn(text("Restart universe", 20.0, TEXT));
                 });
             });
             root.spawn(text("Simulation speed", 16.0, MUTED));
@@ -188,7 +194,13 @@ fn poll_worker(
     mut snapshot: ResMut<DisplaySnapshot>,
     mut controls: ResMut<Controls>,
 ) {
-    snapshot.0 = worker.snapshot();
+    let next = worker.snapshot();
+    if controls.restart_pending && next.generation == controls.generation {
+        return;
+    }
+    controls.generation = next.generation;
+    controls.restart_pending = false;
+    snapshot.0 = next;
     if let Some(error) = &snapshot.0.error {
         controls.running = false;
         controls.error = Some(error.clone());
@@ -196,10 +208,18 @@ fn poll_worker(
 }
 
 fn apply_control(control: Control, controls: &mut Controls, worker: &SimulationWorker) {
-    if controls.error.is_some() {
+    if controls.restart_pending || controls.error.is_some() && !matches!(control, Control::Restart)
+    {
         return;
     }
     let command = match control {
+        Control::Restart => {
+            controls.running = false;
+            controls.speed = 1;
+            controls.error = None;
+            controls.restart_pending = true;
+            SimulationCommand::Restart
+        }
         Control::ToggleRunning => {
             controls.running = !controls.running;
             SimulationCommand::SetRunning(controls.running)
@@ -214,6 +234,7 @@ fn apply_control(control: Control, controls: &mut Controls, worker: &SimulationW
     if let Err(error) = worker.send(command) {
         controls.running = false;
         controls.error = Some(error);
+        controls.restart_pending = false;
     }
 }
 
@@ -341,6 +362,13 @@ fn refresh_display(
 ) {
     for (readout, mut text) in &mut readouts {
         let value = match readout {
+            Readout::Market => {
+                format!(
+                    "Market: berries {:.3} | pebbles {:.3} coins/kg | updates at 04:00",
+                    snapshot.0.universe.prices().coins_per_kg(Good::Berries),
+                    snapshot.0.universe.prices().coins_per_kg(Good::Pebbles)
+                )
+            }
             Readout::Clock => format_clock(snapshot.0.universe.current_time_ms()),
             Readout::Status => format!(
                 "{} | {}x",
@@ -360,8 +388,9 @@ fn refresh_display(
         }
     }
     for (control, interaction, mut color) in &mut buttons {
-        let disabled =
-            controls.error.is_some() || matches!(control, Control::Step) && controls.running;
+        let disabled = controls.restart_pending
+            || controls.error.is_some() && !matches!(control, Control::Restart)
+            || matches!(control, Control::Step) && controls.running;
         let selected = matches!(control, Control::Speed(speed) if *speed == controls.speed);
         color.0 = if disabled {
             Color::srgb(0.09, 0.10, 0.11)
@@ -380,6 +409,7 @@ fn refresh_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use learning_lord_simulation::Citizen;
 
     #[test]
     fn readout_shows_berries_upcoming_actions_and_commitment() {
@@ -387,7 +417,9 @@ mod tests {
             .unwrap()
             .with_berries(200.0)
             .unwrap();
-        let (universe, id) = Universe::default().with_citizen("Ada", citizen);
+        let (universe, id) = Universe::default()
+            .with_prices(learning_lord_simulation::marketplace::Prices::default())
+            .with_citizen("Ada", citizen);
         let universe = universe
             .start_planning(id)
             .unwrap()
@@ -405,7 +437,9 @@ mod tests {
     #[test]
     fn sleeping_readout_counts_down_to_completion_even_past_commitment() {
         let citizen = Citizen::with_needs(-50.0, 50.0).unwrap();
-        let (universe, id) = Universe::default().with_citizen("Ada", citizen);
+        let (universe, id) = Universe::default()
+            .with_prices(learning_lord_simulation::marketplace::Prices::default())
+            .with_citizen("Ada", citizen);
         let universe = universe
             .start_planning(id)
             .unwrap()
@@ -421,7 +455,11 @@ mod tests {
     fn ui_buttons_select_speeds_step_and_toggle_running() {
         use std::time::{Duration, Instant};
 
-        let worker = SimulationWorker::spawn(Universe::default(), 60.try_into().unwrap());
+        let worker = SimulationWorker::spawn(
+            Universe::default()
+                .with_prices(learning_lord_simulation::marketplace::Prices::default()),
+            60.try_into().unwrap(),
+        );
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
@@ -505,6 +543,45 @@ mod tests {
             app.world_mut().entity_mut(toggle).insert(Interaction::None);
             app.update();
         }
+        let restart = buttons
+            .iter()
+            .find(|(_, control)| matches!(control, Control::Restart))
+            .unwrap()
+            .0;
+        let previous_prices = app
+            .world()
+            .resource::<DisplaySnapshot>()
+            .0
+            .universe
+            .prices();
+        app.world_mut()
+            .entity_mut(restart)
+            .insert(Interaction::Pressed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.update();
+            if app.world().resource::<DisplaySnapshot>().0.generation == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "restart did not reach the UI");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let snapshot = &app.world().resource::<DisplaySnapshot>().0;
+        assert_eq!(snapshot.universe.current_time_ms(), 0);
+        assert_ne!(snapshot.universe.prices(), previous_prices);
+        assert_eq!(snapshot.universe.agents().len(), 1);
+        let controls = app.world().resource::<Controls>();
+        assert_eq!(controls.speed, 1);
+        assert!(!controls.running);
+        assert!(!controls.restart_pending);
+        let market_text = app
+            .world_mut()
+            .query::<(&Readout, &Text)>()
+            .iter(app.world())
+            .find(|(readout, _)| matches!(readout, Readout::Market))
+            .unwrap()
+            .1;
+        assert!(market_text.0.contains("coins/kg"));
     }
 
     #[test]

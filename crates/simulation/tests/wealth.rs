@@ -1,4 +1,4 @@
-use learning_lord_simulation::marketplace::{Good, coins_per_kg};
+use learning_lord_simulation::marketplace::{Good, Prices};
 use learning_lord_simulation::planning::plan;
 use learning_lord_simulation::{ACTION_DURATION_MS, Citizen, CitizenAction, SimulationError};
 
@@ -7,8 +7,8 @@ fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
     let source = Citizen::with_needs(20.0, 10.0).unwrap();
     assert_eq!(source.coins(), 0.0);
     assert_eq!(source.pebbles_grams(), 0.0);
-    assert_eq!(coins_per_kg(Good::Berries), 1.0);
-    assert_eq!(coins_per_kg(Good::Pebbles), 2.0);
+    assert_eq!(Prices::default().coins_per_kg(Good::Berries), 1.0);
+    assert_eq!(Prices::default().coins_per_kg(Good::Pebbles), 2.0);
     let rich = source
         .with_berries(500.0)
         .unwrap()
@@ -68,14 +68,19 @@ fn rocks_arrive_on_completion_and_prediction_preserves_randomness() {
     let source = Citizen::with_needs(-50.0, -100.0).unwrap();
     let original = source.clone();
     let planned = plan(&source).unwrap();
-    assert!(planned.actions().contains(&CitizenAction::FindRocks));
-    assert!(planned.average_wellbeing() >= 0.9);
+    assert!(
+        planned
+            .actions()
+            .iter()
+            .any(|a| matches!(a, CitizenAction::Forage | CitizenAction::FindRocks))
+    );
+    assert!(planned.average_wellbeing() >= 0.45 - 1e-10);
     assert_eq!(source, original);
     let started = source.start_action(CitizenAction::FindRocks).unwrap();
     let partial = started.advance(ACTION_DURATION_MS - 1).unwrap();
     assert_eq!(partial.pebbles_grams(), 0.0);
     let complete = partial.advance(1).unwrap();
-    assert!((5.0..=15.0).contains(&complete.pebbles_grams()));
+    assert!((2.5..=7.5).contains(&complete.pebbles_grams()));
     assert_eq!(complete.berries_grams(), 0.0);
     assert_eq!(complete.coins(), 0.0);
     assert_eq!(

@@ -25,7 +25,7 @@
 - Hunger increases with elapsed simulation time. The standard rate is 100 hunger per 24 game hours, balanced by 200 grams of berries (two full meals of 50 nutrition each). Starting hunger is explicit; custom constant hourly rates remain available.
 - Starting hunger must be finite. Hunger rates must be finite and nonnegative. Hunger is not clamped at zero or at the starvation threshold.
 - Citizens start with no berries. Berries provide 0.5 nutrition per gram and take one second per gram to eat. Eat selects up to 50 nutrition from current inventory when starting, using smaller portions when needed and skipping empty meals. The portion determines duration, rounded up to the nearest millisecond, and is consumed gradually alongside its hunger reduction.
-- Find rocks takes 30 minutes and adds uniform random 5–15 grams of pebbles on completion; predictions use 10 grams. Pebble inventory uses grams as `f64`.
+- Find rocks takes 30 minutes and adds uniform random 2.5–7.5 grams of pebbles on completion; predictions use 5 grams. Pebble inventory uses grams as `f64`.
 - Forage takes 30 minutes and adds a uniform random 5–15 grams of berries on completion. Average yield is 10 grams: 20 forage actions (10 hours) yield the 200 grams needed per day on average.
 - Tiredness grows by 100 per 24 simulation hours, including during sleep. Below zero represents being rested; tiredness has a minimum of -100 and no upper cap.
 - Sleep takes eight simulation hours and gradually reduces tiredness by 100 over that duration, subject to the floor. Eight hours of sleep balances one day of tiredness growth when recovery is not lost at the floor. Hunger keeps growing during sleep.
@@ -45,7 +45,7 @@
 - A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
 - Each positive unit of tiredness costs one wellbeing point. Negative tiredness delays future tiredness without granting an immediate bonus.
 - Clothing will be an important factor later.
-- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The placeholder marketplace prices berries at 1 coin/kg and pebbles at 2 coins/kg; the marketplace has unlimited stock and coins.
+- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The marketplace randomizes starting prices and updates at 04:00 every day: berries uniformly 1–2 coins/kg, pebbles uniformly 1–4 coins/kg; the marketplace has unlimited stock and coins.
 - A collective's wellbeing could depend primarily on its members' needs, or it might depend only on money. This is still undecided.
 
 ## Relationships
@@ -148,6 +148,12 @@
 ## Trading
 
 - Buy berries and Sell pebbles each take five simulation minutes. Needs continue growing.
-- Sell pebbles sells all held pebbles at 2 coins/kg. Buy berries tops up to 100 grams at 1 coin/kg, buying less if funds are insufficient and never borrowing.
-- Quantities and payment are fixed from inventory and coins at action start. Goods and coins transfer only on completion, preserving total market-valued wealth apart from floating-point rounding.
+- Sell pebbles sells all held pebbles at the current price. Buy berries tops up to 100 grams at the current price, buying less if funds are insufficient and never borrowing.
+- Quantities and payment are fixed from inventory and coins at action start. Goods and coins transfer only on completion, preserving total market-valued wealth at the quoted prices apart from floating-point rounding. Market value may change while a trade is underway.
 - Predictions use identical trade rules. Empty trades are skipped without consuming time, including during plan execution. Actual quantities may differ after random gathering; the existing low-food replan check still applies before later meals.
+
+## Market updates
+
+- The universe owns the market seed and prices, synchronizing the price context on citizen snapshots. Standalone citizens use `Prices::default()` (1 and 2 coins/kg) unless given `with_prices(...)`; inserting one into a universe uses that universe’s prices. `Universe::with_prices(...)` allows explicit setup prices until the next scheduled update.
+- Split universe advancement at each 04:00 boundary. Active trades retain their quote; actions starting exactly at the boundary use the new prices. Revalue inventories immediately, but keep existing plans until normal replanning. Predictions assume current prices remain stable throughout the forecast.
+- Market draws are addressed by seed and update period, preserving independent branches and tick partitioning. Empty universes can jump directly to the final applicable price update.
