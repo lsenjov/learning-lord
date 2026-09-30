@@ -478,7 +478,7 @@ fn decision_readout(universe: &Universe) -> String {
         }
     }
     lines.push(
-        "\nChosen by time-weighted action endpoint averages.\nGoal avg scores only the sequence shown.\nWealth compares gathering previews up to 2h and shows only the first step.".into(),
+        "\nChosen by time-weighted action endpoint averages.\nGoal avg scores only the sequence shown.".into(),
     );
     lines.join("\n")
 }

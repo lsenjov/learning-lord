@@ -25,7 +25,7 @@ pub struct GoalDecision {
 impl GoalDecision {
     pub fn unavailable_reason(&self) -> Option<&'static str> {
         self.forecast.is_none().then_some(
-            "No executable sequence within the four-hour prerequisite or two-hour wealth preview limits and action rules.",
+            "No executable sequence within the four-hour prerequisite limit and action rules.",
         )
     }
 }

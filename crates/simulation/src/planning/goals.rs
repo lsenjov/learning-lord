@@ -6,7 +6,6 @@ use crate::{
 
 pub const GOAL_HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
 pub const TRADE_PLAN_COOLDOWN_MS: u64 = 2 * 60 * 60 * 1000;
-const WEALTH_PREVIEW_MS: u64 = 2 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {
@@ -303,18 +302,6 @@ fn best_variant_from(
     goal: Effect,
     prior_actions: usize,
 ) -> Result<Option<Prediction>, SimulationError> {
-    if goal == Effect::IncreaseWealth {
-        let mut best = None;
-        let mut best_score = f64::NEG_INFINITY;
-        for candidate in wealth_steps(&initial, prior_actions)? {
-            let score = wealth_preview_score(&candidate, prior_actions)?;
-            if score > best_score {
-                best_score = score;
-                best = Some(candidate);
-            }
-        }
-        return Ok(best);
-    }
     let citizen = &initial.citizen;
     let mut best: Option<Prediction> = None;
     let mut consider = |candidate: Prediction| -> Result<(), SimulationError> {
@@ -358,111 +345,9 @@ fn best_variant_from(
     Ok(best)
 }
 
-fn wealth_steps(
-    state: &Prediction,
-    prior_actions: usize,
-) -> Result<Vec<Prediction>, SimulationError> {
-    let mut variants = Vec::new();
-    for action in [CitizenAction::Forage, CitizenAction::FindRocks] {
-        for ready in prepare(state, action, 0.0, 0, prior_actions)? {
-            if let Some(next) = ready.perform(action, prior_actions)?
-                && next.elapsed_ms <= WEALTH_PREVIEW_MS
-            {
-                variants.push(next);
-            }
-        }
-    }
-    Ok(variants)
-}
-
-fn wealth_preview_score(state: &Prediction, prior_actions: usize) -> Result<f64, SimulationError> {
-    let next = wealth_steps(state, prior_actions)?;
-    if next.is_empty() {
-        return state.goal_average();
-    }
-    let mut best = f64::NEG_INFINITY;
-    for candidate in next {
-        best = best.max(wealth_preview_score(&candidate, prior_actions)?);
-    }
-    Ok(best)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wealth_preview_amortizes_travel_and_retains_only_the_first_step() {
-        use crate::locations::{Location, Map, Position};
-        let map = Map::new(
-            Position { x: 1000.0, y: 0.0 },
-            Position { x: -1000.0, y: 0.0 },
-            Position::default(),
-        )
-        .unwrap();
-        let source = Citizen::with_needs(-50.0, -100.0)
-            .unwrap()
-            .with_map(map)
-            .unwrap()
-            .with_position(map.position(Location::River))
-            .unwrap()
-            .with_prices(crate::marketplace::Prices::new(1.65, 2.0).unwrap());
-        let initial = Prediction::new(
-            &source,
-            Cooldowns {
-                buy: WEALTH_PREVIEW_MS,
-                ..Cooldowns::default()
-            },
-        );
-        let variants = wealth_steps(&initial, 0).unwrap();
-        let forage = &variants[0];
-        let rocks = &variants[1];
-        assert!(rocks.goal_average().unwrap() > forage.goal_average().unwrap());
-        assert!(wealth_preview_score(forage, 0).unwrap() > wealth_preview_score(rocks, 0).unwrap());
-        let second = wealth_steps(forage, 0).unwrap().remove(0);
-        let terminal = wealth_steps(&second, 0).unwrap().remove(0);
-        assert_eq!(terminal.elapsed_ms, 110 * 60_000);
-        assert!(wealth_steps(&terminal, 0).unwrap().is_empty());
-        assert!((wealth_preview_score(forage, 0).unwrap() - 0.2025).abs() < 1e-12);
-        let chosen = best_variant_from(initial, Effect::IncreaseWealth, 0)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            chosen.actions,
-            [
-                CitizenAction::Travel(Location::Forest),
-                CitizenAction::Forage
-            ]
-        );
-        assert_eq!(chosen.elapsed_ms, 50 * 60_000);
-        assert_eq!(chosen.citizen.berries_grams(), 10.0);
-        assert_eq!(chosen.citizen.pebbles_grams(), 0.0);
-        assert_eq!(chosen.citizen.position(), map.position(Location::Forest));
-        assert_eq!(chosen.citizen.hunger(), forage.citizen.hunger());
-        assert_eq!(chosen.citizen.tiredness(), forage.citizen.tiredness());
-        assert_eq!(chosen.cooldowns.buy, WEALTH_PREVIEW_MS - chosen.elapsed_ms);
-        assert_eq!(chosen.goal_score.elapsed_ms, chosen.elapsed_ms);
-    }
-
-    #[test]
-    fn wealth_previews_complete_whole_steps_within_the_budget() {
-        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
-        let mut terminal = Prediction::new(&citizen, Cooldowns::default());
-        for _ in 0..4 {
-            terminal = terminal.perform(CitizenAction::Forage, 0).unwrap().unwrap();
-        }
-        assert_eq!(terminal.elapsed_ms, WEALTH_PREVIEW_MS);
-        assert!(wealth_steps(&terminal, 0).unwrap().is_empty());
-        assert_eq!(
-            wealth_preview_score(&terminal, 0).unwrap(),
-            terminal.goal_average().unwrap()
-        );
-        let mut short = terminal.clone();
-        short.elapsed_ms = WEALTH_PREVIEW_MS - ACTION_DURATION_MS + 1;
-        assert!(wealth_steps(&short, 0).unwrap().is_empty());
-        short.elapsed_ms -= 1;
-        assert_eq!(wealth_steps(&short, 0).unwrap().len(), 2);
-    }
 
     fn hungry(berries: f64) -> Citizen {
         Citizen::with_needs(100.0, -100.0)
@@ -857,23 +742,6 @@ mod tests {
         .unwrap();
         assert_eq!(next.actions, local.actions);
         assert_eq!(next.goal_average().unwrap(), local.average().unwrap());
-        for mean in [-1e100, 1e100] {
-            let mut altered = prefix.clone();
-            altered.score.mean = mean;
-            altered.score.elapsed_ms = 100 * GOAL_HORIZON_MS;
-            let chosen = best_variant_after(&altered, Effect::IncreaseWealth)
-                .unwrap()
-                .unwrap();
-            assert_eq!(chosen.actions, local.actions);
-            assert_eq!(
-                chosen.goal_average().unwrap(),
-                local.goal_average().unwrap()
-            );
-            assert_eq!(
-                chosen.score.elapsed_ms,
-                altered.score.elapsed_ms + chosen.elapsed_ms
-            );
-        }
     }
 
     #[test]
