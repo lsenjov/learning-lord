@@ -266,6 +266,7 @@ fn citizen_readout(universe: &Universe) -> String {
                 CitizenAction::Wait => "Waiting",
                 CitizenAction::Sleep => "Sleeping",
                 CitizenAction::Forage => "Foraging",
+                CitizenAction::FindRocks => "Finding rocks",
             };
             let seconds = active.remaining_ms().div_ceil(1000);
             format!(
@@ -289,6 +290,7 @@ fn citizen_readout(universe: &Universe) -> String {
                     CitizenAction::Wait => "Wait",
                     CitizenAction::Sleep => "Sleep",
                     CitizenAction::Forage => "Forage",
+                    CitizenAction::FindRocks => "Find rocks",
                 })
                 .collect::<Vec<_>>()
                 .join(" > ");
@@ -314,9 +316,14 @@ fn citizen_readout(universe: &Universe) -> String {
         })
         .unwrap_or_else(|| "No active plan".into());
     format!(
-        "{} | Berries: {:.1} g\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\n{action}\n{plan}",
+        "{} | Berries: {:.1} g | Pebbles: {:.1} g\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\n{action}\n{plan}",
         agent.name,
         citizen.berries_grams(),
+        citizen.pebbles_grams(),
+        citizen.coins(),
+        citizen
+            .wealth()
+            .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}")),
         citizen.hunger(),
         citizen.tiredness()
     )
@@ -387,6 +394,8 @@ mod tests {
         assert!(readout.contains("Planned next:"));
         assert!(readout.contains("Commitment left: 01:59:10"));
         assert!(readout.contains("Berries: 150.0 g"));
+        assert!(readout.contains("Pebbles: 0.0 g"));
+        assert!(readout.contains("Coins: 0.00 | Wealth: 0.150 coins"));
     }
 
     #[test]

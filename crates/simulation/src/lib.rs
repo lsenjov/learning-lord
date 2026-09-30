@@ -3,7 +3,10 @@ use rand::{RngExt, rngs::SmallRng};
 use std::fmt;
 use uuid::Uuid;
 
+pub mod marketplace;
 pub mod planning;
+
+pub const WEALTH_WELLBEING_PER_COIN: f64 = 10.0;
 
 pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
 pub const TIREDNESS_PER_HOUR: f64 = 100.0 / 24.0;
@@ -75,6 +78,7 @@ pub enum CitizenAction {
     Wait,
     Sleep,
     Forage,
+    FindRocks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,6 +110,8 @@ pub struct Citizen {
     hunger_per_hour: f64,
     tiredness: f64,
     berries_grams: f64,
+    pebbles_grams: f64,
+    coins: f64,
     forage_rng: SmallRng,
     active_action: Option<ActiveAction>,
     active_plan: Option<planning::ActivePlan>,
@@ -137,6 +143,8 @@ impl Citizen {
             hunger_per_hour,
             tiredness: 0.0,
             berries_grams: 0.0,
+            pebbles_grams: 0.0,
+            coins: 0.0,
             forage_rng: rand::make_rng(),
             active_action: None,
             active_plan: None,
@@ -171,10 +179,55 @@ impl Citizen {
         Ok(citizen)
     }
 
+    pub fn pebbles_grams(&self) -> f64 {
+        self.pebbles_grams
+    }
+
+    pub fn coins(&self) -> f64 {
+        self.coins
+    }
+
+    pub fn with_pebbles(&self, grams: f64) -> Result<Self, SimulationError> {
+        if !grams.is_finite() || grams < 0.0 {
+            return Err(SimulationError::InvalidPebbles);
+        }
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.pebbles_grams = grams;
+        Ok(citizen)
+    }
+
+    pub fn with_coins(&self, coins: f64) -> Result<Self, SimulationError> {
+        if !coins.is_finite() {
+            return Err(SimulationError::InvalidCoins);
+        }
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.coins = coins;
+        Ok(citizen)
+    }
+
+    pub fn wealth(&self) -> Result<f64, SimulationError> {
+        use marketplace::{Good, value};
+        let wealth = self.coins
+            + value(Good::Berries, self.berries_grams)
+            + value(Good::Pebbles, self.pebbles_grams);
+        if !wealth.is_finite() {
+            return Err(SimulationError::WealthOverflow);
+        }
+        Ok(wealth)
+    }
+
     pub fn action_duration_ms(&self, action: CitizenAction) -> u64 {
         match action {
             CitizenAction::Eat => (self.meal_grams() * BERRY_EATING_MS_PER_GRAM).ceil() as u64,
-            CitizenAction::Wait | CitizenAction::Forage => ACTION_DURATION_MS,
+            CitizenAction::Wait | CitizenAction::Forage | CitizenAction::FindRocks => {
+                ACTION_DURATION_MS
+            }
             CitizenAction::Sleep => SLEEP_DURATION_MS,
         }
     }
@@ -224,7 +277,8 @@ impl Citizen {
         let wellbeing = -self.hunger.max(0.0)
             - 4.0 * (self.hunger - 100.0).max(0.0)
             - (-self.hunger - 100.0).max(0.0)
-            - self.tiredness.max(0.0);
+            - self.tiredness.max(0.0)
+            + self.wealth()? * WEALTH_WELLBEING_PER_COIN;
         if !wellbeing.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
@@ -259,7 +313,10 @@ impl Citizen {
             }
 
             if active.remaining_ms == 0 {
-                if active.action == CitizenAction::Forage {
+                if matches!(
+                    active.action,
+                    CitizenAction::Forage | CitizenAction::FindRocks
+                ) {
                     let yield_grams = if prediction {
                         FORAGE_AVERAGE_GRAMS
                     } else {
@@ -267,9 +324,14 @@ impl Citizen {
                             .forage_rng
                             .random_range(FORAGE_MIN_GRAMS..=FORAGE_MAX_GRAMS)
                     };
-                    citizen.berries_grams += yield_grams;
-                    if !citizen.berries_grams.is_finite() {
-                        return Err(SimulationError::BerriesOverflow);
+                    let (stock, error) = if active.action == CitizenAction::Forage {
+                        (&mut citizen.berries_grams, SimulationError::BerriesOverflow)
+                    } else {
+                        (&mut citizen.pebbles_grams, SimulationError::PebblesOverflow)
+                    };
+                    *stock += yield_grams;
+                    if !stock.is_finite() {
+                        return Err(error);
                     }
                 }
                 citizen.active_action = None;
@@ -388,6 +450,10 @@ pub enum SimulationError {
     InvalidHungerRate,
     InvalidTiredness,
     InvalidBerries,
+    InvalidPebbles,
+    InvalidCoins,
+    WealthOverflow,
+    PebblesOverflow,
     TimeOverflow,
     HungerOverflow,
     TirednessOverflow,
@@ -404,6 +470,10 @@ impl fmt::Display for SimulationError {
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
             Self::InvalidTiredness => "tiredness must be finite",
             Self::InvalidBerries => "berry grams must be finite and nonnegative",
+            Self::InvalidPebbles => "pebble grams must be finite and nonnegative",
+            Self::InvalidCoins => "coins must be finite",
+            Self::WealthOverflow => "wealth exceeds the finite range",
+            Self::PebblesOverflow => "finding rocks would produce nonfinite pebble grams",
             Self::TimeOverflow => "elapsed time exceeds the simulation clock's range",
             Self::HungerOverflow => "advancing time would produce nonfinite hunger",
             Self::TirednessOverflow => "advancing time would produce nonfinite tiredness",

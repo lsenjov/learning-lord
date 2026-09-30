@@ -32,6 +32,12 @@ fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
             .unwrap()
             .with_berries(citizen.berries_grams() + 10.0)
             .unwrap()
+    } else if action == CitizenAction::FindRocks {
+        citizen
+            .advance(HALF_HOUR_MS)
+            .unwrap()
+            .with_pebbles(citizen.pebbles_grams() + 10.0)
+            .unwrap()
     } else {
         citizen
             .start_action(action)
@@ -69,6 +75,7 @@ fn search_matches_exhaustive_average_yield_predictions_and_preserves_the_source(
             }
             for action in [
                 CitizenAction::Forage,
+                CitizenAction::FindRocks,
                 CitizenAction::Sleep,
                 CitizenAction::Eat,
                 CitizenAction::Wait,
@@ -113,7 +120,7 @@ fn search_matches_exhaustive_average_yield_predictions_and_preserves_the_source(
 }
 
 #[test]
-fn scoring_averages_completion_states_and_accepts_any_optimal_tied_plan() {
+fn scoring_averages_completion_states_and_rewards_wealth() {
     let starving = Citizen::with_hunger_rate(150.0, 0.0).unwrap();
     let chosen = plan(&starving).unwrap();
     assert_close(
@@ -123,8 +130,8 @@ fn scoring_averages_completion_states_and_accepts_any_optimal_tied_plan() {
 
     let satiated = Citizen::with_needs(-50.0, -100.0).unwrap();
     let chosen = plan(&satiated).unwrap();
-    assert_eq!(score_actions(&satiated, chosen.actions()), 0.0);
-    assert_eq!(chosen.average_wellbeing(), 0.0);
+    assert_close(score_actions(&satiated, chosen.actions()), 0.9);
+    assert_close(chosen.average_wellbeing(), 0.9);
 }
 
 #[test]
@@ -395,6 +402,14 @@ fn sleep_crosses_both_horizons_and_replanning_waits_for_completion() {
     assert_close(crossed.hunger(), split.hunger());
     assert_close(crossed.tiredness(), split.tiredness());
     assert_eq!(crossed.active_action(), split.active_action());
-    assert_eq!(crossed.active_plan(), split.active_plan());
+    let crossed_plan = crossed.active_plan().unwrap();
+    let split_plan = split.active_plan().unwrap();
+    assert_eq!(crossed_plan.plan().actions(), split_plan.plan().actions());
+    assert_eq!(crossed_plan.action_index(), split_plan.action_index());
+    assert_eq!(crossed_plan.elapsed_ms(), split_plan.elapsed_ms());
+    assert_close(
+        crossed_plan.plan().average_wellbeing(),
+        split_plan.plan().average_wellbeing(),
+    );
     assert_eq!(original, snapshot);
 }

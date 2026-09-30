@@ -13,7 +13,7 @@
 
 - Continuous simulation measurements, including hunger, tiredness, rates, and wellbeing, use `f64`.
 - Simulation time and elapsed durations use `u64` milliseconds.
-- Money uses signed `i64` values in a defined smallest currency unit.
+- Coins and wealth use `f64`; small rounding errors are acceptable. Coins may be negative for accounting.
 - Inventory goods are measured in grams as `f64`. Berries are the first good implemented.
 - Discrete counts and tile coordinates remain integers.
 
@@ -25,6 +25,7 @@
 - Hunger increases with elapsed simulation time. The standard rate is 100 hunger per 24 game hours, balanced by 200 grams of berries (two full meals of 50 nutrition each). Starting hunger is explicit; custom constant hourly rates remain available.
 - Starting hunger must be finite. Hunger rates must be finite and nonnegative. Hunger is not clamped at zero or at the starvation threshold.
 - Citizens start with no berries. Berries provide 0.5 nutrition per gram and take one second per gram to eat. Eat selects up to 50 nutrition from current inventory when starting, using smaller portions when needed and skipping empty meals. The portion determines duration, rounded up to the nearest millisecond, and is consumed gradually alongside its hunger reduction.
+- Find rocks takes 30 minutes and adds uniform random 5–15 grams of pebbles on completion; predictions use 10 grams. Pebble inventory uses grams as `f64`.
 - Forage takes 30 minutes and adds a uniform random 5–15 grams of berries on completion. Average yield is 10 grams: 20 forage actions (10 hours) yield the 200 grams needed per day on average.
 - Tiredness grows by 100 per 24 simulation hours, including during sleep. Below zero represents being rested; tiredness has a minimum of -100 and no upper cap.
 - Sleep takes eight simulation hours and gradually reduces tiredness by 100 over that duration, subject to the floor. Eight hours of sleep balances one day of tiredness growth when recovery is not lost at the floor. Hunger keeps growing during sleep.
@@ -36,15 +37,15 @@
 ## Personal wellbeing
 
 - An agent's personal wellbeing score is calculated from its needs and other attributes.
-- Currently, `Citizen::personal_wellbeing()` calculates a hunger and tiredness score on demand without a universe or stored score. `Agent::personal_wellbeing()` delegates to its kind.
-- Higher scores are better. The formula is `-max(hunger, 0) - 4 * max(hunger - 100, 0) - max(-hunger - 100, 0) - max(tiredness, 0)`.
+- Currently, `Citizen::personal_wellbeing()` calculates a hunger, tiredness, and wealth score on demand without a universe or stored score. `Agent::personal_wellbeing()` delegates to its kind.
+- Higher scores are better. The formula is `-max(hunger, 0) - 4 * max(hunger - 100, 0) - max(-hunger - 100, 0) - max(tiredness, 0) + 10 * wealth`.
 - Hunger from -100 to 0 scores zero. Satiation delays future hunger rather than granting an immediate wellbeing bonus.
 - Hunger below -100 represents being overfull, costing one point per excess unit with no jump at the threshold.
 - Hunger above 0 costs one point per unit up to 100. Each unit beyond 100 costs five points, with no jump at the starvation threshold.
 - A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
 - Each positive unit of tiredness costs one wellbeing point. Negative tiredness delays future tiredness without granting an immediate bonus.
 - Clothing will be an important factor later.
-- Total wealth will be a secondary factor.
+- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The placeholder marketplace prices berries at 1 coin/kg and pebbles at 2 coins/kg; trading is not implemented.
 - A collective's wellbeing could depend primarily on its members' needs, or it might depend only on money. This is still undecided.
 
 ## Relationships
@@ -72,12 +73,12 @@
 ## Actions and planning
 
 - Agents have actions, each with an estimated duration and a result.
-- Currently, citizens can Eat for a duration determined by available berries, Wait or Forage for 30 minutes, or Sleep for eight hours. Only one action can be active at a time; both needs continue growing during all actions.
+- Currently, citizens can Eat for a duration determined by available berries, Wait, Forage, or Find rocks for 30 minutes, or Sleep for eight hours. Only one action can be active at a time; both needs continue growing during all actions.
 - Starting an action returns a new snapshot without advancing time. Eat gradually consumes its selected berry portion and restores hunger; Sleep gradually grants 100 tiredness recovery; Wait grants no recovery. Completion gives no extra need reduction; Forage grants its berry yield on completion. Unplanned citizens remain idle after finishing their manually started action. Interruption is not implemented.
 - Planning explores action sequences until the completed action that reaches or crosses a four-hour horizon, using independent citizen snapshots. The horizon is a duration, not an action count. Forage predictions add the 10-gram average; inventory determines predicted meal sizes and durations. Sleep finishes in predictions even across the horizon. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
 - A plan's score is the average personal wellbeing at all its action completions, including the action crossing the horizon. Plans have variable-length action sequences. Wellbeing between completions and duration weighting are not included.
 - Within each prediction, Eat becomes eligible again four simulation hours after its previous completion. Every new plan resets this restriction, regardless of actual recent eating. Current four-hour predictions therefore contain at most one Eat; longer predictions can contain more. The restriction lives in the search, not in persistent citizen state.
-- The highest-scoring permitted plan wins. Any equally good plan is acceptable on ties. Search tries Wait, Eat, Sleep, then Forage. Unused berry stock has no direct wellbeing value, so extra foraging can tie with waiting.
+- The highest-scoring permitted plan wins. Any equally good plan is acceptable on ties. Search tries Wait, Eat, Sleep, Forage, then Find rocks. Stored berries and pebbles contribute market value to wellbeing.
 - Planning is enabled explicitly on an idle citizen with `start_planning()`, also available through agents and universes. The search and batch executor live in the separate planning module and reuse citizen action and need calculations.
 - Execute the selected plan for two simulation hours without reconsidering between actions. Finish any action crossing that time boundary, then search again from the actual state and start the next batch.
 - Exception: before starting a non-first Eat, the **replan check** triggers if actual inventory provides less than 20 nutrition. Replan from actual state; the first action of the new plan is exempt. At least 20 nutrition allows the meal to proceed, eating up to 50 nutrition. A meal already underway is not interrupted. Prediction excludes empty meals and later meals that would already trigger this check.

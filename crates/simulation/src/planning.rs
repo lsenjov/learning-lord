@@ -139,6 +139,7 @@ fn search(
         CitizenAction::Eat,
         CitizenAction::Sleep,
         CitizenAction::Forage,
+        CitizenAction::FindRocks,
     ] {
         if action == CitizenAction::Eat && eat_cooldown_ms > 0
             || replan_check(citizen, action, actions.len())
@@ -153,9 +154,12 @@ fn search(
         let next = started.advance_predicted(duration_ms)?;
         let wellbeing = next.personal_wellbeing()?;
         // Incremental averaging avoids overflowing a sum and supports variable plan lengths.
-        // Wellbeing is nonpositive, so the difference between two scores is finite.
-        let score =
-            average_wellbeing + (wellbeing - average_wellbeing) / (actions.len() + 1) as f64;
+        let count = (actions.len() + 1) as f64;
+        let score = if wellbeing.is_sign_positive() == average_wellbeing.is_sign_positive() {
+            average_wellbeing + (wellbeing - average_wellbeing) / count
+        } else {
+            average_wellbeing * ((count - 1.0) / count) + wellbeing / count
+        };
         if !score.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
