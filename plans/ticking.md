@@ -77,7 +77,7 @@
 - Starting an action returns a new snapshot without advancing time. Eat gradually consumes its selected berry portion and restores hunger; Sleep gradually grants 100 tiredness recovery; Wait grants no recovery. Completion gives no extra need reduction; Forage grants its berry yield on completion. Unplanned citizens remain idle after finishing their manually started action. Interruption is not implemented.
 - Planning starts from hunger, tiredness, and wealth goals. Actions describe inputs and effects; missing resources are obtained by recursively finding supplier actions, rather than enumerating every primitive ordering or defining recipes.
 - Hunger targets a full meal, with an immediate smaller meal also considered if food is already available. Gathered resources use average yields; trading uses the same prices as execution.
-- Each backward goal search has a four-hour limit. One action may cross it, but no more prerequisites can be added afterward; incomplete branches are discarded. Sleep can take eight hours.
+- Each backward goal search allows up to four hours of preparation, including resource acquisition and travel. The final activity is excluded from that budget and finishes in full, allowing travel home followed by eight hours of sleep.
 - Simulate alternatives forward and retain the best average completion-wellbeing variant per goal. Explore subsequent goal choices from its predicted state. This is a local heuristic, not a global optimum over primitive actions.
 - Goals may start while the combined plan is under four hours. Complete the entire final goal, even beyond that horizon. Score the full plan using average wellbeing across all primitive action completions, without time weighting.
 - Eat has a four-hour prediction-local cooldown; Buy berries and Sell pebbles have separate two-hour cooldowns. All start at completion, carry across goals, and reset on each new plan. They do not restrict manual execution.
@@ -157,3 +157,12 @@
 - The universe owns the market seed and prices, synchronizing the price context on citizen snapshots. Standalone citizens use `Prices::default()` (1 and 2 coins/kg) unless given `with_prices(...)`; inserting one into a universe uses that universe’s prices. `Universe::with_prices(...)` allows explicit setup prices until the next scheduled update.
 - Split universe advancement at each 04:00 boundary. Active trades retain their quote; actions starting exactly at the boundary use the new prices. Revalue inventories immediately, but keep existing plans until normal replanning. Predictions assume current prices remain stable throughout the forecast.
 - Market draws are addressed by seed and update period, preserving independent branches and tick partitioning. Empty universes can jump directly to the final applicable price update.
+
+## Locations
+
+- Each universe has a randomized 2 km × 2 km map with the house at the centre and distinct forest, river and market locations. Restart generates a fresh map.
+- Ada starts at home. Sleep requires home, Forage the forest, Find rocks the river, and trading the market. Eat and Wait are available anywhere.
+- Travel is a separate action inserted automatically as a prerequisite, using the position resulting from preceding actions. It is not a standalone planning goal.
+- Walking moves continuously in a straight line at 1 km per 10 minutes. Coordinates are metres as `f64`; needs advance while travelling.
+- Travel counts toward preparation time, cooldown progression and completion wellbeing scoring. A trip already underway finishes before normal replanning.
+- The app shows labelled sites, Ada's position and the current route.

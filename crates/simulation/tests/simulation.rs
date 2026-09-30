@@ -11,8 +11,8 @@ fn citizen(universe: &Universe, id: AgentId) -> &Citizen {
 
 #[test]
 fn creation_assigns_v4_ids_and_preserves_existing_agents_and_time() {
-    let empty =
-        Universe::default().with_prices(learning_lord_simulation::marketplace::Prices::default());
+    let empty = Universe::with_map(learning_lord_simulation::locations::Map::default())
+        .with_prices(learning_lord_simulation::marketplace::Prices::default());
     let (first, first_id) =
         empty.with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 2.0).unwrap());
     let first = first.advance(500).unwrap();
@@ -98,7 +98,7 @@ fn personal_wellbeing_penalizes_hunger_and_weights_starvation_without_a_jump() {
 
 #[test]
 fn personal_wellbeing_reflects_each_snapshot_without_changing_it() {
-    let (original, id) = Universe::default()
+    let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Ada", Citizen::with_hunger_rate(-20.0, 120.0).unwrap());
     let snapshot = original.clone();
@@ -120,9 +120,10 @@ fn personal_wellbeing_reflects_each_snapshot_without_changing_it() {
 #[test]
 fn personal_wellbeing_rejects_overflow_without_changing_the_citizen() {
     for hunger in [f64::MAX / 4.0, f64::MAX] {
-        let (universe, id) = Universe::default()
-            .with_prices(learning_lord_simulation::marketplace::Prices::default())
-            .with_citizen("Ada", Citizen::with_hunger_rate(hunger, 0.0).unwrap());
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_prices(learning_lord_simulation::marketplace::Prices::default())
+                .with_citizen("Ada", Citizen::with_hunger_rate(hunger, 0.0).unwrap());
         let snapshot = universe.clone();
 
         assert_eq!(
@@ -170,9 +171,10 @@ fn citizen_rejects_hunger_overflow_without_changing_its_needs() {
 
 #[test]
 fn advancing_updates_each_citizen_and_the_clock_once() {
-    let (universe, satiated_id) = Universe::default()
-        .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", Citizen::with_hunger_rate(-5.0, 10.0).unwrap());
+    let (universe, satiated_id) =
+        Universe::with_map(learning_lord_simulation::locations::Map::default())
+            .with_prices(learning_lord_simulation::marketplace::Prices::default())
+            .with_citizen("Ada", Citizen::with_hunger_rate(-5.0, 10.0).unwrap());
     let (universe, hungry_id) =
         universe.with_citizen("Bea", Citizen::with_hunger_rate(99.0, 4.0).unwrap());
 
@@ -190,7 +192,7 @@ fn advancing_updates_each_citizen_and_the_clock_once() {
 
 #[test]
 fn subsecond_steps_accumulate_and_match_one_large_step() {
-    let (universe, id) = Universe::default()
+    let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Ada", Citizen::with_hunger_rate(-0.5, 3.7).unwrap());
     let first_step = universe.advance(17).unwrap();
@@ -209,7 +211,7 @@ fn subsecond_steps_accumulate_and_match_one_large_step() {
 
 #[test]
 fn zero_duration_preserves_the_entire_universe() {
-    let (universe, _) = Universe::default()
+    let (universe, _) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 3.0).unwrap());
     let universe = universe.advance(100).unwrap();
@@ -219,7 +221,7 @@ fn zero_duration_preserves_the_entire_universe() {
 
 #[test]
 fn zero_hunger_rate_preserves_satiation_while_time_advances() {
-    let (universe, id) = Universe::default()
+    let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 0.0).unwrap());
 
@@ -231,8 +233,8 @@ fn zero_hunger_rate_preserves_satiation_while_time_advances() {
 
 #[test]
 fn empty_universe_advances_and_rejects_clock_overflow() {
-    let original =
-        Universe::default().with_prices(learning_lord_simulation::marketplace::Prices::default());
+    let original = Universe::with_map(learning_lord_simulation::locations::Map::default())
+        .with_prices(learning_lord_simulation::marketplace::Prices::default());
     let universe = original.advance(u64::MAX).unwrap();
 
     assert_eq!(original.current_time_ms(), 0);
@@ -245,7 +247,7 @@ fn empty_universe_advances_and_rejects_clock_overflow() {
 #[test]
 fn nonfinite_hunger_results_are_rejected_without_changing_the_source() {
     for (starting_hunger, elapsed_ms) in [(f64::MAX, HOUR_MS), (0.0, 2 * HOUR_MS)] {
-        let (universe, _) = Universe::default()
+        let (universe, _) = Universe::with_map(learning_lord_simulation::locations::Map::default())
             .with_prices(learning_lord_simulation::marketplace::Prices::default())
             .with_citizen("Ada", Citizen::with_hunger_rate(1.0, 1.0).unwrap());
         let (universe, _) = universe.with_citizen(
@@ -264,8 +266,8 @@ fn nonfinite_hunger_results_are_rejected_without_changing_the_source() {
 
 #[test]
 fn branches_can_advance_and_create_citizens_on_other_threads_independently() {
-    let mut universe =
-        Universe::default().with_prices(learning_lord_simulation::marketplace::Prices::default());
+    let mut universe = Universe::with_map(learning_lord_simulation::locations::Map::default())
+        .with_prices(learning_lord_simulation::marketplace::Prices::default());
     let mut ids = Vec::new();
     for index in 0..128 {
         let (next, id) = universe.with_citizen(

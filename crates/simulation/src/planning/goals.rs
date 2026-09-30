@@ -33,7 +33,7 @@ impl CitizenAction {
             Self::FindRocks => &[Pebbles, IncreaseWealth],
             Self::BuyBerries => &[Berries],
             Self::SellPebbles => &[Coins],
-            Self::Wait => &[],
+            Self::Wait | Self::Travel(_) => &[],
         }
     }
 
@@ -217,7 +217,7 @@ fn satisfy(
             state,
             action,
             requirement.amount,
-            reserved_ms,
+            reserved_ms + action.predicted_duration(),
             prior_actions,
         )?;
         for ready in prepared {
@@ -239,15 +239,27 @@ fn prepare(
     reserved_ms: u64,
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
-    match action.input_for(&state.citizen, amount) {
-        Some(requirement) => satisfy(
-            state,
-            requirement,
-            reserved_ms + action.predicted_duration(),
-            prior_actions,
-        ),
-        None => Ok(vec![state.clone()]),
+    let prepared = match action.input_for(&state.citizen, amount) {
+        Some(requirement) => satisfy(state, requirement, reserved_ms, prior_actions)?,
+        None => vec![state.clone()],
+    };
+    let mut variants = Vec::new();
+    for mut ready in prepared {
+        if let Some(location) = action.required_location()
+            && ready.citizen.position() != ready.citizen.map().position(location)
+        {
+            let Some(travelled) = ready.perform(CitizenAction::Travel(location), prior_actions)?
+            else {
+                continue;
+            };
+            ready = travelled;
+        }
+        // Preparation includes travel; the final goal activity is not reserved against this budget.
+        if ready.elapsed_ms + reserved_ms <= GOAL_HORIZON_MS {
+            variants.push(ready);
+        }
     }
+    Ok(variants)
 }
 
 pub(super) fn best_variant(
@@ -400,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn backward_limit_allows_one_crossing_action_but_not_missing_prerequisites() {
+    fn preparation_limit_allows_final_activity_but_not_missing_prerequisites() {
         let variants = full_meals(&hungry(20.0));
         let full_forage = variants
             .iter()
@@ -542,6 +554,84 @@ mod tests {
     fn scoring_handles_opposite_extremes_without_overflow() {
         assert_eq!(average(&[-f64::MAX, f64::MAX]), Ok(0.0));
         assert_eq!(average(&[f64::MAX, -f64::MAX]), Ok(0.0));
+    }
+
+    #[test]
+    fn goal_routes_follow_prior_positions_and_charge_travel_once_per_visit() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 300.0, y: 400.0 },
+            Position { x: -400.0, y: 0.0 },
+            Position { x: 0.0, y: 600.0 },
+        )
+        .unwrap();
+        let source = hungry(40.0).with_map(map).unwrap();
+        let variants = full_meals(&source);
+        let mut foraged = vec![CitizenAction::Travel(Location::Forest)];
+        foraged.extend([CitizenAction::Forage; 6]);
+        foraged.push(CitizenAction::Eat);
+        let gathered = variants.iter().find(|v| v.actions == foraged).unwrap();
+        assert_eq!(
+            gathered.elapsed_ms,
+            300_000 + 6 * ACTION_DURATION_MS + 100_000
+        );
+        let mut traded = vec![CitizenAction::Travel(Location::River)];
+        traded.extend([CitizenAction::FindRocks; 6]);
+        traded.extend([
+            CitizenAction::Travel(Location::Market),
+            CitizenAction::SellPebbles,
+            CitizenAction::BuyBerries,
+            CitizenAction::Eat,
+        ]);
+        let trade = variants.iter().find(|v| v.actions == traded).unwrap();
+        let river_to_market = (map
+            .position(Location::River)
+            .distance(map.position(Location::Market))
+            * crate::locations::WALK_MS_PER_METRE)
+            .ceil() as u64;
+        assert_eq!(
+            trade.elapsed_ms,
+            240_000 + 6 * ACTION_DURATION_MS + river_to_market + 2 * TRADE_DURATION_MS + 100_000
+        );
+        assert_eq!(trade.citizen.position(), map.position(Location::Market));
+        assert_eq!(trade.scores.len(), trade.actions.len());
+        assert_eq!(source.position(), Position::default());
+    }
+
+    #[test]
+    fn preparation_budget_includes_travel_but_excludes_the_final_activity() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 300.0, y: 400.0 },
+            Position { x: -400.0, y: 0.0 },
+            Position { x: 0.0, y: 600.0 },
+        )
+        .unwrap();
+        let away = hungry(20.0)
+            .with_map(map)
+            .unwrap()
+            .with_position(map.position(Location::Forest))
+            .unwrap();
+        let sleep = best_variant(&away, Effect::ReduceTiredness, Cooldowns::default(), 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sleep.actions,
+            [CitizenAction::Travel(Location::House), CitizenAction::Sleep]
+        );
+        assert_eq!(sleep.elapsed_ms, 300_000 + SLEEP_DURATION_MS);
+        let at_home = hungry(20.0).with_map(map).unwrap();
+        assert!(!full_meals(&at_home).iter().any(|v| {
+            v.actions
+                .iter()
+                .filter(|&&a| a == CitizenAction::Forage)
+                .count()
+                == 8
+        }));
+        assert!(
+            full_meals(&away).iter().any(|v| v.actions
+                == [vec![CitizenAction::Forage; 8], vec![CitizenAction::Eat]].concat())
+        );
     }
 
     #[test]

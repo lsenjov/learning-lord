@@ -107,9 +107,10 @@ fn tiredness_penalizes_wellbeing_without_a_bonus_for_negative_values() {
     ] {
         let citizen = Citizen::with_needs(hunger, tiredness).unwrap();
         assert_eq!(citizen.personal_wellbeing(), Ok(expected));
-        let (universe, id) = Universe::default()
-            .with_prices(learning_lord_simulation::marketplace::Prices::default())
-            .with_citizen("Ada", citizen);
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_prices(learning_lord_simulation::marketplace::Prices::default())
+                .with_citizen("Ada", citizen);
         assert_eq!(universe.agents()[&id].personal_wellbeing(), Ok(expected));
     }
     assert_eq!(

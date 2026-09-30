@@ -220,7 +220,7 @@ fn planning_rejects_busy_citizens_and_cannot_replace_a_committed_batch() {
 
 #[test]
 fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches() {
-    let (original, id) = Universe::default()
+    let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Ada", Citizen::new(25.0).unwrap());
     let (original, other_id) = original.with_citizen("Bea", Citizen::new(0.0).unwrap());
@@ -265,7 +265,7 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
     assert_eq!(planned, planned_snapshot);
     assert_eq!(original, snapshot);
 
-    let (_, missing_id) = Universe::default()
+    let (_, missing_id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Missing", Citizen::new(0.0).unwrap());
     assert_eq!(
@@ -298,7 +298,7 @@ fn prediction_and_replanning_errors_preserve_original_state() {
     );
     assert_eq!(planned, snapshot);
 
-    let (universe, _) = Universe::default()
+    let (universe, _) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Ada", planned);
     let snapshot = universe.clone();

@@ -297,6 +297,7 @@ mod tests {
         let universe = new_universe().unwrap().advance(STEP_MS).unwrap();
         let old_ids: Vec<_> = universe.agents().keys().copied().collect();
         let old_prices = universe.prices();
+        let old_map = universe.map();
         let mut state = WorkerState {
             universe,
             pacing: pacing(30),
@@ -310,6 +311,7 @@ mod tests {
         assert_eq!(state.universe.agents().len(), 1);
         assert!(!state.universe.agents().contains_key(&old_ids[0]));
         assert_ne!(state.universe.prices(), old_prices);
+        assert_ne!(state.universe.map(), old_map);
         assert!(state.error.is_none());
         assert!(!state.pacing.running);
         assert_eq!(state.pacing.speed, 1);
@@ -322,6 +324,14 @@ mod tests {
         );
         let learning_lord_simulation::AgentKind::Citizen(citizen) =
             &state.universe.agents().values().next().unwrap().kind;
+        assert_eq!(
+            citizen.position(),
+            state
+                .universe
+                .map()
+                .position(learning_lord_simulation::locations::Location::House)
+        );
+        assert_eq!(citizen.map(), state.universe.map());
         assert_eq!(citizen.hunger(), 0.0);
         assert_eq!(citizen.tiredness(), 0.0);
         assert_eq!(citizen.coins(), 0.0);
@@ -428,7 +438,9 @@ mod tests {
 
     #[test]
     fn paused_steps_are_exact_and_ignore_speed_while_running_steps_are_rejected() {
-        let (universe, id) = Universe::default().with_citizen("Ada", Citizen::new(0.0).unwrap());
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_citizen("Ada", Citizen::new(0.0).unwrap());
         let universe = universe.start_planning(id).unwrap();
         let original = universe.clone();
         let mut state = WorkerState {
@@ -449,7 +461,7 @@ mod tests {
 
     #[test]
     fn worker_processes_ordered_commands_publishes_latest_state_and_shuts_down() {
-        let original = Universe::default();
+        let original = Universe::with_map(learning_lord_simulation::locations::Map::default());
         let worker = SimulationWorker::spawn(original.clone(), NonZeroU32::new(30).unwrap());
         worker.send(Command::SetSpeed(20)).unwrap();
         worker.send(Command::Step).unwrap();
@@ -482,7 +494,9 @@ mod tests {
 
     #[test]
     fn overflow_pauses_the_worker_and_preserves_the_last_snapshot() {
-        let universe = Universe::default().advance(u64::MAX).unwrap();
+        let universe = Universe::with_map(learning_lord_simulation::locations::Map::default())
+            .advance(u64::MAX)
+            .unwrap();
         let mut state = WorkerState {
             universe: universe.clone(),
             pacing: pacing(60),

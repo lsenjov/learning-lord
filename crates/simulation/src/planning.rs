@@ -265,6 +265,39 @@ mod tests {
     }
 
     #[test]
+    fn commitment_waits_for_travel_to_finish_before_replanning() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 300.0, y: 400.0 },
+            Position::default(),
+            Position::default(),
+        )
+        .unwrap();
+        let source = Citizen::new(0.0).unwrap().with_map(map).unwrap();
+        let mut planned = executing(
+            &source,
+            vec![
+                CitizenAction::Travel(Location::Forest),
+                CitizenAction::Forage,
+            ],
+        );
+        planned.active_plan.as_mut().unwrap().elapsed_ms = COMMITMENT_MS - 60_000;
+        let crossed = planned.advance(60_000).unwrap();
+        assert_eq!(
+            crossed.active_plan().unwrap().plan(),
+            planned.active_plan().unwrap().plan()
+        );
+        assert_eq!(
+            crossed.active_action().unwrap().action(),
+            CitizenAction::Travel(Location::Forest)
+        );
+        let arrived = crossed.advance(240_000).unwrap();
+        assert_eq!(arrived.position(), map.position(Location::Forest));
+        assert_eq!(arrived.active_plan().unwrap().elapsed_ms(), 0);
+        assert!(arrived.active_plan().unwrap().plan().decision().is_some());
+    }
+
+    #[test]
     fn decision_records_existing_candidates_and_preserves_search_result() {
         use crate::marketplace::Prices;
         for prices in [
@@ -381,7 +414,7 @@ mod tests {
                 CitizenAction::Sleep,
             ],
         );
-        let universe = Universe::default()
+        let universe = Universe::with_map(crate::locations::Map::default())
             .with_prices(Prices::default())
             .advance(UPDATE_TIME_MS - crate::ACTION_DURATION_MS)
             .unwrap();

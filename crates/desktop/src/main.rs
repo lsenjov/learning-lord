@@ -1,3 +1,4 @@
+mod map_view;
 mod simulation;
 
 use bevy::{
@@ -68,7 +69,7 @@ fn main() -> Result<(), String> {
             primary_window: Some(Window {
                 title: "Learning Lord".into(),
                 name: Some("learning-lord".into()),
-                resolution: (1024, 720).into(),
+                resolution: (1280, 800).into(),
                 ..default()
             }),
             ..default()
@@ -81,7 +82,13 @@ fn main() -> Result<(), String> {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (poll_worker, handle_controls, refresh_display).chain(),
+            (
+                poll_worker,
+                handle_controls,
+                refresh_display,
+                map_view::refresh,
+            )
+                .chain(),
         )
         .run();
     Ok(())
@@ -175,10 +182,11 @@ fn setup(mut commands: Commands) {
                 ..default()
             })
             .with_children(|row| {
-                for (readout, size) in [(Readout::Citizen, 18.0), (Readout::Decision, 14.0)] {
+                map_view::spawn(row);
+                for (readout, size) in [(Readout::Citizen, 16.0), (Readout::Decision, 14.0)] {
                     row.spawn((
                         Node {
-                            flex_basis: percent(50),
+                            flex_basis: px(0),
                             flex_grow: 1.0,
                             min_width: px(0),
                             padding: UiRect::all(px(16)),
@@ -302,6 +310,12 @@ fn citizen_readout(universe: &Universe) -> String {
                 CitizenAction::FindRocks => "Finding rocks",
                 CitizenAction::BuyBerries => "Buying berries",
                 CitizenAction::SellPebbles => "Selling pebbles",
+                CitizenAction::Travel(location) => match location {
+                    learning_lord_simulation::locations::Location::House => "Walking to house",
+                    learning_lord_simulation::locations::Location::Forest => "Walking to forest",
+                    learning_lord_simulation::locations::Location::River => "Walking to river",
+                    learning_lord_simulation::locations::Location::Market => "Walking to market",
+                },
             };
             let seconds = active.remaining_ms().div_ceil(1000);
             format!(
@@ -368,6 +382,12 @@ fn action_label(action: CitizenAction) -> &'static str {
         CitizenAction::FindRocks => "Find rocks",
         CitizenAction::BuyBerries => "Buy berries",
         CitizenAction::SellPebbles => "Sell pebbles",
+        CitizenAction::Travel(location) => match location {
+            learning_lord_simulation::locations::Location::House => "Travel home",
+            learning_lord_simulation::locations::Location::Forest => "Travel to forest",
+            learning_lord_simulation::locations::Location::River => "Travel to river",
+            learning_lord_simulation::locations::Location::Market => "Travel to market",
+        },
     }
 }
 
@@ -510,9 +530,10 @@ mod tests {
     fn decision_panel_distinguishes_missing_candidates_and_uses_saved_prices() {
         use learning_lord_simulation::marketplace::Prices;
         let prices = Prices::new(2.0, 1.0).unwrap();
-        let (universe, id) = Universe::default()
-            .with_prices(prices)
-            .with_citizen("Ada", Citizen::new(0.0).unwrap());
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_prices(prices)
+                .with_citizen("Ada", Citizen::new(0.0).unwrap());
         assert!(decision_readout(&universe).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
         let text = decision_readout(&planned);
@@ -548,9 +569,10 @@ mod tests {
             .unwrap()
             .with_berries(200.0)
             .unwrap();
-        let (universe, id) = Universe::default()
-            .with_prices(learning_lord_simulation::marketplace::Prices::default())
-            .with_citizen("Ada", citizen);
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_prices(learning_lord_simulation::marketplace::Prices::default())
+                .with_citizen("Ada", citizen);
         let universe = universe
             .start_planning(id)
             .unwrap()
@@ -568,9 +590,10 @@ mod tests {
     #[test]
     fn sleeping_readout_counts_down_to_completion_even_past_commitment() {
         let citizen = Citizen::with_needs(-50.0, 50.0).unwrap();
-        let (universe, id) = Universe::default()
-            .with_prices(learning_lord_simulation::marketplace::Prices::default())
-            .with_citizen("Ada", citizen);
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_prices(learning_lord_simulation::marketplace::Prices::default())
+                .with_citizen("Ada", citizen);
         let universe = universe
             .start_planning(id)
             .unwrap()
@@ -587,7 +610,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let worker = SimulationWorker::spawn(
-            Universe::default()
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(learning_lord_simulation::marketplace::Prices::default()),
             60.try_into().unwrap(),
         );
@@ -600,7 +623,13 @@ mod tests {
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
-                (poll_worker, handle_controls, refresh_display).chain(),
+                (
+                    poll_worker,
+                    handle_controls,
+                    refresh_display,
+                    map_view::refresh,
+                )
+                    .chain(),
             );
         app.update();
 

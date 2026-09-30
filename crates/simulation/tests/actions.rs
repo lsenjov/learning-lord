@@ -182,7 +182,7 @@ fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
 
 #[test]
 fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
-    let (original, id) = Universe::default()
+    let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen(
             "Ada",
@@ -221,7 +221,7 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     assert_eq!(eating, eating_snapshot);
     assert_eq!(original, snapshot);
 
-    let (_, missing_id) = Universe::default()
+    let (_, missing_id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen("Missing", Citizen::new(0.0).unwrap());
     assert_eq!(
@@ -252,9 +252,10 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
             );
             assert_eq!(citizen, snapshot);
 
-            let (universe, _) = Universe::default()
-                .with_prices(learning_lord_simulation::marketplace::Prices::default())
-                .with_citizen("Ada", citizen);
+            let (universe, _) =
+                Universe::with_map(learning_lord_simulation::locations::Map::default())
+                    .with_prices(learning_lord_simulation::marketplace::Prices::default())
+                    .with_citizen("Ada", citizen);
             let snapshot = universe.clone();
             assert_eq!(
                 universe.advance(120 * MINUTE_MS),

@@ -4,7 +4,9 @@ use rand::{RngExt, rngs::SmallRng};
 use std::fmt;
 use uuid::Uuid;
 
+pub mod locations;
 pub mod marketplace;
+use locations::{Location, Map, Position, WALK_MS_PER_METRE};
 pub mod planning;
 
 pub const WEALTH_WELLBEING_PER_COIN: f64 = 10.0;
@@ -83,6 +85,19 @@ pub enum CitizenAction {
     FindRocks,
     BuyBerries,
     SellPebbles,
+    Travel(Location),
+}
+
+impl CitizenAction {
+    pub fn required_location(self) -> Option<Location> {
+        match self {
+            Self::Sleep => Some(Location::House),
+            Self::Forage => Some(Location::Forest),
+            Self::FindRocks => Some(Location::River),
+            Self::BuyBerries | Self::SellPebbles => Some(Location::Market),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -94,6 +109,8 @@ pub struct ActiveAction {
     berries_after_meal: f64,
     trade_grams: f64,
     trade_coins: f64,
+    travel_origin: Position,
+    travel_destination: Option<Position>,
 }
 
 impl ActiveAction {
@@ -120,6 +137,8 @@ pub struct Citizen {
     coins: f64,
     forage_rng: SmallRng,
     prices: Prices,
+    map: Map,
+    position: Position,
     active_action: Option<ActiveAction>,
     active_plan: Option<planning::ActivePlan>,
 }
@@ -154,9 +173,39 @@ impl Citizen {
             coins: 0.0,
             forage_rng: rand::make_rng(),
             prices: Prices::default(),
+            map: Map::default(),
+            position: Position::default(),
             active_action: None,
             active_plan: None,
         })
+    }
+
+    pub fn position(&self) -> Position {
+        self.position
+    }
+    pub fn map(&self) -> Map {
+        self.map
+    }
+
+    pub fn with_map(&self, map: Map) -> Result<Self, SimulationError> {
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.map = map;
+        Ok(citizen)
+    }
+
+    pub fn with_position(&self, position: Position) -> Result<Self, SimulationError> {
+        if !position.valid() {
+            return Err(SimulationError::InvalidPosition);
+        }
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.position = position;
+        Ok(citizen)
     }
 
     pub fn hunger(&self) -> f64 {
@@ -242,6 +291,10 @@ impl Citizen {
 
     pub fn action_duration_ms(&self, action: CitizenAction) -> u64 {
         match action {
+            CitizenAction::Travel(destination) => {
+                (self.position.distance(self.map.position(destination)) * WALK_MS_PER_METRE).ceil()
+                    as u64
+            }
             CitizenAction::Eat => (self.meal_grams() * BERRY_EATING_MS_PER_GRAM).ceil() as u64,
             CitizenAction::Wait | CitizenAction::Forage | CitizenAction::FindRocks => {
                 ACTION_DURATION_MS
@@ -303,6 +356,12 @@ impl Citizen {
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
         }
+        if action
+            .required_location()
+            .is_some_and(|location| self.position != self.map.position(location))
+        {
+            return Err(SimulationError::WrongLocation);
+        }
         let mut citizen = self.clone();
         let duration_ms = self.action_duration_ms(action);
         if duration_ms == 0 {
@@ -322,6 +381,12 @@ impl Citizen {
             berries_after_meal: self.berries_grams - meal_grams,
             trade_grams,
             trade_coins,
+            travel_origin: self.position,
+            travel_destination: if let CitizenAction::Travel(location) = action {
+                Some(self.map.position(location))
+            } else {
+                None
+            },
         });
         Ok(citizen)
     }
@@ -373,6 +438,19 @@ impl Citizen {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
             citizen.advance_needs(action_elapsed_ms, Some(active))?;
             active.remaining_ms -= action_elapsed_ms;
+            if let Some(destination) = active.travel_destination {
+                let fraction = 1.0 - active.remaining_ms as f64 / active.duration_ms as f64;
+                citizen.position = if active.remaining_ms == 0 {
+                    destination
+                } else {
+                    Position {
+                        x: active.travel_origin.x
+                            + (destination.x - active.travel_origin.x) * fraction,
+                        y: active.travel_origin.y
+                            + (destination.y - active.travel_origin.y) * fraction,
+                    }
+                };
+            }
 
             if active.action == CitizenAction::Eat {
                 citizen.berries_grams = active.berries_after_meal
@@ -459,14 +537,37 @@ impl Citizen {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Universe {
     current_time_ms: u64,
     market: Market,
+    map: Map,
     agents: HashMap<AgentId, Agent>,
 }
 
+impl Default for Universe {
+    fn default() -> Self {
+        Self {
+            current_time_ms: 0,
+            market: Market::default(),
+            map: Map::random(),
+            agents: HashMap::new(),
+        }
+    }
+}
+
 impl Universe {
+    pub fn map(&self) -> Map {
+        self.map
+    }
+
+    pub fn with_map(map: Map) -> Self {
+        Self {
+            map,
+            ..Self::default()
+        }
+    }
+
     pub fn prices(&self) -> Prices {
         self.market.prices
     }
@@ -496,11 +597,19 @@ impl Universe {
         }
 
         let mut universe = self.clone();
+        let mut citizen = citizen.with_prices(self.prices());
+        if citizen.map != self.map {
+            // Entering a different world invalidates routes and actions tied to the old map.
+            citizen.map = self.map;
+            citizen.position = self.map.position(Location::House);
+            citizen.active_action = None;
+            citizen.active_plan = None;
+        }
         universe.agents.insert(
             id,
             Agent {
                 name: name.into(),
-                kind: AgentKind::Citizen(citizen.with_prices(self.prices())),
+                kind: AgentKind::Citizen(citizen),
             },
         );
         (universe, id)
@@ -574,6 +683,8 @@ pub enum SimulationError {
     InvalidPebbles,
     InvalidCoins,
     InvalidPrices,
+    InvalidPosition,
+    WrongLocation,
     WealthOverflow,
     PebblesOverflow,
     TimeOverflow,
@@ -593,6 +704,8 @@ impl fmt::Display for SimulationError {
             Self::InvalidTiredness => "tiredness must be finite",
             Self::InvalidBerries => "berry grams must be finite and nonnegative",
             Self::InvalidPebbles => "pebble grams must be finite and nonnegative",
+            Self::InvalidPosition => "position must be finite and within the map",
+            Self::WrongLocation => "action requires travel to its location first",
             Self::InvalidPrices => "prices must be finite and positive",
             Self::InvalidCoins => "coins must be finite",
             Self::WealthOverflow => "wealth exceeds the finite range",

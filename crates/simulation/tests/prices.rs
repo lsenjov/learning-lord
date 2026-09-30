@@ -10,7 +10,7 @@ fn citizen(universe: &Universe) -> &Citizen {
 
 #[test]
 fn prices_are_randomized_at_creation_and_at_four_each_day() {
-    let source = Universe::default();
+    let source = Universe::with_map(learning_lord_simulation::locations::Map::default());
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(Prices::new(invalid, 1.0).is_err());
         assert!(Prices::new(1.0, invalid).is_err());
@@ -30,14 +30,17 @@ fn prices_are_randomized_at_creation_and_at_four_each_day() {
         source.advance(UPDATE_TIME_MS + 99 * DAY_MS).unwrap(),
         current
     );
-    assert_ne!(Universe::default().prices(), source.prices());
+    assert_ne!(
+        Universe::with_map(learning_lord_simulation::locations::Map::default()).prices(),
+        source.prices()
+    );
     assert_eq!(source.current_time_ms(), 0);
 }
 
 #[test]
 fn all_citizens_share_prices_and_existing_trades_keep_their_quotes() {
     let initial = Prices::new(1.0, 2.0).unwrap();
-    let universe = Universe::default()
+    let universe = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(initial)
         .advance(UPDATE_TIME_MS - 60_000)
         .unwrap();
@@ -80,7 +83,8 @@ fn prices_revalue_stock_without_changing_inventory_or_forcing_replanning() {
         .unwrap()
         .with_pebbles(50.0)
         .unwrap();
-    let (universe, id) = Universe::default().with_citizen("Ada", source);
+    let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
+        .with_citizen("Ada", source);
     let universe = universe
         .advance(UPDATE_TIME_MS - 1)
         .unwrap()
@@ -121,7 +125,8 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .unwrap()
         .with_pebbles(100.0)
         .unwrap();
-    let (universe, id) = Universe::default().with_citizen("Ada", source);
+    let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
+        .with_citizen("Ada", source);
     let source = citizen(&universe);
     let chosen = learning_lord_simulation::planning::plan(source).unwrap();
     assert_eq!(chosen.actions(), &[CitizenAction::Sleep]);

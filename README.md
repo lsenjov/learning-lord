@@ -47,7 +47,7 @@ fn main() -> Result<(), SimulationError> {
 
 - `planning::plan(&citizen)` searches hunger, tiredness, and wealth goals. Actions expose `effects()` and `input_for(...)`; the planner recursively obtains missing berries, coins, or pebbles through their suppliers. Gathering uses average yields, while trades use the same prices and quantities as execution.
 - A hunger goal targets a full 50-nutrition meal. Existing smaller meals are also considered, subject to the existing food replan check. The planner can discover foraging, buying, selling and gathering prerequisite chains, including mixed supply paths, without predefined recipes.
-- Each goal's backward search has a four-hour bound (`goals::GOAL_HORIZON_MS`). It allows one crossing action, then stops adding prerequisites; unmet requirements invalidate that branch. Sleep can therefore take eight hours.
+- Each goal's backward search allows up to four hours of preparation (`goals::GOAL_HORIZON_MS`), including resource acquisition and travel. The final activity is excluded from that budget and finishes in full, so walking home followed by eight hours of sleep is valid.
 - Alternatives are simulated from the predicted state at the goal's start. Keep the variant with the highest average wellbeing across its primitive action completions, then explore the other goals from that variant's resulting state. This deliberately chooses a locally best variant, not a globally optimal primitive sequence.
 - Start another goal while the combined plan is under four hours (`HORIZON_MS`), then simulate the entire final goal even if it crosses the horizon. Overall scores average every primitive action completion, not goal averages, and are not time-weighted.
 - Prediction-local cooldowns begin at completion: Eat waits four hours, Buy berries and Sell pebbles each wait two hours independently. Cooldowns carry across goals in the same prediction and reset for each new plan. They do not restrict manually started actions or carry across replanning.
@@ -77,7 +77,7 @@ cargo run --locked
 
 The desktop starts paused with Ada at hunger and tiredness zero, no berries, and planning enabled. The clock shows elapsed days, hours, minutes, and seconds, starting at `Day 0 | 00:00:00`. Citizen readouts show berry and pebble grams, coins, total wealth, hunger, tiredness, wellbeing, the current action and its remaining hours/minutes/seconds, the rest of the planned actions in order, and remaining commitment time. Normal replanning waits for action completion; insufficient food can trigger an earlier replan. Future meal durations depend on actual forage outcomes, so the commitment countdown is not an exact forecast of replanning time. Actions beyond the commitment are forecasts and may change when replanning occurs.
 
-- **Restart universe** creates a fresh paused universe at 1x with a new Ada and randomized prices, clearing errors and accumulated pacing. Current prices are displayed above the controls.
+- **Restart universe** creates a fresh paused universe at 1x with a new Ada, randomized map and prices, clearing errors and accumulated pacing. Current prices are displayed above the controls.
 - **Run / Pause** (or **Space**) controls automatic advancement.
 - **1x, 2x, 3x, 5x, 10x, 20x** select simulation speed without unpausing.
 - **Advance 30 minutes** (or **Right arrow**) advances exactly 1,800,000 simulation milliseconds while paused, independent of speed. The button is unavailable while running.
@@ -128,3 +128,12 @@ cargo test -p learning-lord-simulation --locked
 - Goal avg covers only the displayed goal sequence. Plan avg covers the best complete plan starting with that sequence; this determines the chosen first goal. An available but unchosen goal is distinct from an unavailable goal.
 - Unavailable means no executable sequence was found within the four-hour prerequisite limit and action rules; the report does not attribute failure to a particular resource or cooldown.
 - `Plan::decision()` exposes the saved candidates, selected starting goal and prices used. The report is captured during the existing search, shared across snapshot clones, and replaced on replanning. Price changes do not rewrite past decisions. No additional planning is performed for the display.
+
+## Locations and travel
+
+- Each universe generates a 2 km × 2 km map: house at the centre, with distinct forest, river and market sites. Ada starts at home. The desktop map shows the sites, Ada and the remaining current route.
+- Sleep requires the house, Forage the forest, Find rocks the river, and trading the market. Eat and Wait are available anywhere. Starting an activity at the wrong site returns `WrongLocation`.
+- The planner inserts `Travel(Location)` before an activity when needed; travel is not a standalone goal. Each trip begins at the preceding predicted position, so consecutive activities at the same site share the journey. Travel contributes to elapsed time, cooldowns and completion wellbeing scores.
+- Walking follows a straight line at 1 km per 10 minutes. Position changes continuously, needs continue growing, and arrival lands exactly at the destination. Positive durations round up to milliseconds. Replanning waits for the current trip to finish when it crosses the two-hour commitment.
+- Positions use metres as `f64`. `universe.map()`, `citizen.map()` and `citizen.position()` expose spatial state. Standalone citizens use `Map::default()`, with all sites at the origin, for nonspatial fixtures. `Map::new(...)`, `Citizen::with_map(...)`, `Citizen::with_position(...)` and `Universe::with_map(...)` support explicit setup.
+- Inserting a citizen into a different map places them at its house and clears actions and plans tied to the old map. Insertion into the same map preserves their position and activity. Universe clones preserve their map.
