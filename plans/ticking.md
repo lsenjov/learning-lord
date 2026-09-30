@@ -45,7 +45,7 @@
 - A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
 - Each positive unit of tiredness costs one wellbeing point. Negative tiredness delays future tiredness without granting an immediate bonus.
 - Clothing will be an important factor later.
-- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The placeholder marketplace prices berries at 1 coin/kg and pebbles at 2 coins/kg; trading is not implemented.
+- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The placeholder marketplace prices berries at 1 coin/kg and pebbles at 2 coins/kg; the marketplace has unlimited stock and coins.
 - A collective's wellbeing could depend primarily on its members' needs, or it might depend only on money. This is still undecided.
 
 ## Relationships
@@ -75,13 +75,15 @@
 - Agents have actions, each with an estimated duration and a result.
 - Currently, citizens can Eat for a duration determined by available berries, Wait, Forage, or Find rocks for 30 minutes, or Sleep for eight hours. Only one action can be active at a time; both needs continue growing during all actions.
 - Starting an action returns a new snapshot without advancing time. Eat gradually consumes its selected berry portion and restores hunger; Sleep gradually grants 100 tiredness recovery; Wait grants no recovery. Completion gives no extra need reduction; Forage grants its berry yield on completion. Unplanned citizens remain idle after finishing their manually started action. Interruption is not implemented.
-- Planning explores action sequences until the completed action that reaches or crosses a four-hour horizon, using independent citizen snapshots. The horizon is a duration, not an action count. Forage predictions add the 10-gram average; inventory determines predicted meal sizes and durations. Sleep finishes in predictions even across the horizon. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
-- A plan's score is the average personal wellbeing at all its action completions, including the action crossing the horizon. Plans have variable-length action sequences. Wellbeing between completions and duration weighting are not included.
-- Within each prediction, Eat becomes eligible again four simulation hours after its previous completion. Every new plan resets this restriction, regardless of actual recent eating. Current four-hour predictions therefore contain at most one Eat; longer predictions can contain more. The restriction lives in the search, not in persistent citizen state.
-- The highest-scoring permitted plan wins. Any equally good plan is acceptable on ties. Search tries Wait, Eat, Sleep, Forage, then Find rocks. Stored berries and pebbles contribute market value to wellbeing.
-- Planning is enabled explicitly on an idle citizen with `start_planning()`, also available through agents and universes. The search and batch executor live in the separate planning module and reuse citizen action and need calculations.
-- Execute the selected plan for two simulation hours without reconsidering between actions. Finish any action crossing that time boundary, then search again from the actual state and start the next batch.
-- Exception: before starting a non-first Eat, the **replan check** triggers if actual inventory provides less than 20 nutrition. Replan from actual state; the first action of the new plan is exempt. At least 20 nutrition allows the meal to proceed, eating up to 50 nutrition. A meal already underway is not interrupted. Prediction excludes empty meals and later meals that would already trigger this check.
+- Planning starts from hunger, tiredness, and wealth goals. Actions describe inputs and effects; missing resources are obtained by recursively finding supplier actions, rather than enumerating every primitive ordering or defining recipes.
+- Hunger targets a full meal, with an immediate smaller meal also considered if food is already available. Gathered resources use average yields; trading uses the same prices as execution.
+- Each backward goal search has a four-hour limit. One action may cross it, but no more prerequisites can be added afterward; incomplete branches are discarded. Sleep can take eight hours.
+- Simulate alternatives forward and retain the best average completion-wellbeing variant per goal. Explore subsequent goal choices from its predicted state. This is a local heuristic, not a global optimum over primitive actions.
+- Goals may start while the combined plan is under four hours. Complete the entire final goal, even beyond that horizon. Score the full plan using average wellbeing across all primitive action completions, without time weighting.
+- Eat has a four-hour prediction-local cooldown; Buy berries and Sell pebbles have separate two-hour cooldowns. All start at completion, carry across goals, and reset on each new plan. They do not restrict manual execution.
+- Execute the flattened primitive actions for a two-hour commitment, completing the current primitive action before replanning. A goal sequence can span the commitment boundary, but the remaining steps are forecasts.
+- Before a non-first Eat, the replan check triggers if actual food provides less than 20 nutrition. First actions are exempt. Empty meals/trades are skipped and an exhausted sequence causes replanning. Already-running actions are not interrupted.
+
 - Actual forage yields can change meal sizes and durations. Follow the remaining plan unless the replan check triggers, the time commitment is reached, or the action list is exhausted.
 - The citizen stores an optional `ActivePlan`, available through `active_plan()`, with the selected plan, current action index, and elapsed batch time including partial actions.
 - Continue immediately into the next committed action or batch, accounting for all elapsed time even when a tick crosses multiple boundaries.
@@ -142,3 +144,10 @@
 - Some tasks take different amounts of time depending on the citizen's skill.
 - Hauling is fairly universal.
 - Carpentry is very slow for an unskilled citizen.
+
+## Trading
+
+- Buy berries and Sell pebbles each take five simulation minutes. Needs continue growing.
+- Sell pebbles sells all held pebbles at 2 coins/kg. Buy berries tops up to 100 grams at 1 coin/kg, buying less if funds are insufficient and never borrowing.
+- Quantities and payment are fixed from inventory and coins at action start. Goods and coins transfer only on completion, preserving total market-valued wealth apart from floating-point rounding.
+- Predictions use identical trade rules. Empty trades are skipped without consuming time, including during plan execution. Actual quantities may differ after random gathering; the existing low-food replan check still applies before later meals.

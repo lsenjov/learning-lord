@@ -12,6 +12,7 @@ pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
 pub const TIREDNESS_PER_HOUR: f64 = 100.0 / 24.0;
 pub const MEAL_NOURISHMENT: f64 = 50.0;
 pub const ACTION_DURATION_MS: u64 = 30 * 60 * 1000;
+pub const TRADE_DURATION_MS: u64 = 5 * 60 * 1000;
 pub const SLEEP_DURATION_MS: u64 = 8 * 60 * 60 * 1000;
 pub const SLEEP_RECOVERY: f64 = 100.0;
 pub const BERRY_NUTRITION_PER_GRAM: f64 = 0.5;
@@ -79,6 +80,8 @@ pub enum CitizenAction {
     Sleep,
     Forage,
     FindRocks,
+    BuyBerries,
+    SellPebbles,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +91,8 @@ pub struct ActiveAction {
     duration_ms: u64,
     meal_grams: f64,
     berries_after_meal: f64,
+    trade_grams: f64,
+    trade_coins: f64,
 }
 
 impl ActiveAction {
@@ -229,6 +234,34 @@ impl Citizen {
                 ACTION_DURATION_MS
             }
             CitizenAction::Sleep => SLEEP_DURATION_MS,
+            CitizenAction::BuyBerries | CitizenAction::SellPebbles => {
+                if self.trade_amounts(action).0 > 0.0 {
+                    TRADE_DURATION_MS
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
+    fn trade_amounts(&self, action: CitizenAction) -> (f64, f64) {
+        use marketplace::{Good, coins_per_kg, value};
+        match action {
+            CitizenAction::BuyBerries => {
+                let missing =
+                    (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM - self.berries_grams).max(0.0);
+                let cost = value(Good::Berries, missing).min(self.coins.max(0.0));
+                let grams = (cost / coins_per_kg(Good::Berries) * 1000.0).min(missing);
+                if cost <= 0.0 || self.berries_grams + grams == self.berries_grams {
+                    (0.0, 0.0)
+                } else {
+                    (grams, cost)
+                }
+            }
+            CitizenAction::SellPebbles => {
+                (self.pebbles_grams, value(Good::Pebbles, self.pebbles_grams))
+            }
+            _ => (0.0, 0.0),
         }
     }
 
@@ -263,12 +296,15 @@ impl Citizen {
         } else {
             0.0
         };
+        let (trade_grams, trade_coins) = self.trade_amounts(action);
         citizen.active_action = Some(ActiveAction {
             action,
             remaining_ms: duration_ms,
             duration_ms,
             meal_grams,
             berries_after_meal: self.berries_grams - meal_grams,
+            trade_grams,
+            trade_coins,
         });
         Ok(citizen)
     }
@@ -313,6 +349,20 @@ impl Citizen {
             }
 
             if active.remaining_ms == 0 {
+                match active.action {
+                    CitizenAction::BuyBerries => {
+                        citizen.berries_grams += active.trade_grams;
+                        citizen.coins -= active.trade_coins;
+                    }
+                    CitizenAction::SellPebbles => {
+                        citizen.pebbles_grams = 0.0;
+                        citizen.coins += active.trade_coins;
+                        if !citizen.coins.is_finite() {
+                            return Err(SimulationError::WealthOverflow);
+                        }
+                    }
+                    _ => {}
+                }
                 if matches!(
                     active.action,
                     CitizenAction::Forage | CitizenAction::FindRocks

@@ -94,10 +94,10 @@ fn forage_yields_only_at_completion_and_prediction_preserves_actual_outcomes() {
 fn empty_hungry_citizens_can_plan_and_advance_without_zero_duration_loops() {
     let source = Citizen::with_needs(50.0, -50.0).unwrap();
     let planned = source.start_planning().unwrap();
-    assert_eq!(
+    assert!(matches!(
         planned.active_action().unwrap().action(),
-        CitizenAction::Forage
-    );
+        CitizenAction::Forage | CitizenAction::FindRocks
+    ));
     let advanced = planned.advance(24 * 3_600_000).unwrap();
     assert!(advanced.hunger().is_finite());
     assert!(advanced.tiredness().is_finite());

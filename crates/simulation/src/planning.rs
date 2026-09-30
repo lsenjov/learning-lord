@@ -1,4 +1,6 @@
 use crate::{BERRY_NUTRITION_PER_GRAM, Citizen, CitizenAction, SimulationError};
+pub mod goals;
+use goals::{Cooldowns, Effect, Prediction};
 
 pub const HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
 pub const COMMITMENT_MS: u64 = 2 * 60 * 60 * 1000;
@@ -112,72 +114,43 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
         actions: Vec::new(),
         average_wellbeing: f64::NEG_INFINITY,
     };
-    search(citizen, &mut Vec::new(), HORIZON_MS, 0.0, &mut best, 0)?;
+    search(
+        Prediction::new(citizen, Cooldowns::default()),
+        HORIZON_MS,
+        &mut best,
+    )?;
     Ok(best)
 }
 
-fn search(
-    citizen: &Citizen,
-    actions: &mut Vec<CitizenAction>,
-    remaining_ms: u64,
-    average_wellbeing: f64,
-    best: &mut Plan,
-    eat_cooldown_ms: u64,
-) -> Result<(), SimulationError> {
-    if remaining_ms == 0 {
-        if average_wellbeing > best.average_wellbeing {
+fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), SimulationError> {
+    if state.elapsed_ms >= horizon_ms {
+        let score = state.average()?;
+        if score > best.average_wellbeing {
             *best = Plan {
-                actions: actions.clone(),
-                average_wellbeing,
+                actions: state.actions,
+                average_wellbeing: score,
             };
         }
         return Ok(());
     }
-
-    for action in [
-        CitizenAction::Wait,
-        CitizenAction::Eat,
-        CitizenAction::Sleep,
-        CitizenAction::Forage,
-        CitizenAction::FindRocks,
+    for goal in [
+        Effect::ReduceHunger,
+        Effect::ReduceTiredness,
+        Effect::IncreaseWealth,
     ] {
-        if action == CitizenAction::Eat && eat_cooldown_ms > 0
-            || replan_check(citizen, action, actions.len())
+        if let Some(variant) =
+            goals::best_variant(&state.citizen, goal, state.cooldowns, state.actions.len())?
         {
-            continue;
+            let mut next = variant;
+            next.elapsed_ms += state.elapsed_ms;
+            let mut actions = state.actions.clone();
+            actions.append(&mut next.actions);
+            next.actions = actions;
+            let mut scores = state.scores.clone();
+            scores.append(&mut next.scores);
+            next.scores = scores;
+            search(next, horizon_ms, best)?;
         }
-        let started = citizen.start_action(action)?;
-        let Some(active) = started.active_action() else {
-            continue;
-        };
-        let duration_ms = active.remaining_ms();
-        let next = started.advance_predicted(duration_ms)?;
-        let wellbeing = next.personal_wellbeing()?;
-        // Incremental averaging avoids overflowing a sum and supports variable plan lengths.
-        let count = (actions.len() + 1) as f64;
-        let score = if wellbeing.is_sign_positive() == average_wellbeing.is_sign_positive() {
-            average_wellbeing + (wellbeing - average_wellbeing) / count
-        } else {
-            average_wellbeing * ((count - 1.0) / count) + wellbeing / count
-        };
-        if !score.is_finite() {
-            return Err(SimulationError::WellbeingOverflow);
-        }
-        let next_eat_cooldown_ms = if action == CitizenAction::Eat {
-            EAT_PLAN_COOLDOWN_MS
-        } else {
-            eat_cooldown_ms.saturating_sub(duration_ms)
-        };
-        actions.push(action);
-        search(
-            &next,
-            actions,
-            remaining_ms.saturating_sub(duration_ms),
-            score,
-            best,
-            next_eat_cooldown_ms,
-        )?;
-        actions.pop();
     }
     Ok(())
 }
@@ -336,110 +309,6 @@ mod tests {
                     .count(),
                 1
             );
-        }
-    }
-
-    #[test]
-    fn longer_predictions_allow_another_meal_four_hours_after_completion() {
-        let citizen = Citizen::with_needs(200.0, -100.0)
-            .unwrap()
-            .with_berries(200.0)
-            .unwrap();
-        let mut best = Plan {
-            actions: Vec::new(),
-            average_wellbeing: f64::NEG_INFINITY,
-        };
-        search(
-            &citizen,
-            &mut Vec::new(),
-            EAT_PLAN_COOLDOWN_MS + 200_000,
-            0.0,
-            &mut best,
-            0,
-        )
-        .unwrap();
-        let mut predicted = citizen;
-        let mut elapsed_ms = 0;
-        let mut last_meal_completion = None;
-        let mut meals = 0;
-        for &action in best.actions() {
-            let duration_ms = predicted.action_duration_ms(action);
-            if action == CitizenAction::Eat {
-                if let Some(completed_ms) = last_meal_completion {
-                    assert!(elapsed_ms - completed_ms >= EAT_PLAN_COOLDOWN_MS);
-                }
-                meals += 1;
-                last_meal_completion = Some(elapsed_ms + duration_ms);
-            }
-            predicted = predicted
-                .start_action(action)
-                .unwrap()
-                .advance_predicted(duration_ms)
-                .unwrap();
-            elapsed_ms += duration_ms;
-        }
-        assert_eq!(meals, 2);
-    }
-
-    #[test]
-    fn meal_eligibility_opens_at_the_cooldown_boundary_and_resets_for_a_new_plan() {
-        let citizen = Citizen::with_needs(200.0, -100.0)
-            .unwrap()
-            .with_berries(200.0)
-            .unwrap();
-        for cooldown_ms in [0, 1] {
-            let mut best = Plan {
-                actions: Vec::new(),
-                average_wellbeing: f64::NEG_INFINITY,
-            };
-            search(&citizen, &mut Vec::new(), 1, 0.0, &mut best, cooldown_ms).unwrap();
-            assert_eq!(best.actions()[0] == CitizenAction::Eat, cooldown_ms == 0);
-        }
-        let just_eaten = citizen
-            .start_action(CitizenAction::Eat)
-            .unwrap()
-            .advance(100_000)
-            .unwrap();
-        let replanned = just_eaten.start_planning().unwrap();
-        assert_eq!(
-            replanned.active_action().unwrap().action(),
-            CitizenAction::Eat
-        );
-        let small_meal = Citizen::with_needs(200.0, -100.0)
-            .unwrap()
-            .with_berries(10.0)
-            .unwrap();
-        let mut best = Plan {
-            actions: Vec::new(),
-            average_wellbeing: f64::NEG_INFINITY,
-        };
-        search(&small_meal, &mut Vec::new(), 1, 0.0, &mut best, 0).unwrap();
-        assert_eq!(best.actions(), &[CitizenAction::Eat]);
-    }
-
-    #[test]
-    fn search_completes_the_action_crossing_the_horizon_and_averages_all_completions() {
-        let citizen = Citizen::with_hunger_rate(150.0, 0.0).unwrap();
-        for horizon_ms in [15 * MINUTE_MS, 75 * MINUTE_MS, HORIZON_MS] {
-            let mut best = Plan {
-                actions: Vec::new(),
-                average_wellbeing: f64::NEG_INFINITY,
-            };
-            search(&citizen, &mut Vec::new(), horizon_ms, 0.0, &mut best, 0).unwrap();
-
-            let mut predicted = citizen.clone();
-            let mut elapsed_ms = 0;
-            let mut sum = 0.0;
-            for action in best.actions() {
-                assert!(elapsed_ms < horizon_ms);
-                let started = predicted.start_action(*action).unwrap();
-                let duration_ms = started.active_action().unwrap().remaining_ms();
-                predicted = started.advance_predicted(duration_ms).unwrap();
-                elapsed_ms += duration_ms;
-                sum += predicted.personal_wellbeing().unwrap();
-            }
-            assert!(elapsed_ms >= horizon_ms);
-            assert!((sum / best.actions().len() as f64 - best.average_wellbeing()).abs() < 1e-10);
         }
     }
 }

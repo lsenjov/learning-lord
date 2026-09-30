@@ -267,6 +267,8 @@ fn citizen_readout(universe: &Universe) -> String {
                 CitizenAction::Sleep => "Sleeping",
                 CitizenAction::Forage => "Foraging",
                 CitizenAction::FindRocks => "Finding rocks",
+                CitizenAction::BuyBerries => "Buying berries",
+                CitizenAction::SellPebbles => "Selling pebbles",
             };
             let seconds = active.remaining_ms().div_ceil(1000);
             format!(
@@ -291,6 +293,8 @@ fn citizen_readout(universe: &Universe) -> String {
                     CitizenAction::Sleep => "Sleep",
                     CitizenAction::Forage => "Forage",
                     CitizenAction::FindRocks => "Find rocks",
+                    CitizenAction::BuyBerries => "Buy berries",
+                    CitizenAction::SellPebbles => "Sell pebbles",
                 })
                 .collect::<Vec<_>>()
                 .join(" > ");
