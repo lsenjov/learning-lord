@@ -135,17 +135,8 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .unwrap()
         .advance(8 * 3_600_000)
         .unwrap();
-    let started = source.start_action(CitizenAction::Sleep).unwrap();
-    let expected = (1..=480)
-        .map(|minute| {
-            started
-                .advance(minute * 60_000)
-                .unwrap()
-                .personal_wellbeing()
-                .unwrap()
-        })
-        .sum::<f64>()
-        / 480.0;
+    let expected =
+        (source.personal_wellbeing().unwrap() + predicted.personal_wellbeing().unwrap()) * 0.5;
     assert!((chosen.average_wellbeing() - expected).abs() < 1e-10);
     assert_eq!(predicted.prices(), universe.prices());
     let actual = universe

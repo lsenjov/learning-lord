@@ -17,33 +17,17 @@ fn assert_close(actual: f64, expected: f64) {
 
 fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
     let mut predicted = original.clone();
-    let mut sum = 0.0;
+    let mut contribution = 0.0;
     let mut elapsed = 0;
-    let mut sample_at = 60_000;
     for &action in actions {
+        let before = predicted.personal_wellbeing().unwrap();
         let duration = predicted.action_duration_ms(action);
-        let end = elapsed + duration;
-        let completed = predict_action(&predicted, action);
-        while sample_at <= end {
-            let sample = if sample_at == end {
-                completed.clone()
-            } else if matches!(action, CitizenAction::Forage | CitizenAction::FindRocks) {
-                predicted.advance(sample_at - elapsed).unwrap()
-            } else {
-                predicted
-                    .start_action(action)
-                    .unwrap()
-                    .advance(sample_at - elapsed)
-                    .unwrap()
-            };
-            sum += sample.personal_wellbeing().unwrap() * 60_000.0;
-            sample_at += 60_000;
-        }
-        elapsed = end;
-        predicted = completed;
+        predicted = predict_action(&predicted, action);
+        let after = predicted.personal_wellbeing().unwrap();
+        contribution += (before + after) * 0.5 * duration as f64;
+        elapsed += duration;
     }
-    sum += predicted.personal_wellbeing().unwrap() * (elapsed % 60_000) as f64;
-    sum / elapsed as f64
+    contribution / elapsed as f64
 }
 
 fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
@@ -69,7 +53,7 @@ fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
 }
 
 #[test]
-fn goal_planning_scores_minutes_and_preserves_the_source() {
+fn goal_planning_scores_action_endpoints_and_preserves_the_source() {
     for (hunger, tiredness, berries) in [
         (-140.0, 0.0, 0.0),
         (-80.0, -100.0, 40.0),
@@ -98,7 +82,7 @@ fn goal_planning_scores_minutes_and_preserves_the_source() {
 }
 
 #[test]
-fn scoring_averages_minutes_and_rewards_wealth() {
+fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
     let starving = Citizen::with_hunger_rate(150.0, 0.0).unwrap();
     let chosen = plan(&starving).unwrap();
     assert_close(

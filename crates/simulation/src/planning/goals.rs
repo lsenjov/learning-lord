@@ -120,8 +120,8 @@ pub(super) struct Prediction {
     pub citizen: Citizen,
     pub actions: Vec<CitizenAction>,
     pub elapsed_ms: u64,
-    score: SampledWellbeing,
-    goal_score: SampledWellbeing,
+    score: WeightedWellbeing,
+    goal_score: WeightedWellbeing,
     pub cooldowns: Cooldowns,
 }
 
@@ -131,8 +131,8 @@ impl Prediction {
             citizen: citizen.clone(),
             actions: Vec::new(),
             elapsed_ms: 0,
-            score: SampledWellbeing::default(),
-            goal_score: SampledWellbeing::default(),
+            score: WeightedWellbeing::default(),
+            goal_score: WeightedWellbeing::default(),
             cooldowns,
         }
     }
@@ -152,21 +152,13 @@ impl Prediction {
             return Ok(None);
         };
         let duration = active.duration_ms();
+        let citizen = started.advance_predicted(duration)?;
+        let before = self.citizen.personal_wellbeing()?;
+        let after = citizen.personal_wellbeing()?;
         let mut next = self.clone();
-        next.citizen = started;
-        let mut remaining = duration;
-        while remaining > 0 {
-            let step = remaining.min(SAMPLE_INTERVAL_MS - next.score.pending_ms);
-            next.citizen = next.citizen.advance_predicted(step)?;
-            next.score.pending_ms += step;
-            next.goal_score.pending_ms += step;
-            remaining -= step;
-            if next.score.pending_ms == SAMPLE_INTERVAL_MS {
-                let value = next.citizen.personal_wellbeing()?;
-                next.score.sample(value)?;
-                next.goal_score.sample(value)?;
-            }
-        }
+        next.citizen = citizen;
+        next.score.add(before, after, duration)?;
+        next.goal_score.add(before, after, duration)?;
         next.actions.push(action);
         next.elapsed_ms += duration;
         next.cooldowns = self.cooldowns.after(action, duration);
@@ -174,48 +166,36 @@ impl Prediction {
     }
 
     pub fn average(&self) -> Result<f64, SimulationError> {
-        self.score.average(self.citizen.personal_wellbeing()?)
+        Ok(self.score.mean)
     }
 
     fn goal_average(&self) -> Result<f64, SimulationError> {
-        self.goal_score.average(self.citizen.personal_wellbeing()?)
+        Ok(self.goal_score.mean)
     }
 }
 
-const SAMPLE_INTERVAL_MS: u64 = 60_000;
-
 #[derive(Clone, Copy, Default)]
-struct SampledWellbeing {
+struct WeightedWellbeing {
     mean: f64,
-    sampled_ms: u64,
-    pending_ms: u64,
+    elapsed_ms: u64,
 }
 
-impl SampledWellbeing {
-    fn sample(&mut self, value: f64) -> Result<(), SimulationError> {
-        if self.pending_ms == 0 {
-            return Ok(());
-        }
-        let total = self.sampled_ms + self.pending_ms;
-        let weight = self.pending_ms as f64 / total as f64;
-        // Avoid overflow when finite scores have opposite signs.
+impl WeightedWellbeing {
+    fn add(&mut self, before: f64, after: f64, duration_ms: u64) -> Result<(), SimulationError> {
+        let value = before * 0.5 + after * 0.5;
+        let total = self.elapsed_ms + duration_ms;
+        let weight = duration_ms as f64 / total as f64;
+        // Keep the weighted mean directly to avoid overflowing a wellbeing × duration sum.
         self.mean = if self.mean.is_sign_positive() == value.is_sign_positive() {
             self.mean + (value - self.mean) * weight
         } else {
-            self.mean * (self.sampled_ms as f64 / total as f64) + value * weight
+            self.mean * (self.elapsed_ms as f64 / total as f64) + value * weight
         };
         if !self.mean.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
-        self.sampled_ms = total;
-        self.pending_ms = 0;
+        self.elapsed_ms = total;
         Ok(())
-    }
-
-    fn average(mut self, endpoint: f64) -> Result<f64, SimulationError> {
-        // A provisional endpoint must not become an extra sample if the plan continues.
-        self.sample(endpoint)?;
-        Ok(self.mean)
     }
 }
 
@@ -691,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn action_boundaries_do_not_add_samples_and_final_fraction_is_weighted() {
+    fn splitting_linear_travel_preserves_its_duration_weighted_score() {
         use crate::locations::{Location, Map, Position};
         let map = Map::new(
             Position { x: 150.0, y: 0.0 },
@@ -712,24 +692,20 @@ mod tests {
             .perform(CitizenAction::Travel(Location::River), 0)
             .unwrap()
             .unwrap();
-        let _provisional = middle.average().unwrap();
-        assert_eq!(middle.score.sampled_ms, 0);
+        assert_eq!(middle.score.elapsed_ms, 30_000);
         let split = middle
             .perform(CitizenAction::Travel(Location::Forest), 0)
             .unwrap()
             .unwrap();
         assert!((direct.average().unwrap() - split.average().unwrap()).abs() < 1e-12);
         let rate_per_ms = 100.0 / (24.0 * 60.0 * 60_000.0);
-        let expected = ((-10.0 - 60_000.0 * rate_per_ms) * 60_000.0
-            + (-10.0 - 90_000.0 * rate_per_ms) * 30_000.0)
-            / 90_000.0;
+        let expected = -10.0 - 45_000.0 * rate_per_ms;
         assert!((direct.average().unwrap() - expected).abs() < 1e-12);
-        assert_eq!(direct.score.sampled_ms, 60_000);
-        assert_eq!(direct.score.pending_ms, 30_000);
+        assert_eq!(direct.score.elapsed_ms, 90_000);
     }
 
     #[test]
-    fn goal_boundaries_preserve_the_plan_sampling_schedule() {
+    fn goal_scores_cover_their_own_duration_and_plan_scores_preserve_the_prefix() {
         use crate::locations::{Location, Map, Position};
         let map = Map::new(
             Position { x: 50.0, y: 0.0 },
@@ -754,38 +730,134 @@ mod tests {
             replay = replay.perform(*action, 0).unwrap().unwrap();
         }
         assert_eq!(next.average().unwrap(), replay.average().unwrap());
-        assert_eq!(next.score.pending_ms, replay.score.pending_ms);
-        assert_eq!(
-            next.goal_score.sampled_ms + next.goal_score.pending_ms,
-            next.elapsed_ms
-        );
-        assert_eq!(
-            next.score.sampled_ms + next.score.pending_ms,
-            prefix.elapsed_ms + next.elapsed_ms
-        );
+        assert_eq!(next.goal_score.elapsed_ms, next.elapsed_ms);
+        assert_eq!(next.score.elapsed_ms, prefix.elapsed_ms + next.elapsed_ms);
+        let local = best_variant(
+            &prefix.citizen,
+            Effect::IncreaseWealth,
+            prefix.cooldowns,
+            prefix.actions.len(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(next.actions, local.actions);
+        assert_eq!(next.goal_average().unwrap(), local.average().unwrap());
     }
 
     #[test]
-    fn completion_effects_are_included_at_the_sample_endpoint() {
+    fn gathering_completion_wealth_is_spread_across_the_action() {
         let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
         let gathered = Prediction::new(&citizen, Cooldowns::default())
             .perform(CitizenAction::Forage, 0)
             .unwrap()
             .unwrap();
-        // Only the thirtieth minute includes the newly gathered berries' wealth.
-        assert!((gathered.average().unwrap() - 0.1 / 30.0).abs() < 1e-12);
+        assert!((gathered.average().unwrap() - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn action_scores_are_weighted_by_duration() {
+        let mut score = WeightedWellbeing::default();
+        score.add(0.0, 10.0, 60_000).unwrap();
+        score.add(10.0, 30.0, 180_000).unwrap();
+        assert_eq!(score.mean, 16.25);
+        assert_eq!(score.elapsed_ms, 240_000);
+    }
+
+    #[test]
+    fn exported_market_state_prefers_direct_rocks_over_the_forest_detour() {
+        use crate::locations::{Location, Map, Position};
+        use crate::marketplace::Prices;
+        let map = Map::new(
+            Position {
+                x: -725.1376571747487,
+                y: 97.96764606609361,
+            },
+            Position {
+                x: -10.912906801495751,
+                y: -727.3559818665126,
+            },
+            Position {
+                x: 233.53900050684547,
+                y: -686.1697663686859,
+            },
+        )
+        .unwrap();
+        // The dump was captured 105,740 ms into the first trip; restore its planning state.
+        let need_growth = 105_740.0 * 100.0 / 86_400_000.0;
+        let source = Citizen::with_needs(
+            16.671912174402078 - need_growth,
+            -45.326035879629764 - need_growth,
+        )
+        .unwrap()
+        .with_map(map)
+        .unwrap()
+        .with_position(map.position(Location::River))
+        .unwrap()
+        .with_prices(Prices::new(1.2090152088522885, 3.905220675837458).unwrap())
+        .with_pebbles(19.454608762314617)
+        .unwrap();
+        let mut prefix = Prediction::new(&source, Cooldowns::default());
+        for action in [
+            CitizenAction::Travel(Location::Market),
+            CitizenAction::SellPebbles,
+            CitizenAction::BuyBerries,
+            CitizenAction::Eat,
+        ] {
+            prefix = prefix.perform(action, 0).unwrap().unwrap();
+        }
+        assert_eq!(prefix.elapsed_ms, 811_580);
+        let forage = prefix
+            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .unwrap()
+            .unwrap()
+            .perform(CitizenAction::Forage, 0)
+            .unwrap()
+            .unwrap();
+        let rocks = prefix
+            .perform(CitizenAction::Travel(Location::River), 0)
+            .unwrap()
+            .unwrap()
+            .perform(CitizenAction::FindRocks, 0)
+            .unwrap()
+            .unwrap();
+        let local_forage = forage.score.mean * forage.score.elapsed_ms as f64
+            - prefix.score.mean * prefix.score.elapsed_ms as f64;
+        let local_rocks = rocks.score.mean * rocks.score.elapsed_ms as f64
+            - prefix.score.mean * prefix.score.elapsed_ms as f64;
+        let forage_average = local_forage / (forage.elapsed_ms - prefix.elapsed_ms) as f64;
+        let rocks_average = local_rocks / (rocks.elapsed_ms - prefix.elapsed_ms) as f64;
+        assert!(rocks_average > forage_average);
+        let chosen = best_variant_after(&prefix, Effect::IncreaseWealth)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            chosen.actions,
+            [
+                CitizenAction::Travel(Location::River),
+                CitizenAction::FindRocks
+            ]
+        );
+        assert!((chosen.goal_average().unwrap() - rocks_average).abs() < 1e-12);
+        let fresh = best_variant(&prefix.citizen, Effect::IncreaseWealth, prefix.cooldowns, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chosen.actions, fresh.actions);
+        assert_eq!(
+            chosen.goal_average().unwrap(),
+            fresh.goal_average().unwrap()
+        );
     }
 
     #[test]
     fn scoring_handles_opposite_extremes_without_overflow() {
         for first in [-f64::MAX, f64::MAX] {
-            let mut score = SampledWellbeing {
-                pending_ms: 60_000,
-                ..Default::default()
-            };
-            score.sample(first).unwrap();
-            score.pending_ms = 60_000;
-            assert_eq!(score.average(-first), Ok(0.0));
+            let mut score = WeightedWellbeing::default();
+            score.add(first, first, 60_000).unwrap();
+            score.add(-first, -first, 60_000).unwrap();
+            assert_eq!(score.mean, 0.0);
+            let mut endpoints = WeightedWellbeing::default();
+            endpoints.add(first, -first, 60_000).unwrap();
+            assert_eq!(endpoints.mean, 0.0);
         }
     }
 
@@ -827,10 +899,7 @@ mod tests {
             240_000 + 6 * ACTION_DURATION_MS + river_to_market + 2 * TRADE_DURATION_MS + 100_000
         );
         assert_eq!(trade.citizen.position(), map.position(Location::Market));
-        assert_eq!(
-            trade.score.sampled_ms + trade.score.pending_ms,
-            trade.elapsed_ms
-        );
+        assert_eq!(trade.score.elapsed_ms, trade.elapsed_ms);
         assert_eq!(source.position(), Position::default());
     }
 
