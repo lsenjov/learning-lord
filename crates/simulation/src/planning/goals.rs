@@ -120,7 +120,8 @@ pub(super) struct Prediction {
     pub citizen: Citizen,
     pub actions: Vec<CitizenAction>,
     pub elapsed_ms: u64,
-    pub scores: Vec<f64>,
+    score: SampledWellbeing,
+    goal_score: SampledWellbeing,
     pub cooldowns: Cooldowns,
 }
 
@@ -130,7 +131,8 @@ impl Prediction {
             citizen: citizen.clone(),
             actions: Vec::new(),
             elapsed_ms: 0,
-            scores: Vec::new(),
+            score: SampledWellbeing::default(),
+            goal_score: SampledWellbeing::default(),
             cooldowns,
         }
     }
@@ -150,10 +152,21 @@ impl Prediction {
             return Ok(None);
         };
         let duration = active.duration_ms();
-        let citizen = started.advance_predicted(duration)?;
         let mut next = self.clone();
-        next.scores.push(citizen.personal_wellbeing()?);
-        next.citizen = citizen;
+        next.citizen = started;
+        let mut remaining = duration;
+        while remaining > 0 {
+            let step = remaining.min(SAMPLE_INTERVAL_MS - next.score.pending_ms);
+            next.citizen = next.citizen.advance_predicted(step)?;
+            next.score.pending_ms += step;
+            next.goal_score.pending_ms += step;
+            remaining -= step;
+            if next.score.pending_ms == SAMPLE_INTERVAL_MS {
+                let value = next.citizen.personal_wellbeing()?;
+                next.score.sample(value)?;
+                next.goal_score.sample(value)?;
+            }
+        }
         next.actions.push(action);
         next.elapsed_ms += duration;
         next.cooldowns = self.cooldowns.after(action, duration);
@@ -161,25 +174,49 @@ impl Prediction {
     }
 
     pub fn average(&self) -> Result<f64, SimulationError> {
-        average(&self.scores)
+        self.score.average(self.citizen.personal_wellbeing()?)
+    }
+
+    fn goal_average(&self) -> Result<f64, SimulationError> {
+        self.goal_score.average(self.citizen.personal_wellbeing()?)
     }
 }
 
-pub(super) fn average(scores: &[f64]) -> Result<f64, SimulationError> {
-    let mut mean: f64 = 0.0;
-    for (index, &score) in scores.iter().enumerate() {
-        let count = (index + 1) as f64;
-        // Opposite signs can overflow subtraction even when both scores are finite.
-        mean = if mean.is_sign_positive() == score.is_sign_positive() {
-            mean + (score - mean) / count
+const SAMPLE_INTERVAL_MS: u64 = 60_000;
+
+#[derive(Clone, Copy, Default)]
+struct SampledWellbeing {
+    mean: f64,
+    sampled_ms: u64,
+    pending_ms: u64,
+}
+
+impl SampledWellbeing {
+    fn sample(&mut self, value: f64) -> Result<(), SimulationError> {
+        if self.pending_ms == 0 {
+            return Ok(());
+        }
+        let total = self.sampled_ms + self.pending_ms;
+        let weight = self.pending_ms as f64 / total as f64;
+        // Avoid overflow when finite scores have opposite signs.
+        self.mean = if self.mean.is_sign_positive() == value.is_sign_positive() {
+            self.mean + (value - self.mean) * weight
         } else {
-            mean * ((count - 1.0) / count) + score / count
+            self.mean * (self.sampled_ms as f64 / total as f64) + value * weight
         };
-        if !mean.is_finite() {
+        if !self.mean.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
+        self.sampled_ms = total;
+        self.pending_ms = 0;
+        Ok(())
     }
-    Ok(mean)
+
+    fn average(mut self, endpoint: f64) -> Result<f64, SimulationError> {
+        // A provisional endpoint must not become an extra sample if the plan continues.
+        self.sample(endpoint)?;
+        Ok(self.mean)
+    }
 }
 
 fn quantity(citizen: &Citizen, resource: Effect) -> f64 {
@@ -268,13 +305,30 @@ pub(super) fn best_variant(
     cooldowns: Cooldowns,
     prior_actions: usize,
 ) -> Result<Option<Prediction>, SimulationError> {
-    let initial = Prediction::new(citizen, cooldowns);
+    best_variant_from(Prediction::new(citizen, cooldowns), goal, prior_actions)
+}
+
+pub(super) fn best_variant_after(
+    prefix: &Prediction,
+    goal: Effect,
+) -> Result<Option<Prediction>, SimulationError> {
+    let mut initial = Prediction::new(&prefix.citizen, prefix.cooldowns);
+    initial.score = prefix.score;
+    best_variant_from(initial, goal, prefix.actions.len())
+}
+
+fn best_variant_from(
+    initial: Prediction,
+    goal: Effect,
+    prior_actions: usize,
+) -> Result<Option<Prediction>, SimulationError> {
+    let citizen = &initial.citizen;
     let mut best: Option<Prediction> = None;
     let mut consider = |candidate: Prediction| -> Result<(), SimulationError> {
-        let candidate_score = candidate.average()?;
+        let candidate_score = candidate.goal_average()?;
         if best
             .as_ref()
-            .map(|old| old.average())
+            .map(|old| old.goal_average())
             .transpose()?
             .is_none_or(|score| candidate_score > score)
         {
@@ -466,28 +520,23 @@ mod tests {
             .unwrap()
             .with_prices(crate::marketplace::Prices::new(1.0, 4.0).unwrap());
         let mut prefix = Prediction::new(&citizen, Cooldowns::default());
-        prefix.elapsed_ms = 7 * ACTION_DURATION_MS;
-        let goal = best_variant(
-            &prefix.citizen,
-            Effect::ReduceHunger,
-            prefix.cooldowns,
-            prefix.actions.len(),
-        )
-        .unwrap()
-        .unwrap();
+        for _ in 0..7 {
+            prefix = prefix.perform(CitizenAction::Wait, 0).unwrap().unwrap();
+        }
+        let mut goal = best_variant_after(&prefix, Effect::ReduceHunger)
+            .unwrap()
+            .unwrap();
         assert!(goal.elapsed_ms > ACTION_DURATION_MS);
-        let mut best = super::super::Plan {
-            actions: Vec::new(),
-            average_wellbeing: f64::NEG_INFINITY,
-            decision: None,
-        };
-        super::super::search(prefix.clone(), super::super::HORIZON_MS, &mut best).unwrap();
-        let mut expected = prefix.actions;
-        expected.extend(goal.actions);
+        goal.elapsed_ms += prefix.elapsed_ms;
+        let mut actions = prefix.actions;
+        actions.append(&mut goal.actions);
+        goal.actions = actions;
+        let expected = goal.actions.clone();
+        let expected_score = goal.average().unwrap();
+        let mut best = super::super::empty_plan();
+        super::super::search(goal, super::super::HORIZON_MS, &mut best).unwrap();
         assert_eq!(best.actions, expected);
-        let mut scores = prefix.scores;
-        scores.extend(goal.scores);
-        assert_eq!(best.average_wellbeing, average(&scores).unwrap());
+        assert_eq!(best.average_wellbeing, expected_score);
     }
 
     #[test]
@@ -551,9 +600,102 @@ mod tests {
     }
 
     #[test]
+    fn action_boundaries_do_not_add_samples_and_final_fraction_is_weighted() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 150.0, y: 0.0 },
+            Position { x: 50.0, y: 0.0 },
+            Position::default(),
+        )
+        .unwrap();
+        let citizen = Citizen::with_needs(10.0, -100.0)
+            .unwrap()
+            .with_map(map)
+            .unwrap();
+        let initial = Prediction::new(&citizen, Cooldowns::default());
+        let direct = initial
+            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .unwrap()
+            .unwrap();
+        let middle = initial
+            .perform(CitizenAction::Travel(Location::River), 0)
+            .unwrap()
+            .unwrap();
+        let _provisional = middle.average().unwrap();
+        assert_eq!(middle.score.sampled_ms, 0);
+        let split = middle
+            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .unwrap()
+            .unwrap();
+        assert!((direct.average().unwrap() - split.average().unwrap()).abs() < 1e-12);
+        let rate_per_ms = 100.0 / (24.0 * 60.0 * 60_000.0);
+        let expected = ((-10.0 - 60_000.0 * rate_per_ms) * 60_000.0
+            + (-10.0 - 90_000.0 * rate_per_ms) * 30_000.0)
+            / 90_000.0;
+        assert!((direct.average().unwrap() - expected).abs() < 1e-12);
+        assert_eq!(direct.score.sampled_ms, 60_000);
+        assert_eq!(direct.score.pending_ms, 30_000);
+    }
+
+    #[test]
+    fn goal_boundaries_preserve_the_plan_sampling_schedule() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 50.0, y: 0.0 },
+            Position::default(),
+            Position::default(),
+        )
+        .unwrap();
+        let citizen = Citizen::with_needs(10.0, -100.0)
+            .unwrap()
+            .with_map(map)
+            .unwrap();
+        let initial = Prediction::new(&citizen, Cooldowns::default());
+        let prefix = initial
+            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .unwrap()
+            .unwrap();
+        let next = best_variant_after(&prefix, Effect::IncreaseWealth)
+            .unwrap()
+            .unwrap();
+        let mut replay = prefix.clone();
+        for action in &next.actions {
+            replay = replay.perform(*action, 0).unwrap().unwrap();
+        }
+        assert_eq!(next.average().unwrap(), replay.average().unwrap());
+        assert_eq!(next.score.pending_ms, replay.score.pending_ms);
+        assert_eq!(
+            next.goal_score.sampled_ms + next.goal_score.pending_ms,
+            next.elapsed_ms
+        );
+        assert_eq!(
+            next.score.sampled_ms + next.score.pending_ms,
+            prefix.elapsed_ms + next.elapsed_ms
+        );
+    }
+
+    #[test]
+    fn completion_effects_are_included_at_the_sample_endpoint() {
+        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
+        let gathered = Prediction::new(&citizen, Cooldowns::default())
+            .perform(CitizenAction::Forage, 0)
+            .unwrap()
+            .unwrap();
+        // Only the thirtieth minute includes the newly gathered berries' wealth.
+        assert!((gathered.average().unwrap() - 0.1 / 30.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn scoring_handles_opposite_extremes_without_overflow() {
-        assert_eq!(average(&[-f64::MAX, f64::MAX]), Ok(0.0));
-        assert_eq!(average(&[f64::MAX, -f64::MAX]), Ok(0.0));
+        for first in [-f64::MAX, f64::MAX] {
+            let mut score = SampledWellbeing {
+                pending_ms: 60_000,
+                ..Default::default()
+            };
+            score.sample(first).unwrap();
+            score.pending_ms = 60_000;
+            assert_eq!(score.average(-first), Ok(0.0));
+        }
     }
 
     #[test]
@@ -594,7 +736,10 @@ mod tests {
             240_000 + 6 * ACTION_DURATION_MS + river_to_market + 2 * TRADE_DURATION_MS + 100_000
         );
         assert_eq!(trade.citizen.position(), map.position(Location::Market));
-        assert_eq!(trade.scores.len(), trade.actions.len());
+        assert_eq!(
+            trade.score.sampled_ms + trade.score.pending_ms,
+            trade.elapsed_ms
+        );
         assert_eq!(source.position(), Position::default());
     }
 

@@ -215,17 +215,12 @@ fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), Sim
         Effect::ReduceTiredness,
         Effect::IncreaseWealth,
     ] {
-        if let Some(variant) =
-            goals::best_variant(&state.citizen, goal, state.cooldowns, state.actions.len())?
-        {
+        if let Some(variant) = goals::best_variant_after(&state, goal)? {
             let mut next = variant;
             next.elapsed_ms += state.elapsed_ms;
             let mut actions = state.actions.clone();
             actions.append(&mut next.actions);
             next.actions = actions;
-            let mut scores = state.scores.clone();
-            scores.append(&mut next.scores);
-            next.scores = scores;
             search(next, horizon_ms, best)?;
         }
     }
