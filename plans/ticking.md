@@ -45,7 +45,7 @@
 - A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
 - Each positive unit of tiredness costs one wellbeing point. Negative tiredness delays future tiredness without granting an immediate bonus.
 - Clothing will be an important factor later.
-- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The marketplace randomizes starting prices and updates at 04:00 every day: berries uniformly 1–2 coins/kg, pebbles uniformly 1–4 coins/kg; the marketplace has unlimited stock and coins.
+- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The marketplace randomizes starting prices and updates at 04:00 every day: berries uniformly 1–2 coins/kg, pebbles uniformly 1–6 coins/kg; the marketplace has unlimited stock and coins.
 - A collective's wellbeing could depend primarily on its members' needs, or it might depend only on money. This is still undecided.
 
 ## Relationships

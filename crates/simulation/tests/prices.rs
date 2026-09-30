@@ -19,7 +19,7 @@ fn prices_are_randomized_at_creation_and_at_four_each_day() {
     for day in 0..100 {
         let prices = current.prices();
         assert!((1.0..=2.0).contains(&prices.coins_per_kg(Good::Berries)));
-        assert!((1.0..=4.0).contains(&prices.coins_per_kg(Good::Pebbles)));
+        assert!((1.0..=6.0).contains(&prices.coins_per_kg(Good::Pebbles)));
         let duration = if day == 0 { UPDATE_TIME_MS } else { DAY_MS };
         let before = current.advance(duration - 1).unwrap();
         assert_eq!(before.prices(), prices);

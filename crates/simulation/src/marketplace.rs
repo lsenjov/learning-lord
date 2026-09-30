@@ -76,7 +76,7 @@ impl Market {
         );
         self.prices = Prices {
             berries: rng.random_range(1.0..=2.0),
-            pebbles: rng.random_range(1.0..=4.0),
+            pebbles: rng.random_range(1.0..=6.0),
         };
     }
 }
