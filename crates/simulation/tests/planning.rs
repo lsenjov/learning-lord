@@ -28,28 +28,49 @@ fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
 }
 
 #[test]
-fn search_matches_all_256_sequences_and_preserves_the_source() {
-    for hunger in [-140.0, -80.0, -5.0, 25.0, 140.0] {
-        let original = Citizen::new(hunger).unwrap();
+fn search_matches_all_511_sequences_and_preserves_the_source() {
+    let mut candidates = Vec::new();
+    for count in 0..=8 {
+        for sequence in 0..1 << count {
+            let mut actions: Vec<_> = (0..count)
+                .map(|index| {
+                    if sequence & (1 << index) == 0 {
+                        CitizenAction::Wait
+                    } else {
+                        CitizenAction::Eat
+                    }
+                })
+                .collect();
+            if count < 8 {
+                actions.push(CitizenAction::Sleep);
+            }
+            candidates.push(actions);
+        }
+    }
+    assert_eq!(candidates.len(), 511);
+    for (hunger, tiredness) in [
+        (-140.0, 0.0),
+        (-80.0, -100.0),
+        (-5.0, 25.0),
+        (25.0, 0.0),
+        (140.0, 100.0),
+    ] {
+        let original = Citizen::with_needs(hunger, tiredness).unwrap();
         let snapshot = original.clone();
         let chosen = plan(&original).unwrap();
         let mut best_score = f64::NEG_INFINITY;
 
-        for sequence in 0..256 {
-            let actions: [CitizenAction; 8] = std::array::from_fn(|index| {
-                if sequence & (1 << (7 - index)) == 0 {
-                    CitizenAction::Wait
-                } else {
-                    CitizenAction::Eat
-                }
-            });
-            best_score = best_score.max(score_actions(&original, &actions));
+        for actions in &candidates {
+            best_score = best_score.max(score_actions(&original, actions));
         }
 
-        assert_eq!(
-            chosen.actions().len() as u64 * HALF_HOUR_MS,
-            4 * 60 * 60 * 1000
-        );
+        let duration_ms: u64 = chosen
+            .actions()
+            .iter()
+            .map(|action| action.duration_ms())
+            .sum();
+        assert!(duration_ms >= 4 * 60 * 60 * 1000);
+        assert!(duration_ms - chosen.actions().last().unwrap().duration_ms() < 4 * 60 * 60 * 1000);
         assert_close(score_actions(&original, chosen.actions()), best_score);
         assert_close(chosen.average_wellbeing(), best_score);
         assert_eq!(original, snapshot);
@@ -60,10 +81,13 @@ fn search_matches_all_256_sequences_and_preserves_the_source() {
 fn scoring_averages_completion_states_and_accepts_any_optimal_tied_plan() {
     let starving = Citizen::with_hunger_rate(150.0, 0.0).unwrap();
     let chosen = plan(&starving).unwrap();
-    assert_close(score_actions(&starving, chosen.actions()), -18.75);
-    assert_close(chosen.average_wellbeing(), -18.75);
+    assert_close(
+        score_actions(&starving, chosen.actions()),
+        -18.75 - 175.0 / 24.0,
+    );
+    assert_close(chosen.average_wellbeing(), -18.75 - 175.0 / 24.0);
 
-    let satiated = Citizen::with_hunger_rate(-50.0, 0.0).unwrap();
+    let satiated = Citizen::with_needs(-50.0, -100.0).unwrap();
     let chosen = plan(&satiated).unwrap();
     assert_eq!(score_actions(&satiated, chosen.actions()), 0.0);
     assert_eq!(chosen.average_wellbeing(), 0.0);
@@ -77,7 +101,7 @@ fn large_finite_scores_can_be_averaged_without_overflowing() {
 
 #[test]
 fn execution_keeps_its_plan_for_two_hours_then_replans() {
-    let original = Citizen::new(170.0).unwrap();
+    let original = Citizen::with_needs(170.0, -100.0).unwrap();
     let mut executing = original.start_planning().unwrap();
     let initial_plan = executing.active_plan().unwrap().plan().clone();
     let mut manual = original.clone();
@@ -145,7 +169,10 @@ fn execution_keeps_its_plan_for_two_hours_then_replans() {
 
 #[test]
 fn small_and_large_ticks_agree_across_multiple_batches_and_partial_actions() {
-    let original = Citizen::new(17.3).unwrap().start_planning().unwrap();
+    let original = Citizen::with_needs(60.0, 100.0)
+        .unwrap()
+        .start_planning()
+        .unwrap();
     let snapshot = original.clone();
     let mut small_ticks = original.clone();
     for _ in 0..1000 {
@@ -154,6 +181,7 @@ fn small_and_large_ticks_agree_across_multiple_batches_and_partial_actions() {
     let large_tick = original.advance(37_123_000).unwrap();
 
     assert_close(small_ticks.hunger(), large_tick.hunger());
+    assert_close(small_ticks.tiredness(), large_tick.tiredness());
     assert_eq!(small_ticks.active_action(), large_tick.active_action());
     let small_execution = small_ticks.active_plan().unwrap();
     let large_execution = large_tick.active_plan().unwrap();
@@ -161,7 +189,6 @@ fn small_and_large_ticks_agree_across_multiple_batches_and_partial_actions() {
         small_execution.action_index(),
         large_execution.action_index()
     );
-    assert_eq!(small_execution.elapsed_ms(), 37_123_000 % TWO_HOURS_MS);
     assert_eq!(small_execution.elapsed_ms(), large_execution.elapsed_ms());
     assert_eq!(
         small_execution.plan().actions(),
@@ -232,7 +259,8 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
     assert_close(citizen(&first, other_id).hunger(), 100.0 / 12.0);
     assert_close(citizen(&second, other_id).hunger(), 100.0 / 6.0);
     assert!(citizen(&first, other_id).active_plan().is_none());
-    assert_eq!(citizen(&first, id).active_plan().unwrap().action_index(), 0);
+    assert_close(citizen(&first, other_id).tiredness(), 100.0 / 12.0);
+    assert_close(citizen(&second, other_id).tiredness(), 100.0 / 6.0);
     assert_eq!(planned, planned_snapshot);
     assert_eq!(original, snapshot);
 
@@ -256,13 +284,13 @@ fn prediction_and_replanning_errors_preserve_original_state() {
         assert_eq!(original, snapshot);
     }
 
-    let planned = Citizen::with_hunger_rate(-f64::MAX, f64::MAX / 8.0)
+    let planned = Citizen::with_hunger_rate(-f64::MAX, f64::MAX / 16.0)
         .unwrap()
         .start_planning()
         .unwrap();
     let snapshot = planned.clone();
     assert_eq!(
-        planned.advance(3 * TWO_HOURS_MS),
+        planned.advance(8 * TWO_HOURS_MS),
         Err(SimulationError::WellbeingOverflow)
     );
     assert_eq!(planned, snapshot);
@@ -270,8 +298,68 @@ fn prediction_and_replanning_errors_preserve_original_state() {
     let (universe, _) = Universe::default().with_citizen("Ada", planned);
     let snapshot = universe.clone();
     assert_eq!(
-        universe.advance(3 * TWO_HOURS_MS),
+        universe.advance(8 * TWO_HOURS_MS),
         Err(SimulationError::WellbeingOverflow)
     );
     assert_eq!(universe, snapshot);
+}
+
+#[test]
+fn planning_sleeps_when_tired_and_eats_before_sleep_when_hungry() {
+    let tired = Citizen::with_needs(-50.0, 50.0).unwrap();
+    assert_eq!(plan(&tired).unwrap().actions(), &[CitizenAction::Sleep]);
+    let hungry = Citizen::with_needs(60.0, 100.0).unwrap();
+    let chosen = plan(&hungry).unwrap();
+    assert_eq!(chosen.actions()[0], CitizenAction::Eat);
+    assert!(chosen.actions().contains(&CitizenAction::Sleep));
+    assert!(chosen.average_wellbeing() > score_actions(&hungry, &[CitizenAction::Sleep]));
+}
+
+#[test]
+fn sleep_crosses_both_horizons_and_replanning_waits_for_completion() {
+    let original = Citizen::with_needs(-50.0, 50.0)
+        .unwrap()
+        .start_planning()
+        .unwrap();
+    let snapshot = original.clone();
+    assert_eq!(
+        original.active_plan().unwrap().plan().actions(),
+        &[CitizenAction::Sleep]
+    );
+    let at_commitment = original.advance(TWO_HOURS_MS).unwrap();
+    assert_eq!(
+        at_commitment.active_plan().unwrap().elapsed_ms(),
+        TWO_HOURS_MS
+    );
+    assert_eq!(
+        at_commitment.active_plan().unwrap().plan(),
+        original.active_plan().unwrap().plan()
+    );
+    assert_eq!(
+        at_commitment.active_action().unwrap().remaining_ms(),
+        3 * TWO_HOURS_MS
+    );
+    let almost_done = at_commitment.advance(3 * TWO_HOURS_MS - 1).unwrap();
+    assert_eq!(
+        almost_done.active_plan().unwrap().elapsed_ms(),
+        4 * TWO_HOURS_MS - 1
+    );
+    assert_eq!(
+        almost_done.active_action().unwrap().action(),
+        CitizenAction::Sleep
+    );
+    assert_eq!(almost_done.active_action().unwrap().remaining_ms(), 1);
+    let finished = almost_done.advance(1).unwrap();
+    assert_close(finished.hunger(), -50.0 + 100.0 / 3.0);
+    assert_close(finished.tiredness(), 50.0 - 100.0 * 2.0 / 3.0);
+    assert_eq!(finished.active_plan().unwrap().elapsed_ms(), 0);
+    assert_eq!(finished.active_plan().unwrap().action_index(), 0);
+    assert!(finished.active_action().is_some());
+    let crossed = original.advance(4 * TWO_HOURS_MS + 15 * 60_000).unwrap();
+    let split = finished.advance(15 * 60_000).unwrap();
+    assert_close(crossed.hunger(), split.hunger());
+    assert_close(crossed.tiredness(), split.tiredness());
+    assert_eq!(crossed.active_action(), split.active_action());
+    assert_eq!(crossed.active_plan(), split.active_plan());
+    assert_eq!(original, snapshot);
 }

@@ -264,9 +264,15 @@ fn citizen_readout(universe: &Universe) -> String {
             let name = match active.action() {
                 CitizenAction::Eat => "Eating",
                 CitizenAction::Wait => "Waiting",
+                CitizenAction::Sleep => "Sleeping",
             };
             let seconds = active.remaining_ms().div_ceil(1000);
-            format!("{name} | {:02}:{:02} remaining", seconds / 60, seconds % 60)
+            format!(
+                "{name} | {:02}:{:02}:{:02} remaining",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            )
         })
         .unwrap_or_else(|| "Idle".into());
     let plan = citizen
@@ -280,6 +286,7 @@ fn citizen_readout(universe: &Universe) -> String {
                 .map(|action| match action {
                     CitizenAction::Eat => "Eat",
                     CitizenAction::Wait => "Wait",
+                    CitizenAction::Sleep => "Sleep",
                 })
                 .collect::<Vec<_>>()
                 .join(" > ");
@@ -288,26 +295,33 @@ fn citizen_readout(universe: &Universe) -> String {
             } else {
                 &upcoming
             };
-            let seconds = COMMITMENT_MS
-                .saturating_sub(active.elapsed_ms())
-                .div_ceil(1000);
-            let replan = if seconds == 0 {
-                "Replan after current action".into()
-            } else {
-                format!(
-                    "Replan in {:02}:{:02}:{:02} (after action completes)",
-                    seconds / 3600,
-                    seconds / 60 % 60,
-                    seconds % 60
-                )
-            };
+            let mut remaining_ms = citizen.active_action().unwrap().remaining_ms();
+            for action in active
+                .plan()
+                .actions()
+                .iter()
+                .skip(active.action_index() + 1)
+            {
+                if remaining_ms >= COMMITMENT_MS.saturating_sub(active.elapsed_ms()) {
+                    break;
+                }
+                remaining_ms += action.duration_ms();
+            }
+            let seconds = remaining_ms.div_ceil(1000);
+            let replan = format!(
+                "Replan in {:02}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            );
             format!("Planned next: {upcoming}\n{replan}")
         })
         .unwrap_or_else(|| "No active plan".into());
     format!(
-        "{}\nHunger: {:.1}     Wellbeing: {wellbeing}\n{action}\n{plan}",
+        "{}\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\n{action}\n{plan}",
         agent.name,
-        citizen.hunger()
+        citizen.hunger(),
+        citizen.tiredness()
     )
 }
 
@@ -360,8 +374,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn readout_shows_only_upcoming_actions_and_remaining_commitment() {
-        let citizen = Citizen::with_hunger_rate(-500.0, 0.0).unwrap();
+    fn readout_shows_upcoming_sleep_and_time_until_replanning() {
+        let citizen = Citizen::with_needs(60.0, 100.0).unwrap();
         let (universe, id) = Universe::default().with_citizen("Ada", citizen);
         let universe = universe
             .start_planning(id)
@@ -369,9 +383,25 @@ mod tests {
             .advance(30 * 60 * 1000)
             .unwrap();
         let readout = citizen_readout(&universe);
-        assert!(readout.contains("Waiting | 30:00 remaining"));
-        assert!(readout.contains("Planned next: Wait > Wait > Wait > Wait > Wait > Wait\n"));
-        assert!(readout.contains("Replan in 01:30:00 (after action completes)"));
+        assert!(readout.contains("Eating | 00:30:00 remaining"));
+        assert!(readout.contains("Planned next: Sleep\n"));
+        assert!(readout.contains("Replan in 08:30:00"));
+        assert!(readout.contains("Tiredness: 102.1"));
+    }
+
+    #[test]
+    fn sleeping_readout_counts_down_to_completion_even_past_commitment() {
+        let citizen = Citizen::with_needs(-50.0, 50.0).unwrap();
+        let (universe, id) = Universe::default().with_citizen("Ada", citizen);
+        let universe = universe
+            .start_planning(id)
+            .unwrap()
+            .advance(COMMITMENT_MS)
+            .unwrap();
+        let readout = citizen_readout(&universe);
+        assert!(readout.contains("Sleeping | 06:00:00 remaining"));
+        assert!(readout.contains("Planned next: None\n"));
+        assert!(readout.contains("Replan in 06:00:00"));
     }
 
     #[test]

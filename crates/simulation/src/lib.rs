@@ -5,8 +5,11 @@ use uuid::Uuid;
 pub mod planning;
 
 pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
+pub const TIREDNESS_PER_HOUR: f64 = 100.0 / 24.0;
 pub const MEAL_NOURISHMENT: f64 = 50.0;
 pub const ACTION_DURATION_MS: u64 = 30 * 60 * 1000;
+pub const SLEEP_DURATION_MS: u64 = 8 * 60 * 60 * 1000;
+pub const SLEEP_RECOVERY: f64 = 100.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AgentId(pub Uuid);
@@ -64,6 +67,16 @@ pub enum AgentKind {
 pub enum CitizenAction {
     Eat,
     Wait,
+    Sleep,
+}
+
+impl CitizenAction {
+    pub fn duration_ms(self) -> u64 {
+        match self {
+            Self::Eat | Self::Wait => ACTION_DURATION_MS,
+            Self::Sleep => SLEEP_DURATION_MS,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +99,7 @@ impl ActiveAction {
 pub struct Citizen {
     hunger: f64,
     hunger_per_hour: f64,
+    tiredness: f64,
     active_action: Option<ActiveAction>,
     active_plan: Option<planning::ActivePlan>,
 }
@@ -93,6 +107,15 @@ pub struct Citizen {
 impl Citizen {
     pub fn new(hunger: f64) -> Result<Self, SimulationError> {
         Self::with_hunger_rate(hunger, HUNGER_PER_HOUR)
+    }
+
+    pub fn with_needs(hunger: f64, tiredness: f64) -> Result<Self, SimulationError> {
+        if !tiredness.is_finite() {
+            return Err(SimulationError::InvalidTiredness);
+        }
+        let mut citizen = Self::new(hunger)?;
+        citizen.tiredness = tiredness.max(-100.0);
+        Ok(citizen)
     }
 
     pub fn with_hunger_rate(hunger: f64, hunger_per_hour: f64) -> Result<Self, SimulationError> {
@@ -105,6 +128,7 @@ impl Citizen {
         Ok(Self {
             hunger,
             hunger_per_hour,
+            tiredness: 0.0,
             active_action: None,
             active_plan: None,
         })
@@ -116,6 +140,10 @@ impl Citizen {
 
     pub fn hunger_per_hour(&self) -> f64 {
         self.hunger_per_hour
+    }
+
+    pub fn tiredness(&self) -> f64 {
+        self.tiredness
     }
 
     pub fn active_action(&self) -> Option<ActiveAction> {
@@ -137,7 +165,7 @@ impl Citizen {
         let mut citizen = self.clone();
         citizen.active_action = Some(ActiveAction {
             action,
-            remaining_ms: ACTION_DURATION_MS,
+            remaining_ms: action.duration_ms(),
         });
         Ok(citizen)
     }
@@ -145,7 +173,8 @@ impl Citizen {
     pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
         let wellbeing = -self.hunger.max(0.0)
             - 4.0 * (self.hunger - 100.0).max(0.0)
-            - (-self.hunger - 100.0).max(0.0);
+            - (-self.hunger - 100.0).max(0.0)
+            - self.tiredness.max(0.0);
         if !wellbeing.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
@@ -163,31 +192,47 @@ impl Citizen {
 
         if let Some(mut active) = citizen.active_action {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
-            citizen.advance_hunger(action_elapsed_ms)?;
+            citizen.advance_needs(action_elapsed_ms, Some(active.action))?;
             active.remaining_ms -= action_elapsed_ms;
 
             if active.remaining_ms == 0 {
-                if active.action == CitizenAction::Eat {
-                    citizen.hunger -= MEAL_NOURISHMENT;
-                }
                 citizen.active_action = None;
             } else {
                 citizen.active_action = Some(active);
             }
-            citizen.advance_hunger(elapsed_ms - action_elapsed_ms)?;
+            citizen.advance_needs(elapsed_ms - action_elapsed_ms, None)?;
         } else {
-            citizen.advance_hunger(elapsed_ms)?;
+            citizen.advance_needs(elapsed_ms, None)?;
         }
         Ok(citizen)
     }
 
-    fn advance_hunger(&mut self, elapsed_ms: u64) -> Result<(), SimulationError> {
+    fn advance_needs(
+        &mut self,
+        elapsed_ms: u64,
+        action: Option<CitizenAction>,
+    ) -> Result<(), SimulationError> {
         let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
-        let hunger = self.hunger + self.hunger_per_hour * elapsed_hours;
+        let nourishment_per_hour = if action == Some(CitizenAction::Eat) {
+            MEAL_NOURISHMENT * 3_600_000.0 / CitizenAction::Eat.duration_ms() as f64
+        } else {
+            0.0
+        };
+        let recovery_per_hour = if action == Some(CitizenAction::Sleep) {
+            SLEEP_RECOVERY * 3_600_000.0 / SLEEP_DURATION_MS as f64
+        } else {
+            0.0
+        };
+        let hunger = self.hunger + (self.hunger_per_hour - nourishment_per_hour) * elapsed_hours;
         if !hunger.is_finite() {
             return Err(SimulationError::HungerOverflow);
         }
+        let tiredness = self.tiredness + (TIREDNESS_PER_HOUR - recovery_per_hour) * elapsed_hours;
+        if !tiredness.is_finite() {
+            return Err(SimulationError::TirednessOverflow);
+        }
         self.hunger = hunger;
+        self.tiredness = tiredness.max(-100.0);
         Ok(())
     }
 }
@@ -266,8 +311,10 @@ impl Universe {
 pub enum SimulationError {
     InvalidHunger,
     InvalidHungerRate,
+    InvalidTiredness,
     TimeOverflow,
     HungerOverflow,
+    TirednessOverflow,
     WellbeingOverflow,
     CitizenBusy,
     AgentNotFound,
@@ -278,8 +325,10 @@ impl fmt::Display for SimulationError {
         let message = match self {
             Self::InvalidHunger => "hunger must be finite",
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
+            Self::InvalidTiredness => "tiredness must be finite",
             Self::TimeOverflow => "elapsed time exceeds the simulation clock's range",
             Self::HungerOverflow => "advancing time would produce nonfinite hunger",
+            Self::TirednessOverflow => "advancing time would produce nonfinite tiredness",
             Self::WellbeingOverflow => "personal wellbeing exceeds the finite score range",
             Self::CitizenBusy => "citizen is already performing an action",
             Self::AgentNotFound => "agent does not exist in this universe",

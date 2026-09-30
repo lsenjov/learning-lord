@@ -27,7 +27,7 @@ fn two_meals_balance_a_day_of_standard_hunger_including_time_spent_eating() {
 }
 
 #[test]
-fn actions_finish_at_thirty_minutes_and_meals_only_nourish_on_completion() {
+fn meals_nourish_gradually_and_short_actions_finish_at_thirty_minutes() {
     for (action, completed_hunger) in [(CitizenAction::Eat, -50.0), (CitizenAction::Wait, 0.0)] {
         let original = Citizen::with_hunger_rate(0.0, 0.0).unwrap();
         let started = original.start_action(action).unwrap();
@@ -38,21 +38,33 @@ fn actions_finish_at_thirty_minutes_and_meals_only_nourish_on_completion() {
         assert_eq!(original.active_action(), None);
         assert_eq!(started.advance(0).unwrap(), started);
 
-        let almost_done = started.advance(HALF_HOUR_MS - 1).unwrap();
-        assert_eq!(almost_done.hunger(), 0.0);
+        let midway = started.advance(HALF_HOUR_MS / 2).unwrap();
+        assert_close(midway.hunger(), completed_hunger / 2.0);
+        let almost_done = midway.advance(HALF_HOUR_MS / 2 - 1).unwrap();
+        assert_close(
+            almost_done.hunger(),
+            completed_hunger * (HALF_HOUR_MS - 1) as f64 / HALF_HOUR_MS as f64,
+        );
         assert_eq!(almost_done.active_action().unwrap().remaining_ms(), 1);
         let completed = almost_done.advance(1).unwrap();
-        assert_eq!(completed.hunger(), completed_hunger);
+        assert_close(completed.hunger(), completed_hunger);
         assert_eq!(completed.active_action(), None);
-        assert_eq!(completed.advance(DAY_MS).unwrap(), completed);
+        assert_close(
+            completed.advance(DAY_MS).unwrap().hunger(),
+            completed_hunger,
+        );
         assert!(completed.start_action(CitizenAction::Eat).is_ok());
         assert_eq!(almost_done.active_action().unwrap().remaining_ms(), 1);
     }
 }
 
 #[test]
-fn busy_citizens_reject_both_actions_without_replacing_the_current_action() {
-    for current in [CitizenAction::Eat, CitizenAction::Wait] {
+fn busy_citizens_reject_all_actions_without_replacing_the_current_action() {
+    for current in [
+        CitizenAction::Eat,
+        CitizenAction::Wait,
+        CitizenAction::Sleep,
+    ] {
         let citizen = Citizen::new(0.0)
             .unwrap()
             .start_action(current)
@@ -60,7 +72,11 @@ fn busy_citizens_reject_both_actions_without_replacing_the_current_action() {
             .advance(MINUTE_MS)
             .unwrap();
         let snapshot = citizen.clone();
-        for requested in [CitizenAction::Eat, CitizenAction::Wait] {
+        for requested in [
+            CitizenAction::Eat,
+            CitizenAction::Wait,
+            CitizenAction::Sleep,
+        ] {
             assert_eq!(
                 citizen.start_action(requested),
                 Err(SimulationError::CitizenBusy)
@@ -78,7 +94,13 @@ fn hunger_advances_during_actions_and_after_their_completion() {
     ] {
         let started = Citizen::new(0.0).unwrap().start_action(action).unwrap();
         let midway = started.advance(15 * MINUTE_MS).unwrap();
-        assert_close(midway.hunger(), 100.0 / 96.0);
+        let nourishment = if action == CitizenAction::Eat {
+            25.0
+        } else {
+            0.0
+        };
+        assert_close(midway.hunger(), 100.0 / 96.0 - nourishment);
+        assert_close(midway.tiredness(), 100.0 / 96.0);
         assert_eq!(
             midway.active_action().unwrap().remaining_ms(),
             15 * MINUTE_MS
@@ -93,7 +115,11 @@ fn hunger_advances_during_actions_and_after_their_completion() {
 
 #[test]
 fn small_ticks_and_one_large_tick_agree_across_action_completion() {
-    for action in [CitizenAction::Eat, CitizenAction::Wait] {
+    for action in [
+        CitizenAction::Eat,
+        CitizenAction::Wait,
+        CitizenAction::Sleep,
+    ] {
         let original = Citizen::new(-80.0).unwrap().start_action(action).unwrap();
         let mut small_ticks = original.clone();
         for _ in 0..240 {
@@ -102,8 +128,8 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
         let large_tick = original.advance(240 * 17_000).unwrap();
 
         assert_close(small_ticks.hunger(), large_tick.hunger());
-        assert_eq!(small_ticks.active_action(), None);
-        assert_eq!(large_tick.active_action(), None);
+        assert_close(small_ticks.tiredness(), large_tick.tiredness());
+        assert_eq!(small_ticks.active_action(), large_tick.active_action());
     }
 }
 
@@ -157,7 +183,10 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     assert_eq!(eaten.current_time_ms(), 31 * MINUTE_MS);
     assert_eq!(waited.current_time_ms(), eaten.current_time_ms());
     assert_eq!(eaten.agents()[&other_id], waited.agents()[&other_id]);
-    assert_eq!(eaten.agents()[&id].personal_wellbeing(), Ok(0.0));
+    assert_close(
+        eaten.agents()[&id].personal_wellbeing().unwrap(),
+        -100.0 / 24.0 * 31.0 / 60.0,
+    );
     assert!(waited.agents()[&id].personal_wellbeing().unwrap() < 0.0);
     assert_eq!(eating, eating_snapshot);
     assert_eq!(original, snapshot);

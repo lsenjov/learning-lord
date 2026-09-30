@@ -7,11 +7,11 @@
 - Collectives include families, guilds, businesses, foreign traders, and kingdoms.
 - Agents can have relationships with one another.
 - Agent IDs are UUID v4s, generated when an agent is created and preserved when universes are cloned.
-- Agent kinds hold their specific data. Citizens have metabolic hunger; collectives do not have metabolic hunger of their own.
+- Agent kinds hold their specific data. Citizens have hunger and tiredness; collectives do not have metabolic needs of their own.
 
 ## Numeric representation
 
-- Continuous simulation measurements, including hunger, rates, and wellbeing, use `f64`.
+- Continuous simulation measurements, including hunger, tiredness, rates, and wellbeing, use `f64`.
 - Simulation time and elapsed durations use `u64` milliseconds.
 - Money uses signed `i64` values in a defined smallest currency unit.
 - Discrete counts and tile coordinates remain integers.
@@ -23,7 +23,10 @@
 - Citizen hunger is a signed energy deficit: below zero is satiation, zero is the boundary, and above zero is a need for food.
 - Hunger increases with elapsed simulation time. The standard rate is 100 hunger per 24 game hours, balanced by two meals of 50 nourishment each. Starting hunger is explicit; custom constant hourly rates remain available.
 - Starting hunger must be finite. Hunger rates must be finite and nonnegative. Hunger is not clamped at zero or at the starvation threshold.
-- Eating takes 30 simulation minutes and reduces hunger by 50 on completion. Hunger continues growing during the meal. Food inventory and availability are not modeled yet.
+- Eating takes 30 simulation minutes and gradually reduces hunger by 50 over the meal. Half a meal provides 25 nourishment alongside normal hunger growth. Food inventory and availability are not modeled yet.
+- Tiredness grows by 100 per 24 simulation hours, including during sleep. Below zero represents being rested; tiredness has a minimum of -100 and no upper cap.
+- Sleep takes eight simulation hours and gradually reduces tiredness by 100 over that duration, subject to the floor. Eight hours of sleep balances one day of tiredness growth when recovery is not lost at the floor. Hunger keeps growing during sleep.
+- Existing citizen constructors start tiredness at zero. `Citizen::with_needs(hunger, tiredness)` accepts finite starting needs with the standard hunger rate and clamps starting tiredness at -100.
 - Other needs have a constant baseline, such as a peasant's clothing need of 40.
 - Goods can reduce a need. Peasant clothing might reduce clothing need by 50.
 - As clothing degrades, its reduction becomes smaller, so the effective clothing need increases.
@@ -31,13 +34,14 @@
 ## Personal wellbeing
 
 - An agent's personal wellbeing score is calculated from its needs and other attributes.
-- Currently, `Citizen::personal_wellbeing()` calculates a hunger-only score on demand without a universe or stored score. `Agent::personal_wellbeing()` delegates to its kind.
-- Higher scores are better. The formula is `-max(hunger, 0) - 4 * max(hunger - 100, 0) - max(-hunger - 100, 0)`.
+- Currently, `Citizen::personal_wellbeing()` calculates a hunger and tiredness score on demand without a universe or stored score. `Agent::personal_wellbeing()` delegates to its kind.
+- Higher scores are better. The formula is `-max(hunger, 0) - 4 * max(hunger - 100, 0) - max(-hunger - 100, 0) - max(tiredness, 0)`.
 - Hunger from -100 to 0 scores zero. Satiation delays future hunger rather than granting an immediate wellbeing bonus.
 - Hunger below -100 represents being overfull, costing one point per excess unit with no jump at the threshold.
 - Hunger above 0 costs one point per unit up to 100. Each unit beyond 100 costs five points, with no jump at the starvation threshold.
 - A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
-- Sleep and clothing will be important factors later.
+- Each positive unit of tiredness costs one wellbeing point. Negative tiredness delays future tiredness without granting an immediate bonus.
+- Clothing will be an important factor later.
 - Total wealth will be a secondary factor.
 - A collective's wellbeing could depend primarily on its members' needs, or it might depend only on money. This is still undecided.
 
@@ -66,11 +70,11 @@
 ## Actions and planning
 
 - Agents have actions, each with an estimated duration and a result.
-- Currently, citizens can eat or wait; each action takes 30 simulation minutes. Only one action can be active at a time, and hunger continues growing throughout both.
-- Starting an action returns a new snapshot without advancing time. Eating grants 50 nourishment on completion; waiting has no completion effect. Unplanned citizens remain idle after finishing their manually started action.
-- Planning explores action sequences until the completed action that reaches or crosses a four-hour horizon, using independent citizen snapshots. The horizon is a duration, not an action count; current 30-minute actions yield 256 sequences of eight actions. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
-- A plan's score is the average personal wellbeing at all its action completions, including the action crossing the horizon. Plans have variable-length action sequences. Wellbeing between completions is not included yet.
-- The highest-scoring plan wins. Any equally good plan is acceptable on ties. The current search tries waiting before eating and retains the first optimum.
+- Currently, citizens can Eat or Wait for 30 simulation minutes, or Sleep for eight hours. Only one action can be active at a time; both needs continue growing during all actions.
+- Starting an action returns a new snapshot without advancing time. Eat gradually grants 50 nourishment; Sleep gradually grants 100 tiredness recovery; Wait grants no recovery. Completion gives no extra reduction. Unplanned citizens remain idle after finishing their manually started action. Interruption is not implemented.
+- Planning explores action sequences until the completed action that reaches or crosses a four-hour horizon, using independent citizen snapshots. The horizon is a duration, not an action count; there are 256 eight-action eat/wait sequences and 255 sequences ending in sleep. Sleep finishes in predictions even across the horizon, so a prediction can reach 11.5 hours. Current actions need no world interactions; future actions can branch immutable universes when those interactions exist.
+- A plan's score is the average personal wellbeing at all its action completions, including the action crossing the horizon. Plans have variable-length action sequences. Wellbeing between completions and duration weighting are not included.
+- The highest-scoring plan wins. Any equally good plan is acceptable on ties. The current search tries Wait, Eat, then Sleep and retains the first optimum.
 - Planning is enabled explicitly on an idle citizen with `start_planning()`, also available through agents and universes. The search and batch executor live in the separate planning module and reuse citizen action and need calculations.
 - Execute the selected plan for two simulation hours without reconsidering between actions. Finish any action crossing that time boundary, then search again from the actual state and start the next batch.
 - The citizen stores an optional `ActivePlan`, available through `active_plan()`, with the selected plan, current action index, and elapsed batch time including partial actions.
@@ -84,17 +88,17 @@
 
 - Time is measured in ticks, with milliseconds represented by a `u64`.
 - A universe has a current time.
-- Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's hunger and action for the elapsed duration.
+- Advancing a universe returns a new snapshot, increments its clock once, and updates each citizen's needs and action for the elapsed duration.
 - Agents delegate advancement to their kind. Citizens advance their own needs and actions without requiring a universe; each advancement returns a new value and preserves its source.
-- If an advance crosses action completion, advance needs to that point and apply the action's effect. Unplanned citizens spend the remaining time idle; planned citizens continue their committed actions, replanning at the first action completion at or after two hours.
-- Invalid advances, including clock overflow or nonfinite hunger results, leave the source snapshot unchanged.
+- If an advance crosses action completion, advance needs and continuous recovery to that point. Unplanned citizens spend the remaining time idle; planned citizens continue their committed actions, replanning at the first action completion at or after two hours, even when sleep crosses that boundary.
+- Invalid advances, including clock overflow or nonfinite need results, leave the source snapshot unchanged.
 - Small advances should agree with one equivalent large advance within floating-point tolerance when no intervening action changes the rate.
 - Ticking a single agent advances its needs and actions by a given amount of time within the universe.
 - Ticking the universe ticks all agents.
 - The desktop starts paused and maps one real second to 60,000 simulation milliseconds at 1x. Speed controls multiply this by 1, 2, 3, 5, 10, or 20.
 - A single simulation worker measures real elapsed monotonic time and starts at most 60 automatic updates per real second by default. The cap is configurable with `LEARNING_LORD_MAX_UPDATES_PER_SECOND`, including 30. Processing delays produce larger time jumps while preserving fractional milliseconds.
 - Paused time is excluded. An in-progress update finishes when pausing, and unapplied running time is retained until resume. Manual stepping while paused advances exactly 30 simulation minutes independent of speed.
-- The desktop displays elapsed days, hours, minutes, and seconds from the latest completed universe snapshot.
+- The desktop displays elapsed days, hours, minutes, and seconds from the latest completed universe snapshot, plus hunger, tiredness, wellbeing, current action, upcoming actions, and time until replanning after an action completes.
 - Planned citizens start the next action at completion rather than losing time to tick boundaries.
 - Individual agents do not need activating in the middle of an action.
 
