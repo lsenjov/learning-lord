@@ -6,6 +6,8 @@ mod simulation;
 use bevy::{
     input_focus::{FocusCause, InputFocus},
     prelude::*,
+    render::pipelined_rendering::PipelinedRenderingPlugin,
+    winit::{EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent},
 };
 use learning_lord_simulation::{
     AgentKind, CitizenAction, Universe, marketplace::Good, planning::COMMITMENT_MS,
@@ -66,42 +68,53 @@ enum Readout {
 fn main() -> Result<(), String> {
     let rate = simulation::update_rate()?;
     let universe = simulation::new_universe().map_err(|error| error.to_string())?;
-    let worker = SimulationWorker::spawn(universe, rate);
-
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Learning Lord".into(),
-                name: Some("learning-lord".into()),
-                resolution: (1280, 800).into(),
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Learning Lord".into(),
+                    name: Some("learning-lord".into()),
+                    resolution: (1280, 800).into(),
+                    ..default()
+                }),
                 ..default()
-            }),
-            ..default()
-        }))
-        .insert_resource(ClearColor(BACKGROUND))
-        .insert_resource(DisplaySnapshot(worker.snapshot()))
-        .insert_resource(worker)
-        .init_resource::<Controls>()
-        .init_resource::<citizens::Selection>()
-        .init_resource::<citizens::PlanDisplay>()
-        .init_resource::<debug_export::DebugExport>()
-        .init_resource::<InputFocus>()
-        .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (
-                poll_worker,
-                handle_controls,
-                citizens::handle_selection,
-                refresh_display,
-                citizens::refresh_cards,
-                citizens::refresh_plan,
-                citizens::scroll_panels,
-                map_view::refresh,
-            )
-                .chain(),
+            })
+            // Reactive updates must render now; another frame is not guaranteed.
+            .disable::<PipelinedRenderingPlugin>(),
+    );
+    let proxy = (**app.world().resource::<EventLoopProxyWrapper>()).clone();
+    let worker = SimulationWorker::spawn_with_wakeup(universe, rate, move || {
+        let _ = proxy.send_event(WinitUserEvent::WakeUp);
+    });
+    app.insert_resource(WinitSettings {
+        focused_mode: UpdateMode::reactive_low_power(std::time::Duration::MAX),
+        unfocused_mode: UpdateMode::reactive_low_power(std::time::Duration::MAX),
+    })
+    .insert_resource(ClearColor(BACKGROUND))
+    .insert_resource(DisplaySnapshot(worker.snapshot()))
+    .insert_resource(worker)
+    .init_resource::<Controls>()
+    .init_resource::<citizens::Selection>()
+    .init_resource::<citizens::PlanDisplay>()
+    .init_resource::<debug_export::DebugExport>()
+    .init_resource::<InputFocus>()
+    .add_systems(Startup, setup)
+    .add_systems(
+        Update,
+        (
+            poll_worker,
+            handle_controls,
+            citizens::handle_selection,
+            refresh_display,
+            citizens::refresh_cards,
+            citizens::refresh_plan,
+            citizens::scroll_panels,
+            map_view::refresh,
         )
-        .run();
+            .chain(),
+    )
+    .run();
     Ok(())
 }
 
@@ -183,7 +196,9 @@ fn poll_worker(
     mut snapshot: ResMut<DisplaySnapshot>,
     mut controls: ResMut<Controls>,
 ) {
-    let next = worker.snapshot();
+    let Some(next) = worker.snapshot_after(snapshot.0.revision) else {
+        return;
+    };
     if controls.restart_pending && next.generation == controls.generation {
         return;
     }
@@ -489,7 +504,7 @@ fn refresh_display(
                 || controls.error.is_some() && !matches!(control, Control::Restart)
                 || matches!(control, Control::Step) && controls.running);
         let selected = matches!(control, Control::Speed(speed) if *speed == controls.speed);
-        color.0 = if disabled {
+        let next = if disabled {
             Color::srgb(0.09, 0.10, 0.11)
         } else if *interaction == Interaction::Pressed {
             Color::srgb(0.18, 0.48, 0.39)
@@ -500,6 +515,7 @@ fn refresh_display(
         } else {
             PANEL
         };
+        color.set_if_neq(BackgroundColor(next));
     }
 }
 
@@ -630,6 +646,42 @@ mod tests {
                     .chain(),
             );
         app.update();
+        app.update();
+        app.world_mut().clear_trackers();
+        app.update();
+        assert!(!app.world().resource_ref::<DisplaySnapshot>().is_changed());
+        assert!(
+            !app.world()
+                .resource_ref::<citizens::Selection>()
+                .is_changed()
+        );
+        let mut unchanged = app.world_mut().query::<(
+            Option<Ref<Text>>,
+            Option<Ref<Node>>,
+            Option<Ref<BackgroundColor>>,
+            Option<Ref<UiTransform>>,
+            Option<Ref<Visibility>>,
+        )>();
+        for (text, node, color, transform, visibility) in unchanged.iter(app.world()) {
+            assert!(text.is_none_or(|value| !value.is_changed()));
+            assert!(node.is_none_or(|value| !value.is_changed()));
+            assert!(color.is_none_or(|value| !value.is_changed()));
+            assert!(transform.is_none_or(|value| !value.is_changed()));
+            assert!(visibility.is_none_or(|value| !value.is_changed()));
+        }
+
+        app.world_mut().clear_trackers();
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .set_changed();
+        app.update();
+        for (text, node, color, transform, visibility) in unchanged.iter(app.world()) {
+            assert!(text.is_none_or(|value| !value.is_changed()));
+            assert!(node.is_none_or(|value| !value.is_changed()));
+            assert!(color.is_none_or(|value| !value.is_changed()));
+            assert!(transform.is_none_or(|value| !value.is_changed()));
+            assert!(visibility.is_none_or(|value| !value.is_changed()));
+        }
 
         let buttons: Vec<_> = app
             .world_mut()
@@ -637,6 +689,27 @@ mod tests {
             .iter(app.world())
             .map(|(entity, control)| (entity, *control))
             .collect();
+        let step_button = buttons
+            .iter()
+            .find(|(_, control)| matches!(control, Control::Step))
+            .unwrap()
+            .0;
+        app.world_mut()
+            .entity_mut(step_button)
+            .insert(Interaction::Hovered);
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(step_button)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0,
+            Color::srgb(0.20, 0.27, 0.29)
+        );
+        app.world_mut()
+            .entity_mut(step_button)
+            .insert(Interaction::None);
+        app.update();
         for (entity, control) in &buttons {
             if let Control::Speed(speed) = control {
                 app.world_mut()

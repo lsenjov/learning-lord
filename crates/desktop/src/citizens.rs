@@ -174,11 +174,17 @@ pub fn handle_selection(
         .0
         .is_none_or(|id| !snapshot.0.universe.agents().contains_key(&id))
     {
-        selection.0 = agents.first().map(|(id, _)| *id);
+        let next = agents.first().map(|(id, _)| *id);
+        if selection.0 != next {
+            selection.0 = next;
+        }
     }
     for (interaction, card) in &cards {
         if *interaction == Interaction::Pressed {
-            selection.0 = agents.get(card.0).map(|(id, _)| *id);
+            let next = agents.get(card.0).map(|(id, _)| *id);
+            if selection.0 != next {
+                selection.0 = next;
+            }
         }
     }
     for (slot, key) in [
@@ -191,7 +197,10 @@ pub fn handle_selection(
     .enumerate()
     {
         if keyboard.just_pressed(key) {
-            selection.0 = agents.get(slot).map(|(id, _)| *id);
+            let next = agents.get(slot).map(|(id, _)| *id);
+            if selection.0 != next {
+                selection.0 = next;
+            }
         }
     }
 }
@@ -342,7 +351,7 @@ pub fn refresh_cards(
             let wealth = citizen
                 .wealth()
                 .map_or_else(|e| e.to_string(), |v| format!("{v:.3}"));
-            value.0 = format!(
+            let next = format!(
                 "{}{}\nCoins {:.2}  |  Wealth {}\nWellbeing {}  |  {}",
                 agent.name,
                 if Some(*id) == selection.0 {
@@ -355,14 +364,20 @@ pub fn refresh_cards(
                 wellbeing,
                 action
             );
+            if value.0 != next {
+                value.0 = next;
+            }
         } else {
-            value.0 = "No citizen".into();
+            let next = "No citizen".into();
+            if value.0 != next {
+                value.0 = next;
+            }
         }
     }
     for (label, mut value) in &mut labels {
         if let Some((_, agent)) = agents.get(label.0) {
             let AgentKind::Citizen(citizen) = &agent.kind;
-            value.0 = format!(
+            let next = format!(
                 "{}: {}   (- < 0 > +)",
                 if label.1 { "Sleep" } else { "Hunger" },
                 need_label(
@@ -374,6 +389,9 @@ pub fn refresh_cards(
                     label.1
                 )
             );
+            if value.0 != next {
+                value.0 = next;
+            }
         }
     }
     for (fill, mut node, mut color) in &mut fills {
@@ -385,19 +403,28 @@ pub fn refresh_cards(
                 citizen.hunger()
             };
             let (left, width) = need_geometry(value);
-            node.left = percent(left);
-            node.width = percent(width);
-            color.0 = if !(-100.0..=100.0).contains(&value) {
+            let next = percent(left);
+            if node.left != next {
+                node.left = next;
+            }
+            let next = percent(width);
+            if node.width != next {
+                node.width = next;
+            }
+            let next = if !(-100.0..=100.0).contains(&value) {
                 Color::srgb(0.95, 0.35, 0.25)
             } else if value > 50.0 {
                 Color::srgb(0.88, 0.65, 0.23)
             } else {
                 Color::srgb(0.24, 0.67, 0.53)
             };
+            if color.0 != next {
+                color.0 = next;
+            }
         }
     }
     for (card, interaction, mut color) in &mut cards {
-        color.0 = if agents
+        let next = if agents
             .get(card.0)
             .is_some_and(|(id, _)| Some(*id) == selection.0)
         {
@@ -407,6 +434,9 @@ pub fn refresh_cards(
         } else {
             PANEL
         };
+        if color.0 != next {
+            color.0 = next;
+        }
     }
 }
 
@@ -519,6 +549,7 @@ mod tests {
             universe,
             error: None,
             generation: 0,
+            revision: 0,
         }))
         .init_resource::<Selection>()
         .init_resource::<ButtonInput<KeyCode>>()

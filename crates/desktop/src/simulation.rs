@@ -40,6 +40,7 @@ pub struct Snapshot {
     pub universe: Universe,
     pub error: Option<String>,
     pub generation: u64,
+    pub revision: u64,
 }
 
 #[derive(Resource)]
@@ -50,17 +51,27 @@ pub struct SimulationWorker {
 }
 
 impl SimulationWorker {
+    #[cfg(test)]
     pub fn spawn(universe: Universe, updates_per_second: NonZeroU32) -> Self {
+        Self::spawn_with_wakeup(universe, updates_per_second, || {})
+    }
+
+    pub fn spawn_with_wakeup(
+        universe: Universe,
+        updates_per_second: NonZeroU32,
+        wakeup: impl Fn() + Send + 'static,
+    ) -> Self {
         let snapshot = Arc::new(Mutex::new(Snapshot {
             universe: universe.clone(),
             error: None,
             generation: 0,
+            revision: 0,
         }));
         let published = Arc::clone(&snapshot);
         let (commands, receiver) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("simulation".into())
-            .spawn(move || run_worker(universe, updates_per_second, receiver, published))
+            .spawn(move || run_worker(universe, updates_per_second, receiver, published, wakeup))
             .expect("could not start the simulation worker");
         Self {
             commands,
@@ -83,6 +94,11 @@ impl SimulationWorker {
             .lock()
             .expect("snapshot lock poisoned")
             .clone()
+    }
+
+    pub fn snapshot_after(&self, revision: u64) -> Option<Snapshot> {
+        let snapshot = self.snapshot.lock().expect("snapshot lock poisoned");
+        (snapshot.revision != revision).then(|| snapshot.clone())
     }
 }
 
@@ -248,10 +264,12 @@ impl WorkerState {
     }
 
     fn publish(&self, published: &Mutex<Snapshot>) {
-        *published.lock().expect("snapshot lock poisoned") = Snapshot {
+        let mut published = published.lock().expect("snapshot lock poisoned");
+        *published = Snapshot {
             universe: self.universe.clone(),
             error: self.error.clone(),
             generation: self.generation,
+            revision: published.revision + 1,
         };
     }
 }
@@ -261,6 +279,7 @@ fn run_worker(
     updates_per_second: NonZeroU32,
     commands: mpsc::Receiver<TimedCommand>,
     published: Arc<Mutex<Snapshot>>,
+    wakeup: impl Fn(),
 ) {
     let epoch = Instant::now();
     let mut state = WorkerState {
@@ -276,6 +295,7 @@ fn run_worker(
                     break;
                 }
                 state.publish(&published);
+                wakeup();
                 continue;
             }
             Err(mpsc::TryRecvError::Disconnected) => break,
@@ -290,6 +310,7 @@ fn run_worker(
                 Ok(None) => {}
             }
             state.publish(&published);
+            wakeup();
             continue;
         }
 
@@ -306,6 +327,7 @@ fn run_worker(
             break;
         }
         state.publish(&published);
+        wakeup();
     }
 }
 
@@ -318,6 +340,54 @@ mod tests {
         let mut pacing = Pacing::new(NonZeroU32::new(rate).unwrap());
         pacing.set_running(true, Duration::ZERO);
         pacing
+    }
+
+    #[test]
+    fn publications_wake_after_step_restart_and_running_updates_but_not_while_idle() {
+        let (wakeups, received) = mpsc::channel();
+        let worker = SimulationWorker::spawn_with_wakeup(
+            Universe::default(),
+            NonZeroU32::new(60).unwrap(),
+            move || {
+                wakeups.send(()).unwrap();
+            },
+        );
+        assert!(worker.snapshot_after(0).is_none());
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        worker.send(Command::Step).unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        let stepped = worker.snapshot_after(0).unwrap();
+        assert_eq!(stepped.universe.current_time_ms(), STEP_MS);
+        assert_eq!(stepped.revision, 1);
+        assert!(worker.snapshot_after(stepped.revision).is_none());
+
+        worker.send(Command::Restart).unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        let restarted = worker.snapshot_after(stepped.revision).unwrap();
+        assert_eq!(restarted.generation, 1);
+        assert_eq!(restarted.universe.current_time_ms(), 0);
+        assert_eq!(restarted.revision, 2);
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        worker.send(Command::SetRunning(true)).unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            worker
+                .snapshot_after(restarted.revision)
+                .unwrap()
+                .universe
+                .current_time_ms()
+                > 0
+        );
+        drop(worker);
     }
 
     #[test]

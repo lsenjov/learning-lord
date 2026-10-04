@@ -152,6 +152,9 @@ pub fn refresh(
         Option<&mut BackgroundColor>,
     )>,
 ) {
+    if !snapshot.is_changed() && !selection.is_changed() {
+        return;
+    }
     let universe = &snapshot.0.universe;
     let map = universe.map();
     let mut sites: Vec<_> = map.places().values().collect();
@@ -162,13 +165,16 @@ pub fn refresh(
         citizen
     });
     for (label, mut value) in &mut labels {
-        value.0 = agents.get(label.0).map_or_else(String::new, |(id, agent)| {
+        let next = agents.get(label.0).map_or_else(String::new, |(id, agent)| {
             format!(
                 "{}{}",
                 agent.name,
                 if Some(*id) == selection.0 { " *" } else { "" }
             )
         });
+        if value.0 != next {
+            value.0 = next;
+        }
     }
     let mut occupied = Vec::new();
     let site_layout: Vec<_> = sites
@@ -196,29 +202,57 @@ pub fn refresh(
         .collect();
     for (label, mut value, mut node, mut visibility) in &mut site_labels {
         let Some(Some((name, position))) = site_layout.get(label.0) else {
-            *visibility = Visibility::Hidden;
-            value.0.clear();
+            let next = Visibility::Hidden;
+            if *visibility != next {
+                *visibility = next;
+            }
+            if !value.0.is_empty() {
+                value.0.clear();
+            }
             continue;
         };
-        *visibility = Visibility::Inherited;
-        value.0.clone_from(name);
+        let next = Visibility::Inherited;
+        if *visibility != next {
+            *visibility = next;
+        }
+        if &value.0 != name {
+            value.0.clone_from(name);
+        }
         let marker = project(sites[label.0].position) - Vec2::splat(5.0);
-        node.left = px(position.x - marker.x);
-        node.top = px(position.y - marker.y);
+        let next = px(position.x - marker.x);
+        if node.left != next {
+            node.left = next;
+        }
+        let next = px(position.y - marker.y);
+        if node.top != next {
+            node.top = next;
+        }
     }
     for (item, mut node, mut transform, mut visibility, color) in &mut items {
         match item {
             MapItem::Site(slot) => {
                 let Some(place) = sites.get(*slot) else {
-                    *visibility = Visibility::Hidden;
+                    let next = Visibility::Hidden;
+                    if *visibility != next {
+                        *visibility = next;
+                    }
                     continue;
                 };
-                *visibility = Visibility::Inherited;
+                let next = Visibility::Inherited;
+                if *visibility != next {
+                    *visibility = next;
+                }
                 let p = project(place.position);
-                node.left = px(p.x - 5.0);
-                node.top = px(p.y - 5.0);
+                let next = px(p.x - 5.0);
+                if node.left != next {
+                    node.left = next;
+                }
+                let next = px(p.y - 5.0);
+                if node.top != next {
+                    node.top = next;
+                }
                 if let Some(mut color) = color {
-                    color.0 = if place.owner.is_some() && place.owner == selection.0 {
+                    let next = if place.owner.is_some() && place.owner == selection.0 {
                         Color::srgb(1.0, 0.75, 0.20)
                     } else {
                         match place.kind {
@@ -228,14 +262,20 @@ pub fn refresh(
                             _ => Color::srgb(0.85, 0.75, 0.60),
                         }
                     };
+                    if color.0 != next {
+                        color.0 = next;
+                    }
                 }
             }
             MapItem::Citizen(slot) => {
-                *visibility = if agents.get(*slot).is_some() {
+                let next = if agents.get(*slot).is_some() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
                 };
+                if *visibility != next {
+                    *visibility = next;
+                }
                 if let Some((id, agent)) = agents.get(*slot) {
                     let AgentKind::Citizen(marker) = &agent.kind;
                     let overlapping: Vec<_> = agents
@@ -252,19 +292,28 @@ pub fn refresh(
                         .unwrap_or(0) as f32;
                     let p = project(marker.position());
                     let shift = (offset - (overlapping.len() - 1) as f32 / 2.0) * 18.0;
-                    node.left = px(p.x - 5.0);
-                    node.top = px(p.y - 5.0 + shift);
+                    let next = px(p.x - 5.0);
+                    if node.left != next {
+                        node.left = next;
+                    }
+                    let next = px(p.y - 5.0 + shift);
+                    if node.top != next {
+                        node.top = next;
+                    }
                     if let Some(mut color) = color {
-                        color.0 = if Some(*id) == selection.0 {
+                        let next = if Some(*id) == selection.0 {
                             Color::srgb(1.0, 0.75, 0.20)
                         } else {
                             Color::srgb(0.45, 0.68, 0.75)
                         };
+                        if color.0 != next {
+                            color.0 = next;
+                        }
                     }
                 }
             }
             MapItem::Route => {
-                *visibility = Visibility::Hidden;
+                let mut next_visibility = Visibility::Hidden;
                 if let Some(citizen) = citizen
                     && let Some(active) = citizen.active_action()
                     && let CitizenAction::Travel(destination) = active.action()
@@ -274,12 +323,25 @@ pub fn refresh(
                     let delta = to - from;
                     let length = delta.length();
                     let midpoint = (from + to) / 2.0;
-                    node.left = px(midpoint.x - length / 2.0);
-                    node.top = px(midpoint.y - 1.0);
-                    node.width = px(length);
-                    *transform = UiTransform::from_rotation(Rot2::radians(delta.y.atan2(delta.x)));
-                    *visibility = Visibility::Inherited;
+                    let next = px(midpoint.x - length / 2.0);
+                    if node.left != next {
+                        node.left = next;
+                    }
+                    let next = px(midpoint.y - 1.0);
+                    if node.top != next {
+                        node.top = next;
+                    }
+                    let next = px(length);
+                    if node.width != next {
+                        node.width = next;
+                    }
+                    let next = UiTransform::from_rotation(Rot2::radians(delta.y.atan2(delta.x)));
+                    if *transform != next {
+                        *transform = next;
+                    }
+                    next_visibility = Visibility::Inherited;
                 }
+                visibility.set_if_neq(next_visibility);
             }
         }
     }
@@ -321,6 +383,7 @@ mod tests {
             universe,
             error: None,
             generation: 0,
+            revision: 0,
         }))
         .insert_resource(Selection(Some(ada)))
         .add_systems(Update, refresh);
@@ -396,6 +459,7 @@ mod tests {
             universe,
             error: None,
             generation: 0,
+            revision: 0,
         }))
         .insert_resource(Selection(Some(selected)))
         .add_systems(Update, refresh);
@@ -456,6 +520,7 @@ mod tests {
             universe: travelling.advance(150_000).unwrap(),
             error: None,
             generation: 0,
+            revision: 0,
         }))
         .init_resource::<Selection>()
         .add_systems(Update, refresh);
