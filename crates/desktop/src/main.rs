@@ -279,19 +279,16 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .active_action()
         .map(|active| {
             let name = match active.action() {
-                CitizenAction::Eat => "Eating",
-                CitizenAction::Wait => "Waiting",
-                CitizenAction::Sleep => "Sleeping",
-                CitizenAction::Forage => "Foraging",
-                CitizenAction::FindRocks => "Finding rocks",
-                CitizenAction::BuyBerries => "Buying berries",
-                CitizenAction::SellPebbles => "Selling pebbles",
-                CitizenAction::Travel(location) => match location {
-                    learning_lord_simulation::locations::Location::House => "Walking to house",
-                    learning_lord_simulation::locations::Location::Forest => "Walking to forest",
-                    learning_lord_simulation::locations::Location::River => "Walking to river",
-                    learning_lord_simulation::locations::Location::Market => "Walking to market",
-                },
+                CitizenAction::Eat => "Eating".into(),
+                CitizenAction::Wait => "Waiting".into(),
+                CitizenAction::Sleep => "Sleeping".into(),
+                CitizenAction::Forage => "Foraging".into(),
+                CitizenAction::FindRocks => "Finding rocks".into(),
+                CitizenAction::BuyBerries => "Buying berries".into(),
+                CitizenAction::SellPebbles => "Selling pebbles".into(),
+                CitizenAction::Travel(id) => {
+                    format!("Walking to {}", citizen.map().place(id).unwrap().name)
+                }
             };
             let seconds = active.remaining_ms().div_ceil(1000);
             format!(
@@ -316,11 +313,26 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
             }
         })
         .unwrap_or_else(|| "No active plan".into());
+    let role = citizen
+        .starting_role()
+        .map_or_else(String::new, |role| format!(" | {}", role.name()));
+    let inventory = Good::ALL
+        .into_iter()
+        .map(|good| format!("{}: {:.1} g", good.name(), citizen.grams(good)))
+        .collect::<Vec<_>>()
+        .chunks(3)
+        .map(|row| row.join(" | "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut properties = citizen
+        .owned_properties()
+        .map(|place| place.name.as_str())
+        .collect::<Vec<_>>();
+    properties.sort();
+    let properties = properties.join(", ");
     format!(
-        "{} | Berries: {:.1} g | Pebbles: {:.1} g\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nLocation: {}\n{action}\n{commitment}",
+        "{}{role}\n{inventory}\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
         agent.name,
-        citizen.berries_grams(),
-        citizen.pebbles_grams(),
         citizen.coins(),
         citizen
             .wealth()
@@ -331,25 +343,23 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
     )
 }
 
-fn action_label(action: CitizenAction) -> &'static str {
+fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citizen) -> String {
     match action {
-        CitizenAction::Eat => "Eat",
-        CitizenAction::Wait => "Wait",
-        CitizenAction::Sleep => "Sleep",
-        CitizenAction::Forage => "Forage",
-        CitizenAction::FindRocks => "Find rocks",
-        CitizenAction::BuyBerries => "Buy berries",
-        CitizenAction::SellPebbles => "Sell pebbles",
-        CitizenAction::Travel(location) => match location {
-            learning_lord_simulation::locations::Location::House => "Travel home",
-            learning_lord_simulation::locations::Location::Forest => "Travel to forest",
-            learning_lord_simulation::locations::Location::River => "Travel to river",
-            learning_lord_simulation::locations::Location::Market => "Travel to market",
-        },
+        CitizenAction::Eat => "Eat".into(),
+        CitizenAction::Wait => "Wait".into(),
+        CitizenAction::Sleep => "Sleep".into(),
+        CitizenAction::Forage => "Forage".into(),
+        CitizenAction::FindRocks => "Find rocks".into(),
+        CitizenAction::BuyBerries => "Buy berries".into(),
+        CitizenAction::SellPebbles => "Sell pebbles".into(),
+        CitizenAction::Travel(id) => format!("Travel to {}", citizen.map().place(id).unwrap().name),
     }
 }
 
-fn sequence_readout(actions: &[CitizenAction]) -> String {
+fn sequence_readout(
+    actions: &[CitizenAction],
+    citizen: &learning_lord_simulation::Citizen,
+) -> String {
     let mut labels = Vec::new();
     let mut index = 0;
     while index < actions.len() {
@@ -358,7 +368,7 @@ fn sequence_readout(actions: &[CitizenAction]) -> String {
             .iter()
             .take_while(|&&next| next == action)
             .count();
-        let label = action_label(action);
+        let label = action_label(action, citizen);
         labels.push(if count == 1 {
             label.to_string()
         } else {
@@ -385,8 +395,8 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
         "Last planning decision".to_string(),
         format!(
             "Prices used: berries {:.3}, pebbles {:.3} coins/kg",
-            decision.prices.coins_per_kg(Good::Berries),
-            decision.prices.coins_per_kg(Good::Pebbles)
+            decision.prices.coins_per_kg(Good::Berries).unwrap(),
+            decision.prices.coins_per_kg(Good::Pebbles).unwrap()
         ),
     ];
     for candidate in &decision.candidates {
@@ -412,7 +422,7 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
                 forecast.average_wellbeing,
                 forecast.full_plan_wellbeing
             ));
-            lines.push(sequence_readout(&forecast.actions));
+            lines.push(sequence_readout(&forecast.actions, citizen));
         } else {
             lines.push(format!(
                 "Unavailable: {}",
@@ -439,8 +449,18 @@ fn refresh_display(
             Readout::Market => {
                 format!(
                     "Market: berries {:.3} | pebbles {:.3} coins/kg | updates at 04:00",
-                    snapshot.0.universe.prices().coins_per_kg(Good::Berries),
-                    snapshot.0.universe.prices().coins_per_kg(Good::Pebbles)
+                    snapshot
+                        .0
+                        .universe
+                        .prices()
+                        .coins_per_kg(Good::Berries)
+                        .unwrap(),
+                    snapshot
+                        .0
+                        .universe
+                        .prices()
+                        .coins_per_kg(Good::Pebbles)
+                        .unwrap()
                 )
             }
             Readout::Clock => format_clock(snapshot.0.universe.current_time_ms()),
@@ -495,7 +515,8 @@ mod tests {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(prices)
-                .with_citizen("Ada", Citizen::new(0.0).unwrap());
+                .with_citizen("Ada", Citizen::new(0.0).unwrap())
+                .unwrap();
         assert!(decision_readout(&universe, None).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
         let text = decision_readout(&planned, None);
@@ -518,11 +539,14 @@ mod tests {
             text
         );
         assert_eq!(
-            sequence_readout(&[
-                CitizenAction::Forage,
-                CitizenAction::Forage,
-                CitizenAction::Eat
-            ]),
+            sequence_readout(
+                &[
+                    CitizenAction::Forage,
+                    CitizenAction::Forage,
+                    CitizenAction::Eat
+                ],
+                &Citizen::new(0.0).unwrap()
+            ),
             "Forage x2 > Eat"
         );
     }
@@ -536,7 +560,8 @@ mod tests {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(learning_lord_simulation::marketplace::Prices::default())
-                .with_citizen("Ada", citizen);
+                .with_citizen("Ada", citizen)
+                .unwrap();
         let universe = universe
             .start_planning(id)
             .unwrap()
@@ -557,7 +582,8 @@ mod tests {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(learning_lord_simulation::marketplace::Prices::default())
-                .with_citizen("Ada", citizen);
+                .with_citizen("Ada", citizen)
+                .unwrap();
         let universe = universe
             .start_planning(id)
             .unwrap()
@@ -565,7 +591,7 @@ mod tests {
             .unwrap();
         let readout = citizen_readout(&universe, None);
         assert!(readout.contains("Sleeping | 06:00:00 remaining"));
-        assert!(readout.contains("Location: House"));
+        assert!(readout.contains("Location: Ada's home"));
         assert!(readout.contains("Replan after current action"));
     }
 

@@ -13,11 +13,13 @@ fn citizen(universe: &Universe, id: AgentId) -> &Citizen {
 fn creation_assigns_v4_ids_and_preserves_existing_agents_and_time() {
     let empty = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default());
-    let (first, first_id) =
-        empty.with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 2.0).unwrap());
+    let (first, first_id) = empty
+        .with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 2.0).unwrap())
+        .unwrap();
     let first = first.advance(500).unwrap();
-    let (second, second_id) =
-        first.with_citizen("Bea", Citizen::with_hunger_rate(0.0, 1.0).unwrap());
+    let (second, second_id) = first
+        .with_citizen("Bea", Citizen::with_hunger_rate(0.0, 1.0).unwrap())
+        .unwrap();
 
     assert_eq!(first_id.0.get_version(), Some(Version::Random));
     assert_eq!(second_id.0.get_version(), Some(Version::Random));
@@ -26,7 +28,11 @@ fn creation_assigns_v4_ids_and_preserves_existing_agents_and_time() {
     assert_eq!(first.agents().len(), 1);
     assert_eq!(second.agents().len(), 2);
     assert_eq!(second.current_time_ms(), 500);
-    assert_eq!(second.agents()[&first_id], first.agents()[&first_id]);
+    assert_eq!(
+        citizen(&second, first_id),
+        &citizen(&first, first_id).with_map(second.map()).unwrap()
+    );
+    assert_eq!(citizen(&first, first_id).map().places().len(), 4);
     assert_eq!(second.agents()[&first_id].name, "Ada");
     assert_eq!(second.agents()[&second_id].name, "Bea");
     assert_eq!(citizen(&second, second_id).hunger(), 0.0);
@@ -100,7 +106,8 @@ fn personal_wellbeing_penalizes_hunger_and_weights_starvation_without_a_jump() {
 fn personal_wellbeing_reflects_each_snapshot_without_changing_it() {
     let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", Citizen::with_hunger_rate(-20.0, 120.0).unwrap());
+        .with_citizen("Ada", Citizen::with_hunger_rate(-20.0, 120.0).unwrap())
+        .unwrap();
     let snapshot = original.clone();
     let advanced = original.advance(HOUR_MS).unwrap();
 
@@ -123,7 +130,8 @@ fn personal_wellbeing_rejects_overflow_without_changing_the_citizen() {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(learning_lord_simulation::marketplace::Prices::default())
-                .with_citizen("Ada", Citizen::with_hunger_rate(hunger, 0.0).unwrap());
+                .with_citizen("Ada", Citizen::with_hunger_rate(hunger, 0.0).unwrap())
+                .unwrap();
         let snapshot = universe.clone();
 
         assert_eq!(
@@ -174,9 +182,11 @@ fn advancing_updates_each_citizen_and_the_clock_once() {
     let (universe, satiated_id) =
         Universe::with_map(learning_lord_simulation::locations::Map::default())
             .with_prices(learning_lord_simulation::marketplace::Prices::default())
-            .with_citizen("Ada", Citizen::with_hunger_rate(-5.0, 10.0).unwrap());
-    let (universe, hungry_id) =
-        universe.with_citizen("Bea", Citizen::with_hunger_rate(99.0, 4.0).unwrap());
+            .with_citizen("Ada", Citizen::with_hunger_rate(-5.0, 10.0).unwrap())
+            .unwrap();
+    let (universe, hungry_id) = universe
+        .with_citizen("Bea", Citizen::with_hunger_rate(99.0, 4.0).unwrap())
+        .unwrap();
 
     let advanced = universe.advance(HOUR_MS).unwrap();
 
@@ -194,7 +204,8 @@ fn advancing_updates_each_citizen_and_the_clock_once() {
 fn subsecond_steps_accumulate_and_match_one_large_step() {
     let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", Citizen::with_hunger_rate(-0.5, 3.7).unwrap());
+        .with_citizen("Ada", Citizen::with_hunger_rate(-0.5, 3.7).unwrap())
+        .unwrap();
     let first_step = universe.advance(17).unwrap();
     assert!(citizen(&first_step, id).hunger() > citizen(&universe, id).hunger());
 
@@ -213,7 +224,8 @@ fn subsecond_steps_accumulate_and_match_one_large_step() {
 fn zero_duration_preserves_the_entire_universe() {
     let (universe, _) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 3.0).unwrap());
+        .with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 3.0).unwrap())
+        .unwrap();
     let universe = universe.advance(100).unwrap();
 
     assert_eq!(universe.advance(0).unwrap(), universe);
@@ -223,7 +235,8 @@ fn zero_duration_preserves_the_entire_universe() {
 fn zero_hunger_rate_preserves_satiation_while_time_advances() {
     let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 0.0).unwrap());
+        .with_citizen("Ada", Citizen::with_hunger_rate(-10.0, 0.0).unwrap())
+        .unwrap();
 
     let advanced = universe.advance(HOUR_MS).unwrap();
 
@@ -249,11 +262,14 @@ fn nonfinite_hunger_results_are_rejected_without_changing_the_source() {
     for (starting_hunger, elapsed_ms) in [(f64::MAX, HOUR_MS), (0.0, 2 * HOUR_MS)] {
         let (universe, _) = Universe::with_map(learning_lord_simulation::locations::Map::default())
             .with_prices(learning_lord_simulation::marketplace::Prices::default())
-            .with_citizen("Ada", Citizen::with_hunger_rate(1.0, 1.0).unwrap());
-        let (universe, _) = universe.with_citizen(
-            "Bea",
-            Citizen::with_hunger_rate(starting_hunger, f64::MAX).unwrap(),
-        );
+            .with_citizen("Ada", Citizen::with_hunger_rate(1.0, 1.0).unwrap())
+            .unwrap();
+        let (universe, _) = universe
+            .with_citizen(
+                "Bea",
+                Citizen::with_hunger_rate(starting_hunger, f64::MAX).unwrap(),
+            )
+            .unwrap();
         let snapshot = universe.clone();
 
         assert_eq!(
@@ -270,10 +286,12 @@ fn branches_can_advance_and_create_citizens_on_other_threads_independently() {
         .with_prices(learning_lord_simulation::marketplace::Prices::default());
     let mut ids = Vec::new();
     for index in 0..128 {
-        let (next, id) = universe.with_citizen(
-            format!("Citizen {index}"),
-            Citizen::with_hunger_rate(-10.0, 2.0).unwrap(),
-        );
+        let (next, id) = universe
+            .with_citizen(
+                format!("Citizen {index}"),
+                Citizen::with_hunger_rate(-10.0, 2.0).unwrap(),
+            )
+            .unwrap();
         universe = next;
         ids.push(id);
     }
@@ -286,8 +304,9 @@ fn branches_can_advance_and_create_citizens_on_other_threads_independently() {
 
                 scope.spawn(move || {
                     let advanced = snapshot.advance(elapsed_ms).unwrap();
-                    let branch =
-                        advanced.with_citizen(name, Citizen::with_hunger_rate(0.0, 1.0).unwrap());
+                    let branch = advanced
+                        .with_citizen(name, Citizen::with_hunger_rate(0.0, 1.0).unwrap())
+                        .unwrap();
                     assert_eq!(original.current_time_ms(), 0);
                     assert_eq!(original.agents().len(), 128);
                     branch

@@ -85,7 +85,7 @@ fn empty_trades_are_skipped() {
             .with_coins(coins)
             .unwrap();
         for action in [CitizenAction::BuyBerries, CitizenAction::SellPebbles] {
-            assert_eq!(source.action_duration_ms(action), 0);
+            assert_eq!(source.action_duration_ms(action).unwrap(), 0);
             assert_eq!(source.start_action(action).unwrap(), source);
         }
     }

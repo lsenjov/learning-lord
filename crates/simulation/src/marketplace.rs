@@ -4,10 +4,38 @@ use rand::{RngExt, SeedableRng, rngs::SmallRng};
 pub const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 pub const UPDATE_TIME_MS: u64 = 4 * 60 * 60 * 1000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Good {
     Berries,
     Pebbles,
+    Wheat,
+    Flour,
+    Wood,
+    Water,
+    Bread,
+}
+
+impl Good {
+    pub const ALL: [Self; 7] = [
+        Self::Berries,
+        Self::Pebbles,
+        Self::Wheat,
+        Self::Flour,
+        Self::Wood,
+        Self::Water,
+        Self::Bread,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Berries => "Berries",
+            Self::Pebbles => "Pebbles",
+            Self::Wheat => "Wheat",
+            Self::Flour => "Flour",
+            Self::Wood => "Wood",
+            Self::Water => "Water",
+            Self::Bread => "Bread",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,15 +61,16 @@ impl Prices {
         Ok(Self { berries, pebbles })
     }
 
-    pub fn coins_per_kg(self, good: Good) -> f64 {
+    pub fn coins_per_kg(self, good: Good) -> Option<f64> {
         match good {
-            Good::Berries => self.berries,
-            Good::Pebbles => self.pebbles,
+            Good::Berries => Some(self.berries),
+            Good::Pebbles => Some(self.pebbles),
+            _ => None,
         }
     }
 
-    pub fn value(self, good: Good, grams: f64) -> f64 {
-        grams / 1000.0 * self.coins_per_kg(good)
+    pub fn value(self, good: Good, grams: f64) -> Option<f64> {
+        self.coins_per_kg(good).map(|price| grams / 1000.0 * price)
     }
 }
 

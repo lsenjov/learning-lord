@@ -7,8 +7,8 @@ fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
     let source = Citizen::with_needs(20.0, 10.0).unwrap();
     assert_eq!(source.coins(), 0.0);
     assert_eq!(source.pebbles_grams(), 0.0);
-    assert_eq!(Prices::default().coins_per_kg(Good::Berries), 1.0);
-    assert_eq!(Prices::default().coins_per_kg(Good::Pebbles), 2.0);
+    assert_eq!(Prices::default().coins_per_kg(Good::Berries).unwrap(), 1.0);
+    assert_eq!(Prices::default().coins_per_kg(Good::Pebbles).unwrap(), 2.0);
     let rich = source
         .with_berries(500.0)
         .unwrap()

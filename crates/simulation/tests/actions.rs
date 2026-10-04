@@ -187,8 +187,11 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
         .with_citizen(
             "Ada",
             Citizen::new(0.0).unwrap().with_berries(100.0).unwrap(),
-        );
-    let (original, other_id) = original.with_citizen("Bea", Citizen::new(10.0).unwrap());
+        )
+        .unwrap();
+    let (original, other_id) = original
+        .with_citizen("Bea", Citizen::new(10.0).unwrap())
+        .unwrap();
     let original = original.advance(MINUTE_MS).unwrap();
     let snapshot = original.clone();
     let eating = original.start_action(id, CitizenAction::Eat).unwrap();
@@ -223,7 +226,8 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
 
     let (_, missing_id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Missing", Citizen::new(0.0).unwrap());
+        .with_citizen("Missing", Citizen::new(0.0).unwrap())
+        .unwrap();
     assert_eq!(
         original.start_action(missing_id, CitizenAction::Eat),
         Err(SimulationError::AgentNotFound)
@@ -255,7 +259,8 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
             let (universe, _) =
                 Universe::with_map(learning_lord_simulation::locations::Map::default())
                     .with_prices(learning_lord_simulation::marketplace::Prices::default())
-                    .with_citizen("Ada", citizen);
+                    .with_citizen("Ada", citizen)
+                    .unwrap();
             let snapshot = universe.clone();
             assert_eq!(
                 universe.advance(120 * MINUTE_MS),

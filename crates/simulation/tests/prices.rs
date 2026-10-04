@@ -18,8 +18,8 @@ fn prices_are_randomized_at_creation_and_at_four_each_day() {
     let mut current = source.clone();
     for day in 0..100 {
         let prices = current.prices();
-        assert!((1.0..=2.0).contains(&prices.coins_per_kg(Good::Berries)));
-        assert!((1.0..=6.0).contains(&prices.coins_per_kg(Good::Pebbles)));
+        assert!((1.0..=2.0).contains(&prices.coins_per_kg(Good::Berries).unwrap()));
+        assert!((1.0..=6.0).contains(&prices.coins_per_kg(Good::Pebbles).unwrap()));
         let duration = if day == 0 { UPDATE_TIME_MS } else { DAY_MS };
         let before = current.advance(duration - 1).unwrap();
         assert_eq!(before.prices(), prices);
@@ -44,12 +44,15 @@ fn all_citizens_share_prices_and_existing_trades_keep_their_quotes() {
         .with_prices(initial)
         .advance(UPDATE_TIME_MS - 60_000)
         .unwrap();
-    let (universe, buyer) =
-        universe.with_citizen("buyer", Citizen::new(0.0).unwrap().with_coins(1.0).unwrap());
-    let (universe, seller) = universe.with_citizen(
-        "seller",
-        Citizen::new(0.0).unwrap().with_pebbles(100.0).unwrap(),
-    );
+    let (universe, buyer) = universe
+        .with_citizen("buyer", Citizen::new(0.0).unwrap().with_coins(1.0).unwrap())
+        .unwrap();
+    let (universe, seller) = universe
+        .with_citizen(
+            "seller",
+            Citizen::new(0.0).unwrap().with_pebbles(100.0).unwrap(),
+        )
+        .unwrap();
     let started = universe
         .start_action(buyer, CitizenAction::BuyBerries)
         .unwrap()
@@ -84,7 +87,8 @@ fn prices_revalue_stock_without_changing_inventory_or_forcing_replanning() {
         .with_pebbles(50.0)
         .unwrap();
     let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
-        .with_citizen("Ada", source);
+        .with_citizen("Ada", source)
+        .unwrap();
     let universe = universe
         .advance(UPDATE_TIME_MS - 1)
         .unwrap()
@@ -96,8 +100,14 @@ fn prices_revalue_stock_without_changing_inventory_or_forcing_replanning() {
     assert_eq!(updated.active_plan().unwrap().plan(), &planned);
     assert_eq!(updated.active_plan().unwrap().elapsed_ms(), 1);
     let expected = updated.coins()
-        + after.prices().value(Good::Berries, updated.berries_grams())
-        + after.prices().value(Good::Pebbles, updated.pebbles_grams());
+        + after
+            .prices()
+            .value(Good::Berries, updated.berries_grams())
+            .unwrap()
+        + after
+            .prices()
+            .value(Good::Pebbles, updated.pebbles_grams())
+            .unwrap();
     assert_eq!(updated.wealth(), Ok(expected));
     assert_eq!(universe.advance(0).unwrap(), universe);
 }
@@ -126,7 +136,8 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .with_pebbles(100.0)
         .unwrap();
     let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
-        .with_citizen("Ada", source);
+        .with_citizen("Ada", source)
+        .unwrap();
     let source = citizen(&universe);
     let chosen = learning_lord_simulation::planning::plan(source).unwrap();
     assert_eq!(chosen.actions(), &[CitizenAction::Sleep]);

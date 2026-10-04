@@ -12,11 +12,16 @@ use learning_lord_simulation::{
 #[derive(Component)]
 pub struct MapLabel(usize);
 
+#[derive(Component)]
+pub struct SiteLabel(usize);
+
 const MAP_SIZE: f32 = 300.0;
+const SITE_LABEL_WIDTH: f32 = 80.0;
+const SITE_LABEL_HEIGHT: f32 = 32.0;
 
 #[derive(Component)]
 pub enum MapItem {
-    Site(Location),
+    Site(usize),
     Citizen(usize),
     Route,
 }
@@ -58,13 +63,8 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                         BackgroundColor(Color::srgb(0.85, 0.66, 0.25)),
                         MapItem::Route,
                     ));
-                    for location in Location::ALL {
-                        let color = match location {
-                            Location::House => Color::srgb(0.85, 0.75, 0.60),
-                            Location::Forest => Color::srgb(0.25, 0.70, 0.40),
-                            Location::River => Color::srgb(0.30, 0.65, 0.95),
-                            Location::Market => Color::srgb(0.80, 0.50, 0.80),
-                        };
+                    for slot in 0..10 {
+                        let color = Color::srgb(0.85, 0.75, 0.60);
                         map.spawn((
                             Node {
                                 position_type: PositionType::Absolute,
@@ -75,15 +75,18 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                             },
                             BackgroundColor(color),
                             UiTransform::default(),
-                            MapItem::Site(location),
+                            MapItem::Site(slot),
                         ))
                         .with_children(|marker| {
                             marker.spawn((
-                                text(location.name(), 12.0, TEXT),
+                                text("", 12.0, TEXT),
+                                SiteLabel(slot),
+                                TextLayout::no_wrap(),
+                                Visibility::Inherited,
                                 Node {
                                     position_type: PositionType::Absolute,
-                                    left: px(-14),
-                                    top: px(11),
+                                    width: px(SITE_LABEL_WIDTH),
+                                    height: px(SITE_LABEL_HEIGHT),
                                     ..default()
                                 },
                             ));
@@ -102,7 +105,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                         });
                     }
                 });
-            panel.spawn(text("Walking: 1 km in 10 minutes\nShared positions: labels are offset\n1-4: select citizen", 13.0, MUTED));
+            panel.spawn(text("Walking: 1 km in 10 minutes\nLabels: public + selected properties\n1-4: select citizen", 13.0, MUTED));
         });
 }
 
@@ -113,10 +116,34 @@ fn project(position: Position) -> Vec2 {
     )
 }
 
+fn site_label_position(point: Vec2, occupied: &[Rect]) -> Vec2 {
+    let size = Vec2::new(SITE_LABEL_WIDTH, SITE_LABEL_HEIGHT);
+    let candidates = [
+        point + Vec2::new(-size.x / 2.0, 12.0),
+        point + Vec2::new(-size.x / 2.0, -size.y - 12.0),
+        point + Vec2::new(12.0, -size.y / 2.0),
+        point + Vec2::new(-size.x - 12.0, -size.y / 2.0),
+    ]
+    .map(|position| position.clamp(Vec2::splat(2.0), Vec2::splat(MAP_SIZE - 2.0) - size));
+    candidates
+        .into_iter()
+        .find(|position| {
+            let end = *position + size;
+            occupied.iter().all(|area| {
+                end.x <= area.min.x
+                    || position.x >= area.max.x
+                    || end.y <= area.min.y
+                    || position.y >= area.max.y
+            })
+        })
+        .unwrap_or(candidates[0])
+}
+
 pub fn refresh(
     snapshot: Res<DisplaySnapshot>,
     selection: Res<Selection>,
-    mut labels: Query<(&MapLabel, &mut Text)>,
+    mut labels: Query<(&MapLabel, &mut Text), Without<SiteLabel>>,
+    mut site_labels: Query<(&SiteLabel, &mut Text, &mut Node, &mut Visibility), Without<MapItem>>,
     mut items: Query<(
         &MapItem,
         &mut Node,
@@ -126,6 +153,9 @@ pub fn refresh(
     )>,
 ) {
     let universe = &snapshot.0.universe;
+    let map = universe.map();
+    let mut sites: Vec<_> = map.places().values().collect();
+    sites.sort_by(|a, b| a.name.cmp(&b.name));
     let agents = citizens::sorted_agents(universe);
     let citizen = citizens::selected_agent(universe, selection.0).map(|agent| {
         let AgentKind::Citizen(citizen) = &agent.kind;
@@ -140,12 +170,65 @@ pub fn refresh(
             )
         });
     }
+    let mut occupied = Vec::new();
+    let site_layout: Vec<_> = sites
+        .iter()
+        .map(|place| {
+            if place.owner.is_some() && place.owner != selection.0 {
+                return None;
+            }
+            let label = if let Some(owner) = place.owner {
+                format!(
+                    "{}'s\n{}",
+                    universe.agents()[&owner].name,
+                    place.kind.name()
+                )
+            } else {
+                place.kind.name().to_string()
+            };
+            let position = site_label_position(project(place.position), &occupied);
+            occupied.push(Rect::from_corners(
+                position,
+                position + Vec2::new(SITE_LABEL_WIDTH, SITE_LABEL_HEIGHT),
+            ));
+            Some((label, position))
+        })
+        .collect();
+    for (label, mut value, mut node, mut visibility) in &mut site_labels {
+        let Some(Some((name, position))) = site_layout.get(label.0) else {
+            *visibility = Visibility::Hidden;
+            value.0.clear();
+            continue;
+        };
+        *visibility = Visibility::Inherited;
+        value.0.clone_from(name);
+        let marker = project(sites[label.0].position) - Vec2::splat(5.0);
+        node.left = px(position.x - marker.x);
+        node.top = px(position.y - marker.y);
+    }
     for (item, mut node, mut transform, mut visibility, color) in &mut items {
         match item {
-            MapItem::Site(location) => {
-                let p = project(universe.map().position(*location));
+            MapItem::Site(slot) => {
+                let Some(place) = sites.get(*slot) else {
+                    *visibility = Visibility::Hidden;
+                    continue;
+                };
+                *visibility = Visibility::Inherited;
+                let p = project(place.position);
                 node.left = px(p.x - 5.0);
                 node.top = px(p.y - 5.0);
+                if let Some(mut color) = color {
+                    color.0 = if place.owner.is_some() && place.owner == selection.0 {
+                        Color::srgb(1.0, 0.75, 0.20)
+                    } else {
+                        match place.kind {
+                            Location::Forest => Color::srgb(0.25, 0.70, 0.40),
+                            Location::River => Color::srgb(0.30, 0.65, 0.95),
+                            Location::Market => Color::srgb(0.80, 0.50, 0.80),
+                            _ => Color::srgb(0.85, 0.75, 0.60),
+                        }
+                    };
+                }
             }
             MapItem::Citizen(slot) => {
                 *visibility = if agents.get(*slot).is_some() {
@@ -209,8 +292,103 @@ mod tests {
     use learning_lord_simulation::{Citizen, Universe, locations::Map};
 
     #[test]
-    fn four_overlapping_markers_stay_distinct_and_highlight_selection() {
+    fn site_labels_stay_bounded_and_show_public_or_selected_properties() {
+        for point in [
+            Vec2::ZERO,
+            Vec2::splat(MAP_SIZE),
+            Vec2::new(0.0, MAP_SIZE),
+            Vec2::new(MAP_SIZE, 0.0),
+        ] {
+            let position = site_label_position(point, &[]);
+            assert!(position.x >= 0.0 && position.y >= 0.0);
+            assert!(position.x + SITE_LABEL_WIDTH <= MAP_SIZE);
+            assert!(position.y + SITE_LABEL_HEIGHT <= MAP_SIZE);
+        }
+        let point = Vec2::splat(150.0);
+        let first = site_label_position(point, &[]);
+        let occupied = Rect::from_corners(
+            first,
+            first + Vec2::new(SITE_LABEL_WIDTH, SITE_LABEL_HEIGHT),
+        );
+        assert_ne!(first, site_label_position(point, &[occupied]));
+
         let universe = crate::simulation::new_universe().unwrap();
+        let agents = citizens::sorted_agents(&universe);
+        let ada = agents[0].0;
+        let bram = agents[1].0;
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(Snapshot {
+            universe,
+            error: None,
+            generation: 0,
+        }))
+        .insert_resource(Selection(Some(ada)))
+        .add_systems(Update, refresh);
+        let labels: Vec<_> = (0..10)
+            .map(|slot| {
+                app.world_mut()
+                    .spawn((
+                        SiteLabel(slot),
+                        Text::new(""),
+                        Node::default(),
+                        Visibility::Inherited,
+                    ))
+                    .id()
+            })
+            .collect();
+        let markers: Vec<_> = (0..10)
+            .map(|slot| {
+                app.world_mut()
+                    .spawn((
+                        MapItem::Site(slot),
+                        Node::default(),
+                        UiTransform::default(),
+                        Visibility::Inherited,
+                    ))
+                    .id()
+            })
+            .collect();
+        app.update();
+        let visible_names = |app: &App| {
+            labels
+                .iter()
+                .filter(|entity| {
+                    app.world().get::<Visibility>(**entity) == Some(&Visibility::Inherited)
+                })
+                .map(|entity| app.world().get::<Text>(*entity).unwrap().0.clone())
+                .collect::<Vec<_>>()
+        };
+        let names = visible_names(&app);
+        assert_eq!(names.len(), 5);
+        assert!(names.contains(&"Ada's\nhome".into()));
+        assert!(names.contains(&"Ada's\nfield".into()));
+        for public in ["Forest", "River", "Market"] {
+            assert!(names.contains(&public.into()));
+        }
+        app.world_mut().resource_mut::<Selection>().0 = Some(bram);
+        app.update();
+        let names = visible_names(&app);
+        assert_eq!(names.len(), 5);
+        assert!(names.contains(&"Bram's\nhome".into()));
+        assert!(names.contains(&"Bram's\nmill".into()));
+        assert!(names.iter().all(|name| !name.starts_with("Ada")));
+        for marker in markers {
+            assert_eq!(
+                app.world().get::<Visibility>(marker),
+                Some(&Visibility::Inherited)
+            );
+        }
+    }
+
+    #[test]
+    fn four_overlapping_markers_stay_distinct_and_highlight_selection() {
+        let mut universe = Universe::with_map(Map::default());
+        for name in ["Ada", "Bram", "Cleo", "Dara"] {
+            universe = universe
+                .with_citizen(name, Citizen::new(0.0).unwrap())
+                .unwrap()
+                .0;
+        }
         let agents = citizens::sorted_agents(&universe);
         let selected = agents[2].0;
         let mut app = App::new();
@@ -264,10 +442,14 @@ mod tests {
             Position { x: 0.0, y: -400.0 },
         )
         .unwrap();
-        let (universe, id) =
-            Universe::with_map(map).with_citizen("Ada", Citizen::new(0.0).unwrap());
+        let (universe, id) = Universe::with_map(map.clone())
+            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .unwrap();
         let travelling = universe
-            .start_action(id, CitizenAction::Travel(Location::Forest))
+            .start_action(
+                id,
+                CitizenAction::Travel(map.public_place(Location::Forest)),
+            )
             .unwrap();
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
@@ -298,7 +480,7 @@ mod tests {
         let forest = app
             .world_mut()
             .spawn((
-                MapItem::Site(Location::Forest),
+                MapItem::Site(1),
                 Node::default(),
                 UiTransform::default(),
                 Visibility::Inherited,

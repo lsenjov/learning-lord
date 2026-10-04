@@ -207,15 +207,17 @@ pub fn duration(ms: u64) -> String {
 }
 
 pub fn location_label(citizen: &Citizen) -> String {
-    use learning_lord_simulation::{CitizenAction, locations::Location};
+    use learning_lord_simulation::CitizenAction;
+    let map = citizen.map();
     if let Some(active) = citizen.active_action()
         && let CitizenAction::Travel(destination) = active.action()
     {
-        return format!("Travelling to {}", destination.name());
+        return format!("Travelling to {}", map.place(destination).unwrap().name);
     }
-    Location::ALL
-        .into_iter()
-        .find(|&location| citizen.position() == citizen.map().position(location))
+    map.places()
+        .values()
+        .filter(|place| place.position == citizen.position())
+        .min_by_key(|place| (place.id != citizen.home(), place.name.clone()))
         .map_or_else(
             || {
                 format!(
@@ -224,7 +226,7 @@ pub fn location_label(citizen: &Citizen) -> String {
                     citizen.position().y
                 )
             },
-            |location| location.name().into(),
+            |place| place.name.clone(),
         )
 }
 
@@ -303,7 +305,7 @@ fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
             rows.push(PlanRow {
                 label: format!(
                     "    {status:4}  {}  |  {timing}",
-                    action_label(plan.actions()[index])
+                    action_label(plan.actions()[index], citizen)
                 ),
                 state,
             });
@@ -329,7 +331,7 @@ pub fn refresh_cards(
                 |active| {
                     format!(
                         "{} | {} left",
-                        action_label(active.action()),
+                        action_label(active.action(), citizen),
                         duration(active.remaining_ms())
                     )
                 },
@@ -560,14 +562,18 @@ mod tests {
 
     #[test]
     fn details_show_selected_citizen_and_full_plan_with_completed_actions() {
-        let (universe, ada) = Universe::with_map(Map::default()).with_citizen(
-            "Ada",
-            Citizen::with_needs(60.0, 100.0)
-                .unwrap()
-                .with_berries(200.0)
-                .unwrap(),
-        );
-        let (universe, bram) = universe.with_citizen("Bram", Citizen::new(-10.0).unwrap());
+        let (universe, ada) = Universe::with_map(Map::default())
+            .with_citizen(
+                "Ada",
+                Citizen::with_needs(60.0, 100.0)
+                    .unwrap()
+                    .with_berries(200.0)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (universe, bram) = universe
+            .with_citizen("Bram", Citizen::new(-10.0).unwrap())
+            .unwrap();
         let started = universe.start_planning(ada).unwrap();
         let progressed = started.advance(100_000).unwrap();
         let AgentKind::Citizen(citizen) = &progressed.agents()[&ada].kind;
@@ -602,7 +608,7 @@ mod tests {
         let details = crate::citizen_readout(&progressed, Some(bram));
         assert!(details.starts_with("Bram"));
         assert!(details.contains("Hunger: -9.9"));
-        assert!(details.contains("Location: House"));
+        assert!(details.contains("Location: Bram's home"));
         assert!(details.contains("Berries: 0.0 g"));
     }
 }

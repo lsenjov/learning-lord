@@ -14,7 +14,9 @@ fn map() -> Map {
 fn travel_moves_continuously_and_arrives_exactly_without_mutating_the_source() {
     let source = Citizen::new(0.0).unwrap().with_map(map()).unwrap();
     let walking = source
-        .start_action(CitizenAction::Travel(Location::Forest))
+        .start_action(CitizenAction::Travel(
+            source.map().public_place(Location::Forest),
+        ))
         .unwrap();
     assert_eq!(walking.active_action().unwrap().duration_ms(), 300_000);
     let halfway = walking.advance(150_000).unwrap();
@@ -22,7 +24,7 @@ fn travel_moves_continuously_and_arrives_exactly_without_mutating_the_source() {
     assert!(halfway.hunger() > 0.0);
     assert!(halfway.tiredness() > 0.0);
     let arrival = halfway.advance(150_000).unwrap();
-    assert_eq!(arrival.position(), map().position(Location::Forest));
+    assert_eq!(arrival.position(), Position { x: 300.0, y: 400.0 });
     assert_eq!(arrival.active_action(), None);
     assert_eq!(
         arrival.position(),
@@ -41,7 +43,9 @@ fn travel_moves_continuously_and_arrives_exactly_without_mutating_the_source() {
     );
     assert_eq!(
         arrival
-            .start_action(CitizenAction::Travel(Location::Forest))
+            .start_action(CitizenAction::Travel(
+                source.map().public_place(Location::Forest)
+            ))
             .unwrap(),
         arrival
     );
@@ -56,13 +60,19 @@ fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
         .with_berries(100.0)
         .unwrap();
     for (action, location) in [
-        (CitizenAction::Sleep, Location::House),
+        (CitizenAction::Sleep, Location::Home),
         (CitizenAction::Forage, Location::Forest),
         (CitizenAction::FindRocks, Location::River),
         (CitizenAction::BuyBerries, Location::Market),
         (CitizenAction::SellPebbles, Location::Market),
     ] {
-        let at_site = home.with_position(map().position(location)).unwrap();
+        let at_site = home
+            .with_position(home.map().position(if location == Location::Home {
+                home.home()
+            } else {
+                home.map().public_place(location)
+            }))
+            .unwrap();
         assert!(at_site.start_action(action).is_ok());
         let away = home.with_position(Position { x: 1.0, y: 1.0 }).unwrap();
         assert_eq!(
@@ -73,7 +83,9 @@ fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
         assert!(away.start_action(CitizenAction::Wait).is_ok());
     }
     let busy = home
-        .start_action(CitizenAction::Travel(Location::Forest))
+        .start_action(CitizenAction::Travel(
+            home.map().public_place(Location::Forest),
+        ))
         .unwrap();
     assert_eq!(
         busy.with_position(Position::default()),
@@ -105,18 +117,19 @@ fn each_universe_has_a_distinct_map_and_citizens_start_at_home() {
     assert_ne!(first.map(), second.map());
     for _ in 0..50 {
         let universe = Universe::default();
-        let map = universe.map();
-        assert_eq!(map.position(Location::House), Position::default());
-        for (index, location) in Location::ALL.into_iter().enumerate() {
-            let position = map.position(location);
-            assert!(position.x.abs() <= 1000.0 && position.y.abs() <= 1000.0);
-            for other in &Location::ALL[index + 1..] {
-                assert!(position.distance(map.position(*other)) >= 200.0);
+        let (inhabited, id) = universe
+            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let map = inhabited.map();
+        let places: Vec<_> = map.places().values().collect();
+        for (index, place) in places.iter().enumerate() {
+            assert!(place.position.x.abs() <= 1000.0 && place.position.y.abs() <= 1000.0);
+            for other in &places[index + 1..] {
+                assert!(place.position.distance(other.position) >= 200.0);
             }
         }
-        let (inhabited, id) = universe.with_citizen("Ada", Citizen::new(0.0).unwrap());
         let AgentKind::Citizen(citizen) = &inhabited.agents()[&id].kind;
-        assert_eq!(citizen.position(), map.position(Location::House));
+        assert_eq!(citizen.position(), map.position(citizen.home()));
         assert_eq!(citizen.map(), map);
         assert_eq!(inhabited.advance(123).unwrap().map(), map);
     }
@@ -127,18 +140,23 @@ fn travel_is_consistent_across_daily_price_updates_and_snapshot_branches() {
     let universe = Universe::with_map(map())
         .advance(4 * 3_600_000 - 120_000)
         .unwrap();
-    let (universe, id) = universe.with_citizen("Ada", Citizen::new(0.0).unwrap());
+    let (universe, id) = universe
+        .with_citizen("Ada", Citizen::new(0.0).unwrap())
+        .unwrap();
     let walking = universe
-        .start_action(id, CitizenAction::Travel(Location::Forest))
+        .start_action(
+            id,
+            CitizenAction::Travel(universe.map().public_place(Location::Forest)),
+        )
         .unwrap();
     let direct = walking.advance(300_000).unwrap();
     let split = walking.advance(120_000).unwrap().advance(180_000).unwrap();
     let AgentKind::Citizen(a) = &direct.agents()[&id].kind;
     let AgentKind::Citizen(b) = &split.agents()[&id].kind;
     assert_eq!(a.position(), b.position());
-    assert_eq!(a.position(), map().position(Location::Forest));
+    assert_eq!(a.position(), Position { x: 300.0, y: 400.0 });
     assert_eq!(direct.prices(), split.prices());
-    assert_eq!(walking.map(), map());
+    assert_eq!(walking.map(), universe.map());
     let AgentKind::Citizen(source) = &walking.agents()[&id].kind;
     assert_eq!(source.position(), Position::default());
 }

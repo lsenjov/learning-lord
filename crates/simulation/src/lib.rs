@@ -1,12 +1,12 @@
 use imbl::HashMap;
-use marketplace::{Market, Prices};
+use marketplace::{Good, Market, Prices};
 use rand::{RngExt, rngs::SmallRng};
 use std::fmt;
 use uuid::Uuid;
 
 pub mod locations;
 pub mod marketplace;
-use locations::{Location, Map, Position, WALK_MS_PER_METRE};
+use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
 pub mod planning;
 
 pub const WEALTH_WELLBEING_PER_COIN: f64 = 10.0;
@@ -85,16 +85,18 @@ pub enum CitizenAction {
     FindRocks,
     BuyBerries,
     SellPebbles,
-    Travel(Location),
+    Travel(PlaceId),
 }
 
 impl CitizenAction {
-    pub fn required_location(self) -> Option<Location> {
+    pub fn required_place(self, citizen: &Citizen) -> Option<PlaceId> {
         match self {
-            Self::Sleep => Some(Location::House),
-            Self::Forage => Some(Location::Forest),
-            Self::FindRocks => Some(Location::River),
-            Self::BuyBerries | Self::SellPebbles => Some(Location::Market),
+            Self::Sleep => Some(citizen.home),
+            Self::Forage => Some(citizen.map.public_place(Location::Forest)),
+            Self::FindRocks => Some(citizen.map.public_place(Location::River)),
+            Self::BuyBerries | Self::SellPebbles => {
+                Some(citizen.map.public_place(Location::Market))
+            }
             _ => None,
         }
     }
@@ -127,13 +129,34 @@ impl ActiveAction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartingRole {
+    Farmer,
+    Miller,
+    Woodcutter,
+    Baker,
+}
+
+impl StartingRole {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Farmer => "Farmer",
+            Self::Miller => "Miller",
+            Self::Woodcutter => "Woodcutter",
+            Self::Baker => "Baker",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Citizen {
     hunger: f64,
     hunger_per_hour: f64,
     tiredness: f64,
-    berries_grams: f64,
-    pebbles_grams: f64,
+    inventory: HashMap<Good, f64>,
+    id: AgentId,
+    home: PlaceId,
+    starting_role: Option<StartingRole>,
     coins: f64,
     forage_rng: SmallRng,
     prices: Prices,
@@ -164,16 +187,21 @@ impl Citizen {
         if !hunger_per_hour.is_finite() || hunger_per_hour < 0.0 {
             return Err(SimulationError::InvalidHungerRate);
         }
+        let id = AgentId(Uuid::new_v4());
+        let (map, home) =
+            Map::default().with_place(Location::Home, Position::default(), Some(id), "Home")?;
         Ok(Self {
             hunger,
             hunger_per_hour,
             tiredness: 0.0,
-            berries_grams: 0.0,
-            pebbles_grams: 0.0,
+            inventory: Good::ALL.into_iter().map(|good| (good, 0.0)).collect(),
+            id,
+            home,
+            starting_role: None,
             coins: 0.0,
             forage_rng: rand::make_rng(),
             prices: Prices::default(),
-            map: Map::default(),
+            map,
             position: Position::default(),
             active_action: None,
             active_plan: None,
@@ -184,7 +212,7 @@ impl Citizen {
         self.position
     }
     pub fn map(&self) -> Map {
-        self.map
+        self.map.clone()
     }
 
     pub fn with_map(&self, map: Map) -> Result<Self, SimulationError> {
@@ -192,7 +220,14 @@ impl Citizen {
             return Err(SimulationError::CitizenBusy);
         }
         let mut citizen = self.clone();
-        citizen.map = map;
+        if !map.places().contains_key(&self.home) {
+            let (map, home) =
+                map.with_place(Location::Home, Position::default(), Some(self.id), "Home")?;
+            citizen.map = map;
+            citizen.home = home;
+        } else {
+            citizen.map = map;
+        }
         Ok(citizen)
     }
 
@@ -220,24 +255,55 @@ impl Citizen {
         self.tiredness
     }
 
-    pub fn berries_grams(&self) -> f64 {
-        self.berries_grams
+    pub fn starting_role(&self) -> Option<StartingRole> {
+        self.starting_role
+    }
+    pub fn with_starting_role(&self, role: StartingRole) -> Self {
+        let mut citizen = self.clone();
+        citizen.starting_role = Some(role);
+        citizen
     }
 
-    pub fn with_berries(&self, grams: f64) -> Result<Self, SimulationError> {
+    pub fn id(&self) -> AgentId {
+        self.id
+    }
+    pub fn home(&self) -> PlaceId {
+        self.home
+    }
+    pub fn owned_properties(&self) -> impl Iterator<Item = &locations::Place> {
+        self.map
+            .places()
+            .values()
+            .filter(|place| place.owner == Some(self.id))
+    }
+    pub fn grams(&self, good: Good) -> f64 {
+        self.inventory.get(&good).copied().unwrap_or(0.0)
+    }
+    pub fn with_good(&self, good: Good, grams: f64) -> Result<Self, SimulationError> {
         if !grams.is_finite() || grams < 0.0 {
-            return Err(SimulationError::InvalidBerries);
+            return Err(SimulationError::InvalidInventory);
         }
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
         }
         let mut citizen = self.clone();
-        citizen.berries_grams = grams;
+        citizen.inventory.insert(good, grams);
         Ok(citizen)
     }
-
+    pub fn berries_grams(&self) -> f64 {
+        self.grams(Good::Berries)
+    }
+    pub fn with_berries(&self, grams: f64) -> Result<Self, SimulationError> {
+        self.with_good(Good::Berries, grams).map_err(|error| {
+            if error == SimulationError::InvalidInventory {
+                SimulationError::InvalidBerries
+            } else {
+                error
+            }
+        })
+    }
     pub fn pebbles_grams(&self) -> f64 {
-        self.pebbles_grams
+        self.grams(Good::Pebbles)
     }
 
     pub fn coins(&self) -> f64 {
@@ -245,15 +311,13 @@ impl Citizen {
     }
 
     pub fn with_pebbles(&self, grams: f64) -> Result<Self, SimulationError> {
-        if !grams.is_finite() || grams < 0.0 {
-            return Err(SimulationError::InvalidPebbles);
-        }
-        if self.active_action.is_some() || self.active_plan.is_some() {
-            return Err(SimulationError::CitizenBusy);
-        }
-        let mut citizen = self.clone();
-        citizen.pebbles_grams = grams;
-        Ok(citizen)
+        self.with_good(Good::Pebbles, grams).map_err(|error| {
+            if error == SimulationError::InvalidInventory {
+                SimulationError::InvalidPebbles
+            } else {
+                error
+            }
+        })
     }
 
     pub fn with_coins(&self, coins: f64) -> Result<Self, SimulationError> {
@@ -281,20 +345,35 @@ impl Citizen {
     pub fn wealth(&self) -> Result<f64, SimulationError> {
         use marketplace::Good;
         let wealth = self.coins
-            + self.prices.value(Good::Berries, self.berries_grams)
-            + self.prices.value(Good::Pebbles, self.pebbles_grams);
+            + self
+                .prices
+                .value(Good::Berries, self.berries_grams())
+                .unwrap()
+            + self
+                .prices
+                .value(Good::Pebbles, self.pebbles_grams())
+                .unwrap();
         if !wealth.is_finite() {
             return Err(SimulationError::WealthOverflow);
         }
         Ok(wealth)
     }
 
-    pub fn action_duration_ms(&self, action: CitizenAction) -> u64 {
-        match action {
-            CitizenAction::Travel(destination) => {
-                (self.position.distance(self.map.position(destination)) * WALK_MS_PER_METRE).ceil()
-                    as u64
-            }
+    fn accessible_place(&self, id: PlaceId) -> Result<&locations::Place, SimulationError> {
+        let place = self.map.place(id)?;
+        if place.owner.is_some_and(|owner| owner != self.id) {
+            return Err(SimulationError::PrivateProperty);
+        }
+        Ok(place)
+    }
+
+    pub fn action_duration_ms(&self, action: CitizenAction) -> Result<u64, SimulationError> {
+        Ok(match action {
+            CitizenAction::Travel(destination) => (self
+                .position
+                .distance(self.accessible_place(destination)?.position)
+                * WALK_MS_PER_METRE)
+                .ceil() as u64,
             CitizenAction::Eat => (self.meal_grams() * BERRY_EATING_MS_PER_GRAM).ceil() as u64,
             CitizenAction::Wait | CitizenAction::Forage | CitizenAction::FindRocks => {
                 ACTION_DURATION_MS
@@ -307,7 +386,7 @@ impl Citizen {
                     0
                 }
             }
-        }
+        })
     }
 
     fn trade_amounts(&self, action: CitizenAction) -> (f64, f64) {
@@ -315,28 +394,32 @@ impl Citizen {
         match action {
             CitizenAction::BuyBerries => {
                 let missing =
-                    (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM - self.berries_grams).max(0.0);
+                    (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM - self.berries_grams()).max(0.0);
                 let cost = self
                     .prices
                     .value(Good::Berries, missing)
+                    .unwrap()
                     .min(self.coins.max(0.0));
-                let grams = (cost / self.prices.coins_per_kg(Good::Berries) * 1000.0).min(missing);
-                if cost <= 0.0 || self.berries_grams + grams == self.berries_grams {
+                let grams =
+                    (cost / self.prices.coins_per_kg(Good::Berries).unwrap() * 1000.0).min(missing);
+                if cost <= 0.0 || self.berries_grams() + grams == self.berries_grams() {
                     (0.0, 0.0)
                 } else {
                     (grams, cost)
                 }
             }
             CitizenAction::SellPebbles => (
-                self.pebbles_grams,
-                self.prices.value(Good::Pebbles, self.pebbles_grams),
+                self.pebbles_grams(),
+                self.prices
+                    .value(Good::Pebbles, self.pebbles_grams())
+                    .unwrap(),
             ),
             _ => (0.0, 0.0),
         }
     }
 
     fn meal_grams(&self) -> f64 {
-        self.berries_grams
+        self.berries_grams()
             .min(MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM)
     }
 
@@ -357,13 +440,16 @@ impl Citizen {
             return Err(SimulationError::CitizenBusy);
         }
         if action
-            .required_location()
+            .required_place(self)
             .is_some_and(|location| self.position != self.map.position(location))
         {
             return Err(SimulationError::WrongLocation);
         }
+        if let CitizenAction::Travel(id) = action {
+            self.accessible_place(id)?;
+        }
         let mut citizen = self.clone();
-        let duration_ms = self.action_duration_ms(action);
+        let duration_ms = self.action_duration_ms(action)?;
         if duration_ms == 0 {
             return Ok(citizen);
         }
@@ -378,7 +464,7 @@ impl Citizen {
             remaining_ms: duration_ms,
             duration_ms,
             meal_grams,
-            berries_after_meal: self.berries_grams - meal_grams,
+            berries_after_meal: self.berries_grams() - meal_grams,
             trade_grams,
             trade_coins,
             travel_origin: self.position,
@@ -453,18 +539,24 @@ impl Citizen {
             }
 
             if active.action == CitizenAction::Eat {
-                citizen.berries_grams = active.berries_after_meal
-                    + active.meal_grams * (active.remaining_ms as f64 / active.duration_ms as f64);
+                citizen.inventory.insert(
+                    Good::Berries,
+                    active.berries_after_meal
+                        + active.meal_grams
+                            * (active.remaining_ms as f64 / active.duration_ms as f64),
+                );
             }
 
             if active.remaining_ms == 0 {
                 match active.action {
                     CitizenAction::BuyBerries => {
-                        citizen.berries_grams += active.trade_grams;
+                        citizen
+                            .inventory
+                            .insert(Good::Berries, citizen.berries_grams() + active.trade_grams);
                         citizen.coins -= active.trade_coins;
                     }
                     CitizenAction::SellPebbles => {
-                        citizen.pebbles_grams = 0.0;
+                        citizen.inventory.insert(Good::Pebbles, 0.0);
                         citizen.coins += active.trade_coins;
                         if !citizen.coins.is_finite() {
                             return Err(SimulationError::WealthOverflow);
@@ -483,19 +575,21 @@ impl Citizen {
                             .forage_rng
                             .random_range(FORAGE_MIN_GRAMS..=FORAGE_MAX_GRAMS)
                     };
-                    let (stock, error) = if active.action == CitizenAction::Forage {
-                        (&mut citizen.berries_grams, SimulationError::BerriesOverflow)
+                    let (good, error) = if active.action == CitizenAction::Forage {
+                        (Good::Berries, SimulationError::BerriesOverflow)
                     } else {
-                        (&mut citizen.pebbles_grams, SimulationError::PebblesOverflow)
+                        (Good::Pebbles, SimulationError::PebblesOverflow)
                     };
-                    *stock += if active.action == CitizenAction::FindRocks {
-                        yield_grams / 2.0
-                    } else {
-                        yield_grams
-                    };
+                    let stock = citizen.grams(good)
+                        + if good == Good::Pebbles {
+                            yield_grams / 2.0
+                        } else {
+                            yield_grams
+                        };
                     if !stock.is_finite() {
                         return Err(error);
                     }
+                    citizen.inventory.insert(good, stock);
                 }
                 citizen.active_action = None;
             } else {
@@ -558,7 +652,7 @@ impl Default for Universe {
 
 impl Universe {
     pub fn map(&self) -> Map {
-        self.map
+        self.map.clone()
     }
 
     pub fn with_map(map: Map) -> Self {
@@ -590,29 +684,71 @@ impl Universe {
         &self.agents
     }
 
-    pub fn with_citizen(&self, name: impl Into<String>, citizen: Citizen) -> (Self, AgentId) {
-        let mut id = AgentId(Uuid::new_v4());
-        while self.agents.contains_key(&id) {
-            id = AgentId(Uuid::new_v4());
+    pub fn with_citizen(
+        &self,
+        name: impl Into<String>,
+        citizen: Citizen,
+    ) -> Result<(Self, AgentId), SimulationError> {
+        let name = name.into();
+        let id = citizen.id;
+        if self.agents.contains_key(&id) {
+            return Err(SimulationError::AgentAlreadyExists);
         }
-
         let mut universe = self.clone();
         let mut citizen = citizen.with_prices(self.prices());
         if citizen.map != self.map {
-            // Entering a different world invalidates routes and actions tied to the old map.
-            citizen.map = self.map;
-            citizen.position = self.map.position(Location::House);
+            let (map, home) = universe.map.with_place(
+                Location::Home,
+                universe.map.next_position(),
+                Some(id),
+                format!("{name}'s home"),
+            )?;
+            universe.map = map;
+            citizen.home = home;
+            citizen.position = universe.map.position(home);
             citizen.active_action = None;
             citizen.active_plan = None;
+        }
+        universe.map = universe
+            .map
+            .with_place_name(citizen.home, format!("{name}'s home"))?;
+        citizen.map = universe.map.clone();
+        for (_, agent) in universe.agents.iter_mut() {
+            let AgentKind::Citizen(existing) = &mut agent.kind;
+            existing.map = universe.map.clone();
         }
         universe.agents.insert(
             id,
             Agent {
-                name: name.into(),
+                name,
                 kind: AgentKind::Citizen(citizen),
             },
         );
-        (universe, id)
+        Ok((universe, id))
+    }
+
+    pub fn with_property(
+        &self,
+        owner: AgentId,
+        kind: Location,
+    ) -> Result<(Self, PlaceId), SimulationError> {
+        let agent = self
+            .agents
+            .get(&owner)
+            .ok_or(SimulationError::AgentNotFound)?;
+        let (map, id) = self.map.with_place(
+            kind,
+            self.map.next_position(),
+            Some(owner),
+            format!("{}'s {}", agent.name, kind.name()),
+        )?;
+        let mut universe = self.clone();
+        universe.map = map;
+        for (_, agent) in universe.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.map = universe.map.clone();
+        }
+        Ok((universe, id))
     }
 
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
@@ -676,6 +812,10 @@ impl Universe {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulationError {
+    InvalidInventory,
+    InvalidOwnership,
+    PrivateProperty,
+    PlaceNotFound,
     InvalidHunger,
     InvalidHungerRate,
     InvalidTiredness,
@@ -694,11 +834,18 @@ pub enum SimulationError {
     WellbeingOverflow,
     CitizenBusy,
     AgentNotFound,
+    AgentAlreadyExists,
 }
 
 impl fmt::Display for SimulationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::InvalidInventory => "goods must have finite nonnegative grams",
+            Self::InvalidOwnership => {
+                "private places require an owner and public places cannot have one"
+            }
+            Self::PrivateProperty => "citizen cannot use another citizen's private property",
+            Self::PlaceNotFound => "place does not exist",
             Self::InvalidHunger => "hunger must be finite",
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
             Self::InvalidTiredness => "tiredness must be finite",
@@ -716,6 +863,7 @@ impl fmt::Display for SimulationError {
             Self::BerriesOverflow => "foraging would produce nonfinite berry grams",
             Self::WellbeingOverflow => "personal wellbeing exceeds the finite score range",
             Self::CitizenBusy => "citizen is already performing an action",
+            Self::AgentAlreadyExists => "citizen already exists in this universe",
             Self::AgentNotFound => "agent does not exist in this universe",
         };
         formatter.write_str(message)

@@ -439,11 +439,11 @@ mod tests {
             Position::default(),
         )
         .unwrap();
-        let source = Citizen::new(0.0).unwrap().with_map(map).unwrap();
+        let source = Citizen::new(0.0).unwrap().with_map(map.clone()).unwrap();
         let mut planned = executing(
             &source,
             vec![
-                CitizenAction::Travel(Location::Forest),
+                CitizenAction::Travel(map.public_place(Location::Forest)),
                 CitizenAction::Forage,
             ],
         );
@@ -455,10 +455,13 @@ mod tests {
         );
         assert_eq!(
             crossed.active_action().unwrap().action(),
-            CitizenAction::Travel(Location::Forest)
+            CitizenAction::Travel(map.public_place(Location::Forest))
         );
         let arrived = crossed.advance(240_000).unwrap();
-        assert_eq!(arrived.position(), map.position(Location::Forest));
+        assert_eq!(
+            arrived.position(),
+            map.position(map.public_place(Location::Forest))
+        );
         assert_eq!(arrived.active_plan().unwrap().elapsed_ms(), 0);
         assert!(arrived.active_plan().unwrap().plan().decision().is_some());
     }
@@ -579,9 +582,9 @@ mod tests {
         let citizen =
             Citizen::with_needs(-19.624550026806507 - growth, -14.518873842590954 - growth)
                 .unwrap()
-                .with_map(map)
+                .with_map(map.clone())
                 .unwrap()
-                .with_position(map.position(Location::River))
+                .with_position(map.position(map.public_place(Location::River)))
                 .unwrap()
                 .with_prices(Prices::new(1.8975551078215391, 5.529146608397028).unwrap())
                 .with_berries(25.36314504117695)
@@ -598,7 +601,7 @@ mod tests {
             .find(|variant| {
                 variant.actions
                     == [
-                        CitizenAction::Travel(Location::Market),
+                        CitizenAction::Travel(map.public_place(Location::Market)),
                         CitizenAction::SellPebbles,
                         CitizenAction::BuyBerries,
                         CitizenAction::Eat,
@@ -688,11 +691,11 @@ mod tests {
                 CitizenAction::Sleep,
             ],
         );
-        let universe = Universe::with_map(crate::locations::Map::default())
+        let universe = Universe::with_map(citizen.map())
             .with_prices(Prices::default())
             .advance(UPDATE_TIME_MS - crate::ACTION_DURATION_MS)
             .unwrap();
-        let (universe, id) = universe.with_citizen("Ada", planned);
+        let (universe, id) = universe.with_citizen("Ada", planned).unwrap();
         let boundary = universe.advance(crate::ACTION_DURATION_MS).unwrap();
         let AgentKind::Citizen(buyer) = &boundary.agents()[&id].kind;
         assert_eq!(
@@ -707,7 +710,7 @@ mod tests {
         let AgentKind::Citizen(buyer) = &after.agents()[&id].kind;
         assert_eq!(
             buyer.coins(),
-            1.0 - boundary.prices().value(Good::Berries, 100.0)
+            1.0 - boundary.prices().value(Good::Berries, 100.0).unwrap()
         );
         let combined = universe
             .advance(crate::ACTION_DURATION_MS + crate::TRADE_DURATION_MS)

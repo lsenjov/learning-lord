@@ -45,7 +45,7 @@
 - A score outside the finite `f64` range returns `SimulationError::WellbeingOverflow`.
 - Each positive unit of tiredness costs one wellbeing point. Negative tiredness delays future tiredness without granting an immediate bonus.
 - Clothing will be an important factor later.
-- Total wealth is coins plus inventory valued at current market prices, contributing 10 wellbeing per coin. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The marketplace randomizes starting prices and updates at 04:00 every day: berries uniformly 1–2 coins/kg, pebbles uniformly 1–6 coins/kg; the marketplace has unlimited stock and coins.
+- Total wealth is coins plus carried inventory with configured market prices, contributing 10 wellbeing per coin. Property is excluded; wheat, flour, wood, water and bread remain unpriced until their parameters are discussed. Coins and wealth use `f64`; citizens start with zero coins and pebbles. The marketplace randomizes starting prices and updates at 04:00 every day: berries uniformly 1–2 coins/kg, pebbles uniformly 1–6 coins/kg; the marketplace has unlimited stock and coins.
 - A collective's wellbeing could depend primarily on its members' needs, or it might depend only on money. This is still undecided.
 
 ## Relationships
@@ -163,9 +163,12 @@
 
 ## Locations
 
-- Each universe has a randomized 2 km × 2 km map with the house at the centre and distinct forest, river and market locations. Restart generates a fresh map.
-- Ada starts at home. Sleep requires home, Forage the forest, Find rocks the river, and trading the market. Eat and Wait are available anywhere.
+- The desktop starts four citizens: Ada the farmer, Bram the miller, Cleo the woodcutter and Dara the baker. These are starting roles without profession locks; skills and production are deferred. Each starts with 200 g berries (100 nutrition), zero coins and no other goods.
+- The desktop has ten random distinct UUID v4 places within the 2 km × 2 km map, separated by at least 200 m: four private homes, Ada's field, Bram's mill, Dara's bakery, a public forest, river and market. Every place stores type, position and owner; a citizen can own multiple properties. Restart generates fresh places and IDs.
+- Each citizen starts at their own home. Sleep requires that home, Forage the forest, Find rocks the river, and trading the market. Eat and Wait are available anywhere.
 - Travel is a separate action inserted automatically as a prerequisite, using the position resulting from preceding actions. It is not a standalone planning goal.
 - Walking moves continuously in a straight line at 1 km per 10 minutes. Coordinates are metres as `f64`; needs advance while travelling.
 - Travel counts toward preparation time, cooldown progression and duration-weighted wellbeing scoring. A trip already underway finishes before normal replanning.
-- The app shows labelled sites, Ada's position and the current route.
+- Travel targets a specific PlaceId; private sites permit only the owner and public sites permit anyone. Unknown destinations and foreign private destinations are rejected.
+- The app shows all ten labelled sites, every citizen, selected ownership and the current route. Selected details and debug exports include all carried inventory, owned properties and plan destinations.
+- Goods are berries, pebbles, wheat, flour, wood, water and bread in finite nonnegative f64 grams, with coins separate. Only berries are currently consumed. Bread is intended to be edible; its nutrition and eating speed are deferred. There is no property storage, capacity or spoilage. Production rates, wheat/field inputs and growth, mill/bakery starting stocks and farmer/woodcutter starter coins require later discussion before implementation.

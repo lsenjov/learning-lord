@@ -21,7 +21,7 @@ fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
     let mut elapsed = 0;
     for &action in actions {
         let before = predicted.personal_wellbeing().unwrap();
-        let duration = predicted.action_duration_ms(action);
+        let duration = predicted.action_duration_ms(action).unwrap();
         predicted = predict_action(&predicted, action);
         let after = predicted.personal_wellbeing().unwrap();
         contribution += (before + after) * 0.5 * duration as f64;
@@ -47,7 +47,7 @@ fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
         citizen
             .start_action(action)
             .unwrap()
-            .advance(citizen.action_duration_ms(action))
+            .advance(citizen.action_duration_ms(action).unwrap())
             .unwrap()
     }
 }
@@ -73,7 +73,7 @@ fn goal_planning_scores_action_endpoints_and_preserves_the_source() {
         let mut predicted = original.clone();
         let mut elapsed = 0;
         for &action in chosen.actions() {
-            elapsed += predicted.action_duration_ms(action);
+            elapsed += predicted.action_duration_ms(action).unwrap();
             predicted = predict_action(&predicted, action);
         }
         assert!(elapsed >= 4 * 60 * 60 * 1000);
@@ -165,7 +165,9 @@ fn execution_keeps_its_plan_for_two_hours_then_replans() {
     );
     assert_eq!(
         executing.active_action().unwrap().remaining_ms(),
-        manual.action_duration_ms(execution.plan().actions()[0])
+        manual
+            .action_duration_ms(execution.plan().actions()[0])
+            .unwrap()
     );
     assert_eq!(original.active_action(), None);
     assert_eq!(original.active_plan(), None);
@@ -227,8 +229,11 @@ fn planning_rejects_busy_citizens_and_cannot_replace_a_committed_batch() {
 fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches() {
     let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", Citizen::new(25.0).unwrap());
-    let (original, other_id) = original.with_citizen("Bea", Citizen::new(0.0).unwrap());
+        .with_citizen("Ada", Citizen::new(25.0).unwrap())
+        .unwrap();
+    let (original, other_id) = original
+        .with_citizen("Bea", Citizen::new(0.0).unwrap())
+        .unwrap();
     let snapshot = original.clone();
     let planned = original.start_planning(id).unwrap();
     let planned_snapshot = planned.clone();
@@ -272,7 +277,8 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
 
     let (_, missing_id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Missing", Citizen::new(0.0).unwrap());
+        .with_citizen("Missing", Citizen::new(0.0).unwrap())
+        .unwrap();
     assert_eq!(
         original.start_planning(missing_id),
         Err(SimulationError::AgentNotFound)
@@ -303,9 +309,10 @@ fn prediction_and_replanning_errors_preserve_original_state() {
     );
     assert_eq!(planned, snapshot);
 
-    let (universe, _) = Universe::with_map(learning_lord_simulation::locations::Map::default())
+    let (universe, _) = Universe::with_map(planned.map())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", planned);
+        .with_citizen("Ada", planned)
+        .unwrap();
     let snapshot = universe.clone();
     assert_eq!(
         universe.advance(8 * TWO_HOURS_MS),

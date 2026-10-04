@@ -163,9 +163,33 @@ impl Pacing {
 
 pub fn new_universe() -> Result<Universe, SimulationError> {
     let mut universe = Universe::default();
-    for name in ["Ada", "Bram", "Cleo", "Dara"] {
-        let (next, id) = universe.with_citizen(name, Citizen::new(0.0)?);
-        universe = next.start_planning(id)?;
+    let mut ids = Vec::new();
+    use learning_lord_simulation::StartingRole;
+    for (name, role) in [
+        ("Ada", StartingRole::Farmer),
+        ("Bram", StartingRole::Miller),
+        ("Cleo", StartingRole::Woodcutter),
+        ("Dara", StartingRole::Baker),
+    ] {
+        let (next, id) = universe.with_citizen(
+            name,
+            Citizen::new(0.0)?
+                .with_berries(200.0)?
+                .with_starting_role(role),
+        )?;
+        universe = next;
+        ids.push(id);
+    }
+    use learning_lord_simulation::locations::Location;
+    for (owner, kind) in [
+        (ids[0], Location::Field),
+        (ids[1], Location::Mill),
+        (ids[3], Location::Bakery),
+    ] {
+        universe = universe.with_property(owner, kind)?.0;
+    }
+    for id in ids {
+        universe = universe.start_planning(id)?;
     }
     Ok(universe)
 }
@@ -306,16 +330,11 @@ mod tests {
             assert_eq!(citizen.hunger(), 0.0);
             assert_eq!(citizen.tiredness(), 0.0);
             assert_eq!(citizen.coins(), 0.0);
-            assert_eq!(citizen.berries_grams(), 0.0);
+            assert_eq!(citizen.berries_grams(), 200.0);
             assert_eq!(citizen.pebbles_grams(), 0.0);
             assert_eq!(citizen.map(), universe.map());
             assert_eq!(citizen.prices(), universe.prices());
-            assert_eq!(
-                citizen.position(),
-                universe
-                    .map()
-                    .position(learning_lord_simulation::locations::Location::House)
-            );
+            assert_eq!(citizen.position(), universe.map().position(citizen.home()));
             assert!(citizen.active_plan().is_some());
         }
         let next = universe.advance(STEP_MS).unwrap();
@@ -325,10 +344,69 @@ mod tests {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert!(citizen.active_plan().is_some());
             assert_ne!(agent, &source.agents()[id]);
+            assert!(citizen.hunger().is_finite());
+        }
+    }
+
+    #[test]
+    fn initial_town_has_ten_separated_identified_places_and_agreed_starting_roles() {
+        use learning_lord_simulation::{
+            AgentKind, StartingRole, locations::Location, marketplace::Good,
+        };
+        for _ in 0..10 {
+            let universe = new_universe().unwrap();
+            let map = universe.map();
+            let places: Vec<_> = map.places().values().collect();
+            assert_eq!(places.len(), 10);
             assert_eq!(
-                citizen.hunger(),
-                STEP_MS as f64 / 3_600_000.0 * citizen.hunger_per_hour()
+                places
+                    .iter()
+                    .filter(|place| place.kind == Location::Home)
+                    .count(),
+                4
             );
+            assert_eq!(
+                places.iter().filter(|place| place.owner.is_none()).count(),
+                3
+            );
+            for (index, place) in places.iter().enumerate() {
+                assert_eq!(place.id.0.get_version_num(), 4);
+                assert!(place.position.x.abs() <= 1000.0 && place.position.y.abs() <= 1000.0);
+                for other in &places[index + 1..] {
+                    assert!(place.position.distance(other.position) >= 200.0);
+                }
+                if let Some(owner) = place.owner {
+                    assert!(universe.agents().contains_key(&owner));
+                }
+            }
+            for (id, agent) in universe.agents() {
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                assert_eq!(citizen.id(), *id);
+                assert_eq!(citizen.id().0.get_version_num(), 4);
+                assert_eq!(citizen.berries_grams(), 200.0);
+                assert_eq!(citizen.coins(), 0.0);
+                for good in Good::ALL.into_iter().filter(|good| *good != Good::Berries) {
+                    assert_eq!(citizen.grams(good), 0.0);
+                }
+                assert_eq!(map.place(citizen.home()).unwrap().owner, Some(*id));
+                assert_eq!(citizen.position(), map.position(citizen.home()));
+                let (role, property) = match agent.name.as_str() {
+                    "Ada" => (StartingRole::Farmer, Some(Location::Field)),
+                    "Bram" => (StartingRole::Miller, Some(Location::Mill)),
+                    "Cleo" => (StartingRole::Woodcutter, None),
+                    "Dara" => (StartingRole::Baker, Some(Location::Bakery)),
+                    _ => panic!("unexpected citizen"),
+                };
+                assert_eq!(citizen.starting_role(), Some(role));
+                assert_eq!(
+                    citizen.owned_properties().count(),
+                    if property.is_some() { 2 } else { 1 }
+                );
+                if let Some(kind) = property {
+                    assert!(citizen.owned_properties().any(|place| place.kind == kind));
+                }
+            }
+            assert_eq!(universe.clone().map(), map);
         }
     }
 
@@ -366,10 +444,7 @@ mod tests {
             &state.universe.agents().values().next().unwrap().kind;
         assert_eq!(
             citizen.position(),
-            state
-                .universe
-                .map()
-                .position(learning_lord_simulation::locations::Location::House)
+            state.universe.map().position(citizen.home())
         );
         assert_eq!(citizen.map(), state.universe.map());
         assert_eq!(citizen.hunger(), 0.0);
@@ -480,7 +555,8 @@ mod tests {
     fn paused_steps_are_exact_and_ignore_speed_while_running_steps_are_rejected() {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
-                .with_citizen("Ada", Citizen::new(0.0).unwrap());
+                .with_citizen("Ada", Citizen::new(0.0).unwrap())
+                .unwrap();
         let universe = universe.start_planning(id).unwrap();
         let original = universe.clone();
         let mut state = WorkerState {

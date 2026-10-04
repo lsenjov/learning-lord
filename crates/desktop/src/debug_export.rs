@@ -72,7 +72,6 @@ fn write_universe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_lord_simulation::Citizen;
     use std::time::Duration;
 
     #[test]
@@ -85,7 +84,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let (universe, _) = Universe::default().with_citizen("Ada", Citizen::new(25.0).unwrap());
+        let universe = crate::simulation::new_universe().unwrap();
         let universe = universe.advance(1234).unwrap();
         let source = universe.clone();
         let pressed_at = UNIX_EPOCH + Duration::new(1_800_000_000, 123_456_789);
@@ -96,6 +95,21 @@ mod tests {
         );
         let contents = fs::read_to_string(&first).unwrap();
         assert!(contents.contains(&format!("{universe:#?}")));
+        for name in [
+            "Ada's home",
+            "Bram's mill",
+            "Dara's bakery",
+            "PlaceId",
+            "owner",
+            "inventory",
+            "Wheat",
+            "Flour",
+            "Wood",
+            "Water",
+            "Bread",
+        ] {
+            assert!(contents.contains(name), "missing {name}");
+        }
         let second = write_universe(&directory, &Universe::default(), pressed_at).unwrap();
         assert_ne!(first, second);
         assert_eq!(fs::read_to_string(&first).unwrap(), contents);

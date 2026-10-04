@@ -45,11 +45,13 @@ impl CitizenAction {
                 Effect::Coins,
                 citizen
                     .prices()
-                    .value(Good::Berries, (amount - citizen.berries_grams()).max(0.0)),
+                    .value(Good::Berries, (amount - citizen.berries_grams()).max(0.0))
+                    .unwrap(),
             ),
             Self::SellPebbles => (
                 Effect::Pebbles,
-                (amount - citizen.coins()).max(0.0) / citizen.prices().coins_per_kg(Good::Pebbles)
+                (amount - citizen.coins()).max(0.0)
+                    / citizen.prices().coins_per_kg(Good::Pebbles).unwrap()
                     * 1000.0,
             ),
             _ => return None,
@@ -314,7 +316,7 @@ fn prepare(
     };
     let mut variants = Vec::new();
     for mut ready in prepared {
-        if let Some(location) = action.required_location()
+        if let Some(location) = action.required_place(&ready.citizen)
             && ready.citizen.position() != ready.citizen.map().position(location)
         {
             let Some(travelled) = ready.perform(CitizenAction::Travel(location), prior_actions)?
@@ -503,7 +505,7 @@ mod tests {
             Position::default(),
         )
         .unwrap();
-        let source = hungry(0.0).with_map(map).unwrap();
+        let source = hungry(0.0).with_map(map.clone()).unwrap();
         let initial = Prediction::new(
             &source,
             Cooldowns {
@@ -517,7 +519,7 @@ mod tests {
         assert_eq!(
             order.actions,
             [
-                CitizenAction::Travel(Location::Forest),
+                CitizenAction::Travel(map.public_place(Location::Forest)),
                 CitizenAction::Forage,
                 CitizenAction::Forage,
                 CitizenAction::Forage
@@ -542,9 +544,9 @@ mod tests {
             Position { x: 0.0, y: 600.0 },
         )
         .unwrap();
-        let source = hungry(0.0).with_map(map).unwrap();
+        let source = hungry(0.0).with_map(map.clone()).unwrap();
         assert!(full_meals(&source).is_empty());
-        let mut expected = vec![CitizenAction::Travel(Location::Forest)];
+        let mut expected = vec![CitizenAction::Travel(map.public_place(Location::Forest))];
         expected.extend([CitizenAction::Forage; 6]);
         expected.push(CitizenAction::Eat);
         let variants = meals(&source, 30.0);
@@ -571,7 +573,7 @@ mod tests {
         );
 
         let mut prefix = Prediction::new(&source, Cooldowns::default())
-            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .perform(CitizenAction::Travel(map.public_place(Location::Forest)), 0)
             .unwrap()
             .unwrap();
         for _ in 0..4 {
@@ -846,20 +848,20 @@ mod tests {
         .unwrap();
         let citizen = Citizen::with_needs(10.0, -100.0)
             .unwrap()
-            .with_map(map)
+            .with_map(map.clone())
             .unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
         let direct = initial
-            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .perform(CitizenAction::Travel(map.public_place(Location::Forest)), 0)
             .unwrap()
             .unwrap();
         let middle = initial
-            .perform(CitizenAction::Travel(Location::River), 0)
+            .perform(CitizenAction::Travel(map.public_place(Location::River)), 0)
             .unwrap()
             .unwrap();
         assert_eq!(middle.score.elapsed_ms, 30_000);
         let split = middle
-            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .perform(CitizenAction::Travel(map.public_place(Location::Forest)), 0)
             .unwrap()
             .unwrap();
         assert!((direct.average().unwrap() - split.average().unwrap()).abs() < 1e-12);
@@ -880,11 +882,11 @@ mod tests {
         .unwrap();
         let citizen = Citizen::with_needs(10.0, -100.0)
             .unwrap()
-            .with_map(map)
+            .with_map(map.clone())
             .unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
         let prefix = initial
-            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .perform(CitizenAction::Travel(map.public_place(Location::Forest)), 0)
             .unwrap()
             .unwrap();
         let next = best_variant_after(&prefix, Effect::IncreaseWealth)
@@ -954,16 +956,16 @@ mod tests {
             -45.326035879629764 - need_growth,
         )
         .unwrap()
-        .with_map(map)
+        .with_map(map.clone())
         .unwrap()
-        .with_position(map.position(Location::River))
+        .with_position(map.position(map.public_place(Location::River)))
         .unwrap()
         .with_prices(Prices::new(1.2090152088522885, 3.905220675837458).unwrap())
         .with_pebbles(19.454608762314617)
         .unwrap();
         let mut prefix = Prediction::new(&source, Cooldowns::default());
         for action in [
-            CitizenAction::Travel(Location::Market),
+            CitizenAction::Travel(map.public_place(Location::Market)),
             CitizenAction::SellPebbles,
             CitizenAction::BuyBerries,
             CitizenAction::Eat,
@@ -972,14 +974,14 @@ mod tests {
         }
         assert_eq!(prefix.elapsed_ms, 811_580);
         let forage = prefix
-            .perform(CitizenAction::Travel(Location::Forest), 0)
+            .perform(CitizenAction::Travel(map.public_place(Location::Forest)), 0)
             .unwrap()
             .unwrap()
             .perform(CitizenAction::Forage, 0)
             .unwrap()
             .unwrap();
         let rocks = prefix
-            .perform(CitizenAction::Travel(Location::River), 0)
+            .perform(CitizenAction::Travel(map.public_place(Location::River)), 0)
             .unwrap()
             .unwrap()
             .perform(CitizenAction::FindRocks, 0)
@@ -997,7 +999,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             chosen.actions.first(),
-            Some(&CitizenAction::Travel(Location::River))
+            Some(&CitizenAction::Travel(map.public_place(Location::River)))
         );
         assert!(
             chosen.actions[1..]
@@ -1038,9 +1040,9 @@ mod tests {
             Position { x: 0.0, y: 600.0 },
         )
         .unwrap();
-        let source = hungry(40.0).with_map(map).unwrap();
+        let source = hungry(40.0).with_map(map.clone()).unwrap();
         let variants = full_meals(&source);
-        let mut foraged = vec![CitizenAction::Travel(Location::Forest)];
+        let mut foraged = vec![CitizenAction::Travel(map.public_place(Location::Forest))];
         foraged.extend([CitizenAction::Forage; 6]);
         foraged.push(CitizenAction::Eat);
         let gathered = variants.iter().find(|v| v.actions == foraged).unwrap();
@@ -1048,25 +1050,28 @@ mod tests {
             gathered.elapsed_ms,
             300_000 + 6 * ACTION_DURATION_MS + 100_000
         );
-        let mut traded = vec![CitizenAction::Travel(Location::River)];
+        let mut traded = vec![CitizenAction::Travel(map.public_place(Location::River))];
         traded.extend([CitizenAction::FindRocks; 6]);
         traded.extend([
-            CitizenAction::Travel(Location::Market),
+            CitizenAction::Travel(map.public_place(Location::Market)),
             CitizenAction::SellPebbles,
             CitizenAction::BuyBerries,
             CitizenAction::Eat,
         ]);
         let trade = variants.iter().find(|v| v.actions == traded).unwrap();
         let river_to_market = (map
-            .position(Location::River)
-            .distance(map.position(Location::Market))
+            .position(map.public_place(Location::River))
+            .distance(map.position(map.public_place(Location::Market)))
             * crate::locations::WALK_MS_PER_METRE)
             .ceil() as u64;
         assert_eq!(
             trade.elapsed_ms,
             240_000 + 6 * ACTION_DURATION_MS + river_to_market + 2 * TRADE_DURATION_MS + 100_000
         );
-        assert_eq!(trade.citizen.position(), map.position(Location::Market));
+        assert_eq!(
+            trade.citizen.position(),
+            map.position(map.public_place(Location::Market))
+        );
         assert_eq!(trade.score.elapsed_ms, trade.elapsed_ms);
         assert_eq!(source.position(), Position::default());
     }
@@ -1081,19 +1086,19 @@ mod tests {
         )
         .unwrap();
         let away = hungry(20.0)
-            .with_map(map)
+            .with_map(map.clone())
             .unwrap()
-            .with_position(map.position(Location::Forest))
+            .with_position(map.position(map.public_place(Location::Forest)))
             .unwrap();
         let sleep = best_variant(&away, Effect::ReduceTiredness, Cooldowns::default(), 0)
             .unwrap()
             .unwrap();
         assert_eq!(
             sleep.actions,
-            [CitizenAction::Travel(Location::House), CitizenAction::Sleep]
+            [CitizenAction::Travel(away.home()), CitizenAction::Sleep]
         );
         assert_eq!(sleep.elapsed_ms, 300_000 + SLEEP_DURATION_MS);
-        let at_home = hungry(20.0).with_map(map).unwrap();
+        let at_home = hungry(20.0).with_map(map.clone()).unwrap();
         assert!(!full_meals(&at_home).iter().any(|v| {
             v.actions
                 .iter()
