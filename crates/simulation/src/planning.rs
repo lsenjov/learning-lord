@@ -159,27 +159,29 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
         Effect::ReduceTiredness,
         Effect::IncreaseWealth,
     ] {
-        let forecast =
-            if let Some(variant) = goals::best_variant(citizen, goal, Cooldowns::default(), 0)? {
-                let actions = variant.actions.clone();
-                let duration_ms = variant.elapsed_ms;
-                let average_wellbeing = variant.average()?;
-                let mut continuation = empty_plan();
-                search(variant, HORIZON_MS, &mut continuation)?;
-                let full_plan_wellbeing = continuation.average_wellbeing;
-                if full_plan_wellbeing > best.average_wellbeing {
-                    best = continuation;
-                    selected_goal = goal;
-                }
-                Some(GoalForecast {
+        let mut forecast = None;
+        let mut goal_best = empty_plan();
+        let initial = Prediction::new(citizen, Cooldowns::default());
+        for variant in goals::variants_after(&initial, goal)? {
+            let actions = variant.actions.clone();
+            let duration_ms = variant.elapsed_ms;
+            let average_wellbeing = variant.average()?;
+            let mut continuation = empty_plan();
+            search(variant, HORIZON_MS, &mut continuation)?;
+            if continuation.average_wellbeing > goal_best.average_wellbeing {
+                forecast = Some(GoalForecast {
                     actions,
                     duration_ms,
                     average_wellbeing,
-                    full_plan_wellbeing,
-                })
-            } else {
-                None
-            };
+                    full_plan_wellbeing: continuation.average_wellbeing,
+                });
+                goal_best = continuation;
+            }
+        }
+        if goal_best.average_wellbeing > best.average_wellbeing {
+            best = goal_best;
+            selected_goal = goal;
+        }
         candidates.push(GoalDecision { goal, forecast });
     }
     best.decision = Some(Arc::new(PlanningDecision {
@@ -215,7 +217,7 @@ fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), Sim
         Effect::ReduceTiredness,
         Effect::IncreaseWealth,
     ] {
-        if let Some(variant) = goals::best_variant_after(&state, goal)? {
+        for variant in goals::variants_after(&state, goal)? {
             let mut next = variant;
             next.elapsed_ms += state.elapsed_ms;
             let mut actions = state.actions.clone();
@@ -302,7 +304,7 @@ mod tests {
         let replanned = before.advance(1).unwrap();
         assert_eq!(replanned.active_plan().unwrap().elapsed_ms(), 0);
         assert!(replanned.active_plan().unwrap().plan().decision().is_some());
-        assert!(replanned.berries_grams() > citizen.berries_grams());
+        assert!(replanned.wealth().unwrap() > citizen.wealth().unwrap());
     }
 
     #[test]
@@ -363,8 +365,18 @@ mod tests {
             assert_eq!(decision.candidates.len(), 3);
             assert_eq!(decision.prices, prices);
             for candidate in &decision.candidates {
-                let expected =
-                    goals::best_variant(&citizen, candidate.goal, Cooldowns::default(), 0).unwrap();
+                let expected = goals::variants_after(
+                    &Prediction::new(&citizen, Cooldowns::default()),
+                    candidate.goal,
+                )
+                .unwrap()
+                .into_iter()
+                .find(|variant| {
+                    candidate
+                        .forecast
+                        .as_ref()
+                        .is_some_and(|forecast| forecast.actions == variant.actions)
+                });
                 match (&candidate.forecast, expected) {
                     (Some(forecast), Some(expected)) => {
                         assert_eq!(forecast.actions, expected.actions);
@@ -388,6 +400,107 @@ mod tests {
             let hunger = &decision.candidates[0];
             assert!(hunger.forecast.is_some());
             assert_eq!(citizen, snapshot);
+        }
+    }
+
+    #[test]
+    fn full_continuations_can_outscore_the_local_goal_winner() {
+        let citizen = Citizen::with_needs(50.0, -100.0)
+            .unwrap()
+            .with_prices(crate::marketplace::Prices::new(2.0, 1.0).unwrap());
+        let local = goals::best_variant(&citizen, Effect::ReduceHunger, Cooldowns::default(), 0)
+            .unwrap()
+            .unwrap();
+        let chosen = plan(&citizen).unwrap();
+        let forecast = chosen.decision().unwrap().candidates[0]
+            .forecast
+            .as_ref()
+            .unwrap();
+        let mut local_plan = empty_plan();
+        search(local.clone(), HORIZON_MS, &mut local_plan).unwrap();
+        assert_ne!(forecast.actions, local.actions);
+        assert!(forecast.average_wellbeing < local.average().unwrap());
+        assert!(forecast.full_plan_wellbeing > local_plan.average_wellbeing);
+        for variant in goals::variants_after(
+            &Prediction::new(&citizen, Cooldowns::default()),
+            Effect::ReduceHunger,
+        )
+        .unwrap()
+        {
+            let mut full = empty_plan();
+            search(variant, HORIZON_MS, &mut full).unwrap();
+            assert!(full.average_wellbeing <= forecast.full_plan_wellbeing);
+        }
+    }
+
+    #[test]
+    fn exported_hunger_state_compares_affordable_trading_continuations() {
+        use crate::locations::{Location, Map, Position};
+        use crate::marketplace::Prices;
+        let map = Map::new(
+            Position {
+                x: 386.3952040173808,
+                y: -841.1173238559137,
+            },
+            Position {
+                x: -724.4895163019701,
+                y: -755.0057040246737,
+            },
+            Position {
+                x: -501.65675592959025,
+                y: 468.19843490627386,
+            },
+        )
+        .unwrap();
+        let growth = 73533.0 * 100.0 / 86400000.0;
+        let citizen =
+            Citizen::with_needs(-19.624550026806507 - growth, -14.518873842590954 - growth)
+                .unwrap()
+                .with_map(map)
+                .unwrap()
+                .with_position(map.position(Location::River))
+                .unwrap()
+                .with_prices(Prices::new(1.8975551078215391, 5.529146608397028).unwrap())
+                .with_berries(25.36314504117695)
+                .unwrap()
+                .with_pebbles(114.36715287400935)
+                .unwrap();
+        let variants = goals::variants_after(
+            &Prediction::new(&citizen, Cooldowns::default()),
+            Effect::ReduceHunger,
+        )
+        .unwrap();
+        let trade = variants
+            .iter()
+            .find(|variant| {
+                variant.actions
+                    == [
+                        CitizenAction::Travel(Location::Market),
+                        CitizenAction::SellPebbles,
+                        CitizenAction::BuyBerries,
+                        CitizenAction::Eat,
+                    ]
+            })
+            .unwrap();
+        let mut trade_plan = empty_plan();
+        search(trade.clone(), HORIZON_MS, &mut trade_plan).unwrap();
+        let local = goals::best_variant(&citizen, Effect::ReduceHunger, Cooldowns::default(), 0)
+            .unwrap()
+            .unwrap();
+        let mut local_plan = empty_plan();
+        search(local, HORIZON_MS, &mut local_plan).unwrap();
+        assert!(trade_plan.average_wellbeing.is_finite());
+        let chosen = plan(&citizen).unwrap();
+        let hunger = chosen.decision().unwrap().candidates[0]
+            .forecast
+            .as_ref()
+            .unwrap();
+        assert!(hunger.full_plan_wellbeing >= trade_plan.average_wellbeing);
+        assert!(hunger.full_plan_wellbeing > local_plan.average_wellbeing);
+        for variant in variants {
+            let mut full = empty_plan();
+            search(variant, HORIZON_MS, &mut full).unwrap();
+            assert!(hunger.full_plan_wellbeing >= full.average_wellbeing);
         }
     }
 

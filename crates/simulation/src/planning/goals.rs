@@ -177,6 +177,7 @@ impl Prediction {
         Ok(self.score.mean)
     }
 
+    #[cfg(test)]
     fn goal_average(&self) -> Result<f64, SimulationError> {
         Ok(self.goal_score.mean)
     }
@@ -327,43 +328,64 @@ fn prepare(
     Ok(variants)
 }
 
+#[cfg(test)]
 pub(super) fn best_variant(
     citizen: &Citizen,
     goal: Effect,
     cooldowns: Cooldowns,
     prior_actions: usize,
 ) -> Result<Option<Prediction>, SimulationError> {
-    best_variant_from(Prediction::new(citizen, cooldowns), goal, prior_actions)
+    Ok(local_best(variants_from(
+        Prediction::new(citizen, cooldowns),
+        goal,
+        prior_actions,
+    )?))
 }
 
+#[cfg(test)]
 pub(super) fn best_variant_after(
     prefix: &Prediction,
     goal: Effect,
 ) -> Result<Option<Prediction>, SimulationError> {
-    let mut initial = Prediction::new(&prefix.citizen, prefix.cooldowns);
-    initial.score = prefix.score;
-    initial.last_gathering_order = prefix.last_gathering_order;
-    best_variant_from(initial, goal, prefix.actions.len())
+    Ok(local_best(variants_after(prefix, goal)?))
 }
 
-fn best_variant_from(
-    initial: Prediction,
-    goal: Effect,
-    prior_actions: usize,
-) -> Result<Option<Prediction>, SimulationError> {
-    let citizen = &initial.citizen;
+#[cfg(test)]
+fn local_best(variants: Vec<Prediction>) -> Option<Prediction> {
     let mut best: Option<Prediction> = None;
-    let mut consider = |candidate: Prediction| -> Result<(), SimulationError> {
-        let candidate_score = candidate.goal_average()?;
+    for candidate in variants {
         if best
             .as_ref()
-            .map(|old| old.goal_average())
-            .transpose()?
-            .is_none_or(|score| candidate_score > score)
+            .is_none_or(|old| candidate.goal_score.mean > old.goal_score.mean)
         {
             best = Some(candidate);
         }
-        Ok(())
+    }
+    best
+}
+
+pub(super) fn variants_after(
+    prefix: &Prediction,
+    goal: Effect,
+) -> Result<Vec<Prediction>, SimulationError> {
+    let mut initial = Prediction::new(&prefix.citizen, prefix.cooldowns);
+    initial.score = prefix.score;
+    initial.last_gathering_order = prefix.last_gathering_order;
+    variants_from(initial, goal, prefix.actions.len())
+}
+
+fn variants_from(
+    initial: Prediction,
+    goal: Effect,
+    prior_actions: usize,
+) -> Result<Vec<Prediction>, SimulationError> {
+    let citizen = &initial.citizen;
+    let mut variants: Vec<Prediction> = Vec::new();
+    let mut consider = |candidate: Prediction| {
+        // Identical primitive paths have identical predictions, regardless of the requested target.
+        if !variants.iter().any(|old| old.actions == candidate.actions) {
+            variants.push(candidate);
+        }
     };
     for action in ACTIONS
         .into_iter()
@@ -376,7 +398,7 @@ fn best_variant_from(
         };
         for &target in targets {
             for candidate in order_variants(&initial, action, target, 0, prior_actions)? {
-                consider(candidate)?;
+                consider(candidate);
             }
         }
         // Existing small meals remain useful when acquiring a full meal would delay relief.
@@ -386,10 +408,10 @@ fn best_variant_from(
                 || citizen.berries_grams() * BERRY_NUTRITION_PER_GRAM >= REPLAN_MIN_NUTRITION)
             && let Some(candidate) = initial.perform(action, prior_actions)?
         {
-            consider(candidate)?;
+            consider(candidate);
         }
     }
-    Ok(best)
+    Ok(variants)
 }
 
 #[cfg(test)]
@@ -621,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn local_variant_winner_is_selected_before_goal_sequencing() {
+    fn goal_variants_retain_every_supplier_target_and_immediate_meal() {
         let source = hungry(0.0).with_prices(crate::marketplace::Prices::new(1.0, 4.0).unwrap());
         let mut variants = meals(&source, 30.0);
         variants.extend(full_meals(&source));
@@ -629,15 +651,21 @@ mod tests {
             .iter()
             .map(|v| v.average().unwrap())
             .fold(f64::NEG_INFINITY, f64::max);
-        let chosen = best_variant(&source, Effect::ReduceHunger, Cooldowns::default(), 0)
-            .unwrap()
-            .unwrap();
-        assert_eq!(chosen.average().unwrap(), best_score);
-        assert!(variants.iter().any(|v| v.actions == chosen.actions));
-        let immediate = best_variant(&hungry(10.0), Effect::ReduceHunger, Cooldowns::default(), 0)
-            .unwrap()
-            .unwrap();
-        assert_eq!(immediate.actions, [CitizenAction::Eat]);
+        let retained = variants_after(
+            &Prediction::new(&source, Cooldowns::default()),
+            Effect::ReduceHunger,
+        )
+        .unwrap();
+        assert!(retained.iter().any(|v| v.average().unwrap() == best_score));
+        for variant in variants {
+            assert!(retained.iter().any(|v| v.actions == variant.actions));
+        }
+        let immediate = variants_after(
+            &Prediction::new(&hungry(10.0), Cooldowns::default()),
+            Effect::ReduceHunger,
+        )
+        .unwrap();
+        assert!(immediate.iter().any(|v| v.actions == [CitizenAction::Eat]));
     }
 
     #[test]
