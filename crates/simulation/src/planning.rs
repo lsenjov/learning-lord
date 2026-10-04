@@ -37,14 +37,33 @@ pub struct PlanningDecision {
     pub prices: crate::marketplace::Prices,
 }
 
+/// A chosen goal and its primitive actions, including prerequisites.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanGoal {
+    pub goal: Effect,
+    pub actions: std::ops::Range<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     actions: Vec<CitizenAction>,
+    action_durations_ms: Vec<u64>,
+    goals: Vec<PlanGoal>,
     average_wellbeing: f64,
     decision: Option<Arc<PlanningDecision>>,
 }
 
 impl Plan {
+    /// Goal boundaries in execution order.
+    pub fn goals(&self) -> &[PlanGoal] {
+        &self.goals
+    }
+
+    /// Predicted durations in the same order as `actions()`.
+    pub fn action_durations_ms(&self) -> &[u64] {
+        &self.action_durations_ms
+    }
+
     pub fn decision(&self) -> Option<&PlanningDecision> {
         self.decision.as_deref()
     }
@@ -167,7 +186,11 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
             let duration_ms = variant.elapsed_ms;
             let average_wellbeing = variant.average()?;
             let mut continuation = empty_plan();
-            search(variant, HORIZON_MS, &mut continuation)?;
+            let boundary = PlanGoal {
+                goal,
+                actions: 0..variant.actions.len(),
+            };
+            search_with_goals(variant, HORIZON_MS, &mut continuation, vec![boundary])?;
             if continuation.average_wellbeing > goal_best.average_wellbeing {
                 forecast = Some(GoalForecast {
                     actions,
@@ -195,17 +218,31 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
 fn empty_plan() -> Plan {
     Plan {
         actions: Vec::new(),
+        action_durations_ms: Vec::new(),
+        goals: Vec::new(),
         average_wellbeing: f64::NEG_INFINITY,
         decision: None,
     }
 }
 
+#[cfg(test)]
 fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), SimulationError> {
+    search_with_goals(state, horizon_ms, best, Vec::new())
+}
+
+fn search_with_goals(
+    state: Prediction,
+    horizon_ms: u64,
+    best: &mut Plan,
+    boundaries: Vec<PlanGoal>,
+) -> Result<(), SimulationError> {
     if state.elapsed_ms >= horizon_ms {
         let score = state.average()?;
         if score > best.average_wellbeing {
             *best = Plan {
                 actions: state.actions,
+                action_durations_ms: state.action_durations_ms,
+                goals: boundaries,
                 average_wellbeing: score,
                 decision: None,
             };
@@ -222,8 +259,16 @@ fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), Sim
             next.elapsed_ms += state.elapsed_ms;
             let mut actions = state.actions.clone();
             actions.append(&mut next.actions);
+            let mut durations = state.action_durations_ms.clone();
+            durations.append(&mut next.action_durations_ms);
+            next.action_durations_ms = durations;
+            let mut goals = boundaries.clone();
+            goals.push(PlanGoal {
+                goal,
+                actions: state.actions.len()..actions.len(),
+            });
             next.actions = actions;
-            search(next, horizon_ms, best)?;
+            search_with_goals(next, horizon_ms, best, goals)?;
         }
     }
     Ok(())
@@ -251,6 +296,8 @@ mod tests {
         let mut citizen = citizen.start_action(actions[0]).unwrap();
         citizen.active_plan = Some(ActivePlan {
             plan: Plan {
+                action_durations_ms: vec![0; actions.len()],
+                goals: Vec::new(),
                 actions,
                 average_wellbeing: -1.0,
                 decision: None,
@@ -259,6 +306,82 @@ mod tests {
             elapsed_ms: 0,
         });
         citizen
+    }
+
+    #[test]
+    fn goal_ranges_include_prerequisites_and_cover_repeated_primitives() {
+        use crate::marketplace::Prices;
+        let citizen = Citizen::with_needs(70.0, -100.0)
+            .unwrap()
+            .with_prices(Prices::new(2.0, 1.0).unwrap());
+        let selected = plan(&citizen).unwrap();
+        let forecast = selected
+            .decision()
+            .unwrap()
+            .candidates
+            .iter()
+            .find(|candidate| candidate.goal == selected.decision().unwrap().selected_goal)
+            .unwrap()
+            .forecast
+            .as_ref()
+            .unwrap();
+        assert_eq!(selected.goals()[0].actions, 0..forecast.actions.len());
+        assert_eq!(
+            &selected.actions()[selected.goals()[0].actions.clone()],
+            forecast.actions
+        );
+        assert_eq!(
+            selected.action_durations_ms()[selected.goals()[0].actions.clone()]
+                .iter()
+                .sum::<u64>(),
+            forecast.duration_ms
+        );
+        let mut covered = Vec::new();
+        for boundary in selected.goals() {
+            covered.extend(boundary.actions.clone());
+            assert!(
+                selected.actions()[boundary.actions.end - 1]
+                    .effects()
+                    .contains(&boundary.goal)
+            );
+        }
+        assert_eq!(covered, (0..selected.actions().len()).collect::<Vec<_>>());
+        assert!(selected.actions().windows(2).any(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn goal_boundaries_cover_actions_and_metadata_survives_execution() {
+        let citizen = Citizen::with_needs(60.0, 100.0)
+            .unwrap()
+            .with_berries(200.0)
+            .unwrap();
+        let started = start(&citizen).unwrap();
+        let plan = started.active_plan().unwrap().plan();
+        assert_eq!(plan.goals()[0].goal, plan.decision().unwrap().selected_goal);
+        assert_eq!(plan.action_durations_ms().len(), plan.actions().len());
+        assert!(
+            plan.action_durations_ms()
+                .iter()
+                .all(|&duration| duration > 0)
+        );
+        let mut next = 0;
+        for boundary in plan.goals() {
+            assert_eq!(boundary.actions.start, next);
+            assert!(boundary.actions.end > next);
+            next = boundary.actions.end;
+        }
+        assert_eq!(next, plan.actions().len());
+        assert_eq!(plan.goals()[0].goal, Effect::ReduceHunger);
+        assert_eq!(plan.goals()[0].actions, 0..1);
+        assert_eq!(plan.goals()[1].goal, Effect::ReduceTiredness);
+        let advanced = started.advance(100_000).unwrap();
+        assert_eq!(advanced.active_plan().unwrap().action_index(), 1);
+        assert_eq!(advanced.active_plan().unwrap().plan(), plan);
+        assert_eq!(started.active_plan().unwrap().action_index(), 0);
+        assert_eq!(
+            advanced.active_action().unwrap().duration_ms(),
+            plan.action_durations_ms()[1]
+        );
     }
 
     #[test]
@@ -682,6 +805,8 @@ mod tests {
         let mut active = ActivePlan {
             plan: Plan {
                 actions: vec![CitizenAction::Eat, CitizenAction::Wait],
+                action_durations_ms: vec![0; 2],
+                goals: Vec::new(),
                 average_wellbeing: 0.0,
                 decision: None,
             },

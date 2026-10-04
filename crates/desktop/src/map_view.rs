@@ -1,16 +1,23 @@
-use crate::{DisplaySnapshot, MUTED, PANEL, TEXT, text};
+use crate::{
+    DisplaySnapshot, MUTED, PANEL, TEXT,
+    citizens::{self, Selection},
+    text,
+};
 use bevy::prelude::*;
 use learning_lord_simulation::{
     AgentKind, CitizenAction,
     locations::{Location, MAP_HALF_SIZE_METRES, Position},
 };
 
+#[derive(Component)]
+pub struct MapLabel(usize);
+
 const MAP_SIZE: f32 = 300.0;
 
 #[derive(Component)]
 pub enum MapItem {
     Site(Location),
-    Ada,
+    Citizen(usize),
     Route,
 }
 
@@ -82,31 +89,20 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                             ));
                         });
                     }
-                    map.spawn((
-                        Node {
-                            position_type: PositionType::Absolute,
-                            width: px(10),
-                            height: px(10),
-                            border_radius: BorderRadius::MAX,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(1.0, 0.75, 0.20)),
-                        UiTransform::default(),
-                        MapItem::Ada,
-                    ))
-                    .with_children(|marker| {
-                        marker.spawn((
-                            text("Ada", 12.0, TEXT),
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: px(10),
-                                top: px(-14),
-                                ..default()
-                            },
-                        ));
-                    });
+                    for slot in 0..4 {
+                        map.spawn((Node {
+                            position_type: PositionType::Absolute, width: px(10), height: px(10),
+                            border_radius: BorderRadius::MAX, ..default()
+                        }, BackgroundColor(Color::srgb(1.0, 0.75, 0.20)), UiTransform::default(), MapItem::Citizen(slot)))
+                        .with_children(|marker| {
+                            marker.spawn((text("", 12.0, TEXT), MapLabel(slot), Node {
+                                position_type: PositionType::Absolute, left: px(12), top: px(-3),
+                                padding: UiRect::horizontal(px(3)), ..default()
+                            }, BackgroundColor(Color::srgb(0.055, 0.085, 0.095))));
+                        });
+                    }
                 });
-            panel.spawn(text("Walking: 1 km in 10 minutes", 13.0, MUTED));
+            panel.spawn(text("Walking: 1 km in 10 minutes\nShared positions: labels are offset\n1-4: select citizen", 13.0, MUTED));
         });
 }
 
@@ -119,30 +115,69 @@ fn project(position: Position) -> Vec2 {
 
 pub fn refresh(
     snapshot: Res<DisplaySnapshot>,
-    mut items: Query<(&MapItem, &mut Node, &mut UiTransform, &mut Visibility)>,
+    selection: Res<Selection>,
+    mut labels: Query<(&MapLabel, &mut Text)>,
+    mut items: Query<(
+        &MapItem,
+        &mut Node,
+        &mut UiTransform,
+        &mut Visibility,
+        Option<&mut BackgroundColor>,
+    )>,
 ) {
     let universe = &snapshot.0.universe;
-    let citizen = universe.agents().values().next().map(|agent| {
+    let agents = citizens::sorted_agents(universe);
+    let citizen = citizens::selected_agent(universe, selection.0).map(|agent| {
         let AgentKind::Citizen(citizen) = &agent.kind;
         citizen
     });
-    for (item, mut node, mut transform, mut visibility) in &mut items {
+    for (label, mut value) in &mut labels {
+        value.0 = agents.get(label.0).map_or_else(String::new, |(id, agent)| {
+            format!(
+                "{}{}",
+                agent.name,
+                if Some(*id) == selection.0 { " *" } else { "" }
+            )
+        });
+    }
+    for (item, mut node, mut transform, mut visibility, color) in &mut items {
         match item {
             MapItem::Site(location) => {
                 let p = project(universe.map().position(*location));
                 node.left = px(p.x - 5.0);
                 node.top = px(p.y - 5.0);
             }
-            MapItem::Ada => {
-                *visibility = if citizen.is_some() {
+            MapItem::Citizen(slot) => {
+                *visibility = if agents.get(*slot).is_some() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
                 };
-                if let Some(citizen) = citizen {
-                    let p = project(citizen.position());
+                if let Some((id, agent)) = agents.get(*slot) {
+                    let AgentKind::Citizen(marker) = &agent.kind;
+                    let overlapping: Vec<_> = agents
+                        .iter()
+                        .filter(|(_, agent)| {
+                            let AgentKind::Citizen(other) = &agent.kind;
+                            project(other.position()).distance(project(marker.position())) < 16.0
+                        })
+                        .map(|(id, _)| *id)
+                        .collect();
+                    let offset = overlapping
+                        .iter()
+                        .position(|other| other == id)
+                        .unwrap_or(0) as f32;
+                    let p = project(marker.position());
+                    let shift = (offset - (overlapping.len() - 1) as f32 / 2.0) * 18.0;
                     node.left = px(p.x - 5.0);
-                    node.top = px(p.y - 5.0);
+                    node.top = px(p.y - 5.0 + shift);
+                    if let Some(mut color) = color {
+                        color.0 = if Some(*id) == selection.0 {
+                            Color::srgb(1.0, 0.75, 0.20)
+                        } else {
+                            Color::srgb(0.45, 0.68, 0.75)
+                        };
+                    }
                 }
             }
             MapItem::Route => {
@@ -174,6 +209,54 @@ mod tests {
     use learning_lord_simulation::{Citizen, Universe, locations::Map};
 
     #[test]
+    fn four_overlapping_markers_stay_distinct_and_highlight_selection() {
+        let universe = crate::simulation::new_universe().unwrap();
+        let agents = citizens::sorted_agents(&universe);
+        let selected = agents[2].0;
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(Snapshot {
+            universe,
+            error: None,
+            generation: 0,
+        }))
+        .insert_resource(Selection(Some(selected)))
+        .add_systems(Update, refresh);
+        let markers: Vec<_> = (0..4)
+            .map(|slot| {
+                app.world_mut()
+                    .spawn((
+                        MapItem::Citizen(slot),
+                        Node::default(),
+                        UiTransform::default(),
+                        Visibility::Inherited,
+                        BackgroundColor(PANEL),
+                    ))
+                    .id()
+            })
+            .collect();
+        app.update();
+        let positions: Vec<_> = markers
+            .iter()
+            .map(|&entity| app.world().get::<Node>(entity).unwrap().top)
+            .collect();
+        for first in 0..4 {
+            for second in first + 1..4 {
+                assert_ne!(positions[first], positions[second]);
+            }
+        }
+        for entity in &markers {
+            assert_eq!(
+                app.world().get::<Visibility>(*entity),
+                Some(&Visibility::Inherited)
+            );
+        }
+        assert_ne!(
+            app.world().get::<BackgroundColor>(markers[2]),
+            app.world().get::<BackgroundColor>(markers[0])
+        );
+    }
+
+    #[test]
     fn markers_follow_travel_and_route_disappears_on_arrival() {
         let map = Map::new(
             Position { x: 300.0, y: 400.0 },
@@ -192,11 +275,12 @@ mod tests {
             error: None,
             generation: 0,
         }))
+        .init_resource::<Selection>()
         .add_systems(Update, refresh);
         let ada = app
             .world_mut()
             .spawn((
-                MapItem::Ada,
+                MapItem::Citizen(0),
                 Node::default(),
                 UiTransform::default(),
                 Visibility::Inherited,

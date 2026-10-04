@@ -1,3 +1,4 @@
+mod citizens;
 mod debug_export;
 mod map_view;
 mod simulation;
@@ -81,6 +82,8 @@ fn main() -> Result<(), String> {
         .insert_resource(DisplaySnapshot(worker.snapshot()))
         .insert_resource(worker)
         .init_resource::<Controls>()
+        .init_resource::<citizens::Selection>()
+        .init_resource::<citizens::PlanDisplay>()
         .init_resource::<debug_export::DebugExport>()
         .init_resource::<InputFocus>()
         .add_systems(Startup, setup)
@@ -89,7 +92,11 @@ fn main() -> Result<(), String> {
             (
                 poll_worker,
                 handle_controls,
+                citizens::handle_selection,
                 refresh_display,
+                citizens::refresh_cards,
+                citizens::refresh_plan,
+                citizens::scroll_panels,
                 map_view::refresh,
             )
                 .chain(),
@@ -115,8 +122,8 @@ fn button(control: Control) -> impl Bundle {
         control,
         Node {
             min_width: px(76),
-            height: px(48),
-            padding: UiRect::horizontal(px(18)),
+            height: px(36),
+            padding: UiRect::horizontal(px(12)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border_radius: BorderRadius::all(px(8)),
@@ -128,93 +135,47 @@ fn button(control: Control) -> impl Bundle {
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
-    commands
-        .spawn(Node {
-            width: percent(100),
-            height: percent(100),
-            padding: UiRect::all(px(20)),
-            flex_direction: FlexDirection::Column,
-            row_gap: px(8),
-            ..default()
-        })
-        .with_children(|root| {
-            root.spawn(text("LEARNING LORD", 18.0, MUTED));
-            root.spawn((text("Day 0 | 00:00:00", 32.0, TEXT), Readout::Clock));
-            root.spawn((text("Paused | 1x", 20.0, MUTED), Readout::Status));
-            root.spawn((text("", 18.0, TEXT), Readout::Market));
-            root.spawn(Node {
-                column_gap: px(12),
-                row_gap: px(12),
-                flex_wrap: FlexWrap::Wrap,
-                ..default()
-            })
+    commands.spawn(Node {
+        width: percent(100), height: percent(100), padding: UiRect::all(px(16)),
+        flex_direction: FlexDirection::Column, row_gap: px(10), ..default()
+    }).with_children(|root| {
+        root.spawn(Node { align_items: AlignItems::Center, column_gap: px(20), ..default() })
             .with_children(|row| {
-                row.spawn(button(Control::ToggleRunning))
-                    .with_children(|button| {
-                        button.spawn((text("Run", 20.0, TEXT), Readout::RunButton));
-                    });
-                row.spawn(button(Control::Step)).with_children(|button| {
-                    button.spawn(text("Advance 30 minutes", 20.0, TEXT));
-                });
-                row.spawn(button(Control::Restart)).with_children(|button| {
-                    button.spawn(text("Restart universe", 20.0, TEXT));
-                });
-                row.spawn(button(Control::Export)).with_children(|button| {
-                    button.spawn(text("Export universe", 20.0, TEXT));
-                });
+                row.spawn(text("LEARNING LORD", 17.0, MUTED));
+                row.spawn((text("", 26.0, TEXT), Readout::Clock));
+                row.spawn((text("", 16.0, MUTED), Readout::Status));
             });
-            root.spawn((text("", 14.0, MUTED), Readout::ExportStatus));
-            root.spawn(text("Simulation speed", 16.0, MUTED));
-            root.spawn(Node {
-                column_gap: px(10),
-                row_gap: px(10),
-                flex_wrap: FlexWrap::Wrap,
-                ..default()
-            })
+        root.spawn(Node { column_gap: px(8), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() })
             .with_children(|row| {
+                for (control, label) in [(Control::ToggleRunning, "Run"), (Control::Step, "Advance 30 min"),
+                    (Control::Restart, "Restart universe"), (Control::Export, "Export universe")] {
+                    row.spawn(button(control)).with_children(|button| {
+                        if matches!(control, Control::ToggleRunning) {
+                            button.spawn((text(label, 16.0, TEXT), Readout::RunButton));
+                        } else { button.spawn(text(label, 16.0, TEXT)); }
+                    });
+                }
                 for speed in SPEEDS {
-                    row.spawn(button(Control::Speed(speed)))
-                        .with_children(|button| {
-                            button.spawn(text(format!("{speed}x"), 20.0, TEXT));
-                        });
-                }
-            });
-            root.spawn(text(
-                "1x = 1 simulation minute per real second",
-                16.0,
-                MUTED,
-            ));
-            root.spawn(Node {
-                width: percent(100),
-                column_gap: px(12),
-                ..default()
-            })
-            .with_children(|row| {
-                map_view::spawn(row);
-                for (readout, size) in [(Readout::Citizen, 16.0), (Readout::Decision, 14.0)] {
-                    row.spawn((
-                        Node {
-                            flex_basis: px(0),
-                            flex_grow: 1.0,
-                            min_width: px(0),
-                            padding: UiRect::all(px(16)),
-                            border_radius: BorderRadius::all(px(12)),
-                            ..default()
-                        },
-                        BackgroundColor(PANEL),
-                    ))
-                    .with_children(|panel| {
-                        panel.spawn((text("", size, TEXT), readout));
+                    row.spawn(button(Control::Speed(speed))).with_children(|button| {
+                        button.spawn(text(format!("{speed}x"), 16.0, TEXT));
                     });
                 }
             });
-            root.spawn(text(
-                "Space: run / pause     Right arrow: advance 30 minutes while paused",
-                14.0,
-                MUTED,
-            ));
-            root.spawn((text("", 16.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
-        });
+        root.spawn((text("", 14.0, MUTED), Readout::Market));
+        root.spawn((text("", 13.0, MUTED), Readout::ExportStatus));
+        citizens::spawn_roster(root);
+        root.spawn(Node { width: percent(100), flex_grow: 1.0, min_height: px(0), column_gap: px(14), ..default() })
+            .with_children(|row| {
+                row.spawn((Node { width: px(324), flex_shrink: 0.0, flex_direction: FlexDirection::Column,
+                    row_gap: px(12), min_height: px(0), overflow: Overflow::scroll_y(), ..default() }, ScrollPosition::default(), bevy::ui::RelativeCursorPosition::default()))
+                    .with_children(|left| {
+                        map_view::spawn(left);
+                    });
+                citizens::spawn_details(row);
+            });
+        root.spawn(text("Space: run / pause   |   Right: advance 30 min   |   1-4: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
+        root.spawn((text("", 14.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
+    });
 }
 
 fn poll_worker(
@@ -305,8 +266,8 @@ fn format_clock(time_ms: u64) -> String {
     )
 }
 
-fn citizen_readout(universe: &Universe) -> String {
-    let Some(agent) = universe.agents().values().next() else {
+fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::AgentId>) -> String {
+    let Some(agent) = citizens::selected_agent(universe, id) else {
         return "No citizens".into();
     };
     let AgentKind::Citizen(citizen) = &agent.kind;
@@ -341,41 +302,22 @@ fn citizen_readout(universe: &Universe) -> String {
             )
         })
         .unwrap_or_else(|| "Idle".into());
-    let plan = citizen
+    let commitment = citizen
         .active_plan()
         .map(|active| {
-            let upcoming = active
-                .plan()
-                .actions()
-                .iter()
-                .skip(active.action_index() + 1)
-                .copied()
-                .map(action_label)
-                .collect::<Vec<_>>()
-                .join(" > ");
-            let upcoming = if upcoming.is_empty() {
-                "None"
-            } else {
-                &upcoming
-            };
-            let seconds = COMMITMENT_MS
-                .saturating_sub(active.elapsed_ms())
-                .div_ceil(1000);
-            let replan = if seconds == 0 {
+            let left = COMMITMENT_MS.saturating_sub(active.elapsed_ms());
+            if left == 0 {
                 "Replan after current action".into()
             } else {
                 format!(
-                    "Commitment left: {:02}:{:02}:{:02} (then finish action)",
-                    seconds / 3600,
-                    seconds / 60 % 60,
-                    seconds % 60
+                    "Commitment left: {} (then finish action)",
+                    citizens::duration(left)
                 )
-            };
-            format!("Planned next: {upcoming}\n{replan}")
+            }
         })
         .unwrap_or_else(|| "No active plan".into());
     format!(
-        "{} | Berries: {:.1} g | Pebbles: {:.1} g\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\n{action}\n{plan}",
+        "{} | Berries: {:.1} g | Pebbles: {:.1} g\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nLocation: {}\n{action}\n{commitment}",
         agent.name,
         citizen.berries_grams(),
         citizen.pebbles_grams(),
@@ -384,7 +326,8 @@ fn citizen_readout(universe: &Universe) -> String {
             .wealth()
             .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}")),
         citizen.hunger(),
-        citizen.tiredness()
+        citizen.tiredness(),
+        citizens::location_label(citizen)
     )
 }
 
@@ -426,9 +369,9 @@ fn sequence_readout(actions: &[CitizenAction]) -> String {
     labels.join(" > ")
 }
 
-fn decision_readout(universe: &Universe) -> String {
+fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::AgentId>) -> String {
     use learning_lord_simulation::planning::goals::Effect;
-    let Some(agent) = universe.agents().values().next() else {
+    let Some(agent) = citizens::selected_agent(universe, id) else {
         return "Last planning decision\nNo citizen selected".into();
     };
     let AgentKind::Citizen(citizen) = &agent.kind;
@@ -478,7 +421,7 @@ fn decision_readout(universe: &Universe) -> String {
         }
     }
     lines.push(
-        "\nChosen by full-plan time-weighted action endpoint averages.\nEach sequence leads to its goal’s best full plan.\nGoal avg scores only the sequence shown.\nRepeated gathering segments form one order.".into(),
+        "\nChosen by full-plan time-weighted action endpoint averages.\nEach sequence leads to its goal's best full plan.\nGoal avg scores only the sequence shown.\nRepeated gathering segments form one order.".into(),
     );
     lines.join("\n")
 }
@@ -487,6 +430,7 @@ fn refresh_display(
     controls: Res<Controls>,
     exporter: Res<debug_export::DebugExport>,
     snapshot: Res<DisplaySnapshot>,
+    selection: Res<citizens::Selection>,
     mut readouts: Query<(&Readout, &mut Text)>,
     mut buttons: Query<(&Control, &Interaction, &mut BackgroundColor)>,
 ) {
@@ -509,8 +453,8 @@ fn refresh_display(
                 },
                 controls.speed
             ),
-            Readout::Citizen => citizen_readout(&snapshot.0.universe),
-            Readout::Decision => decision_readout(&snapshot.0.universe),
+            Readout::Citizen => citizen_readout(&snapshot.0.universe, selection.0),
+            Readout::Decision => decision_readout(&snapshot.0.universe, selection.0),
             Readout::ExportStatus => exporter.status.clone(),
             Readout::Error => controls.error.clone().unwrap_or_default(),
             Readout::RunButton => if controls.running { "Pause" } else { "Run" }.into(),
@@ -552,9 +496,9 @@ mod tests {
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(prices)
                 .with_citizen("Ada", Citizen::new(0.0).unwrap());
-        assert!(decision_readout(&universe).contains("No planning decision yet"));
+        assert!(decision_readout(&universe, None).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
-        let text = decision_readout(&planned);
+        let text = decision_readout(&planned, None);
         assert!(text.contains("Hunger"));
         assert!(!text.contains("Unavailable:"));
         assert!(text.contains("Sleep"));
@@ -568,7 +512,8 @@ mod tests {
                 &planned
                     .with_prices(Prices::new(1.0, 4.0).unwrap())
                     .advance(1)
-                    .unwrap()
+                    .unwrap(),
+                None
             ),
             text
         );
@@ -597,9 +542,9 @@ mod tests {
             .unwrap()
             .advance(50_000)
             .unwrap();
-        let readout = citizen_readout(&universe);
+        let readout = citizen_readout(&universe, None);
         assert!(readout.contains("Eating | 00:00:50 remaining"));
-        assert!(readout.contains("Planned next:"));
+        assert!(readout.contains("Location:"));
         assert!(readout.contains("Commitment left: 01:59:10"));
         assert!(readout.contains("Berries: 150.0 g"));
         assert!(readout.contains("Pebbles: 0.0 g"));
@@ -618,9 +563,9 @@ mod tests {
             .unwrap()
             .advance(COMMITMENT_MS)
             .unwrap();
-        let readout = citizen_readout(&universe);
+        let readout = citizen_readout(&universe, None);
         assert!(readout.contains("Sleeping | 06:00:00 remaining"));
-        assert!(readout.contains("Planned next: None\n"));
+        assert!(readout.contains("Location: House"));
         assert!(readout.contains("Replan after current action"));
     }
 
@@ -637,16 +582,23 @@ mod tests {
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
             .init_resource::<Controls>()
+            .init_resource::<citizens::Selection>()
+            .init_resource::<citizens::PlanDisplay>()
             .init_resource::<debug_export::DebugExport>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
+            .add_message::<bevy::input::mouse::MouseWheel>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
                 (
                     poll_worker,
                     handle_controls,
+                    citizens::handle_selection,
                     refresh_display,
+                    citizens::refresh_cards,
+                    citizens::refresh_plan,
+                    citizens::scroll_panels,
                     map_view::refresh,
                 )
                     .chain(),
@@ -749,7 +701,7 @@ mod tests {
         let snapshot = &app.world().resource::<DisplaySnapshot>().0;
         assert_eq!(snapshot.universe.current_time_ms(), 0);
         assert_ne!(snapshot.universe.prices(), previous_prices);
-        assert_eq!(snapshot.universe.agents().len(), 1);
+        assert_eq!(snapshot.universe.agents().len(), 4);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);

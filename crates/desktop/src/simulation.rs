@@ -162,8 +162,12 @@ impl Pacing {
 }
 
 pub fn new_universe() -> Result<Universe, SimulationError> {
-    let (universe, id) = Universe::default().with_citizen("Ada", Citizen::new(0.0)?);
-    universe.start_planning(id)
+    let mut universe = Universe::default();
+    for name in ["Ada", "Bram", "Cleo", "Dara"] {
+        let (next, id) = universe.with_citizen(name, Citizen::new(0.0)?);
+        universe = next.start_planning(id)?;
+    }
+    Ok(universe)
 }
 
 struct WorkerState {
@@ -293,6 +297,42 @@ mod tests {
     }
 
     #[test]
+    fn four_citizens_start_equally_and_advance_without_changing_the_source() {
+        let universe = new_universe().unwrap();
+        let source = universe.clone();
+        assert_eq!(universe.agents().len(), 4);
+        for agent in universe.agents().values() {
+            let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
+            assert_eq!(citizen.hunger(), 0.0);
+            assert_eq!(citizen.tiredness(), 0.0);
+            assert_eq!(citizen.coins(), 0.0);
+            assert_eq!(citizen.berries_grams(), 0.0);
+            assert_eq!(citizen.pebbles_grams(), 0.0);
+            assert_eq!(citizen.map(), universe.map());
+            assert_eq!(citizen.prices(), universe.prices());
+            assert_eq!(
+                citizen.position(),
+                universe
+                    .map()
+                    .position(learning_lord_simulation::locations::Location::House)
+            );
+            assert!(citizen.active_plan().is_some());
+        }
+        let next = universe.advance(STEP_MS).unwrap();
+        assert_eq!(universe, source);
+        assert_eq!(next.current_time_ms(), STEP_MS);
+        for (id, agent) in next.agents() {
+            let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
+            assert!(citizen.active_plan().is_some());
+            assert_ne!(agent, &source.agents()[id]);
+            assert_eq!(
+                citizen.hunger(),
+                STEP_MS as f64 / 3_600_000.0 * citizen.hunger_per_hour()
+            );
+        }
+    }
+
+    #[test]
     fn restart_replaces_universe_and_clears_error_speed_and_time_debt() {
         let universe = new_universe().unwrap().advance(STEP_MS).unwrap();
         let old_ids: Vec<_> = universe.agents().keys().copied().collect();
@@ -308,7 +348,7 @@ mod tests {
         state.pacing.pending_simulated_ns = 123456789;
         assert!(state.apply(Command::Restart, Duration::from_secs(10)));
         assert_eq!(state.universe.current_time_ms(), 0);
-        assert_eq!(state.universe.agents().len(), 1);
+        assert_eq!(state.universe.agents().len(), 4);
         assert!(!state.universe.agents().contains_key(&old_ids[0]));
         assert_ne!(state.universe.prices(), old_prices);
         assert_ne!(state.universe.map(), old_map);

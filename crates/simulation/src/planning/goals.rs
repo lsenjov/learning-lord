@@ -119,6 +119,7 @@ impl Cooldowns {
 pub(super) struct Prediction {
     pub citizen: Citizen,
     pub actions: Vec<CitizenAction>,
+    pub action_durations_ms: Vec<u64>,
     pub elapsed_ms: u64,
     score: WeightedWellbeing,
     goal_score: WeightedWellbeing,
@@ -131,6 +132,7 @@ impl Prediction {
         Self {
             citizen: citizen.clone(),
             actions: Vec::new(),
+            action_durations_ms: Vec::new(),
             elapsed_ms: 0,
             score: WeightedWellbeing::default(),
             goal_score: WeightedWellbeing::default(),
@@ -168,6 +170,7 @@ impl Prediction {
             next.last_gathering_order = None;
         }
         next.actions.push(action);
+        next.action_durations_ms.push(duration);
         next.elapsed_ms += duration;
         next.cooldowns = self.cooldowns.after(action, duration);
         Ok(Some(next))
