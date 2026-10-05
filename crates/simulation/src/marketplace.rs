@@ -3,6 +3,8 @@ use imbl::{HashMap, Vector};
 
 pub const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 pub const UPDATE_TIME_MS: u64 = 4 * 60 * 60 * 1000;
+pub const MAX_DAILY_PRICE_CHANGE: f64 = 0.10;
+pub const MIN_COINS_PER_KG: f64 = 0.0001;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Good {
@@ -80,6 +82,10 @@ impl ShoppingList {
         list
     }
 
+    pub fn grams(self, good: Good) -> f64 {
+        self.grams[good as usize]
+    }
+
     /// Purchases use catalogue order when the budget cannot fill the entire list.
     pub fn items(self) -> impl Iterator<Item = (Good, f64)> {
         Good::ALL
@@ -112,7 +118,7 @@ impl Prices {
         Self::default().with_price(Good::Berries, berries)
     }
     pub fn with_price(self, good: Good, price: f64) -> Result<Self, SimulationError> {
-        if !price.is_finite() || price <= 0.0 {
+        if !price.is_finite() || price < MIN_COINS_PER_KG {
             return Err(SimulationError::InvalidPrices);
         }
         let mut prices = self;
@@ -150,12 +156,36 @@ pub struct Trade {
     pub coins_per_kg: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct TradedVolume {
+    grams: f64,
+    coins: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DailyMarketActivity {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub good: Good,
+    pub traded_grams: f64,
+    pub traded_coins: f64,
+    pub remaining_supply_grams: f64,
+    pub unmet_demand_grams: f64,
+    pub price_before: f64,
+    pub price_after: f64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Market {
     pub prices: Prices,
     orders: HashMap<OrderId, SellOrder>,
     trades: Vector<Trade>,
     next_order_id: u64,
+    requests: HashMap<AgentId, ShoppingList>,
+    affordable_requests: HashMap<AgentId, ShoppingList>,
+    history: Vector<DailyMarketActivity>,
+    period_start_ms: u64,
+    period_trades: [TradedVolume; Good::COUNT],
 }
 
 pub(crate) struct Purchase {
@@ -165,6 +195,90 @@ pub(crate) struct Purchase {
 }
 
 impl Market {
+    pub fn history(&self) -> &Vector<DailyMarketActivity> {
+        &self.history
+    }
+    pub fn requested(&self, agent: AgentId) -> ShoppingList {
+        self.requests.get(&agent).copied().unwrap_or_default()
+    }
+    pub fn affordable_request(&self, agent: AgentId) -> ShoppingList {
+        self.affordable_requests
+            .get(&agent)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_request(
+        &mut self,
+        agent: AgentId,
+        request: ShoppingList,
+    ) -> Result<(), SimulationError> {
+        request.validate()?;
+        if request.items().next().is_none() {
+            self.requests.remove(&agent);
+        } else {
+            self.requests.insert(agent, request);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn refresh_affordability(&mut self, budgets: &[(AgentId, f64)]) {
+        let mut affordable = HashMap::new();
+        for &(agent, coins) in budgets {
+            let request = self.requested(agent);
+            let mut funds = coins.max(0.0);
+            let mut items = Vec::new();
+            for (good, requested) in request.items() {
+                let mut remaining = requested;
+                let mut grams = 0.0;
+                let mut orders: Vec<_> = self
+                    .orders()
+                    .filter(|o| o.seller != agent && o.good == good)
+                    .collect();
+                orders.sort_by(|a, b| {
+                    a.coins_per_kg
+                        .total_cmp(&b.coins_per_kg)
+                        .then_with(|| a.id.0.cmp(&b.id.0))
+                });
+                for order in orders {
+                    let amount = remaining
+                        .min(order.grams)
+                        .min(funds / order.coins_per_kg * 1000.0);
+                    let cost = (amount / 1000.0 * order.coins_per_kg).min(funds);
+                    if amount <= 0.0 || cost <= 0.0 {
+                        continue;
+                    }
+                    grams += amount;
+                    remaining = (remaining - amount).max(0.0);
+                    funds = (funds - cost).max(0.0);
+                    if remaining <= 0.0 || funds <= 0.0 {
+                        break;
+                    }
+                }
+                if remaining > 0.0 && funds > 0.0 {
+                    let price = self.prices.coins_per_kg(good).unwrap();
+                    let amount = remaining.min(funds / price * 1000.0);
+                    let cost = (amount / 1000.0 * price).min(funds);
+                    if cost > 0.0 {
+                        grams += amount;
+                        funds = (funds - cost).max(0.0);
+                    }
+                }
+                if grams > 0.0 {
+                    items.push((good, grams.min(requested)));
+                }
+            }
+            let mut list = ShoppingList::default();
+            for (good, grams) in items {
+                list.grams[good as usize] = grams;
+            }
+            if list.items().next().is_some() {
+                affordable.insert(agent, list);
+            }
+        }
+        self.affordable_requests = affordable;
+    }
+
     pub fn orders(&self) -> impl Iterator<Item = &SellOrder> {
         self.orders.values()
     }
@@ -326,6 +440,15 @@ impl Market {
             funds -= cost;
             order.grams -= grams;
             if record {
+                let volume = &mut self.period_trades[good as usize];
+                volume.grams += grams;
+                volume.coins += cost;
+                if !volume.grams.is_finite() || !volume.coins.is_finite() {
+                    return Err(SimulationError::WealthOverflow);
+                }
+                if let Some(request) = self.requests.get_mut(&buyer) {
+                    request.grams[good as usize] = (request.grams[good as usize] - grams).max(0.0);
+                }
                 self.trades.push_back(Trade {
                     time_ms,
                     buyer,
@@ -347,7 +470,57 @@ impl Market {
         }
         Ok(result)
     }
-    pub(crate) fn update(&mut self, _time_ms: u64) {}
+    pub(crate) fn update(&mut self, time_ms: u64) -> Result<(), SimulationError> {
+        if time_ms < UPDATE_TIME_MS {
+            return Ok(());
+        }
+        let boundary = UPDATE_TIME_MS + (time_ms - UPDATE_TIME_MS) / DAY_MS * DAY_MS;
+        if boundary <= self.period_start_ms {
+            return Ok(());
+        }
+        for good in Good::ALL {
+            let traded = self.period_trades[good as usize];
+            let supply: f64 = self
+                .orders()
+                .filter(|o| o.good == good)
+                .map(|o| o.grams)
+                .sum();
+            let unmet: f64 = self
+                .affordable_requests
+                .values()
+                .map(|list| list.grams(good))
+                .sum();
+            if !supply.is_finite() || !unmet.is_finite() {
+                return Err(SimulationError::WealthOverflow);
+            }
+            if traded.grams == 0.0 && supply == 0.0 && unmet == 0.0 {
+                continue;
+            }
+            // Scale before adding so finite large volumes do not overflow the imbalance ratio.
+            let scale = traded.grams.max(supply).max(unmet);
+            let demand = traded.grams / scale + unmet / scale;
+            let available = traded.grams / scale + supply / scale;
+            let imbalance = (demand - available) / (demand + available);
+            let before = self.prices.coins_per_kg(good).unwrap();
+            let after = (before * (1.0 + MAX_DAILY_PRICE_CHANGE * imbalance))
+                .clamp(MIN_COINS_PER_KG, f64::MAX);
+            self.prices = self.prices.with_price(good, after)?;
+            self.history.push_back(DailyMarketActivity {
+                start_ms: self.period_start_ms,
+                end_ms: boundary,
+                good,
+                traded_grams: traded.grams,
+                traded_coins: traded.coins,
+                remaining_supply_grams: supply,
+                unmet_demand_grams: unmet,
+                price_before: before,
+                price_after: after,
+            });
+        }
+        self.period_trades = [TradedVolume::default(); Good::COUNT];
+        self.period_start_ms = boundary;
+        Ok(())
+    }
 }
 
 pub(crate) fn validate_quantity(grams: f64) -> Result<(), SimulationError> {

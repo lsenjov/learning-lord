@@ -811,6 +811,7 @@ impl Universe {
             citizen.prices = prices;
             citizen.market.prices = prices;
         }
+        universe.refresh_market();
         universe
     }
 
@@ -864,6 +865,8 @@ impl Universe {
                 kind: AgentKind::Citizen(citizen),
             },
         );
+        universe.register_action_request(id)?;
+        universe.refresh_market();
         Ok((universe, id))
     }
 
@@ -902,7 +905,7 @@ impl Universe {
             .ok_or(SimulationError::TimeOverflow)?;
         let mut universe = self.clone();
         if universe.agents.is_empty() {
-            universe.market.update(end);
+            universe.market.update(end)?;
             universe.current_time_ms = end;
             return Ok(universe);
         }
@@ -951,8 +954,10 @@ impl Universe {
             }
             universe.current_time_ms = finishing_time;
             if step == until_update {
-                universe.market.update(finishing_time);
+                universe.refresh_market();
+                universe.market.update(finishing_time)?;
             }
+            let mut new_actions = Vec::new();
             for id in ids {
                 let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
                 citizen.market = universe.market.clone();
@@ -964,9 +969,64 @@ impl Universe {
                     execution.finish_action();
                     *citizen = execution.resume(citizen.clone())?;
                     citizen.active_plan = Some(execution);
+                    new_actions.push(id);
                 }
             }
+            for id in new_actions {
+                universe.register_action_request(id)?;
+            }
+            universe.refresh_market();
         }
+        Ok(universe)
+    }
+
+    fn refresh_market(&mut self) {
+        let budgets: Vec<_> = self
+            .agents
+            .iter()
+            .map(|(id, agent)| {
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                (*id, citizen.coins)
+            })
+            .collect();
+        self.market.refresh_affordability(&budgets);
+        for (_, agent) in self.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.market = self.market.clone();
+            citizen.prices = self.market.prices;
+        }
+    }
+
+    fn register_action_request(&mut self, id: AgentId) -> Result<(), SimulationError> {
+        let AgentKind::Citizen(citizen) = &self
+            .agents
+            .get(&id)
+            .ok_or(SimulationError::AgentNotFound)?
+            .kind;
+        let request = match citizen.active_action().map(|active| active.action()) {
+            Some(CitizenAction::Buy(list)) => list,
+            Some(CitizenAction::BuyFood(good)) => marketplace::ShoppingList::single(
+                good,
+                (MEAL_NOURISHMENT - citizen.food_nutrition()).max(0.0)
+                    / good.nutrition_per_gram().ok_or(SimulationError::NotFood)?,
+            ),
+            _ => marketplace::ShoppingList::default(),
+        };
+        self.market.set_request(id, request)
+    }
+
+    /// Replaces an actual purchase intention; unavailable stock is priced at the reference price.
+    pub fn with_purchase_request(
+        &self,
+        id: AgentId,
+        request: marketplace::ShoppingList,
+    ) -> Result<Self, SimulationError> {
+        if !self.agents.contains_key(&id) {
+            return Err(SimulationError::AgentNotFound);
+        }
+        let mut universe = self.clone();
+        universe.market.set_request(id, request)?;
+        universe.refresh_market();
         Ok(universe)
     }
 
@@ -979,6 +1039,8 @@ impl Universe {
         let updated = agent.start_action(action)?;
         let mut universe = self.clone();
         universe.agents.insert(id, updated);
+        universe.register_action_request(id)?;
+        universe.refresh_market();
         Ok(universe)
     }
 
@@ -987,6 +1049,8 @@ impl Universe {
         let updated = agent.start_planning()?;
         let mut universe = self.clone();
         universe.agents.insert(id, updated);
+        universe.register_action_request(id)?;
+        universe.refresh_market();
         Ok(universe)
     }
 }

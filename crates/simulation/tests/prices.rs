@@ -8,7 +8,7 @@ fn citizen(universe: &Universe, id: learning_lord_simulation::AgentId) -> &Citiz
 }
 
 #[test]
-fn fixed_prices_validate_and_remain_stable_until_demand_pricing_is_added() {
+fn inactive_prices_validate_and_remain_stable_across_daily_boundaries() {
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(Prices::new(invalid).is_err());
     }

@@ -743,7 +743,10 @@ mod tests {
         let AgentKind::Citizen(buyer) = &after.agents()[&id].kind;
         assert_eq!(
             buyer.coins(),
-            1.0 - boundary.prices().value(Good::Berries, 100.0).unwrap()
+            1.0 - boundary
+                .market()
+                .purchase_cost(id, Good::Berries, 100.0)
+                .unwrap()
         );
         let combined = universe
             .advance(crate::ACTION_DURATION_MS + crate::TRADE_DURATION_MS)
