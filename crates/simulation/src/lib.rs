@@ -8,6 +8,7 @@ pub mod locations;
 pub mod marketplace;
 use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
 pub mod planning;
+pub mod production;
 
 pub const WEALTH_WELLBEING_PER_COIN: f64 = 10.0;
 
@@ -83,7 +84,8 @@ pub enum CitizenAction {
     Wait,
     Sleep,
     Forage,
-    BuyBerries,
+    BuyFood(Good),
+    Produce(production::Recipe),
     List(Good, f64),
     Buy(marketplace::ShoppingList),
     Withdraw(Good, f64),
@@ -95,7 +97,8 @@ impl CitizenAction {
         match self {
             Self::Sleep => Some(citizen.home),
             Self::Forage => Some(citizen.map.public_place(Location::Forest)),
-            Self::BuyBerries | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
+            Self::Produce(recipe) => citizen.production_place(recipe).ok(),
+            Self::BuyFood(_) | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
                 Some(citizen.map.public_place(Location::Market))
             }
             _ => None,
@@ -108,8 +111,9 @@ pub struct ActiveAction {
     action: CitizenAction,
     remaining_ms: u64,
     duration_ms: u64,
-    meal_grams: f64,
-    berries_after_meal: f64,
+    meal_nutrition: f64,
+    meal_grams: [f64; Good::COUNT],
+    inventory_after_meal: [f64; Good::COUNT],
     travel_origin: Position,
     travel_destination: Option<Position>,
 }
@@ -156,6 +160,7 @@ pub struct Citizen {
     id: AgentId,
     home: PlaceId,
     starting_role: Option<StartingRole>,
+    skills: [f64; production::Skill::COUNT],
     coins: f64,
     forage_rng: SmallRng,
     prices: Prices,
@@ -199,6 +204,7 @@ impl Citizen {
             id,
             home,
             starting_role: None,
+            skills: [0.0; production::Skill::COUNT],
             coins: 0.0,
             forage_rng: rand::make_rng(),
             prices: Prices::default(),
@@ -264,6 +270,13 @@ impl Citizen {
     pub fn with_starting_role(&self, role: StartingRole) -> Self {
         let mut citizen = self.clone();
         citizen.starting_role = Some(role);
+        let skill = match role {
+            StartingRole::Farmer => production::Skill::Farming,
+            StartingRole::Miller => production::Skill::Milling,
+            StartingRole::Woodcutter => production::Skill::Woodcutting,
+            StartingRole::Baker => production::Skill::Baking,
+        };
+        citizen.skills[skill as usize] = 1.0;
         citizen
     }
 
@@ -377,19 +390,84 @@ impl Citizen {
                 .distance(self.accessible_place(destination)?.position)
                 * WALK_MS_PER_METRE)
                 .ceil() as u64,
-            CitizenAction::Eat => (self.meal_grams() * BERRY_EATING_MS_PER_GRAM).ceil() as u64,
+            CitizenAction::Eat => self
+                .meal()
+                .0
+                .iter()
+                .enumerate()
+                .map(|(index, grams)| grams * Good::ALL[index].eating_ms_per_gram().unwrap_or(0.0))
+                .sum::<f64>()
+                .ceil() as u64,
+            CitizenAction::Produce(recipe) => {
+                self.production_place(recipe)?;
+                recipe.duration_ms(self)?
+            }
             CitizenAction::Wait | CitizenAction::Forage => ACTION_DURATION_MS,
             CitizenAction::Sleep => SLEEP_DURATION_MS,
-            CitizenAction::BuyBerries
+            CitizenAction::BuyFood(_)
             | CitizenAction::List(..)
             | CitizenAction::Buy(..)
             | CitizenAction::Withdraw(..) => TRADE_DURATION_MS,
         })
     }
 
-    fn meal_grams(&self) -> f64 {
-        self.berries_grams()
-            .min(MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM)
+    pub fn food_nutrition(&self) -> f64 {
+        Good::FOOD
+            .into_iter()
+            .map(|good| self.grams(good) * good.nutrition_per_gram().unwrap())
+            .sum()
+    }
+
+    fn meal(&self) -> ([f64; Good::COUNT], f64) {
+        let mut grams = [0.0; Good::COUNT];
+        let mut remaining = MEAL_NOURISHMENT;
+        let mut total = 0.0;
+        for good in Good::FOOD {
+            let nutrition = good.nutrition_per_gram().unwrap();
+            let portion = self.grams(good).min(remaining / nutrition);
+            grams[good as usize] = portion;
+            total += portion * nutrition;
+            remaining = (remaining - portion * nutrition).max(0.0);
+        }
+        (grams, total)
+    }
+
+    pub fn skill_level(&self, skill: production::Skill) -> f64 {
+        self.skills[skill as usize]
+    }
+
+    pub fn with_skill(
+        &self,
+        skill: production::Skill,
+        level: f64,
+    ) -> Result<Self, SimulationError> {
+        if !level.is_finite() || level < 0.0 {
+            return Err(SimulationError::InvalidSkill);
+        }
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.skills[skill as usize] = level;
+        Ok(citizen)
+    }
+
+    pub fn production_place(&self, recipe: production::Recipe) -> Result<PlaceId, SimulationError> {
+        let kind = recipe.location();
+        if kind.is_public() {
+            return Ok(self.map.public_place(kind));
+        }
+        self.owned_properties()
+            .filter(|place| place.kind == kind)
+            .map(|place| place.id)
+            .min_by_key(|id| id.0)
+            .ok_or(SimulationError::MissingProperty)
+    }
+
+    pub fn available_recipes(&self) -> impl Iterator<Item = production::Recipe> + '_ {
+        production::Recipe::ALL.into_iter().filter(|recipe| {
+            recipe.duration_ms(self).is_ok() && self.production_place(*recipe).is_ok()
+        })
     }
 
     pub fn active_action(&self) -> Option<ActiveAction> {
@@ -428,17 +506,33 @@ impl Citizen {
         if duration_ms == 0 {
             return Ok(citizen);
         }
-        let meal_grams = if action == CitizenAction::Eat {
-            self.meal_grams()
+        if let CitizenAction::Produce(recipe) = action
+            && recipe
+                .inputs()
+                .iter()
+                .any(|&(good, grams)| self.grams(good) < grams)
+        {
+            return Err(SimulationError::MissingInputs);
+        }
+        if let CitizenAction::BuyFood(good) = action
+            && good.nutrition_per_gram().is_none()
+        {
+            return Err(SimulationError::NotFood);
+        }
+        let (meal_grams, meal_nutrition) = if action == CitizenAction::Eat {
+            self.meal()
         } else {
-            0.0
+            ([0.0; Good::COUNT], 0.0)
         };
         citizen.active_action = Some(ActiveAction {
             action,
             remaining_ms: duration_ms,
             duration_ms,
+            meal_nutrition,
             meal_grams,
-            berries_after_meal: self.berries_grams() - meal_grams,
+            inventory_after_meal: std::array::from_fn(|index| {
+                self.grams(Good::ALL[index]) - meal_grams[index]
+            }),
             travel_origin: self.position,
             travel_destination: if let CitizenAction::Travel(location) = action {
                 Some(self.map.position(location))
@@ -510,27 +604,30 @@ impl Citizen {
             }
 
             if active.action == CitizenAction::Eat {
-                citizen.inventory.insert(
-                    Good::Berries,
-                    active.berries_after_meal
-                        + active.meal_grams
-                            * (active.remaining_ms as f64 / active.duration_ms as f64),
-                );
+                for good in Good::FOOD {
+                    let index = good as usize;
+                    citizen.inventory.insert(
+                        good,
+                        active.inventory_after_meal[index]
+                            + active.meal_grams[index]
+                                * (active.remaining_ms as f64 / active.duration_ms as f64),
+                    );
+                }
             }
 
             if active.remaining_ms == 0 {
                 match active.action {
-                    CitizenAction::BuyBerries => {
-                        let grams = (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM
-                            - citizen.berries_grams())
-                        .max(0.0);
+                    CitizenAction::BuyFood(good) => {
+                        let grams = (MEAL_NOURISHMENT - citizen.food_nutrition()).max(0.0)
+                            / good.nutrition_per_gram().ok_or(SimulationError::NotFood)?;
                         payments.extend(citizen.complete_purchase(
-                            Good::Berries,
+                            good,
                             grams,
                             record_trades,
                             action_elapsed_ms,
                         )?);
                     }
+                    CitizenAction::Produce(recipe) => citizen.complete_production(recipe)?,
                     CitizenAction::Buy(list) => {
                         for (good, grams) in list.items() {
                             payments.extend(citizen.complete_purchase(
@@ -588,6 +685,34 @@ impl Citizen {
         Ok((citizen, payments))
     }
 
+    fn complete_production(&mut self, recipe: production::Recipe) -> Result<(), SimulationError> {
+        for &(good, grams) in recipe.inputs() {
+            let stock = self.grams(good);
+            if stock < grams {
+                return Err(SimulationError::MissingInputs);
+            }
+            if stock - grams == stock {
+                return Err(SimulationError::InventoryOverflow);
+            }
+            self.inventory.insert(good, stock - grams);
+        }
+        for &(good, grams) in recipe.outputs() {
+            let stock = self.grams(good);
+            let next = stock + grams;
+            if !next.is_finite() || next == stock {
+                return Err(SimulationError::InventoryOverflow);
+            }
+            self.inventory.insert(good, next);
+        }
+        if let Some(skill) = recipe.skill() {
+            self.skills[skill as usize] += production::SKILL_GAIN_PER_BATCH;
+            if !self.skill_level(skill).is_finite() {
+                return Err(SimulationError::InvalidSkill);
+            }
+        }
+        Ok(())
+    }
+
     fn complete_purchase(
         &mut self,
         good: Good,
@@ -621,7 +746,7 @@ impl Citizen {
     ) -> Result<(), SimulationError> {
         let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
         let nourishment_per_hour = active.map_or(0.0, |action| {
-            action.meal_grams * BERRY_NUTRITION_PER_GRAM * 3_600_000.0 / action.duration_ms as f64
+            action.meal_nutrition * 3_600_000.0 / action.duration_ms as f64
         });
         let recovery_per_hour =
             if active.is_some_and(|action| action.action == CitizenAction::Sleep) {
@@ -869,6 +994,12 @@ impl Universe {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulationError {
     InvalidInventory,
+    InventoryOverflow,
+    InvalidSkill,
+    MissingSkill,
+    MissingProperty,
+    MissingInputs,
+    NotFood,
     InvalidOwnership,
     PrivateProperty,
     PlaceNotFound,
@@ -896,6 +1027,12 @@ impl fmt::Display for SimulationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidInventory => "goods must have finite nonnegative grams",
+            Self::InventoryOverflow => "production exceeds representable inventory quantities",
+            Self::InvalidSkill => "skill level must be finite and nonnegative",
+            Self::MissingSkill => "production requires its skill",
+            Self::MissingProperty => "production requires an owned property",
+            Self::MissingInputs => "production inputs are unavailable",
+            Self::NotFood => "this good is not edible",
             Self::InvalidOwnership => {
                 "private places require an owner and public places cannot have one"
             }

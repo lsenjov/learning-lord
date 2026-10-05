@@ -9,7 +9,7 @@ pub const TRADE_PLAN_COOLDOWN_MS: u64 = 2 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {
-    Berries,
+    Food,
     Coins,
     ReduceHunger,
     ReduceTiredness,
@@ -28,28 +28,50 @@ impl CitizenAction {
         match self {
             Self::Eat => &[ReduceHunger],
             Self::Sleep => &[ReduceTiredness],
-            Self::Forage => &[Berries, IncreaseWealth],
-            Self::BuyBerries => &[Berries],
-            Self::Wait | Self::Travel(_) | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
-                &[]
+            Self::Forage => &[Food, IncreaseWealth],
+            Self::BuyFood(good) if good.nutrition_per_gram().is_some() => &[Food],
+            Self::BuyFood(_) => &[],
+            Self::Buy(list)
+                if list
+                    .items()
+                    .any(|(good, _)| good.nutrition_per_gram().is_some()) =>
+            {
+                &[Food]
             }
+            Self::Wait
+            | Self::Travel(_)
+            | Self::Produce(_)
+            | Self::List(..)
+            | Self::Buy(..)
+            | Self::Withdraw(..) => &[],
         }
     }
 
     /// Resources needed to supply the requested quantity during prediction.
     pub fn input_for(self, citizen: &Citizen, amount: f64) -> Option<Requirement> {
         let (resource, amount) = match self {
-            Self::Eat => (Effect::Berries, amount / BERRY_NUTRITION_PER_GRAM),
-            Self::BuyBerries => (
+            Self::Eat => (Effect::Food, amount),
+            Self::BuyFood(good) => (
                 Effect::Coins,
                 citizen
                     .market()
                     .purchase_cost(
                         citizen.id(),
-                        Good::Berries,
-                        (amount - citizen.berries_grams()).max(0.0),
+                        good,
+                        (amount - citizen.food_nutrition()).max(0.0) / good.nutrition_per_gram()?,
                     )
                     .unwrap_or(f64::INFINITY),
+            ),
+            Self::Buy(list) => (
+                Effect::Coins,
+                list.items()
+                    .map(|(good, grams)| {
+                        citizen
+                            .market()
+                            .purchase_cost(citizen.id(), good, grams)
+                            .unwrap_or(f64::INFINITY)
+                    })
+                    .sum(),
             ),
             _ => return None,
         };
@@ -61,7 +83,7 @@ impl CitizenAction {
             Self::Eat => (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM * BERRY_EATING_MS_PER_GRAM)
                 .ceil() as u64,
             Self::Sleep => SLEEP_DURATION_MS,
-            Self::BuyBerries | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
+            Self::BuyFood(_) | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
                 TRADE_DURATION_MS
             }
             _ => ACTION_DURATION_MS,
@@ -69,11 +91,13 @@ impl CitizenAction {
     }
 }
 
-const ACTIONS: [CitizenAction; 4] = [
+const ACTIONS: [CitizenAction; 6] = [
     CitizenAction::Eat,
     CitizenAction::Sleep,
     CitizenAction::Forage,
-    CitizenAction::BuyBerries,
+    CitizenAction::BuyFood(Good::Berries),
+    CitizenAction::BuyFood(Good::Bread),
+    CitizenAction::BuyFood(Good::BerryPie),
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -87,7 +111,7 @@ impl Cooldowns {
     fn remaining(self, action: CitizenAction) -> u64 {
         match action {
             CitizenAction::Eat => self.eat,
-            CitizenAction::BuyBerries | CitizenAction::Buy(..) => self.buy,
+            CitizenAction::BuyFood(_) | CitizenAction::Buy(..) => self.buy,
             CitizenAction::List(..) => self.sell,
             _ => 0,
         }
@@ -100,7 +124,7 @@ impl Cooldowns {
             } else {
                 self.eat.saturating_sub(duration)
             },
-            buy: if matches!(action, CitizenAction::BuyBerries | CitizenAction::Buy(..)) {
+            buy: if matches!(action, CitizenAction::BuyFood(_) | CitizenAction::Buy(..)) {
                 TRADE_PLAN_COOLDOWN_MS
             } else {
                 self.buy.saturating_sub(duration)
@@ -159,8 +183,9 @@ impl Prediction {
         let before = self.citizen.personal_wellbeing()?;
         let after = citizen.personal_wellbeing()?;
         let mut next = self.clone();
-        if action == CitizenAction::BuyBerries
-            && citizen.berries_grams() <= self.citizen.berries_grams()
+        if matches!(action, CitizenAction::BuyFood(_) | CitizenAction::Buy(_))
+            && action.effects().contains(&Effect::Food)
+            && citizen.food_nutrition() <= self.citizen.food_nutrition()
         {
             return Ok(None);
         }
@@ -214,10 +239,54 @@ impl WeightedWellbeing {
 
 fn quantity(citizen: &Citizen, resource: Effect) -> f64 {
     match resource {
-        Effect::Berries => citizen.berries_grams(),
+        Effect::Food => citizen.food_nutrition(),
         Effect::Coins => citizen.coins(),
         _ => unreachable!("only inventory resources are prerequisites"),
     }
+}
+
+fn suppliers(
+    state: &Prediction,
+    requirement: Requirement,
+) -> Result<Vec<CitizenAction>, SimulationError> {
+    let mut actions: Vec<_> = ACTIONS
+        .into_iter()
+        .filter(|action| action.effects().contains(&requirement.resource))
+        .collect();
+    if requirement.resource != Effect::Food {
+        return Ok(actions);
+    }
+    let [a, b, c] = Good::FOOD;
+    for order in [
+        [a, b, c],
+        [a, c, b],
+        [b, a, c],
+        [b, c, a],
+        [c, a, b],
+        [c, b, a],
+    ] {
+        let mut remaining = (requirement.amount - state.citizen.food_nutrition()).max(0.0);
+        let mut items = Vec::new();
+        for good in order {
+            let nutrition = good.nutrition_per_gram().unwrap();
+            let grams = state
+                .citizen
+                .market()
+                .available_grams(state.citizen.id(), good)
+                .min(remaining / nutrition);
+            if grams > 0.0 {
+                items.push((good, grams));
+                remaining = (remaining - grams * nutrition).max(0.0);
+            }
+        }
+        if items.len() > 1 {
+            let action = CitizenAction::Buy(crate::marketplace::ShoppingList::new(items)?);
+            if !actions.contains(&action) {
+                actions.push(action);
+            }
+        }
+    }
+    Ok(actions)
 }
 
 fn satisfy(
@@ -238,10 +307,7 @@ fn satisfy(
         return Ok(Vec::new());
     }
     let mut variants = Vec::new();
-    for action in ACTIONS
-        .into_iter()
-        .filter(|action| action.effects().contains(&requirement.resource))
-    {
+    for action in suppliers(state, requirement)? {
         for next in order_variants(
             state,
             action,
@@ -406,9 +472,8 @@ fn variants_from(
         }
         // Existing small meals remain useful when acquiring a full meal would delay relief.
         if action == CitizenAction::Eat
-            && citizen.berries_grams() < MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM
-            && (prior_actions == 0
-                || citizen.berries_grams() * BERRY_NUTRITION_PER_GRAM >= REPLAN_MIN_NUTRITION)
+            && citizen.food_nutrition() < MEAL_NOURISHMENT
+            && (prior_actions == 0 || citizen.food_nutrition() >= REPLAN_MIN_NUTRITION)
             && let Some(candidate) = initial.perform(action, prior_actions)?
         {
             consider(candidate);
@@ -597,7 +662,13 @@ mod tests {
         let variants = meals(&funded, 30.0);
         let bought = variants
             .iter()
-            .find(|v| v.actions == [CitizenAction::BuyBerries, CitizenAction::Eat])
+            .find(|v| {
+                v.actions
+                    == [
+                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
+                        CitizenAction::Eat,
+                    ]
+            })
             .unwrap();
         assert_eq!(bought.elapsed_ms, TRADE_DURATION_MS + 60_000);
         assert_eq!(bought.citizen.berries_grams(), 0.0);
@@ -605,7 +676,13 @@ mod tests {
         let variants = meals(&rich, 30.0);
         let bought = variants
             .iter()
-            .find(|v| v.actions == [CitizenAction::BuyBerries, CitizenAction::Eat])
+            .find(|v| {
+                v.actions
+                    == [
+                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
+                        CitizenAction::Eat,
+                    ]
+            })
             .unwrap();
         assert_eq!(bought.elapsed_ms, TRADE_DURATION_MS + 100_000);
         let existing = meals(&hungry(80.0), 30.0);
@@ -629,10 +706,11 @@ mod tests {
             assert!(variant.citizen.hunger() < source.hunger());
         }
         let paid = full_meals(&source.with_coins(0.06).unwrap());
-        assert!(
-            paid.iter()
-                .any(|v| v.actions == [CitizenAction::BuyBerries, CitizenAction::Eat])
-        );
+        assert!(paid.iter().any(|v| v.actions
+            == [
+                CitizenAction::BuyFood(crate::marketplace::Good::Berries),
+                CitizenAction::Eat
+            ]));
     }
 
     #[test]
@@ -669,7 +747,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             chosen.actions,
-            [CitizenAction::BuyBerries, CitizenAction::Eat]
+            [
+                CitizenAction::BuyFood(crate::marketplace::Good::Berries),
+                CitizenAction::Eat
+            ]
         );
         assert!(chosen.citizen.coins() >= 0.0);
         assert!(chosen.citizen.berries_grams() < 1e-10);
@@ -719,8 +800,8 @@ mod tests {
             satisfy(
                 &impossible,
                 Requirement {
-                    resource: Effect::Berries,
-                    amount: 100.0
+                    resource: Effect::Food,
+                    amount: 50.0
                 },
                 GOAL_HORIZON_MS,
                 0
@@ -786,7 +867,7 @@ mod tests {
         );
         assert!(
             generic
-                .perform(CitizenAction::BuyBerries, 0)
+                .perform(CitizenAction::BuyFood(crate::marketplace::Good::Berries), 0)
                 .unwrap()
                 .is_none()
         );
@@ -795,7 +876,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(sold.cooldowns.sell, TRADE_PLAN_COOLDOWN_MS);
-        let bought = sold.perform(CitizenAction::BuyBerries, 0).unwrap().unwrap();
+        let bought = sold
+            .perform(CitizenAction::BuyFood(crate::marketplace::Good::Berries), 0)
+            .unwrap()
+            .unwrap();
         assert_eq!(bought.cooldowns.buy, TRADE_PLAN_COOLDOWN_MS);
         assert_eq!(
             bought.cooldowns.sell,
@@ -805,7 +889,7 @@ mod tests {
         assert_eq!(eaten.cooldowns.eat, EAT_PLAN_COOLDOWN_MS);
         assert!(
             eaten
-                .perform(CitizenAction::BuyBerries, 0)
+                .perform(CitizenAction::BuyFood(crate::marketplace::Good::Berries), 0)
                 .unwrap()
                 .is_none()
         );
@@ -815,7 +899,7 @@ mod tests {
         }
         assert!(
             elapsed
-                .perform(CitizenAction::BuyBerries, 0)
+                .perform(CitizenAction::BuyFood(crate::marketplace::Good::Berries), 0)
                 .unwrap()
                 .is_some()
         );
@@ -837,7 +921,7 @@ mod tests {
         let reset = Prediction::new(&eaten.citizen, Cooldowns::default());
         assert!(
             reset
-                .perform(CitizenAction::BuyBerries, 0)
+                .perform(CitizenAction::BuyFood(crate::marketplace::Good::Berries), 0)
                 .unwrap()
                 .is_some()
         );
@@ -957,7 +1041,7 @@ mod tests {
             chosen.actions,
             [
                 CitizenAction::Travel(map.public_place(Location::Market)),
-                CitizenAction::BuyBerries,
+                CitizenAction::BuyFood(crate::marketplace::Good::Berries),
                 CitizenAction::Eat
             ]
         );
@@ -1014,7 +1098,7 @@ mod tests {
                 v.actions
                     == [
                         CitizenAction::Travel(map.public_place(Location::Market)),
-                        CitizenAction::BuyBerries,
+                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
                         CitizenAction::Eat,
                     ]
             })
@@ -1081,5 +1165,38 @@ mod tests {
             assert_eq!(chosen.citizen.prices(), source.prices());
             assert_eq!(chosen.citizen.berries_grams(), 10.0 * segments as f64);
         }
+    }
+    #[test]
+    fn mixed_market_food_supplies_a_small_meal_in_one_shopping_action() {
+        let mut market = crate::marketplace::Market::default();
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        market.list(seller, Good::Bread, 40.0).unwrap();
+        market.list(seller, Good::BerryPie, 25.0).unwrap();
+        let source = hungry(0.0)
+            .with_coins(1.0)
+            .unwrap()
+            .with_market(market.clone());
+        let variants = meals(&source, 30.0);
+        let basket = variants
+            .iter()
+            .find(|variant| {
+                matches!(
+                    variant.actions.as_slice(),
+                    [CitizenAction::Buy(_), CitizenAction::Eat]
+                )
+            })
+            .unwrap();
+        assert!(basket.elapsed_ms <= TRADE_DURATION_MS + 60_000);
+        assert!(basket.citizen.hunger() < source.hunger() - 29.0);
+        assert!(basket.citizen.market().trades().is_empty());
+        assert_eq!(source.market(), &market);
+        let start = std::time::Instant::now();
+        let plan = super::super::plan(&source).unwrap();
+        println!(
+            "Mixed-food full plan searched in {:?} ({} actions)",
+            start.elapsed(),
+            plan.actions().len()
+        );
+        assert!(plan.average_wellbeing().is_finite());
     }
 }

@@ -1,4 +1,4 @@
-use crate::{BERRY_NUTRITION_PER_GRAM, Citizen, CitizenAction, SimulationError};
+use crate::{Citizen, CitizenAction, SimulationError};
 pub mod goals;
 use goals::{Cooldowns, Effect, Prediction};
 use std::sync::Arc;
@@ -180,7 +180,7 @@ impl ActivePlan {
 fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -> bool {
     action == CitizenAction::Eat
         && action_index > 0
-        && citizen.berries_grams() * BERRY_NUTRITION_PER_GRAM < REPLAN_MIN_NUTRITION
+        && citizen.food_nutrition() < REPLAN_MIN_NUTRITION
 }
 
 pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
@@ -625,7 +625,7 @@ mod tests {
                 variant.actions
                     == [
                         CitizenAction::Travel(map.public_place(Location::Market)),
-                        CitizenAction::BuyBerries,
+                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
                         CitizenAction::Eat,
                     ]
             })
@@ -712,7 +712,7 @@ mod tests {
             &citizen,
             vec![
                 CitizenAction::Wait,
-                CitizenAction::BuyBerries,
+                CitizenAction::BuyFood(crate::marketplace::Good::Berries),
                 CitizenAction::Eat,
                 CitizenAction::Sleep,
             ],
@@ -733,7 +733,7 @@ mod tests {
         let AgentKind::Citizen(buyer) = &boundary.agents()[&id].kind;
         assert_eq!(
             buyer.active_action().unwrap().action(),
-            CitizenAction::BuyBerries
+            CitizenAction::BuyFood(crate::marketplace::Good::Berries)
         );
         assert_eq!(
             buyer.active_action().unwrap().remaining_ms(),

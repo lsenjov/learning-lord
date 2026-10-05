@@ -12,10 +12,11 @@ pub enum Good {
     Wood,
     Water,
     Bread,
+    BerryPie,
 }
 
 impl Good {
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Berries,
         Self::Wheat,
@@ -23,7 +24,19 @@ impl Good {
         Self::Wood,
         Self::Water,
         Self::Bread,
+        Self::BerryPie,
     ];
+    pub const FOOD: [Self; 3] = [Self::Berries, Self::Bread, Self::BerryPie];
+    pub fn nutrition_per_gram(self) -> Option<f64> {
+        match self {
+            Self::Berries | Self::Bread => Some(0.5),
+            Self::BerryPie => Some(0.6),
+            _ => None,
+        }
+    }
+    pub fn eating_ms_per_gram(self) -> Option<f64> {
+        self.nutrition_per_gram().map(|_| 1000.0)
+    }
     pub fn name(self) -> &'static str {
         match self {
             Self::Berries => "Berries",
@@ -32,6 +45,7 @@ impl Good {
             Self::Wood => "Wood",
             Self::Water => "Water",
             Self::Bread => "Bread",
+            Self::BerryPie => "Berry pie",
         }
     }
 }
@@ -89,7 +103,7 @@ pub struct Prices {
 impl Default for Prices {
     fn default() -> Self {
         Self {
-            coins_per_kg: [1.0, 0.4, 1.0, 0.5, 0.1, 1.5],
+            coins_per_kg: [1.0, 0.4, 1.0, 0.5, 0.1, 1.5, 2.0],
         }
     }
 }

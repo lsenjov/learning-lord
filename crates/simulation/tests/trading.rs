@@ -47,7 +47,10 @@ fn purchases_top_up_at_completion_without_borrowing() {
             )
             .unwrap();
         let started = source
-            .start_action(buyer, CitizenAction::BuyBerries)
+            .start_action(
+                buyer,
+                CitizenAction::BuyFood(learning_lord_simulation::marketplace::Good::Berries),
+            )
             .unwrap();
         let partial = started.advance(TRADE_DURATION_MS - 1).unwrap();
         assert_eq!(citizen(&partial, buyer).berries_grams(), berries);
@@ -119,7 +122,9 @@ fn empty_or_unaffordable_purchases_take_time_without_creating_goods_or_coins() {
     for coins in [0.0, -1.0, 1.0] {
         let source = Citizen::new(0.0).unwrap().with_coins(coins).unwrap();
         let done = source
-            .start_action(CitizenAction::BuyBerries)
+            .start_action(CitizenAction::BuyFood(
+                learning_lord_simulation::marketplace::Good::Berries,
+            ))
             .unwrap()
             .advance(TRADE_DURATION_MS)
             .unwrap();
@@ -145,7 +150,10 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
     let chosen = learning_lord_simulation::planning::plan(citizen(&source, buyer)).unwrap();
     assert_eq!(
         &chosen.actions()[..2],
-        &[CitizenAction::BuyBerries, CitizenAction::Eat]
+        &[
+            CitizenAction::BuyFood(learning_lord_simulation::marketplace::Good::Berries),
+            CitizenAction::Eat
+        ]
     );
     assert_eq!(source.market().orders().count(), 1);
     assert!(source.market().trades().is_empty());
@@ -362,7 +370,10 @@ fn hunger_planning_quotes_retained_asks_instead_of_new_reference_prices() {
     let chosen = learning_lord_simulation::planning::plan(citizen(&universe, buyer)).unwrap();
     assert_eq!(
         &chosen.actions()[..2],
-        &[CitizenAction::BuyBerries, CitizenAction::Eat]
+        &[
+            CitizenAction::BuyFood(learning_lord_simulation::marketplace::Good::Berries),
+            CitizenAction::Eat
+        ]
     );
     assert!(universe.market().trades().is_empty());
 }

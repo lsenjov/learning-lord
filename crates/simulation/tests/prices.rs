@@ -50,7 +50,10 @@ fn all_citizens_share_reference_prices_but_existing_orders_keep_their_asking_pri
     }
     assert_eq!(repriced.market().orders().next().unwrap().coins_per_kg, 1.0);
     let bought = repriced
-        .start_action(buyer, CitizenAction::BuyBerries)
+        .start_action(
+            buyer,
+            CitizenAction::BuyFood(learning_lord_simulation::marketplace::Good::Berries),
+        )
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();

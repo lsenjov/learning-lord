@@ -34,7 +34,7 @@ fn every_good_validates_weights_and_inventory_branches_are_independent() {
 }
 
 #[test]
-fn newly_priced_goods_remain_inedible_and_unchanged_by_berry_actions() {
+fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     let mut stocked = Citizen::new(40.0)
         .unwrap()
         .with_berries(200.0)
@@ -91,12 +91,11 @@ fn newly_priced_goods_remain_inedible_and_unchanged_by_berry_actions() {
         .unwrap()
         .with_good(Good::Bread, 1000.0)
         .unwrap();
-    assert!(
-        bread_only
-            .start_action(CitizenAction::Eat)
-            .unwrap()
-            .active_action()
-            .is_none()
+    let bread_meal = bread_only.start_action(CitizenAction::Eat).unwrap();
+    assert_eq!(bread_meal.active_action().unwrap().duration_ms(), 100_000);
+    assert_eq!(
+        bread_meal.advance(100_000).unwrap().grams(Good::Bread),
+        900.0
     );
     assert_eq!(bread_only.wealth().unwrap(), 1.5);
 }

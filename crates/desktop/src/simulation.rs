@@ -187,12 +187,14 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         ("Cleo", StartingRole::Woodcutter),
         ("Dara", StartingRole::Baker),
     ] {
-        let (next, id) = universe.with_citizen(
-            name,
-            Citizen::new(0.0)?
-                .with_berries(200.0)?
-                .with_starting_role(role),
-        )?;
+        let mut citizen = Citizen::new(0.0)?
+            .with_berries(200.0)?
+            .with_starting_role(role)
+            .with_coins(learning_lord_simulation::production::starting_coins(role))?;
+        for (good, grams) in learning_lord_simulation::production::starting_inputs(role).items() {
+            citizen = citizen.with_good(good, grams)?;
+        }
+        let (next, id) = universe.with_citizen(name, citizen)?;
         universe = next;
         ids.push(id);
     }
@@ -391,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn four_citizens_start_equally_and_advance_without_changing_the_source() {
+    fn four_citizens_start_with_agreed_role_supplies_and_advance_without_changing_the_source() {
         let universe = new_universe().unwrap();
         let source = universe.clone();
         assert_eq!(universe.agents().len(), 4);
@@ -399,7 +401,12 @@ mod tests {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert_eq!(citizen.hunger(), 0.0);
             assert_eq!(citizen.tiredness(), 0.0);
-            assert_eq!(citizen.coins(), 0.0);
+            assert_eq!(
+                citizen.coins(),
+                learning_lord_simulation::production::starting_coins(
+                    citizen.starting_role().unwrap()
+                )
+            );
             assert_eq!(citizen.berries_grams(), 200.0);
             assert_eq!(citizen.map(), universe.map());
             assert_eq!(citizen.prices(), universe.prices());
@@ -453,9 +460,20 @@ mod tests {
                 assert_eq!(citizen.id(), *id);
                 assert_eq!(citizen.id().0.get_version_num(), 4);
                 assert_eq!(citizen.berries_grams(), 200.0);
-                assert_eq!(citizen.coins(), 0.0);
+                assert_eq!(
+                    citizen.coins(),
+                    learning_lord_simulation::production::starting_coins(
+                        citizen.starting_role().unwrap()
+                    )
+                );
                 for good in Good::ALL.into_iter().filter(|good| *good != Good::Berries) {
-                    assert_eq!(citizen.grams(good), 0.0);
+                    let expected = learning_lord_simulation::production::starting_inputs(
+                        citizen.starting_role().unwrap(),
+                    )
+                    .items()
+                    .find(|(g, _)| *g == good)
+                    .map_or(0.0, |(_, grams)| grams);
+                    assert_eq!(citizen.grams(good), expected);
                 }
                 assert_eq!(map.place(citizen.home()).unwrap().owner, Some(*id));
                 assert_eq!(citizen.position(), map.position(citizen.home()));
@@ -518,7 +536,10 @@ mod tests {
         assert_eq!(citizen.map(), state.universe.map());
         assert_eq!(citizen.hunger(), 0.0);
         assert_eq!(citizen.tiredness(), 0.0);
-        assert_eq!(citizen.coins(), 0.0);
+        assert_eq!(
+            citizen.coins(),
+            learning_lord_simulation::production::starting_coins(citizen.starting_role().unwrap())
+        );
         assert!(citizen.active_plan().is_some());
     }
 
