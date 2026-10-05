@@ -37,12 +37,6 @@ fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
             .unwrap()
             .with_berries(citizen.berries_grams() + 10.0)
             .unwrap()
-    } else if action == CitizenAction::FindRocks {
-        citizen
-            .advance(HALF_HOUR_MS)
-            .unwrap()
-            .with_pebbles(citizen.pebbles_grams() + 5.0)
-            .unwrap()
     } else {
         citizen
             .start_action(action)

@@ -34,12 +34,10 @@ fn every_good_validates_weights_and_inventory_branches_are_independent() {
 }
 
 #[test]
-fn deferred_goods_have_no_prices_nutrition_or_effect_on_existing_food_and_trades() {
+fn newly_priced_goods_remain_inedible_and_unchanged_by_berry_actions() {
     let mut stocked = Citizen::new(40.0)
         .unwrap()
         .with_berries(200.0)
-        .unwrap()
-        .with_pebbles(50.0)
         .unwrap()
         .with_coins(2.0)
         .unwrap();
@@ -50,11 +48,19 @@ fn deferred_goods_have_no_prices_nutrition_or_effect_on_existing_food_and_trades
         Good::Water,
         Good::Bread,
     ] {
-        assert_eq!(Prices::default().coins_per_kg(good), None);
-        assert_eq!(Prices::default().value(good, 1000.0), None);
+        assert!(
+            Prices::default()
+                .coins_per_kg(good)
+                .is_some_and(|price| price > 0.0)
+        );
         stocked = stocked.with_good(good, 1000.5).unwrap();
     }
-    assert!((stocked.wealth().unwrap() - 2.3).abs() < 1e-12);
+    let expected = stocked.coins()
+        + Good::ALL
+            .into_iter()
+            .map(|good| Prices::default().value(good, stocked.grams(good)).unwrap())
+            .sum::<f64>();
+    assert!((stocked.wealth().unwrap() - expected).abs() < 1e-12);
     let eaten = stocked
         .start_action(CitizenAction::Eat)
         .unwrap()
@@ -63,12 +69,13 @@ fn deferred_goods_have_no_prices_nutrition_or_effect_on_existing_food_and_trades
     assert_eq!(eaten.berries_grams(), 150.0);
     assert_eq!(eaten.grams(Good::Bread), 1000.5);
     let sold = stocked
-        .start_action(CitizenAction::SellPebbles)
+        .start_action(CitizenAction::List(Good::Berries, 50.0))
         .unwrap()
         .advance(300_000)
         .unwrap();
-    assert_eq!(sold.pebbles_grams(), 0.0);
-    assert_eq!(sold.coins(), 2.1);
+    assert_eq!(sold.berries_grams(), 150.0);
+    assert_eq!(sold.market().listed_grams(sold.id(), Good::Berries), 50.0);
+    assert_eq!(sold.coins(), 2.0);
     assert!((sold.wealth().unwrap() - stocked.wealth().unwrap()).abs() < 1e-12);
     for good in [
         Good::Wheat,
@@ -91,7 +98,7 @@ fn deferred_goods_have_no_prices_nutrition_or_effect_on_existing_food_and_trades
             .active_action()
             .is_none()
     );
-    assert_eq!(bread_only.wealth().unwrap(), 0.0);
+    assert_eq!(bread_only.wealth().unwrap(), 1.5);
 }
 
 #[test]

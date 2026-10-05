@@ -11,7 +11,6 @@ pub const TRADE_PLAN_COOLDOWN_MS: u64 = 2 * 60 * 60 * 1000;
 pub enum Effect {
     Berries,
     Coins,
-    Pebbles,
     ReduceHunger,
     ReduceTiredness,
     IncreaseWealth,
@@ -30,10 +29,10 @@ impl CitizenAction {
             Self::Eat => &[ReduceHunger],
             Self::Sleep => &[ReduceTiredness],
             Self::Forage => &[Berries, IncreaseWealth],
-            Self::FindRocks => &[Pebbles, IncreaseWealth],
             Self::BuyBerries => &[Berries],
-            Self::SellPebbles => &[Coins],
-            Self::Wait | Self::Travel(_) => &[],
+            Self::Wait | Self::Travel(_) | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
+                &[]
+            }
         }
     }
 
@@ -44,15 +43,13 @@ impl CitizenAction {
             Self::BuyBerries => (
                 Effect::Coins,
                 citizen
-                    .prices()
-                    .value(Good::Berries, (amount - citizen.berries_grams()).max(0.0))
-                    .unwrap(),
-            ),
-            Self::SellPebbles => (
-                Effect::Pebbles,
-                (amount - citizen.coins()).max(0.0)
-                    / citizen.prices().coins_per_kg(Good::Pebbles).unwrap()
-                    * 1000.0,
+                    .market()
+                    .purchase_cost(
+                        citizen.id(),
+                        Good::Berries,
+                        (amount - citizen.berries_grams()).max(0.0),
+                    )
+                    .unwrap_or(f64::INFINITY),
             ),
             _ => return None,
         };
@@ -64,19 +61,19 @@ impl CitizenAction {
             Self::Eat => (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM * BERRY_EATING_MS_PER_GRAM)
                 .ceil() as u64,
             Self::Sleep => SLEEP_DURATION_MS,
-            Self::BuyBerries | Self::SellPebbles => TRADE_DURATION_MS,
+            Self::BuyBerries | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
+                TRADE_DURATION_MS
+            }
             _ => ACTION_DURATION_MS,
         }
     }
 }
 
-const ACTIONS: [CitizenAction; 6] = [
+const ACTIONS: [CitizenAction; 4] = [
     CitizenAction::Eat,
     CitizenAction::Sleep,
     CitizenAction::Forage,
-    CitizenAction::FindRocks,
     CitizenAction::BuyBerries,
-    CitizenAction::SellPebbles,
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -90,8 +87,8 @@ impl Cooldowns {
     fn remaining(self, action: CitizenAction) -> u64 {
         match action {
             CitizenAction::Eat => self.eat,
-            CitizenAction::BuyBerries => self.buy,
-            CitizenAction::SellPebbles => self.sell,
+            CitizenAction::BuyBerries | CitizenAction::Buy(..) => self.buy,
+            CitizenAction::List(..) => self.sell,
             _ => 0,
         }
     }
@@ -103,12 +100,12 @@ impl Cooldowns {
             } else {
                 self.eat.saturating_sub(duration)
             },
-            buy: if action == CitizenAction::BuyBerries {
+            buy: if matches!(action, CitizenAction::BuyBerries | CitizenAction::Buy(..)) {
                 TRADE_PLAN_COOLDOWN_MS
             } else {
                 self.buy.saturating_sub(duration)
             },
-            sell: if action == CitizenAction::SellPebbles {
+            sell: if matches!(action, CitizenAction::List(..)) {
                 TRADE_PLAN_COOLDOWN_MS
             } else {
                 self.sell.saturating_sub(duration)
@@ -162,13 +159,15 @@ impl Prediction {
         let before = self.citizen.personal_wellbeing()?;
         let after = citizen.personal_wellbeing()?;
         let mut next = self.clone();
+        if action == CitizenAction::BuyBerries
+            && citizen.berries_grams() <= self.citizen.berries_grams()
+        {
+            return Ok(None);
+        }
         next.citizen = citizen;
         next.score.add(before, after, duration)?;
         next.goal_score.add(before, after, duration)?;
-        if !matches!(
-            action,
-            CitizenAction::Forage | CitizenAction::FindRocks | CitizenAction::Travel(_)
-        ) {
+        if !matches!(action, CitizenAction::Forage | CitizenAction::Travel(_)) {
             next.last_gathering_order = None;
         }
         next.actions.push(action);
@@ -217,7 +216,6 @@ fn quantity(citizen: &Citizen, resource: Effect) -> f64 {
     match resource {
         Effect::Berries => citizen.berries_grams(),
         Effect::Coins => citizen.coins(),
-        Effect::Pebbles => citizen.pebbles_grams(),
         _ => unreachable!("only inventory resources are prerequisites"),
     }
 }
@@ -273,7 +271,7 @@ fn order_variants(
     reserved_ms: u64,
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
-    let gathering = matches!(action, CitizenAction::Forage | CitizenAction::FindRocks);
+    let gathering = matches!(action, CitizenAction::Forage);
     if gathering && state.last_gathering_order == Some(action) {
         return Ok(Vec::new());
     }
@@ -424,10 +422,15 @@ mod tests {
     use super::*;
 
     fn hungry(berries: f64) -> Citizen {
-        Citizen::with_needs(100.0, -100.0)
+        let citizen = Citizen::with_needs(100.0, -100.0)
             .unwrap()
             .with_berries(berries)
-            .unwrap()
+            .unwrap();
+        let mut market = citizen.market().clone();
+        market
+            .list(crate::AgentId(uuid::Uuid::new_v4()), Good::Berries, 1000.0)
+            .unwrap();
+        citizen.with_market(market)
     }
 
     fn full_meals(citizen: &Citizen) -> Vec<Prediction> {
@@ -469,16 +472,14 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let wealth = best_variant_after(gathered, Effect::IncreaseWealth)
-            .unwrap()
-            .unwrap();
         assert!(
-            wealth
-                .actions
-                .iter()
-                .all(|action| *action == CitizenAction::FindRocks)
+            best_variant_after(gathered, Effect::IncreaseWealth)
+                .unwrap()
+                .is_none()
         );
-        let hunger = best_variant_after(gathered, Effect::ReduceHunger)
+        let mut funded = gathered.clone();
+        funded.citizen = funded.citizen.with_coins(1.0).unwrap();
+        let hunger = best_variant_after(&funded, Effect::ReduceHunger)
             .unwrap()
             .unwrap();
         assert!(!hunger.actions.contains(&CitizenAction::Forage));
@@ -622,19 +623,6 @@ mod tests {
         let mut foraged = vec![CitizenAction::Forage; 6];
         foraged.push(CitizenAction::Eat);
         assert!(variants.iter().any(|v| v.actions == foraged));
-        let mut traded = vec![CitizenAction::FindRocks; 6];
-        traded.extend([
-            CitizenAction::SellPebbles,
-            CitizenAction::BuyBerries,
-            CitizenAction::Eat,
-        ]);
-        assert!(variants.iter().any(|v| v.actions == traded));
-        assert!(
-            variants
-                .iter()
-                .any(|v| v.actions.contains(&CitizenAction::Forage)
-                    && v.actions.contains(&CitizenAction::BuyBerries))
-        );
         for variant in variants {
             assert!(variant.citizen.berries_grams() >= 0.0);
             assert_eq!(variant.actions.last(), Some(&CitizenAction::Eat));
@@ -649,7 +637,7 @@ mod tests {
 
     #[test]
     fn goal_variants_retain_every_supplier_target_and_immediate_meal() {
-        let source = hungry(0.0).with_prices(crate::marketplace::Prices::new(1.0, 4.0).unwrap());
+        let source = hungry(0.0).with_prices(crate::marketplace::Prices::new(1.0).unwrap());
         let mut variants = meals(&source, 30.0);
         variants.extend(full_meals(&source));
         let best_score = variants
@@ -675,32 +663,24 @@ mod tests {
 
     #[test]
     fn conversion_rounding_does_not_add_gathering_prerequisites() {
-        let source = hungry(0.0)
-            .with_coins(0.00069)
-            .unwrap()
-            .with_pebbles(49.655)
-            .unwrap();
+        let source = hungry(0.0).with_coins(0.1).unwrap();
         let chosen = best_variant(&source, Effect::ReduceHunger, Cooldowns::default(), 0)
             .unwrap()
             .unwrap();
         assert_eq!(
             chosen.actions,
-            [
-                CitizenAction::SellPebbles,
-                CitizenAction::BuyBerries,
-                CitizenAction::Eat
-            ]
+            [CitizenAction::BuyBerries, CitizenAction::Eat]
         );
         assert!(chosen.citizen.coins() >= 0.0);
-        assert_eq!(chosen.citizen.pebbles_grams(), 0.0);
         assert!(chosen.citizen.berries_grams() < 1e-10);
-        let short = hungry(0.0).with_pebbles(49.0).unwrap();
+        assert!(chosen.citizen.market().trades().is_empty());
+        let short = hungry(0.0).with_coins(0.049).unwrap();
         let full = full_meals(&short);
         assert!(!full.is_empty());
-        assert!(full.iter().all(
-            |variant| variant.actions.contains(&CitizenAction::FindRocks)
-                || variant.actions.contains(&CitizenAction::Forage)
-        ));
+        assert!(
+            full.iter()
+                .all(|v| v.actions.contains(&CitizenAction::Forage))
+        );
     }
 
     #[test]
@@ -754,9 +734,9 @@ mod tests {
     fn final_goal_is_completed_after_the_outer_horizon() {
         let citizen = Citizen::with_needs(50.0, -100.0)
             .unwrap()
-            .with_pebbles(5.0)
+            .with_berries(20.0)
             .unwrap()
-            .with_prices(crate::marketplace::Prices::new(1.0, 4.0).unwrap());
+            .with_prices(crate::marketplace::Prices::new(1.0).unwrap());
         let mut prefix = Prediction::new(&citizen, Cooldowns::default());
         for _ in 0..7 {
             prefix = prefix.perform(CitizenAction::Wait, 0).unwrap().unwrap();
@@ -779,10 +759,39 @@ mod tests {
 
     #[test]
     fn cooldowns_are_separate_start_at_completion_and_reset_for_new_plans() {
-        let source = hungry(0.0).with_pebbles(100.0).unwrap();
+        let source = hungry(100.0).with_coins(1.0).unwrap();
         let initial = Prediction::new(&source, Cooldowns::default());
+        let generic = initial
+            .perform(
+                CitizenAction::Buy(crate::marketplace::ShoppingList::single(
+                    Good::Berries,
+                    10.0,
+                )),
+                0,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(generic.cooldowns.buy, TRADE_PLAN_COOLDOWN_MS);
+        assert!(
+            generic
+                .perform(
+                    CitizenAction::Buy(crate::marketplace::ShoppingList::single(
+                        Good::Berries,
+                        10.0
+                    )),
+                    0
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            generic
+                .perform(CitizenAction::BuyBerries, 0)
+                .unwrap()
+                .is_none()
+        );
         let sold = initial
-            .perform(CitizenAction::SellPebbles, 0)
+            .perform(CitizenAction::List(Good::Berries, 100.0), 0)
             .unwrap()
             .unwrap();
         assert_eq!(sold.cooldowns.sell, TRADE_PLAN_COOLDOWN_MS);
@@ -802,10 +811,7 @@ mod tests {
         );
         let mut elapsed = eaten.clone();
         for _ in 0..4 {
-            elapsed = elapsed
-                .perform(CitizenAction::FindRocks, 0)
-                .unwrap()
-                .unwrap();
+            elapsed = elapsed.perform(CitizenAction::Wait, 0).unwrap().unwrap();
         }
         assert!(
             elapsed
@@ -815,7 +821,7 @@ mod tests {
         );
         assert!(
             elapsed
-                .perform(CitizenAction::SellPebbles, 0)
+                .perform(CitizenAction::List(Good::Berries, 10.0), 0)
                 .unwrap()
                 .is_some()
         );
@@ -931,91 +937,42 @@ mod tests {
     }
 
     #[test]
-    fn exported_market_state_prefers_direct_rocks_over_the_forest_detour() {
+    fn market_food_path_is_compared_against_the_forest_detour() {
         use crate::locations::{Location, Map, Position};
-        use crate::marketplace::Prices;
         let map = Map::new(
-            Position {
-                x: -725.1376571747487,
-                y: 97.96764606609361,
-            },
-            Position {
-                x: -10.912906801495751,
-                y: -727.3559818665126,
-            },
-            Position {
-                x: 233.53900050684547,
-                y: -686.1697663686859,
-            },
+            Position { x: 900.0, y: 0.0 },
+            Position::default(),
+            Position { x: 10.0, y: 0.0 },
         )
         .unwrap();
-        // The dump was captured 105,740 ms into the first trip; restore its planning state.
-        let need_growth = 105_740.0 * 100.0 / 86_400_000.0;
-        let source = Citizen::with_needs(
-            16.671912174402078 - need_growth,
-            -45.326035879629764 - need_growth,
-        )
-        .unwrap()
-        .with_map(map.clone())
-        .unwrap()
-        .with_position(map.position(map.public_place(Location::River)))
-        .unwrap()
-        .with_prices(Prices::new(1.2090152088522885, 3.905220675837458).unwrap())
-        .with_pebbles(19.454608762314617)
-        .unwrap();
-        let mut prefix = Prediction::new(&source, Cooldowns::default());
-        for action in [
-            CitizenAction::Travel(map.public_place(Location::Market)),
-            CitizenAction::SellPebbles,
-            CitizenAction::BuyBerries,
-            CitizenAction::Eat,
-        ] {
-            prefix = prefix.perform(action, 0).unwrap().unwrap();
-        }
-        assert_eq!(prefix.elapsed_ms, 811_580);
-        let forage = prefix
-            .perform(CitizenAction::Travel(map.public_place(Location::Forest)), 0)
+        let source = hungry(0.0)
+            .with_coins(1.0)
             .unwrap()
-            .unwrap()
-            .perform(CitizenAction::Forage, 0)
-            .unwrap()
+            .with_map(map.clone())
             .unwrap();
-        let rocks = prefix
-            .perform(CitizenAction::Travel(map.public_place(Location::River)), 0)
-            .unwrap()
-            .unwrap()
-            .perform(CitizenAction::FindRocks, 0)
-            .unwrap()
-            .unwrap();
-        let local_forage = forage.score.mean * forage.score.elapsed_ms as f64
-            - prefix.score.mean * prefix.score.elapsed_ms as f64;
-        let local_rocks = rocks.score.mean * rocks.score.elapsed_ms as f64
-            - prefix.score.mean * prefix.score.elapsed_ms as f64;
-        let forage_average = local_forage / (forage.elapsed_ms - prefix.elapsed_ms) as f64;
-        let rocks_average = local_rocks / (rocks.elapsed_ms - prefix.elapsed_ms) as f64;
-        assert!(rocks_average > forage_average);
-        let chosen = best_variant_after(&prefix, Effect::IncreaseWealth)
+        let chosen = best_variant(&source, Effect::ReduceHunger, Cooldowns::default(), 0)
             .unwrap()
             .unwrap();
         assert_eq!(
-            chosen.actions.first(),
-            Some(&CitizenAction::Travel(map.public_place(Location::River)))
+            chosen.actions,
+            [
+                CitizenAction::Travel(map.public_place(Location::Market)),
+                CitizenAction::BuyBerries,
+                CitizenAction::Eat
+            ]
         );
-        assert!(
-            chosen.actions[1..]
-                .iter()
-                .all(|action| *action == CitizenAction::FindRocks)
-        );
-        assert!(chosen.actions.len() > 2);
-        assert!(chosen.goal_average().unwrap() > rocks_average);
-        let fresh = best_variant(&prefix.citizen, Effect::IncreaseWealth, prefix.cooldowns, 0)
-            .unwrap()
-            .unwrap();
-        assert_eq!(chosen.actions, fresh.actions);
         assert_eq!(
-            chosen.goal_average().unwrap(),
-            fresh.goal_average().unwrap()
+            chosen
+                .citizen
+                .market()
+                .available_grams(source.id(), Good::Berries),
+            900.0
         );
+        assert_eq!(
+            source.market().available_grams(source.id(), Good::Berries),
+            1000.0
+        );
+        assert!(chosen.citizen.market().trades().is_empty());
     }
 
     #[test]
@@ -1050,24 +1007,19 @@ mod tests {
             gathered.elapsed_ms,
             300_000 + 6 * ACTION_DURATION_MS + 100_000
         );
-        let mut traded = vec![CitizenAction::Travel(map.public_place(Location::River))];
-        traded.extend([CitizenAction::FindRocks; 6]);
-        traded.extend([
-            CitizenAction::Travel(map.public_place(Location::Market)),
-            CitizenAction::SellPebbles,
-            CitizenAction::BuyBerries,
-            CitizenAction::Eat,
-        ]);
-        let trade = variants.iter().find(|v| v.actions == traded).unwrap();
-        let river_to_market = (map
-            .position(map.public_place(Location::River))
-            .distance(map.position(map.public_place(Location::Market)))
-            * crate::locations::WALK_MS_PER_METRE)
-            .ceil() as u64;
-        assert_eq!(
-            trade.elapsed_ms,
-            240_000 + 6 * ACTION_DURATION_MS + river_to_market + 2 * TRADE_DURATION_MS + 100_000
-        );
+        let funded = source.with_coins(1.0).unwrap();
+        let trade = full_meals(&funded)
+            .into_iter()
+            .find(|v| {
+                v.actions
+                    == [
+                        CitizenAction::Travel(map.public_place(Location::Market)),
+                        CitizenAction::BuyBerries,
+                        CitizenAction::Eat,
+                    ]
+            })
+            .unwrap();
+        assert_eq!(trade.elapsed_ms, 360_000 + TRADE_DURATION_MS + 100_000);
         assert_eq!(
             trade.citizen.position(),
             map.position(map.public_place(Location::Market))
@@ -1113,26 +1065,21 @@ mod tests {
     }
 
     #[test]
-    fn wealth_goal_uses_current_prices_and_half_pebble_yield() {
-        use crate::marketplace::Prices;
-        for (berries, pebbles, expected) in [
-            (1.0, 1.0, CitizenAction::Forage),
-            (1.0, 4.0, CitizenAction::FindRocks),
-        ] {
+    fn wealth_goal_uses_current_prices_and_expected_berry_yield() {
+        for berries in [1.0, 4.0] {
             let source = Citizen::with_needs(-50.0, -100.0)
                 .unwrap()
-                .with_prices(Prices::new(berries, pebbles).unwrap());
+                .with_prices(crate::marketplace::Prices::new(berries).unwrap());
             let chosen = best_variant(&source, Effect::IncreaseWealth, Cooldowns::default(), 0)
                 .unwrap()
                 .unwrap();
             let segments = gathering_segments(super::super::HORIZON_MS, ACTION_DURATION_MS);
-            assert_eq!(chosen.actions, vec![expected; segments as usize]);
+            assert_eq!(
+                chosen.actions,
+                vec![CitizenAction::Forage; segments as usize]
+            );
             assert_eq!(chosen.citizen.prices(), source.prices());
-            if expected == CitizenAction::FindRocks {
-                assert_eq!(chosen.citizen.pebbles_grams(), 5.0 * segments as f64);
-            } else {
-                assert_eq!(chosen.citizen.berries_grams(), 10.0 * segments as f64);
-            }
+            assert_eq!(chosen.citizen.berries_grams(), 10.0 * segments as f64);
         }
     }
 }

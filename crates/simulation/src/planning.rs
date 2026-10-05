@@ -126,6 +126,7 @@ impl ActivePlan {
                 && let Some(prices) = end_prices
             {
                 citizen.prices = prices;
+                citizen.market.prices = prices;
             }
             if citizen.active_action().is_none() {
                 execution.action_index += 1;
@@ -135,6 +136,22 @@ impl ActivePlan {
 
         citizen.active_plan = Some(execution);
         Ok(citizen)
+    }
+
+    pub(crate) fn record_elapsed(&mut self, elapsed_ms: u64) -> Result<(), SimulationError> {
+        self.elapsed_ms = self
+            .elapsed_ms
+            .checked_add(elapsed_ms)
+            .ok_or(SimulationError::TimeOverflow)?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_action(&mut self) {
+        self.action_index += 1;
+    }
+
+    pub(crate) fn resume(&mut self, citizen: Citizen) -> Result<Citizen, SimulationError> {
+        self.start_next_action(citizen)
     }
 
     fn start_next_action(&mut self, mut citizen: Citizen) -> Result<Citizen, SimulationError> {
@@ -313,7 +330,7 @@ mod tests {
         use crate::marketplace::Prices;
         let citizen = Citizen::with_needs(70.0, -100.0)
             .unwrap()
-            .with_prices(Prices::new(2.0, 1.0).unwrap());
+            .with_prices(Prices::new(2.0).unwrap());
         let selected = plan(&citizen).unwrap();
         let forecast = selected
             .decision()
@@ -469,10 +486,7 @@ mod tests {
     #[test]
     fn decision_records_existing_candidates_and_preserves_search_result() {
         use crate::marketplace::Prices;
-        for prices in [
-            Prices::new(2.0, 1.0).unwrap(),
-            Prices::new(1.0, 4.0).unwrap(),
-        ] {
+        for prices in [Prices::new(2.0).unwrap(), Prices::new(1.0).unwrap()] {
             let citizen = Citizen::with_needs(50.0, -100.0)
                 .unwrap()
                 .with_prices(prices);
@@ -533,7 +547,7 @@ mod tests {
     fn full_continuations_can_outscore_the_local_goal_winner() {
         let citizen = Citizen::with_needs(50.0, -100.0)
             .unwrap()
-            .with_prices(crate::marketplace::Prices::new(2.0, 1.0).unwrap());
+            .with_prices(crate::marketplace::Prices::new(2.0).unwrap());
         let local = goals::best_variant(&citizen, Effect::ReduceHunger, Cooldowns::default(), 0)
             .unwrap()
             .unwrap();
@@ -586,11 +600,20 @@ mod tests {
                 .unwrap()
                 .with_position(map.position(map.public_place(Location::River)))
                 .unwrap()
-                .with_prices(Prices::new(1.8975551078215391, 5.529146608397028).unwrap())
+                .with_prices(Prices::new(1.8975551078215391).unwrap())
                 .with_berries(25.36314504117695)
                 .unwrap()
-                .with_pebbles(114.36715287400935)
+                .with_coins(1.0)
                 .unwrap();
+        let mut market = citizen.market().clone();
+        market
+            .list(
+                crate::AgentId(uuid::Uuid::new_v4()),
+                crate::marketplace::Good::Berries,
+                1000.0,
+            )
+            .unwrap();
+        let citizen = citizen.with_market(market);
         let variants = goals::variants_after(
             &Prediction::new(&citizen, Cooldowns::default()),
             Effect::ReduceHunger,
@@ -602,7 +625,6 @@ mod tests {
                 variant.actions
                     == [
                         CitizenAction::Travel(map.public_place(Location::Market)),
-                        CitizenAction::SellPebbles,
                         CitizenAction::BuyBerries,
                         CitizenAction::Eat,
                     ]
@@ -622,7 +644,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(hunger.full_plan_wellbeing >= trade_plan.average_wellbeing);
-        assert!(hunger.full_plan_wellbeing > local_plan.average_wellbeing);
+        assert!(hunger.full_plan_wellbeing >= local_plan.average_wellbeing);
         for variant in variants {
             let mut full = empty_plan();
             search(variant, HORIZON_MS, &mut full).unwrap();
@@ -644,7 +666,7 @@ mod tests {
             .decision
             .clone()
             .unwrap();
-        let repriced = source.with_prices(Prices::new(2.0, 1.0).unwrap());
+        let repriced = source.with_prices(Prices::new(2.0).unwrap());
         let partial = repriced.advance(1).unwrap();
         assert!(Arc::ptr_eq(
             &report,
@@ -668,7 +690,7 @@ mod tests {
                 .as_ref()
                 .unwrap();
             if !Arc::ptr_eq(&report, current) {
-                assert_eq!(current.prices, Prices::new(2.0, 1.0).unwrap());
+                assert_eq!(current.prices, Prices::new(2.0).unwrap());
                 return;
             }
         }
@@ -682,6 +704,10 @@ mod tests {
             marketplace::{Good, Prices, UPDATE_TIME_MS},
         };
         let citizen = Citizen::new(0.0).unwrap().with_coins(1.0).unwrap();
+        let mut market = citizen.market().clone();
+        let seller = Citizen::new(0.0).unwrap().with_map(citizen.map()).unwrap();
+        market.list(seller.id(), Good::Berries, 1000.0).unwrap();
+        let citizen = citizen.with_market(market.clone());
         let planned = executing(
             &citizen,
             vec![
@@ -691,10 +717,17 @@ mod tests {
                 CitizenAction::Sleep,
             ],
         );
-        let universe = Universe::with_map(citizen.map())
+        let universe = Universe::with_map(seller.map())
             .with_prices(Prices::default())
             .advance(UPDATE_TIME_MS - crate::ACTION_DURATION_MS)
             .unwrap();
+        let (mut universe, _) = universe.with_citizen("Seller", seller).unwrap();
+        universe.market = market;
+        let planned = {
+            let mut p = planned;
+            p.map = universe.map.clone();
+            p
+        };
         let (universe, id) = universe.with_citizen("Ada", planned).unwrap();
         let boundary = universe.advance(crate::ACTION_DURATION_MS).unwrap();
         let AgentKind::Citizen(buyer) = &boundary.agents()[&id].kind;

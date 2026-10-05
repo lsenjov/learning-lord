@@ -62,9 +62,11 @@ fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
     for (action, location) in [
         (CitizenAction::Sleep, Location::Home),
         (CitizenAction::Forage, Location::Forest),
-        (CitizenAction::FindRocks, Location::River),
         (CitizenAction::BuyBerries, Location::Market),
-        (CitizenAction::SellPebbles, Location::Market),
+        (
+            CitizenAction::List(learning_lord_simulation::marketplace::Good::Berries, 10.0),
+            Location::Market,
+        ),
     ] {
         let at_site = home
             .with_position(home.map().position(if location == Location::Home {

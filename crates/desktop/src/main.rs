@@ -298,9 +298,12 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                 CitizenAction::Wait => "Waiting".into(),
                 CitizenAction::Sleep => "Sleeping".into(),
                 CitizenAction::Forage => "Foraging".into(),
-                CitizenAction::FindRocks => "Finding rocks".into(),
                 CitizenAction::BuyBerries => "Buying berries".into(),
-                CitizenAction::SellPebbles => "Selling pebbles".into(),
+                CitizenAction::List(good, grams) => format!("Listing {grams:.1} g {}", good.name()),
+                CitizenAction::Buy(list) => format!("Buying {}", shopping_list_label(list)),
+                CitizenAction::Withdraw(good, grams) => {
+                    format!("Withdrawing {grams:.1} g {}", good.name())
+                }
                 CitizenAction::Travel(id) => {
                     format!("Walking to {}", citizen.map().place(id).unwrap().name)
                 }
@@ -358,15 +361,23 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
     )
 }
 
+fn shopping_list_label(list: learning_lord_simulation::marketplace::ShoppingList) -> String {
+    list.items()
+        .map(|(good, grams)| format!("{grams:.1} g {}", good.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citizen) -> String {
     match action {
         CitizenAction::Eat => "Eat".into(),
         CitizenAction::Wait => "Wait".into(),
         CitizenAction::Sleep => "Sleep".into(),
         CitizenAction::Forage => "Forage".into(),
-        CitizenAction::FindRocks => "Find rocks".into(),
         CitizenAction::BuyBerries => "Buy berries".into(),
-        CitizenAction::SellPebbles => "Sell pebbles".into(),
+        CitizenAction::List(good, grams) => format!("List {grams:.1} g {}", good.name()),
+        CitizenAction::Buy(list) => format!("Buy {}", shopping_list_label(list)),
+        CitizenAction::Withdraw(good, grams) => format!("Withdraw {grams:.1} g {}", good.name()),
         CitizenAction::Travel(id) => format!("Travel to {}", citizen.map().place(id).unwrap().name),
     }
 }
@@ -409,9 +420,8 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
     let mut lines = vec![
         "Last planning decision".to_string(),
         format!(
-            "Prices used: berries {:.3}, pebbles {:.3} coins/kg",
-            decision.prices.coins_per_kg(Good::Berries).unwrap(),
-            decision.prices.coins_per_kg(Good::Pebbles).unwrap()
+            "Prices used: berries {:.3} coins/kg",
+            decision.prices.coins_per_kg(Good::Berries).unwrap()
         ),
     ];
     for candidate in &decision.candidates {
@@ -461,23 +471,17 @@ fn refresh_display(
 ) {
     for (readout, mut text) in &mut readouts {
         let value = match readout {
-            Readout::Market => {
-                format!(
-                    "Market: berries {:.3} | pebbles {:.3} coins/kg | updates at 04:00",
-                    snapshot
-                        .0
-                        .universe
-                        .prices()
-                        .coins_per_kg(Good::Berries)
-                        .unwrap(),
-                    snapshot
-                        .0
-                        .universe
-                        .prices()
-                        .coins_per_kg(Good::Pebbles)
-                        .unwrap()
-                )
-            }
+            Readout::Market => format!(
+                "Market: berries {:.3} coins/kg | {} sell orders | {} trades",
+                snapshot
+                    .0
+                    .universe
+                    .prices()
+                    .coins_per_kg(Good::Berries)
+                    .unwrap(),
+                snapshot.0.universe.market().orders().count(),
+                snapshot.0.universe.market().trades().len()
+            ),
             Readout::Clock => format_clock(snapshot.0.universe.current_time_ms()),
             Readout::Status => format!(
                 "{} | {}x",
@@ -527,7 +531,7 @@ mod tests {
     #[test]
     fn decision_panel_shows_reachable_hunger_and_uses_saved_prices() {
         use learning_lord_simulation::marketplace::Prices;
-        let prices = Prices::new(2.0, 1.0).unwrap();
+        let prices = Prices::new(2.0).unwrap();
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(prices)
@@ -543,11 +547,11 @@ mod tests {
         assert_eq!(text.matches("[chosen first]").count(), 1);
         assert!(text.contains("Goal avg"));
         assert!(text.contains("Plan avg"));
-        assert!(text.contains("berries 2.000, pebbles 1.000"));
+        assert!(text.contains("berries 2.000"));
         assert_eq!(
             decision_readout(
                 &planned
-                    .with_prices(Prices::new(1.0, 4.0).unwrap())
+                    .with_prices(Prices::new(1.0).unwrap())
                     .advance(1)
                     .unwrap(),
                 None
@@ -588,7 +592,6 @@ mod tests {
         assert!(readout.contains("Location:"));
         assert!(readout.contains("Commitment left: 01:59:10"));
         assert!(readout.contains("Berries: 150.0 g"));
-        assert!(readout.contains("Pebbles: 0.0 g"));
         assert!(readout.contains("Coins: 0.00 | Wealth: 0.150 coins"));
     }
 
@@ -799,7 +802,7 @@ mod tests {
         }
         let snapshot = &app.world().resource::<DisplaySnapshot>().0;
         assert_eq!(snapshot.universe.current_time_ms(), 0);
-        assert_ne!(snapshot.universe.prices(), previous_prices);
+        assert_eq!(snapshot.universe.prices(), previous_prices);
         assert_eq!(snapshot.universe.agents().len(), 4);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);

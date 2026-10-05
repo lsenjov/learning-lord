@@ -60,6 +60,7 @@ impl Agent {
         }
     }
 
+    /// Advances this isolated snapshot; use Universe for shared trade settlement.
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
         let kind = match &self.kind {
             AgentKind::Citizen(citizen) => AgentKind::Citizen(citizen.advance(elapsed_ms)?),
@@ -76,15 +77,16 @@ pub enum AgentKind {
     Citizen(Citizen),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CitizenAction {
     Eat,
     Wait,
     Sleep,
     Forage,
-    FindRocks,
     BuyBerries,
-    SellPebbles,
+    List(Good, f64),
+    Buy(marketplace::ShoppingList),
+    Withdraw(Good, f64),
     Travel(PlaceId),
 }
 
@@ -93,8 +95,7 @@ impl CitizenAction {
         match self {
             Self::Sleep => Some(citizen.home),
             Self::Forage => Some(citizen.map.public_place(Location::Forest)),
-            Self::FindRocks => Some(citizen.map.public_place(Location::River)),
-            Self::BuyBerries | Self::SellPebbles => {
+            Self::BuyBerries | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
                 Some(citizen.map.public_place(Location::Market))
             }
             _ => None,
@@ -109,8 +110,6 @@ pub struct ActiveAction {
     duration_ms: u64,
     meal_grams: f64,
     berries_after_meal: f64,
-    trade_grams: f64,
-    trade_coins: f64,
     travel_origin: Position,
     travel_destination: Option<Position>,
 }
@@ -160,6 +159,8 @@ pub struct Citizen {
     coins: f64,
     forage_rng: SmallRng,
     prices: Prices,
+    market: Market,
+    market_time_ms: u64,
     map: Map,
     position: Position,
     active_action: Option<ActiveAction>,
@@ -201,6 +202,8 @@ impl Citizen {
             coins: 0.0,
             forage_rng: rand::make_rng(),
             prices: Prices::default(),
+            market: Market::default(),
+            market_time_ms: 0,
             map,
             position: Position::default(),
             active_action: None,
@@ -302,22 +305,19 @@ impl Citizen {
             }
         })
     }
-    pub fn pebbles_grams(&self) -> f64 {
-        self.grams(Good::Pebbles)
-    }
-
     pub fn coins(&self) -> f64 {
         self.coins
     }
 
-    pub fn with_pebbles(&self, grams: f64) -> Result<Self, SimulationError> {
-        self.with_good(Good::Pebbles, grams).map_err(|error| {
-            if error == SimulationError::InvalidInventory {
-                SimulationError::InvalidPebbles
-            } else {
-                error
-            }
-        })
+    pub fn market(&self) -> &Market {
+        &self.market
+    }
+
+    pub fn with_market(&self, market: Market) -> Self {
+        let mut citizen = self.clone();
+        citizen.prices = market.prices;
+        citizen.market = market;
+        citizen
     }
 
     pub fn with_coins(&self, coins: f64) -> Result<Self, SimulationError> {
@@ -339,20 +339,23 @@ impl Citizen {
     pub fn with_prices(&self, prices: Prices) -> Self {
         let mut citizen = self.clone();
         citizen.prices = prices;
+        citizen.market.prices = prices;
         citizen
     }
 
     pub fn wealth(&self) -> Result<f64, SimulationError> {
-        use marketplace::Good;
         let wealth = self.coins
-            + self
-                .prices
-                .value(Good::Berries, self.berries_grams())
-                .unwrap()
-            + self
-                .prices
-                .value(Good::Pebbles, self.pebbles_grams())
-                .unwrap();
+            + Good::ALL
+                .into_iter()
+                .map(|good| {
+                    self.prices
+                        .value(
+                            good,
+                            self.grams(good) + self.market.listed_grams(self.id, good),
+                        )
+                        .unwrap_or(0.0)
+                })
+                .sum::<f64>();
         if !wealth.is_finite() {
             return Err(SimulationError::WealthOverflow);
         }
@@ -375,47 +378,13 @@ impl Citizen {
                 * WALK_MS_PER_METRE)
                 .ceil() as u64,
             CitizenAction::Eat => (self.meal_grams() * BERRY_EATING_MS_PER_GRAM).ceil() as u64,
-            CitizenAction::Wait | CitizenAction::Forage | CitizenAction::FindRocks => {
-                ACTION_DURATION_MS
-            }
+            CitizenAction::Wait | CitizenAction::Forage => ACTION_DURATION_MS,
             CitizenAction::Sleep => SLEEP_DURATION_MS,
-            CitizenAction::BuyBerries | CitizenAction::SellPebbles => {
-                if self.trade_amounts(action).0 > 0.0 {
-                    TRADE_DURATION_MS
-                } else {
-                    0
-                }
-            }
+            CitizenAction::BuyBerries
+            | CitizenAction::List(..)
+            | CitizenAction::Buy(..)
+            | CitizenAction::Withdraw(..) => TRADE_DURATION_MS,
         })
-    }
-
-    fn trade_amounts(&self, action: CitizenAction) -> (f64, f64) {
-        use marketplace::Good;
-        match action {
-            CitizenAction::BuyBerries => {
-                let missing =
-                    (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM - self.berries_grams()).max(0.0);
-                let cost = self
-                    .prices
-                    .value(Good::Berries, missing)
-                    .unwrap()
-                    .min(self.coins.max(0.0));
-                let grams =
-                    (cost / self.prices.coins_per_kg(Good::Berries).unwrap() * 1000.0).min(missing);
-                if cost <= 0.0 || self.berries_grams() + grams == self.berries_grams() {
-                    (0.0, 0.0)
-                } else {
-                    (grams, cost)
-                }
-            }
-            CitizenAction::SellPebbles => (
-                self.pebbles_grams(),
-                self.prices
-                    .value(Good::Pebbles, self.pebbles_grams())
-                    .unwrap(),
-            ),
-            _ => (0.0, 0.0),
-        }
     }
 
     fn meal_grams(&self) -> f64 {
@@ -448,6 +417,12 @@ impl Citizen {
         if let CitizenAction::Travel(id) = action {
             self.accessible_place(id)?;
         }
+        if let CitizenAction::List(_, grams) | CitizenAction::Withdraw(_, grams) = action {
+            marketplace::validate_quantity(grams)?;
+        }
+        if let CitizenAction::Buy(list) = action {
+            list.validate()?;
+        }
         let mut citizen = self.clone();
         let duration_ms = self.action_duration_ms(action)?;
         if duration_ms == 0 {
@@ -458,15 +433,12 @@ impl Citizen {
         } else {
             0.0
         };
-        let (trade_grams, trade_coins) = self.trade_amounts(action);
         citizen.active_action = Some(ActiveAction {
             action,
             remaining_ms: duration_ms,
             duration_ms,
             meal_grams,
             berries_after_meal: self.berries_grams() - meal_grams,
-            trade_grams,
-            trade_coins,
             travel_origin: self.position,
             travel_destination: if let CitizenAction::Travel(location) = action {
                 Some(self.map.position(location))
@@ -489,6 +461,7 @@ impl Citizen {
         Ok(wellbeing)
     }
 
+    /// Advances this isolated snapshot; use Universe for shared trade settlement.
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
         if let Some(execution) = &self.active_plan {
             return execution.advance(self, elapsed_ms, None);
@@ -496,28 +469,26 @@ impl Citizen {
         self.advance_action(elapsed_ms, false)
     }
 
-    fn advance_to_price_update(
-        &self,
-        elapsed_ms: u64,
-        prices: Prices,
-    ) -> Result<Self, SimulationError> {
-        let mut citizen = if let Some(execution) = &self.active_plan {
-            execution.advance(self, elapsed_ms, Some(prices))?
-        } else {
-            self.advance_action(elapsed_ms, false)?
-        };
-        citizen.prices = prices;
-        Ok(citizen)
-    }
-
     pub(crate) fn advance_predicted(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
         self.advance_action(elapsed_ms, true)
     }
 
     fn advance_action(&self, elapsed_ms: u64, prediction: bool) -> Result<Self, SimulationError> {
+        Ok(self
+            .advance_action_with_settlement(elapsed_ms, prediction, false)?
+            .0)
+    }
+
+    fn advance_action_with_settlement(
+        &self,
+        elapsed_ms: u64,
+        prediction: bool,
+        record_trades: bool,
+    ) -> Result<(Self, Vec<(AgentId, f64)>), SimulationError> {
         let mut citizen = self.clone();
+        let mut payments = Vec::new();
         if elapsed_ms == 0 {
-            return Ok(citizen);
+            return Ok((citizen, payments));
         }
 
         if let Some(mut active) = citizen.active_action {
@@ -550,46 +521,57 @@ impl Citizen {
             if active.remaining_ms == 0 {
                 match active.action {
                     CitizenAction::BuyBerries => {
-                        citizen
-                            .inventory
-                            .insert(Good::Berries, citizen.berries_grams() + active.trade_grams);
-                        citizen.coins -= active.trade_coins;
+                        let grams = (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM
+                            - citizen.berries_grams())
+                        .max(0.0);
+                        payments.extend(citizen.complete_purchase(
+                            Good::Berries,
+                            grams,
+                            record_trades,
+                            action_elapsed_ms,
+                        )?);
                     }
-                    CitizenAction::SellPebbles => {
-                        citizen.inventory.insert(Good::Pebbles, 0.0);
-                        citizen.coins += active.trade_coins;
-                        if !citizen.coins.is_finite() {
-                            return Err(SimulationError::WealthOverflow);
+                    CitizenAction::Buy(list) => {
+                        for (good, grams) in list.items() {
+                            payments.extend(citizen.complete_purchase(
+                                good,
+                                grams,
+                                record_trades,
+                                action_elapsed_ms,
+                            )?);
                         }
                     }
-                    _ => {}
-                }
-                if matches!(
-                    active.action,
-                    CitizenAction::Forage | CitizenAction::FindRocks
-                ) {
-                    let yield_grams = if prediction {
-                        FORAGE_AVERAGE_GRAMS
-                    } else {
-                        citizen
-                            .forage_rng
-                            .random_range(FORAGE_MIN_GRAMS..=FORAGE_MAX_GRAMS)
-                    };
-                    let (good, error) = if active.action == CitizenAction::Forage {
-                        (Good::Berries, SimulationError::BerriesOverflow)
-                    } else {
-                        (Good::Pebbles, SimulationError::PebblesOverflow)
-                    };
-                    let stock = citizen.grams(good)
-                        + if good == Good::Pebbles {
-                            yield_grams / 2.0
-                        } else {
-                            yield_grams
-                        };
-                    if !stock.is_finite() {
-                        return Err(error);
+                    CitizenAction::List(good, requested) => {
+                        let grams = requested.min(citizen.grams(good));
+                        if grams > 0.0 && citizen.grams(good) - grams == citizen.grams(good) {
+                            return Err(SimulationError::WealthOverflow);
+                        }
+                        citizen.market.list(citizen.id, good, grams)?;
+                        citizen.inventory.insert(good, citizen.grams(good) - grams);
                     }
-                    citizen.inventory.insert(good, stock);
+                    CitizenAction::Withdraw(good, requested) => {
+                        let grams = citizen.market.withdraw(citizen.id, good, requested)?;
+                        let stock = citizen.grams(good) + grams;
+                        if !stock.is_finite() || grams > 0.0 && stock == citizen.grams(good) {
+                            return Err(SimulationError::WealthOverflow);
+                        }
+                        citizen.inventory.insert(good, stock);
+                    }
+                    CitizenAction::Forage => {
+                        let grams = if prediction {
+                            FORAGE_AVERAGE_GRAMS
+                        } else {
+                            citizen
+                                .forage_rng
+                                .random_range(FORAGE_MIN_GRAMS..=FORAGE_MAX_GRAMS)
+                        };
+                        let stock = citizen.berries_grams() + grams;
+                        if !stock.is_finite() {
+                            return Err(SimulationError::BerriesOverflow);
+                        }
+                        citizen.inventory.insert(Good::Berries, stock);
+                    }
+                    _ => {}
                 }
                 citizen.active_action = None;
             } else {
@@ -599,7 +581,37 @@ impl Citizen {
         } else {
             citizen.advance_needs(elapsed_ms, None)?;
         }
-        Ok(citizen)
+        citizen.market_time_ms = citizen
+            .market_time_ms
+            .checked_add(elapsed_ms)
+            .ok_or(SimulationError::TimeOverflow)?;
+        Ok((citizen, payments))
+    }
+
+    fn complete_purchase(
+        &mut self,
+        good: Good,
+        grams: f64,
+        record_trades: bool,
+        elapsed_ms: u64,
+    ) -> Result<Vec<(AgentId, f64)>, SimulationError> {
+        let purchase = self.market.purchase(
+            self.id,
+            good,
+            grams,
+            self.coins,
+            self.market_time_ms
+                .checked_add(elapsed_ms)
+                .ok_or(SimulationError::TimeOverflow)?,
+            record_trades,
+        )?;
+        let stock = self.grams(good) + purchase.grams;
+        if !stock.is_finite() || purchase.grams > 0.0 && stock == self.grams(good) {
+            return Err(SimulationError::WealthOverflow);
+        }
+        self.inventory.insert(good, stock);
+        self.coins -= purchase.coins;
+        Ok(purchase.payments)
     }
 
     fn advance_needs(
@@ -672,6 +684,7 @@ impl Universe {
         for (_, agent) in universe.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
             citizen.prices = prices;
+            citizen.market.prices = prices;
         }
         universe
     }
@@ -713,6 +726,8 @@ impl Universe {
             .map
             .with_place_name(citizen.home, format!("{name}'s home"))?;
         citizen.map = universe.map.clone();
+        citizen.market = universe.market.clone();
+        citizen.market_time_ms = universe.current_time_ms;
         for (_, agent) in universe.agents.iter_mut() {
             let AgentKind::Citizen(existing) = &mut agent.kind;
             existing.map = universe.map.clone();
@@ -751,40 +766,81 @@ impl Universe {
         Ok((universe, id))
     }
 
+    pub fn market(&self) -> &Market {
+        &self.market
+    }
+
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
-        let current_time_ms = self
+        let end = self
             .current_time_ms
             .checked_add(elapsed_ms)
             .ok_or(SimulationError::TimeOverflow)?;
         let mut universe = self.clone();
-        if elapsed_ms == 0 {
-            return Ok(universe);
-        }
-
         if universe.agents.is_empty() {
-            if elapsed_ms >= marketplace::until_update(self.current_time_ms) {
-                universe.market.update(current_time_ms);
-            }
-            universe.current_time_ms = current_time_ms;
+            universe.market.update(end);
+            universe.current_time_ms = end;
             return Ok(universe);
         }
-        while universe.current_time_ms < current_time_ms {
+        while universe.current_time_ms < end {
             let until_update = marketplace::until_update(universe.current_time_ms);
-            let step = (current_time_ms - universe.current_time_ms).min(until_update);
-            let updating = step == until_update;
-            if updating {
-                universe.market.update(universe.current_time_ms + step);
-            }
-            let prices = universe.prices();
-            for (_, agent) in universe.agents.iter_mut() {
+            let mut ids: Vec<_> = universe.agents.keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            let boundary = ids
+                .iter()
+                .filter_map(|id| {
+                    let AgentKind::Citizen(citizen) = &universe.agents[id].kind;
+                    citizen.active_action().map(|a| a.remaining_ms())
+                })
+                .min()
+                .unwrap_or(end - universe.current_time_ms);
+            let step = (end - universe.current_time_ms)
+                .min(until_update)
+                .min(boundary);
+            let finishing_time = universe.current_time_ms + step;
+            for id in &ids {
+                let agent = universe.agents.get_mut(id).unwrap();
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
-                *citizen = if updating {
-                    citizen.advance_to_price_update(step, prices)?
-                } else {
-                    citizen.advance(step)?
-                };
+                citizen.market = universe.market.clone();
+                citizen.prices = universe.market.prices;
+                citizen.market_time_ms = universe.current_time_ms;
+                let execution = citizen.active_plan.take();
+                let (updated, payments) =
+                    citizen.advance_action_with_settlement(step, false, true)?;
+                *citizen = updated;
+                if let Some(mut execution) = execution {
+                    execution.record_elapsed(step)?;
+                    citizen.active_plan = Some(execution);
+                }
+                universe.market = citizen.market.clone();
+                for (seller, coins) in payments {
+                    let seller = universe
+                        .agents
+                        .get_mut(&seller)
+                        .ok_or(SimulationError::AgentNotFound)?;
+                    let AgentKind::Citizen(seller) = &mut seller.kind;
+                    seller.coins += coins;
+                    if !seller.coins.is_finite() {
+                        return Err(SimulationError::WealthOverflow);
+                    }
+                }
             }
-            universe.current_time_ms += step;
+            universe.current_time_ms = finishing_time;
+            if step == until_update {
+                universe.market.update(finishing_time);
+            }
+            for id in ids {
+                let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
+                citizen.market = universe.market.clone();
+                citizen.prices = universe.market.prices;
+                citizen.market_time_ms = finishing_time;
+                if citizen.active_action.is_none()
+                    && let Some(mut execution) = citizen.active_plan.take()
+                {
+                    execution.finish_action();
+                    *citizen = execution.resume(citizen.clone())?;
+                    citizen.active_plan = Some(execution);
+                }
+            }
         }
         Ok(universe)
     }
@@ -820,13 +876,12 @@ pub enum SimulationError {
     InvalidHungerRate,
     InvalidTiredness,
     InvalidBerries,
-    InvalidPebbles,
+    InvalidQuantity,
     InvalidCoins,
     InvalidPrices,
     InvalidPosition,
     WrongLocation,
     WealthOverflow,
-    PebblesOverflow,
     TimeOverflow,
     HungerOverflow,
     TirednessOverflow,
@@ -850,13 +905,12 @@ impl fmt::Display for SimulationError {
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
             Self::InvalidTiredness => "tiredness must be finite",
             Self::InvalidBerries => "berry grams must be finite and nonnegative",
-            Self::InvalidPebbles => "pebble grams must be finite and nonnegative",
+            Self::InvalidQuantity => "action grams must be finite and nonnegative",
             Self::InvalidPosition => "position must be finite and within the map",
             Self::WrongLocation => "action requires travel to its location first",
             Self::InvalidPrices => "prices must be finite and positive",
             Self::InvalidCoins => "coins must be finite",
             Self::WealthOverflow => "wealth exceeds the finite range",
-            Self::PebblesOverflow => "finding rocks would produce nonfinite pebble grams",
             Self::TimeOverflow => "elapsed time exceeds the simulation clock's range",
             Self::HungerOverflow => "advancing time would produce nonfinite hunger",
             Self::TirednessOverflow => "advancing time would produce nonfinite tiredness",

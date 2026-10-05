@@ -401,7 +401,6 @@ mod tests {
             assert_eq!(citizen.tiredness(), 0.0);
             assert_eq!(citizen.coins(), 0.0);
             assert_eq!(citizen.berries_grams(), 200.0);
-            assert_eq!(citizen.pebbles_grams(), 0.0);
             assert_eq!(citizen.map(), universe.map());
             assert_eq!(citizen.prices(), universe.prices());
             assert_eq!(citizen.position(), universe.map().position(citizen.home()));
@@ -498,7 +497,7 @@ mod tests {
         assert_eq!(state.universe.current_time_ms(), 0);
         assert_eq!(state.universe.agents().len(), 4);
         assert!(!state.universe.agents().contains_key(&old_ids[0]));
-        assert_ne!(state.universe.prices(), old_prices);
+        assert_eq!(state.universe.prices(), old_prices);
         assert_ne!(state.universe.map(), old_map);
         assert!(state.error.is_none());
         assert!(!state.pacing.running);

@@ -96,7 +96,7 @@ fn empty_hungry_citizens_can_plan_and_advance_without_zero_duration_loops() {
     let planned = source.start_planning().unwrap();
     assert!(matches!(
         planned.active_action().unwrap().action(),
-        CitizenAction::Forage | CitizenAction::FindRocks
+        CitizenAction::Forage
     ));
     let advanced = planned.advance(24 * 3_600_000).unwrap();
     assert!(advanced.hunger().is_finite());

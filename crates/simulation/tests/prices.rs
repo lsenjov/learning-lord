@@ -1,144 +1,104 @@
+use learning_lord_simulation::locations::Map;
 use learning_lord_simulation::marketplace::{DAY_MS, Good, Prices, UPDATE_TIME_MS};
-use learning_lord_simulation::{
-    ACTION_DURATION_MS, AgentKind, Citizen, CitizenAction, TRADE_DURATION_MS, Universe,
-};
+use learning_lord_simulation::{AgentKind, Citizen, CitizenAction, TRADE_DURATION_MS, Universe};
 
-fn citizen(universe: &Universe) -> &Citizen {
-    let AgentKind::Citizen(citizen) = &universe.agents().values().next().unwrap().kind;
+fn citizen(universe: &Universe, id: learning_lord_simulation::AgentId) -> &Citizen {
+    let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
     citizen
 }
 
 #[test]
-fn prices_are_randomized_at_creation_and_at_four_each_day() {
-    let source = Universe::with_map(learning_lord_simulation::locations::Map::default());
+fn fixed_prices_validate_and_remain_stable_until_demand_pricing_is_added() {
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        assert!(Prices::new(invalid, 1.0).is_err());
-        assert!(Prices::new(1.0, invalid).is_err());
+        assert!(Prices::new(invalid).is_err());
     }
+    let source = Universe::with_map(Map::default());
+    assert_eq!(source.prices(), Prices::default());
     let mut current = source.clone();
     for day in 0..100 {
-        let prices = current.prices();
-        assert!((1.0..=2.0).contains(&prices.coins_per_kg(Good::Berries).unwrap()));
-        assert!((1.0..=6.0).contains(&prices.coins_per_kg(Good::Pebbles).unwrap()));
         let duration = if day == 0 { UPDATE_TIME_MS } else { DAY_MS };
-        let before = current.advance(duration - 1).unwrap();
-        assert_eq!(before.prices(), prices);
-        current = before.advance(1).unwrap();
-        assert_ne!(current.prices(), prices);
+        current = current.advance(duration).unwrap();
+        assert_eq!(current.prices(), source.prices());
     }
     assert_eq!(
         source.advance(UPDATE_TIME_MS + 99 * DAY_MS).unwrap(),
         current
     );
-    assert_ne!(
-        Universe::with_map(learning_lord_simulation::locations::Map::default()).prices(),
-        source.prices()
-    );
     assert_eq!(source.current_time_ms(), 0);
 }
 
 #[test]
-fn all_citizens_share_prices_and_existing_trades_keep_their_quotes() {
-    let initial = Prices::new(1.0, 2.0).unwrap();
-    let universe = Universe::with_map(learning_lord_simulation::locations::Map::default())
-        .with_prices(initial)
-        .advance(UPDATE_TIME_MS - 60_000)
-        .unwrap();
-    let (universe, buyer) = universe
-        .with_citizen("buyer", Citizen::new(0.0).unwrap().with_coins(1.0).unwrap())
-        .unwrap();
-    let (universe, seller) = universe
+fn all_citizens_share_reference_prices_but_existing_orders_keep_their_asking_prices() {
+    let (universe, seller) = Universe::with_map(Map::default())
         .with_citizen(
-            "seller",
-            Citizen::new(0.0).unwrap().with_pebbles(100.0).unwrap(),
+            "Seller",
+            Citizen::new(0.0).unwrap().with_berries(100.0).unwrap(),
         )
         .unwrap();
-    let started = universe
+    let (universe, buyer) = universe
+        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(1.0).unwrap())
+        .unwrap();
+    let listed = universe
+        .start_action(seller, CitizenAction::List(Good::Berries, 100.0))
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    let repriced = listed.with_prices(Prices::new(2.0).unwrap());
+    for agent in repriced.agents().values() {
+        let AgentKind::Citizen(c) = &agent.kind;
+        assert_eq!(c.prices(), repriced.prices());
+    }
+    assert_eq!(repriced.market().orders().next().unwrap().coins_per_kg, 1.0);
+    let bought = repriced
         .start_action(buyer, CitizenAction::BuyBerries)
         .unwrap()
-        .start_action(seller, CitizenAction::SellPebbles)
+        .advance(TRADE_DURATION_MS)
         .unwrap();
-    let boundary = started.advance(60_000).unwrap();
-    for agent in boundary.agents().values() {
-        let AgentKind::Citizen(citizen) = &agent.kind;
-        assert_eq!(citizen.prices(), boundary.prices());
-        assert_eq!(
-            citizen.active_action().unwrap().remaining_ms(),
-            TRADE_DURATION_MS - 60_000
-        );
-    }
-    let complete = boundary.advance(TRADE_DURATION_MS - 60_000).unwrap();
-    let AgentKind::Citizen(bought) = &complete.agents()[&buyer].kind;
-    let AgentKind::Citizen(sold) = &complete.agents()[&seller].kind;
-    assert_eq!(bought.berries_grams(), 100.0);
-    assert_eq!(bought.coins(), 0.9);
-    assert_eq!(sold.coins(), 0.2);
-    assert_eq!(sold.pebbles_grams(), 0.0);
-    assert_eq!(complete, started.advance(TRADE_DURATION_MS).unwrap());
-    assert_eq!(started.prices(), initial);
+    assert_eq!(citizen(&bought, buyer).berries_grams(), 100.0);
+    assert_eq!(citizen(&bought, buyer).coins(), 0.9);
+    assert_eq!(citizen(&bought, seller).coins(), 0.1);
+    assert_eq!(listed.prices(), Prices::default());
 }
 
 #[test]
-fn prices_revalue_stock_without_changing_inventory_or_forcing_replanning() {
+fn prices_revalue_inventory_and_listed_goods_without_forcing_replanning() {
     let source = Citizen::with_needs(-50.0, -100.0)
         .unwrap()
-        .with_berries(50.0)
-        .unwrap()
-        .with_pebbles(50.0)
+        .with_berries(200.0)
         .unwrap();
-    let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
+    let (universe, id) = Universe::with_map(Map::default())
         .with_citizen("Ada", source)
         .unwrap();
-    let universe = universe
-        .advance(UPDATE_TIME_MS - 1)
+    let listed = universe
+        .start_action(id, CitizenAction::List(Good::Berries, 100.0))
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
         .unwrap()
         .start_planning(id)
         .unwrap();
-    let planned = citizen(&universe).active_plan().unwrap().plan().clone();
-    let after = universe.advance(1).unwrap();
-    let updated = citizen(&after);
-    assert_eq!(updated.active_plan().unwrap().plan(), &planned);
-    assert_eq!(updated.active_plan().unwrap().elapsed_ms(), 1);
-    let expected = updated.coins()
-        + after
-            .prices()
-            .value(Good::Berries, updated.berries_grams())
-            .unwrap()
-        + after
-            .prices()
-            .value(Good::Pebbles, updated.pebbles_grams())
-            .unwrap();
-    assert_eq!(updated.wealth(), Ok(expected));
-    assert_eq!(universe.advance(0).unwrap(), universe);
-}
-
-#[test]
-fn pebble_yield_is_half_the_berry_yield_from_the_same_random_state() {
-    let source = Citizen::new(0.0).unwrap();
-    let foraged = source
-        .start_action(CitizenAction::Forage)
-        .unwrap()
-        .advance(ACTION_DURATION_MS)
-        .unwrap();
-    let rocks = source
-        .start_action(CitizenAction::FindRocks)
-        .unwrap()
-        .advance(ACTION_DURATION_MS)
-        .unwrap();
-    assert_eq!(rocks.pebbles_grams(), foraged.berries_grams() / 2.0);
-    assert!((2.5..=7.5).contains(&rocks.pebbles_grams()));
+    let updated = listed.with_prices(Prices::new(2.0).unwrap());
+    assert_eq!(
+        citizen(&listed, id).active_plan(),
+        citizen(&updated, id).active_plan()
+    );
+    assert_eq!(
+        citizen(&listed, id).grams(Good::Berries),
+        citizen(&updated, id).grams(Good::Berries)
+    );
+    assert_eq!(citizen(&updated, id).wealth(), Ok(0.4));
+    assert_eq!(updated.advance(0).unwrap(), updated);
 }
 
 #[test]
 fn predictions_hold_prices_fixed_beyond_the_daily_update() {
     let source = Citizen::with_needs(-50.0, 50.0)
         .unwrap()
-        .with_pebbles(100.0)
+        .with_berries(200.0)
         .unwrap();
-    let (universe, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
+    let (universe, id) = Universe::with_map(Map::default())
         .with_citizen("Ada", source)
         .unwrap();
-    let source = citizen(&universe);
+    let source = citizen(&universe, id);
     let chosen = learning_lord_simulation::planning::plan(source).unwrap();
     assert_eq!(chosen.actions(), &[CitizenAction::Sleep]);
     let predicted = source
@@ -155,9 +115,5 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .unwrap()
         .advance(8 * 3_600_000)
         .unwrap();
-    assert_eq!(
-        actual.prices(),
-        universe.advance(8 * 3_600_000).unwrap().prices()
-    );
-    assert_ne!(actual.prices(), universe.prices());
+    assert_eq!(actual.prices(), universe.prices());
 }
