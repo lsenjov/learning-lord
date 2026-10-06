@@ -105,7 +105,7 @@ fn unsold_supply_lowers_prices_gradually_and_respects_the_floor() {
     let after = u.advance(UPDATE_TIME_MS - u.current_time_ms()).unwrap();
     close(after.prices().coins_per_kg(Good::Berries).unwrap(), 0.9);
     assert_eq!(after.market().history()[0].remaining_supply_grams, 100.0);
-    assert_eq!(after.market().orders().next().unwrap().coins_per_kg, 1.0);
+    assert_eq!(after.market().orders().next().unwrap().coins_per_kg, 0.9);
     assert_eq!(citizen(&after, seller).grams(Good::Berries), 0.0);
     let floor = u
         .with_prices(Prices::new(MIN_COINS_PER_KG).unwrap())
@@ -208,7 +208,8 @@ fn seller_income_funds_an_existing_request_without_accumulating_retries() {
 
 #[test]
 fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preserves_history() {
-    let (u, _) = supply(150.0);
+    let (u, seller) = supply(150.0);
+    let original_order = u.market().orders().next().unwrap().clone();
     let (u, id) = u
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(1.0).unwrap())
         .unwrap();
@@ -232,6 +233,23 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
     assert_eq!(day.remaining_supply_grams, 50.0);
     assert_eq!(direct.market().trades()[0].time_ms, UPDATE_TIME_MS);
     close(day.price_after, 0.98);
+    close(direct.market().trades()[0].coins, 0.1);
+    let remaining = direct.market().orders().next().unwrap();
+    assert_eq!(remaining.id, original_order.id);
+    assert_eq!(remaining.seller, seller);
+    assert_eq!(remaining.good, original_order.good);
+    assert_eq!(remaining.grams, 50.0);
+    close(remaining.coins_per_kg, 0.98);
+    let after = direct
+        .start_action(
+            id,
+            CitizenAction::Buy(ShoppingList::single(Good::Berries, 50.0)),
+        )
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    close(after.market().trades()[1].coins, 0.049);
+    assert_eq!(after.market().listed_grams(seller, Good::Berries), 0.0);
 }
 
 #[test]
@@ -258,4 +276,33 @@ fn prediction_does_not_register_demands_or_publish_history() {
     assert!(isolated.market().trades().is_empty());
     assert!(isolated.market().history().is_empty());
     assert_eq!(u, before);
+}
+
+#[test]
+fn purchases_crossing_four_settle_at_updated_live_order_prices() {
+    let (source, seller) = supply(150.0);
+    let (source, buyer) = source
+        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(1.0).unwrap())
+        .unwrap();
+    let source = source
+        .advance(UPDATE_TIME_MS - source.current_time_ms() - TRADE_DURATION_MS / 2)
+        .unwrap()
+        .start_action(
+            buyer,
+            CitizenAction::Buy(ShoppingList::single(Good::Berries, 100.0)),
+        )
+        .unwrap();
+    let boundary = source.advance(TRADE_DURATION_MS / 2).unwrap();
+    close(
+        boundary.market().orders().next().unwrap().coins_per_kg,
+        0.98,
+    );
+    assert!(boundary.market().trades().is_empty());
+    assert_eq!(boundary.market().listed_grams(seller, Good::Berries), 150.0);
+    let completed = boundary.advance(TRADE_DURATION_MS / 2).unwrap();
+    assert_eq!(completed.market().trades()[0].grams, 100.0);
+    close(completed.market().trades()[0].coins, 0.098);
+    close(citizen(&completed, buyer).coins(), 0.902);
+    close(citizen(&completed, seller).coins(), 0.098);
+    assert_eq!(completed, source.advance(TRADE_DURATION_MS).unwrap());
 }

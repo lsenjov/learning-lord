@@ -517,6 +517,10 @@ impl Market {
                 price_after: after,
             });
         }
+        for id in self.orders.keys().copied().collect::<Vec<_>>() {
+            let order = self.orders.get_mut(&id).unwrap();
+            order.coins_per_kg = self.prices.coins_per_kg(order.good).unwrap();
+        }
         self.period_trades = [TradedVolume::default(); Good::COUNT];
         self.period_start_ms = boundary;
         Ok(())

@@ -28,7 +28,7 @@ fn inactive_prices_validate_and_remain_stable_across_daily_boundaries() {
 }
 
 #[test]
-fn all_citizens_share_reference_prices_but_existing_orders_keep_their_asking_prices() {
+fn explicit_setup_prices_share_citizen_context_without_running_the_daily_update() {
     let (universe, seller) = Universe::with_map(Map::default())
         .with_citizen(
             "Seller",

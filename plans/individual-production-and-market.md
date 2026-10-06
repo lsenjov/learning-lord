@@ -7,7 +7,7 @@ Implement the agreed prototype economy in reviewed, committed stages. If impleme
 - Ownership remains individual: each citizen owns their goods, coins, properties, orders and production target.
 - Remove pebbles and Find Rocks, including their old planner and interface paths.
 - Finite sell orders hold goods until purchased or withdrawn. Partial purchases transfer goods and coins atomically at action completion. Buyers cannot buy from themselves. Unsold goods remain owned wealth and can be retrieved at the market.
-- Listing and buying take five minutes at the market. Keep prediction-local trading cooldowns. New orders use reference prices; existing orders retain their asking prices.
+- Listing and buying take five minutes at the market. Keep prediction-local trading cooldowns. New orders use reference prices; at 04:00, existing orders adopt the updated reference price for their good.
 - A Buy action accepts a shopping list containing several goods. The entire purchase takes five minutes and starts one shared two-hour prediction-local buy cooldown at completion. It buys available quantities within the citizen's budget; it does not wait two hours between different ingredients. This was explicitly clarified and approved during step 1.
 - Predictions clone market state, assume stable prices and do not reserve real stock, advance other citizens or write actual demand/sales history. Execution tolerates changed stock and replans when a shortage prevents the next action.
 - Track executed trade quantity/value and historical market activity, as well as each citizen's current affordable purchase requirement. Repeated attempts replace requirements instead of accumulating fictitious demand.
@@ -16,7 +16,7 @@ Implement the agreed prototype economy in reviewed, committed stages. If impleme
 - Choose prototype numerical values to make the production chain generally more efficient than subsistence foraging. Keep them central and easy to tune.
 - Production targets are revisable quantities, not strict timetables. Start with a small exploratory batch per eligible profitable product; use observed volume and profitability per hour to choose replenishment work within estimated daily capacity.
 - Production targets aim for one day of expected own sales plus the full affordable unmet market demand. Do not divide unmet demand among producers: each may compete for it, constrained by its own time, funds, skills, property and inputs. Market requests are still counted only once. Subtract carried saleable output, listed output and output already underway; choose batches by profit per production hour within a 12-hour daily capacity. Account for personal food separately. Unsold exploratory output counts toward the target and prevents endless trial batches.
-- Unsold stock is intentionally allowed to keep pushing reference prices down, even when producers maintain buffer stock. Keep the daily percentage bound and a small positive numerical floor. Outside traders and an economic export-price floor are future work, not part of this milestone. Existing order asking prices remain fixed until goods are withdrawn and relisted.
+- Unsold stock is intentionally allowed to keep pushing reference prices down, even when producers maintain buffer stock. Keep the daily percentage bound and a small positive numerical floor. Outside traders and an economic export-price floor are future work, not part of this milestone. Daily price updates also reprice remaining standing orders without changing their owners or quantities.
 - The four-hour action planner executes production intentions alongside hunger/sleep, retaining the two-hour commitment and finishing the current action. Targets are reconsidered daily or when essential inputs become unavailable.
 - Reserve inputs for remaining target quantities plus personal food. Combine competing uses without counting the same inventory twice. Reserves restrict selling, not necessary eating.
 - Listing excess is a standing policy. A minimum listing value avoids tiny dedicated selling trips. Listing gives no artificial wealth bonus and predicted sales are not guaranteed.
@@ -62,3 +62,10 @@ Each step must pass appropriate formatting, tests and Clippy, receive independen
 - Action completions at exactly 04:00 settle into the closing interval before prices update; subsequent actions see the new reference prices. History records active per-good intervals with traded volume/value, remaining supply/unmet demand and before/after prices. Omitted inactive periods still count as elapsed time for later sales-rate estimation.
 - Standing supply and unmet demand use the boundary snapshot initially. No time-weighted stock integration is introduced in this prototype.
 - Step 3 verification: 148 workspace tests, formatting/diff checks and Clippy with warnings denied passed. Independent Sol-6.1 review approved the logic and separately ran all 12 demand/price tests. The sole low documentation finding was corrected. Tests cover replacement/cancellation, live shared budgets, partial fulfilment, existing asking prices, interval history, daily limits/floor, snapshot isolation and boundary chronology.
+
+### Standing-order repricing
+
+- Daily updates at 04:00 now apply to existing orders, preserving IDs, owners and quantities. Earlier fixed-ask notes are superseded by this decision.
+- Completions exactly at the boundary settle before repricing; purchases spanning the boundary use the updated live asks when they finish. Historical trades remain unchanged.
+- Explicit `with_prices` fixture setup changes reference context without simulating a daily update.
+- Independent review found no high, medium or low issues; all 27 demand, price and trading tests passed.
