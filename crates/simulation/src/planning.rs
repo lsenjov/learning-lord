@@ -35,9 +35,70 @@ impl GoalDecision {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ProductionInputDecision {
+    pub good: crate::marketplace::Good,
+    pub required_grams: f64,
+    pub carried_grams: f64,
+    pub supply_shortfall: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProductionDecision {
+    pub recipe: crate::production::Recipe,
+    pub profit_per_hour: Option<f64>,
+    pub remaining_batches: Option<f64>,
+    pub inputs: Vec<ProductionInputDecision>,
+    pub prefix_attempted: bool,
+    pub preparation_limit_observed: bool,
+    pub feasible_sequence_found: bool,
+    pub selected: bool,
+    pub best_competing_score: Option<f64>,
+}
+
+impl ProductionDecision {
+    fn new(citizen: &Citizen, recipe: crate::production::Recipe) -> Self {
+        Self {
+            recipe,
+            profit_per_hour: crate::production::recipe_profit(recipe, citizen)
+                .zip(recipe.duration_ms(citizen).ok())
+                .map(|(profit, duration)| profit * 3_600_000.0 / duration as f64),
+            remaining_batches: citizen
+                .production_targets()
+                .map(|t| t.remaining_batches(recipe)),
+            inputs: recipe
+                .inputs()
+                .iter()
+                .map(|&(good, required_grams)| {
+                    let carried_grams = citizen.grams(good);
+                    let obtainable = carried_grams
+                        + citizen.market().listed_grams(citizen.id(), good)
+                        + citizen.market().available_grams(citizen.id(), good);
+                    let can_gather = good == crate::marketplace::Good::Berries
+                        || citizen
+                            .available_recipes()
+                            .any(|r| r.outputs().iter().any(|&(g, _)| g == good));
+                    ProductionInputDecision {
+                        good,
+                        required_grams,
+                        carried_grams,
+                        supply_shortfall: obtainable < required_grams && !can_gather,
+                    }
+                })
+                .collect(),
+            prefix_attempted: false,
+            preparation_limit_observed: false,
+            feasible_sequence_found: false,
+            selected: false,
+            best_competing_score: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlanningDecision {
     pub candidates: Vec<GoalDecision>,
     pub selected_goal: Effect,
+    pub production: Vec<ProductionDecision>,
     pub prices: crate::marketplace::Prices,
 }
 
@@ -221,6 +282,10 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
     }
     let mut best = empty_plan();
     let mut candidates = Vec::new();
+    let mut production: Vec<_> = citizen
+        .available_recipes()
+        .map(|recipe| ProductionDecision::new(citizen, recipe))
+        .collect();
     let mut selected_goal = Effect::ReduceTiredness;
     let standing_listing = citizen.production_targets().is_some()
         && citizen.hunger() < crate::production::URGENT_HUNGER
@@ -249,7 +314,17 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
         let mut forecast = None;
         let mut goal_best = empty_plan();
         let initial = Prediction::new(citizen, Cooldowns::default());
-        for variant in goals::variants_after(&initial, goal)? {
+        let variants = if goal == Effect::Production {
+            goals::production_prefixes(initial, 0, &mut production)?
+        } else {
+            goals::variants_after(&initial, goal)?
+        };
+        for variant in variants {
+            for diagnostic in &mut production {
+                diagnostic.feasible_sequence_found |= variant
+                    .actions
+                    .contains(&CitizenAction::Produce(diagnostic.recipe));
+            }
             let actions = variant.actions.clone();
             let duration_ms = variant.elapsed_ms;
             let average_wellbeing = variant.average()?;
@@ -265,6 +340,23 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
                 vec![boundary],
                 &mut cache,
             )?;
+            if continuation.average_wellbeing.is_finite() {
+                for diagnostic in &mut production {
+                    if continuation
+                        .actions
+                        .contains(&CitizenAction::Produce(diagnostic.recipe))
+                    {
+                        diagnostic.feasible_sequence_found = true;
+                        diagnostic.best_competing_score = Some(
+                            diagnostic
+                                .best_competing_score
+                                .map_or(continuation.average_wellbeing, |score| {
+                                    score.max(continuation.average_wellbeing)
+                                }),
+                        );
+                    }
+                }
+            }
             if continuation.average_wellbeing > goal_best.average_wellbeing {
                 forecast = Some(GoalForecast {
                     actions,
@@ -281,9 +373,15 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
         }
         candidates.push(GoalDecision { goal, forecast });
     }
+    for diagnostic in &mut production {
+        diagnostic.selected = best
+            .actions
+            .contains(&CitizenAction::Produce(diagnostic.recipe));
+    }
     best.decision = Some(Arc::new(PlanningDecision {
         candidates,
         selected_goal,
+        production,
         prices: citizen.prices(),
     }));
     Ok(best)

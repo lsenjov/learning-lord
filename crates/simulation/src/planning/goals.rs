@@ -522,6 +522,24 @@ fn production_order(
     reserved_ms: u64,
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
+    production_order_with_evidence(
+        initial,
+        recipes,
+        food_target,
+        reserved_ms,
+        prior_actions,
+        &mut false,
+    )
+}
+
+fn production_order_with_evidence(
+    initial: &Prediction,
+    recipes: &[crate::production::Recipe],
+    food_target: Option<f64>,
+    reserved_ms: u64,
+    prior_actions: usize,
+    preparation_limit: &mut bool,
+) -> Result<Vec<Prediction>, SimulationError> {
     let requirements = recipe_requirements(recipes)?;
     let mut variants = Vec::new();
     for mut state in prepare_inputs(initial, &requirements, reserved_ms, prior_actions)? {
@@ -560,6 +578,7 @@ fn production_order(
             if state.elapsed_ms >= GOAL_HORIZON_MS
                 || state.elapsed_ms + reserved_ms > GOAL_HORIZON_MS
             {
+                *preparation_limit = true;
                 complete = false;
                 break;
             }
@@ -781,9 +800,10 @@ pub(super) fn variants_after(
     variants_from(initial, goal, prefix.actions.len())
 }
 
-fn production_prefixes(
+pub(super) fn production_prefixes(
     initial: Prediction,
     prior_actions: usize,
+    diagnostics: &mut [super::ProductionDecision],
 ) -> Result<Vec<Prediction>, SimulationError> {
     let Some(targets) = initial.citizen.production_targets() else {
         return Ok(Vec::new());
@@ -816,7 +836,19 @@ fn production_prefixes(
         };
         let mut extended = order.clone();
         extended.push(recipe);
-        let next = production_order(&initial, &extended, None, 0, prior_actions)?;
+        let mut preparation_limit = false;
+        let next = production_order_with_evidence(
+            &initial,
+            &extended,
+            None,
+            0,
+            prior_actions,
+            &mut preparation_limit,
+        )?;
+        if let Some(diagnostic) = diagnostics.iter_mut().find(|d| d.recipe == recipe) {
+            diagnostic.prefix_attempted = true;
+            diagnostic.preparation_limit_observed |= preparation_limit;
+        }
         if next.is_empty() {
             pending.push((order, index + 1));
         } else {
@@ -853,7 +885,7 @@ fn variants_from(
         }
     };
     if goal == Effect::Production {
-        return production_prefixes(initial, prior_actions);
+        return production_prefixes(initial, prior_actions, &mut []);
     }
     if goal == Effect::ReplenishReserves {
         for target in [
@@ -1230,6 +1262,41 @@ mod tests {
     }
 
     #[test]
+    fn production_evidence_keeps_variants_and_records_observed_window_exclusion() {
+        use crate::production::Recipe;
+        let source = buying_baker(2000.0);
+        let initial = Prediction::new(&source, Cooldowns::default());
+        let mut diagnostics: Vec<_> = source
+            .available_recipes()
+            .map(|recipe| super::super::ProductionDecision::new(&source, recipe))
+            .collect();
+        let observed = production_prefixes(initial.clone(), 0, &mut diagnostics).unwrap();
+        let original = production_prefixes(initial, 0, &mut []).unwrap();
+        assert_eq!(
+            observed.iter().map(|p| &p.actions).collect::<Vec<_>>(),
+            original.iter().map(|p| &p.actions).collect::<Vec<_>>()
+        );
+        assert!(diagnostics.iter().any(|d| d.prefix_attempted));
+
+        let mut initial = Prediction::new(&source, Cooldowns::default());
+        initial.elapsed_ms = GOAL_HORIZON_MS - 60 * 60_000;
+        let mut excluded = false;
+        assert!(
+            production_order_with_evidence(
+                &initial,
+                &[Recipe::BakeBread; 2],
+                None,
+                0,
+                0,
+                &mut excluded
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(excluded);
+    }
+
+    #[test]
     fn input_stock_shortage_retains_shorter_prefixes_and_next_recipe_fallback() {
         use crate::production::Recipe;
         let initial = Prediction::new(&buying_baker(100.0), Cooldowns::default());
@@ -1243,7 +1310,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(!production_prefixes(initial, 0).unwrap().is_empty());
+        assert!(!production_prefixes(initial, 0, &mut []).unwrap().is_empty());
         let source = buying_baker(2000.0).with_good(Good::Flour, 100.0).unwrap();
         let mut market = source.market().clone();
         // Pie cannot obtain its berries; bread remains available after the preferred recipe fails.
@@ -1266,7 +1333,7 @@ mod tests {
         assert!(targets.remaining_batches(Recipe::BakeBerryPie) > 0.0);
         assert!(targets.remaining_batches(Recipe::BakeBread) > 0.0);
         assert!(
-            production_prefixes(Prediction::new(&source, Cooldowns::default()), 0)
+            production_prefixes(Prediction::new(&source, Cooldowns::default()), 0, &mut [])
                 .unwrap()
                 .iter()
                 .any(|candidate| candidate

@@ -478,6 +478,66 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
             ));
         }
     }
+    if !decision.production.is_empty() {
+        lines.push("\nProduction recipes | last decision snapshot".into());
+        lines.push("Inputs and targets below are from that decision, not current inventory.\nFeasibility reflects recorded root sequences and completed forecasts, including later goals; ordered prefixes can skip a recipe.".into());
+        for recipe in &decision.production {
+            let profit = recipe
+                .profit_per_hour
+                .map_or_else(|| "unknown".into(), |value| format!("{value:.3} coins/h"));
+            let target = recipe.remaining_batches.map_or_else(
+                || "not tracked".into(),
+                |value| format!("{value:.2} batches"),
+            );
+            lines.push(format!(
+                "\n{} | Estimated profit {} | Target remaining {}",
+                recipe.recipe.name(),
+                profit,
+                target
+            ));
+            if recipe.inputs.is_empty() {
+                lines.push("Inputs per batch: none".into());
+            } else {
+                for input in &recipe.inputs {
+                    lines.push(format!(
+                        "Inputs per batch — {}: {:.1}/{:.1} g carried | {:.1} g missing{}",
+                        input.good.name(),
+                        input.carried_grams,
+                        input.required_grams,
+                        (input.required_grams - input.carried_grams).max(0.0),
+                        if input.supply_shortfall {
+                            " | insufficient accessible supplies"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+            }
+            let status = if recipe.selected {
+                "Included in selected full plan (possibly after other goals)."
+            } else if recipe.best_competing_score.is_some_and(|score| {
+                score < citizen.active_plan().unwrap().plan().average_wellbeing()
+            }) {
+                "Feasible sequence found; another full plan scored better."
+            } else if recipe.feasible_sequence_found {
+                "Feasible sequence found; absent from selected full plan (ties can retain the earlier plan)."
+            } else if recipe.inputs.iter().any(|input| input.supply_shortfall) {
+                "No feasible sequence found; insufficient accessible input supplies."
+            } else if recipe.remaining_batches == Some(0.0) {
+                "No sequence found; production target already met (prerequisites or food goals may still use this recipe)."
+            } else if recipe.profit_per_hour.is_some_and(|profit| profit <= 0.0) {
+                "No sequence found; nonpositive estimated profit excludes this recipe from the production target queue."
+            } else if recipe.prefix_attempted {
+                "No feasible sequence found in explored prefixes; supplies, four-hour preparation limit or action rules blocked them."
+            } else {
+                "No sequence found; recipe not reached in production prefixes or production goal not compared."
+            };
+            lines.push(status.into());
+            if recipe.preparation_limit_observed {
+                lines.push("Observed exclusion: a tested prefix reached the four-hour preparation limit before a production step.".into());
+            }
+        }
+    }
     lines.push(
         "\nChosen by full-plan time-weighted action endpoint averages.\nEach sequence leads to its goal's best full plan.\nGoal avg scores only the sequence shown.\nRepeated gathering segments form one order.".into(),
     );
@@ -598,6 +658,35 @@ mod tests {
             ),
             "Forage x2 > Eat"
         );
+    }
+
+    #[test]
+    fn production_readout_explains_saved_supplies_and_targets() {
+        use learning_lord_simulation::{StartingRole, production::Recipe};
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_citizen(
+                    "Baker",
+                    Citizen::new(0.0)
+                        .unwrap()
+                        .with_starting_role(StartingRole::Baker)
+                        .with_berries(930.0)
+                        .unwrap(),
+                )
+                .unwrap();
+        let (universe, _) = universe
+            .with_property(id, Recipe::BakeBread.location())
+            .unwrap();
+        let universe = universe.start_planning(id).unwrap();
+        let text = decision_readout(&universe, Some(id));
+        assert!(text.contains("Production recipes | last decision snapshot"));
+        assert!(text.contains("not current inventory"));
+        assert!(text.contains("Bake bread | Estimated profit"));
+        assert!(text.contains("Target remaining"));
+        assert!(text.contains("insufficient accessible input supplies"));
+        assert!(text.contains("100.0 g missing"));
+        let later = universe.advance(1).unwrap();
+        assert_eq!(text, decision_readout(&later, Some(id)));
     }
 
     #[test]

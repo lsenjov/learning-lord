@@ -489,3 +489,124 @@ fn remaining_recipe_inputs_and_personal_food_use_separate_portions_of_inventory(
     assert_eq!(citizen(&universe, baker).production_targets(), None);
     assert_eq!(citizen(&universe, baker).grams(Good::Berries), 1130.0);
 }
+
+#[test]
+fn decision_snapshots_inputs_targets_and_observed_production() {
+    let (universe, id) = producer(
+        Universe::with_map(Map::default()),
+        "Farmer",
+        StartingRole::Farmer,
+        &[(Good::Berries, 930.0)],
+        0.0,
+    );
+    let universe = universe.start_planning(id).unwrap();
+    let worker = citizen(&universe, id);
+    let decision = worker.active_plan().unwrap().plan().decision().unwrap();
+    let wheat = decision
+        .production
+        .iter()
+        .find(|d| d.recipe == Recipe::GrowWheat)
+        .unwrap();
+    assert!(wheat.profit_per_hour.unwrap() > 0.0);
+    assert!(wheat.remaining_batches.unwrap() > 0.0);
+    assert!(wheat.inputs.is_empty());
+    assert!(wheat.prefix_attempted);
+    assert!(wheat.feasible_sequence_found);
+    assert!(wheat.best_competing_score.is_some());
+    assert_eq!(
+        wheat.selected,
+        worker
+            .active_plan()
+            .unwrap()
+            .plan()
+            .actions()
+            .contains(&CitizenAction::Produce(Recipe::GrowWheat))
+    );
+    let snapshot = decision.clone();
+    let later = universe.advance(1).unwrap();
+    assert_eq!(
+        citizen(&later, id)
+            .active_plan()
+            .unwrap()
+            .plan()
+            .decision()
+            .unwrap(),
+        &snapshot
+    );
+}
+
+#[test]
+fn decision_proves_missing_supplies_without_claiming_missing_water_is_unavailable() {
+    let (universe, id) = producer(
+        Universe::with_map(Map::default()),
+        "Baker",
+        StartingRole::Baker,
+        &[(Good::Berries, 930.0)],
+        0.0,
+    );
+    let universe = universe.start_planning(id).unwrap();
+    let decision = citizen(&universe, id)
+        .active_plan()
+        .unwrap()
+        .plan()
+        .decision()
+        .unwrap();
+    let bread = decision
+        .production
+        .iter()
+        .find(|d| d.recipe == Recipe::BakeBread)
+        .unwrap();
+    let flour = bread
+        .inputs
+        .iter()
+        .find(|input| input.good == Good::Flour)
+        .unwrap();
+    let water = bread
+        .inputs
+        .iter()
+        .find(|input| input.good == Good::Water)
+        .unwrap();
+    assert_eq!(flour.carried_grams, 0.0);
+    assert!(flour.supply_shortfall);
+    assert!(!water.supply_shortfall);
+    assert!(!bread.feasible_sequence_found);
+    assert!(!bread.selected);
+}
+
+#[test]
+fn decision_observes_recipe_only_reached_in_later_goals() {
+    let (universe, id) = producer(
+        Universe::with_map(Map::default()).with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(Good::Wheat, 100.0)
+                .unwrap(),
+        ),
+        "Farmer",
+        StartingRole::Farmer,
+        &[(Good::Berries, 930.0), (Good::Wheat, 400.0)],
+        0.0,
+    );
+    let universe = universe.start_planning(id).unwrap();
+    let plan = citizen(&universe, id).active_plan().unwrap().plan();
+    let decision = plan.decision().unwrap();
+    assert_eq!(
+        decision.selected_goal,
+        learning_lord_simulation::planning::goals::Effect::ListExcess
+    );
+    assert!(decision.candidates.iter().all(|c| {
+        c.forecast
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .all(|a| !matches!(a, CitizenAction::Produce(_)))
+    }));
+    let wheat = decision
+        .production
+        .iter()
+        .find(|d| d.recipe == Recipe::GrowWheat)
+        .unwrap();
+    assert!(!wheat.prefix_attempted);
+    assert!(wheat.feasible_sequence_found);
+    assert!(wheat.best_competing_score.is_some());
+}
