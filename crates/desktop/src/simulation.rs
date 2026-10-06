@@ -188,7 +188,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         ("Cleo", StartingRole::Woodcutter),
         ("Dara", StartingRole::Baker),
     ] {
-        let mut citizen = Citizen::with_needs(-50.0, -100.0)?
+        let mut citizen = Citizen::with_needs(-50.0, -66.6)?
             .with_berries(310.0)?
             .with_starting_role(role)
             .with_coins(learning_lord_simulation::production::starting_coins(role))?;
@@ -412,7 +412,7 @@ mod tests {
         for agent in universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert_eq!(citizen.hunger(), -50.0);
-            assert_eq!(citizen.tiredness(), -100.0);
+            assert_eq!(citizen.tiredness(), -66.6);
             assert_eq!(citizen.coins(), 3.0);
             assert_eq!(citizen.berries_grams(), 310.0);
             assert_eq!(citizen.map(), universe.map());
@@ -606,7 +606,7 @@ mod tests {
         );
         assert_eq!(citizen.map(), state.universe.map());
         assert_eq!(citizen.hunger(), -50.0);
-        assert_eq!(citizen.tiredness(), -100.0);
+        assert_eq!(citizen.tiredness(), -66.6);
         assert_eq!(citizen.coins(), 3.0);
         assert!(citizen.active_plan().is_some());
     }
