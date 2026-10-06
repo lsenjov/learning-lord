@@ -100,6 +100,7 @@ fn main() -> Result<(), String> {
     .insert_resource(worker)
     .init_resource::<Controls>()
     .init_resource::<citizens::Selection>()
+    .init_resource::<citizens::RosterPage>()
     .init_resource::<citizens::PlanDisplay>()
     .init_resource::<citizen_history::Selection>()
     .init_resource::<market::Selection>()
@@ -119,6 +120,7 @@ fn main() -> Result<(), String> {
             market::handle_selection,
             refresh_display,
             citizens::refresh_cards,
+            citizens::refresh_page_label,
             citizens::refresh_plan,
             citizens::scroll_panels,
             map_view::refresh,
@@ -196,7 +198,7 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
             width: percent(100), flex_grow: 1.0, min_height: px(0),
             flex_direction: FlexDirection::Column, row_gap: px(10), ..default()
         })).with_children(|root| {
-        citizens::spawn_roster(root, snapshot.0.universe.agents().len().max(simulation::STARTING_CITIZENS.len()));
+        citizens::spawn_roster(root);
         root.spawn(Node { width: percent(100), flex_grow: 1.0, min_height: px(0), column_gap: px(14), ..default() })
             .with_children(|row| {
                 row.spawn((Node { width: px(324), flex_shrink: 0.0, flex_direction: FlexDirection::Column,
@@ -208,7 +210,7 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
             });
         });
         market::spawn(root);
-        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-6: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
+        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-6: select on page   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
         root.spawn((text("", 14.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
     });
 }
@@ -846,6 +848,7 @@ mod tests {
             .insert_resource(worker)
             .init_resource::<Controls>()
             .init_resource::<citizens::Selection>()
+            .init_resource::<citizens::RosterPage>()
             .init_resource::<citizens::PlanDisplay>()
             .init_resource::<citizen_history::Selection>()
             .init_resource::<market::Selection>()
@@ -867,6 +870,7 @@ mod tests {
                     market::handle_selection,
                     refresh_display,
                     citizens::refresh_cards,
+                    citizens::refresh_page_label,
                     citizens::refresh_plan,
                     citizens::scroll_panels,
                     map_view::refresh,
@@ -1035,7 +1039,7 @@ mod tests {
             simulation::START_TIME_MS
         );
         assert_eq!(snapshot.universe.prices(), previous_prices);
-        assert_eq!(snapshot.universe.agents().len(), 6);
+        assert_eq!(snapshot.universe.agents().len(), 24);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);

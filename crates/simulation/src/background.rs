@@ -562,6 +562,157 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual spatial town wall-clock benchmark"]
+    fn larger_spatial_town_benchmark() {
+        use crate::{
+            StartingRole,
+            locations::{Location, Position},
+        };
+        use rand::SeedableRng;
+        use std::time::{Duration, Instant};
+        let count: usize = std::env::var("TOWN_BENCH_CITIZENS")
+            .unwrap_or("24".into())
+            .parse()
+            .unwrap();
+        assert!(matches!(count, 6 | 24));
+        let days: u64 = std::env::var("TOWN_BENCH_DAYS")
+            .unwrap_or("3".into())
+            .parse()
+            .unwrap();
+        let cap = Duration::from_secs(
+            std::env::var("TOWN_BENCH_CAP_SECONDS")
+                .unwrap_or("120".into())
+                .parse()
+                .unwrap(),
+        );
+        let started = Instant::now();
+        let position = |slot: usize| Position {
+            x: -750.0 + (slot % 7) as f64 * 250.0,
+            y: -750.0 + (slot / 7) as f64 * 250.0,
+        };
+        let mut map = Map::new(position(0), position(1), position(2)).unwrap();
+        let roles = [
+            StartingRole::Farmer,
+            StartingRole::Miller,
+            StartingRole::Woodcutter,
+            StartingRole::Baker,
+            StartingRole::Weaver,
+            StartingRole::Tailor,
+        ];
+        let properties = [
+            Some(Location::Field),
+            Some(Location::Mill),
+            None,
+            Some(Location::Bakery),
+            Some(Location::Weavery),
+            Some(Location::Tailory),
+        ];
+        let mut citizens = Vec::new();
+        let mut slot = 3;
+        for index in 0..count {
+            let role = roles[index % 6];
+            let mut citizen = Citizen::with_needs(-50.0, -66.6)
+                .unwrap()
+                .with_berries(310)
+                .unwrap()
+                .with_garment_condition(Some(0.5))
+                .unwrap()
+                .with_starting_role(role)
+                .with_coins(crate::production::starting_coins(role))
+                .unwrap();
+            citizen.id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
+            citizen.forage_rng = rand::rngs::SmallRng::seed_from_u64(42 + index as u64);
+            for (good, units) in crate::production::starting_inputs(role).items() {
+                citizen = citizen.with_good(good, units).unwrap();
+            }
+            let (next, home) = map
+                .with_place(
+                    Location::Home,
+                    position(slot),
+                    Some(citizen.id),
+                    format!("Citizen {}'s home", index + 1),
+                )
+                .unwrap();
+            map = next;
+            citizen.home = home;
+            citizen.position = position(slot);
+            slot += 1;
+            if let Some(kind) = properties[index % 6] {
+                map = map
+                    .with_place(
+                        kind,
+                        position(slot),
+                        Some(citizen.id),
+                        format!("Citizen {index}'s {}", kind.name()),
+                    )
+                    .unwrap()
+                    .0;
+                slot += 1;
+            }
+            citizens.push(citizen);
+        }
+        let mut world = Universe::with_map(map.clone()).advance(6 * HOUR).unwrap();
+        for mut citizen in citizens {
+            citizen.map = map.clone();
+            world = world
+                .with_citizen(format!("Citizen {}", citizen.id.0.as_u128()), citizen)
+                .unwrap()
+                .0;
+        }
+        let ids: Vec<_> = (0..count)
+            .map(|index| AgentId(uuid::Uuid::from_u128(index as u128 + 1)))
+            .collect();
+        for id in ids {
+            world = world.start_planning(id).unwrap();
+        }
+        assert_eq!(world.map().places().len(), 3 + count + count / 6 * 5);
+        let mut home_slot = 3;
+        for index in 0..count {
+            let id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
+            let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
+            assert_eq!(world.map().position(citizen.home()), position(home_slot));
+            assert_eq!(citizen.position(), position(home_slot));
+            home_slot += 1 + usize::from(properties[index % 6].is_some());
+        }
+        let available = std::thread::available_parallelism().unwrap().get();
+        println!(
+            "citizens={count} hardware_threads={available} planning_workers={} startup_ms={:.3}",
+            available.saturating_sub(4).max(2),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let mut runtime = PlanningRuntime::default();
+        for day in 1..=days {
+            let day_start = Instant::now();
+            let next = world
+                .advance_with_planner(&mut runtime, 24 * HOUR, || day_start.elapsed() >= cap)
+                .unwrap();
+            let Some(next) = next else {
+                println!(
+                    "citizens={count} day={day} cancelled_after_ms={:.3} source_hour={}",
+                    day_start.elapsed().as_secs_f64() * 1000.0,
+                    world.current_time_ms() / HOUR
+                );
+                break;
+            };
+            world = next;
+            let mut hunger_max = f64::NEG_INFINITY;
+            let mut wealth = 0;
+            for agent in world.agents().values() {
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                assert!(citizen.hunger().is_finite() && citizen.tiredness().is_finite());
+                assert!(citizen.coins() >= 0);
+                hunger_max = hunger_max.max(citizen.hunger());
+                wealth += citizen.coins();
+            }
+            println!(
+                "citizens={count} day={day} elapsed_ms={:.3} trades={} orders={} max_hunger={hunger_max:.3} coins={wealth}",
+                day_start.elapsed().as_secs_f64() * 1000.0,
+                world.market().trades().len(),
+                world.market().orders().count()
+            );
+        }
+    }
+    #[test]
     #[ignore = "manual wall-clock benchmark"]
     fn fixed_town_day_benchmark() {
         use crate::{StartingRole, locations::Location};

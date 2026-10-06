@@ -16,6 +16,8 @@ pub struct MapLabel(usize);
 pub struct SiteLabel(usize);
 
 const MAP_SIZE: f32 = 300.0;
+const ROUTE_DOT_SPACING: f32 = 4.0;
+const ROUTE_DOTS: usize = (MAP_SIZE * std::f32::consts::SQRT_2 / ROUTE_DOT_SPACING) as usize + 2;
 const SITE_LABEL_WIDTH: f32 = 80.0;
 const SITE_LABEL_HEIGHT: f32 = 32.0;
 
@@ -23,7 +25,7 @@ const SITE_LABEL_HEIGHT: f32 = 32.0;
 pub enum MapItem {
     Site(usize),
     Citizen(usize),
-    Route,
+    Route(usize),
 }
 
 pub fn spawn(parent: &mut ChildSpawnerCommands, sites: usize, citizens: usize) {
@@ -53,16 +55,20 @@ pub fn spawn(parent: &mut ChildSpawnerCommands, sites: usize, citizens: usize) {
                     BackgroundColor(Color::srgb(0.055, 0.085, 0.095)),
                 ))
                 .with_children(|map| {
-                    map.spawn((
-                        Node {
-                            position_type: PositionType::Absolute,
-                            height: px(2),
-                            ..default()
-                        },
-                        UiTransform::default(),
-                        BackgroundColor(Color::srgb(0.85, 0.66, 0.25)),
-                        MapItem::Route,
-                    ));
+                    // Unrotated dots respect the scroll viewport's clipping rectangle.
+                    for slot in 0..ROUTE_DOTS {
+                        map.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                width: px(2),
+                                height: px(2),
+                                ..default()
+                            },
+                            UiTransform::default(),
+                            BackgroundColor(Color::srgb(0.85, 0.66, 0.25)),
+                            MapItem::Route(slot),
+                        ));
+                    }
                     for slot in 0..sites {
                         let color = Color::srgb(0.85, 0.75, 0.60);
                         map.spawn((
@@ -105,7 +111,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands, sites: usize, citizens: usize) {
                         });
                     }
                 });
-            panel.spawn(text("Walking: 1 km in 10 minutes\nLabels: public + selected properties\n1-6: select citizen", 13.0, MUTED));
+            panel.spawn(text("Walking: 1 km in 10 minutes\nLabels: public + selected properties\n1-6: select citizen on page", 13.0, MUTED));
         });
 }
 
@@ -147,7 +153,6 @@ pub fn refresh(
     mut items: Query<(
         &MapItem,
         &mut Node,
-        &mut UiTransform,
         &mut Visibility,
         Option<&mut BackgroundColor>,
     )>,
@@ -228,7 +233,7 @@ pub fn refresh(
             node.top = next;
         }
     }
-    for (item, mut node, mut transform, mut visibility, color) in &mut items {
+    for (item, mut node, mut visibility, color) in &mut items {
         match item {
             MapItem::Site(slot) => {
                 let Some(place) = sites.get(*slot) else {
@@ -314,7 +319,7 @@ pub fn refresh(
                     }
                 }
             }
-            MapItem::Route => {
+            MapItem::Route(slot) => {
                 let mut next_visibility = Visibility::Hidden;
                 if let Some(citizen) = citizen
                     && let Some(active) = citizen.active_action()
@@ -324,24 +329,19 @@ pub fn refresh(
                     let to = project(citizen.map().position(destination));
                     let delta = to - from;
                     let length = delta.length();
-                    let midpoint = (from + to) / 2.0;
-                    let next = px(midpoint.x - length / 2.0);
-                    if node.left != next {
-                        node.left = next;
+                    let intervals = (length / ROUTE_DOT_SPACING).ceil().max(1.0) as usize;
+                    if *slot <= intervals {
+                        let point = from + delta * (*slot as f32 / intervals as f32);
+                        let next = px(point.x - 1.0);
+                        if node.left != next {
+                            node.left = next;
+                        }
+                        let next = px(point.y - 1.0);
+                        if node.top != next {
+                            node.top = next;
+                        }
+                        next_visibility = Visibility::Inherited;
                     }
-                    let next = px(midpoint.y - 1.0);
-                    if node.top != next {
-                        node.top = next;
-                    }
-                    let next = px(length);
-                    if node.width != next {
-                        node.width = next;
-                    }
-                    let next = UiTransform::from_rotation(Rot2::radians(delta.y.atan2(delta.x)));
-                    if *transform != next {
-                        *transform = next;
-                    }
-                    next_visibility = Visibility::Inherited;
                 }
                 visibility.set_if_neq(next_visibility);
             }
@@ -377,6 +377,7 @@ mod tests {
         assert_ne!(first, site_label_position(point, &[occupied]));
 
         let universe = crate::simulation::new_universe().unwrap();
+        let place_count = universe.map().places().len();
         let agents = citizens::sorted_agents(&universe);
         let ada = agents[0].0;
         let bram = agents[1].0;
@@ -390,7 +391,7 @@ mod tests {
         }))
         .insert_resource(Selection(Some(ada)))
         .add_systems(Update, refresh);
-        let labels: Vec<_> = (0..14)
+        let labels: Vec<_> = (0..place_count)
             .map(|slot| {
                 app.world_mut()
                     .spawn((
@@ -402,7 +403,7 @@ mod tests {
                     .id()
             })
             .collect();
-        let markers: Vec<_> = (0..14)
+        let markers: Vec<_> = (0..place_count)
             .map(|slot| {
                 app.world_mut()
                     .spawn((
@@ -541,7 +542,25 @@ mod tests {
         let route = app
             .world_mut()
             .spawn((
-                MapItem::Route,
+                MapItem::Route(0),
+                Node::default(),
+                UiTransform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let endpoint = app
+            .world_mut()
+            .spawn((
+                MapItem::Route(10),
+                Node::default(),
+                UiTransform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let unused = app
+            .world_mut()
+            .spawn((
+                MapItem::Route(11),
                 Node::default(),
                 UiTransform::default(),
                 Visibility::Inherited,
@@ -567,7 +586,18 @@ mod tests {
             app.world().get::<Visibility>(route),
             Some(&Visibility::Inherited)
         );
-        assert_eq!(app.world().get::<Node>(route).unwrap().width, px(37.5));
+        assert_eq!(app.world().get::<Node>(route).unwrap().left, px(171.5));
+        assert_eq!(app.world().get::<Node>(route).unwrap().top, px(119.0));
+        assert_eq!(
+            app.world().get::<UiTransform>(route).unwrap(),
+            &UiTransform::default()
+        );
+        assert_eq!(app.world().get::<Node>(endpoint).unwrap().left, px(194.0));
+        assert_eq!(app.world().get::<Node>(endpoint).unwrap().top, px(89.0));
+        assert_eq!(
+            app.world().get::<Visibility>(unused),
+            Some(&Visibility::Hidden)
+        );
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe =
             travelling.advance(300_000).unwrap();
         app.update();

@@ -11,6 +11,20 @@ use learning_lord_simulation::{
 #[derive(Resource, Default)]
 pub struct Selection(pub Option<AgentId>);
 
+pub const CARDS_PER_PAGE: usize = 6;
+
+#[derive(Resource, Default)]
+pub struct RosterPage {
+    index: usize,
+    generation: u64,
+}
+
+#[derive(Component)]
+pub struct PageButton(isize);
+
+#[derive(Component)]
+pub struct PageLabel;
+
 #[derive(Resource, Default)]
 pub struct PlanDisplay {
     selected: Option<AgentId>,
@@ -82,7 +96,31 @@ pub fn selected_agent(universe: &Universe, id: Option<AgentId>) -> Option<&Agent
         .or_else(|| sorted_agents(universe).first().map(|(_, agent)| *agent))
 }
 
-pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
+pub fn spawn_roster(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn(Node {
+            column_gap: px(12),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            for (direction, label) in [(-1, "Previous"), (1, "Next")] {
+                row.spawn((
+                    Button,
+                    PageButton(direction),
+                    Node {
+                        padding: UiRect::axes(px(12), px(6)),
+                        border_radius: BorderRadius::all(px(6)),
+                        ..default()
+                    },
+                    BackgroundColor(PANEL),
+                ))
+                .with_children(|button| {
+                    button.spawn(text(label, 14.0, TEXT));
+                });
+            }
+            row.spawn((text("", 14.0, MUTED), PageLabel));
+        });
     parent
         .spawn(Node {
             width: percent(100),
@@ -91,7 +129,7 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
             ..default()
         })
         .with_children(|row| {
-            for slot in 0..count {
+            for slot in 0..CARDS_PER_PAGE {
                 row.spawn((
                     Button,
                     Card(slot),
@@ -206,10 +244,28 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
 pub fn handle_selection(
     snapshot: Res<DisplaySnapshot>,
     mut selection: ResMut<Selection>,
+    mut page: ResMut<RosterPage>,
+    buttons: Query<(&Interaction, &PageButton), Changed<Interaction>>,
     cards: Query<(&Interaction, &Card), Changed<Interaction>>,
     keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     let agents = sorted_agents(&snapshot.0.universe);
+    let pages = agents.len().div_ceil(CARDS_PER_PAGE).max(1);
+    if page.generation != snapshot.0.generation {
+        page.generation = snapshot.0.generation;
+        page.index = 0;
+        selection.0 = agents.first().map(|(id, _)| *id);
+    }
+    page.index = page.index.min(pages - 1);
+    for (interaction, button) in &buttons {
+        if *interaction == Interaction::Pressed {
+            let next = page.index.saturating_add_signed(button.0).min(pages - 1);
+            if next != page.index {
+                page.index = next;
+                selection.0 = agents.get(next * CARDS_PER_PAGE).map(|(id, _)| *id);
+            }
+        }
+    }
     if selection
         .0
         .is_none_or(|id| !snapshot.0.universe.agents().contains_key(&id))
@@ -221,7 +277,9 @@ pub fn handle_selection(
     }
     for (interaction, card) in &cards {
         if *interaction == Interaction::Pressed {
-            let next = agents.get(card.0).map(|(id, _)| *id);
+            let next = agents
+                .get(page.index * CARDS_PER_PAGE + card.0)
+                .map(|(id, _)| *id);
             if selection.0 != next {
                 selection.0 = next;
             }
@@ -234,15 +292,14 @@ pub fn handle_selection(
         KeyCode::Digit4,
         KeyCode::Digit5,
         KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
     ]
     .into_iter()
     .enumerate()
     {
         if keyboard.just_pressed(key) {
-            let next = agents.get(slot).map(|(id, _)| *id);
+            let next = agents
+                .get(page.index * CARDS_PER_PAGE + slot)
+                .map(|(id, _)| *id);
             if selection.0 != next {
                 selection.0 = next;
             }
@@ -380,9 +437,29 @@ fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
     rows
 }
 
+pub fn refresh_page_label(
+    snapshot: Res<DisplaySnapshot>,
+    page: Res<RosterPage>,
+    mut labels: Query<&mut Text, With<PageLabel>>,
+) {
+    let count = snapshot.0.universe.agents().len();
+    for mut label in &mut labels {
+        let next = format!(
+            "Page {} / {}  |  {} citizens  |  1-6 select visible citizens",
+            page.index + 1,
+            count.div_ceil(CARDS_PER_PAGE).max(1),
+            count
+        );
+        if label.0 != next {
+            label.0 = next;
+        }
+    }
+}
+
 pub fn refresh_cards(
     snapshot: Res<DisplaySnapshot>,
     selection: Res<Selection>,
+    page: Res<RosterPage>,
     mut summaries: Query<(&Summary, &mut Text), Without<NeedLabel>>,
     mut labels: Query<(&NeedLabel, &mut Text), Without<Summary>>,
     mut fills: Query<(&NeedFill, &mut Node, &mut BackgroundColor), Without<Card>>,
@@ -390,7 +467,7 @@ pub fn refresh_cards(
 ) {
     let agents = sorted_agents(&snapshot.0.universe);
     for (summary, mut value) in &mut summaries {
-        if let Some((id, agent)) = agents.get(summary.0) {
+        if let Some((id, agent)) = agents.get(page.index * CARDS_PER_PAGE + summary.0) {
             let AgentKind::Citizen(citizen) = &agent.kind;
             let action = citizen.active_action().map_or_else(
                 || "Idle".into(),
@@ -432,7 +509,7 @@ pub fn refresh_cards(
         }
     }
     for (label, mut value) in &mut labels {
-        if let Some((_, agent)) = agents.get(label.0) {
+        if let Some((_, agent)) = agents.get(page.index * CARDS_PER_PAGE + label.0) {
             let AgentKind::Citizen(citizen) = &agent.kind;
             let next = match label.1 {
                 Need::Clothing => format!(
@@ -456,7 +533,7 @@ pub fn refresh_cards(
         }
     }
     for (fill, mut node, mut color) in &mut fills {
-        if let Some((_, agent)) = agents.get(fill.0) {
+        if let Some((_, agent)) = agents.get(page.index * CARDS_PER_PAGE + fill.0) {
             let AgentKind::Citizen(citizen) = &agent.kind;
             let value = fill.1.value(citizen);
             let (left, width) = if matches!(fill.1, Need::Clothing) {
@@ -493,7 +570,7 @@ pub fn refresh_cards(
     }
     for (card, interaction, mut color) in &mut cards {
         let next = if agents
-            .get(card.0)
+            .get(page.index * CARDS_PER_PAGE + card.0)
             .is_some_and(|(id, _)| Some(*id) == selection.0)
         {
             SELECTED
@@ -623,6 +700,83 @@ mod tests {
     }
 
     #[test]
+    fn every_citizen_is_reachable_and_restart_resets_page() {
+        let universe = simulation::new_universe().unwrap();
+        let ids: Vec<_> = sorted_agents(&universe).iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids.len(), 24);
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(Snapshot {
+            universe,
+            error: None,
+            planning_history: Default::default(),
+            generation: 0,
+            revision: 0,
+        }))
+        .init_resource::<Selection>()
+        .init_resource::<RosterPage>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .add_systems(Update, handle_selection);
+        let next = app
+            .world_mut()
+            .spawn((PageButton(1), Interaction::None))
+            .id();
+        let card = app.world_mut().spawn((Card(0), Interaction::None)).id();
+        for page in 0..4 {
+            assert_eq!(app.world().resource::<RosterPage>().index, page);
+            for slot in 0..CARDS_PER_PAGE {
+                app.world_mut()
+                    .entity_mut(card)
+                    .insert((Card(slot), Interaction::Pressed));
+                app.update();
+                assert_eq!(
+                    app.world().resource::<Selection>().0,
+                    Some(ids[page * CARDS_PER_PAGE + slot])
+                );
+                app.world_mut().entity_mut(card).insert(Interaction::None);
+                app.update();
+            }
+            app.world_mut()
+                .entity_mut(next)
+                .insert(Interaction::Pressed);
+            app.update();
+            app.world_mut().entity_mut(next).insert(Interaction::None);
+            app.update();
+        }
+        assert_eq!(app.world().resource::<RosterPage>().index, 3);
+        let previous = app
+            .world_mut()
+            .spawn((PageButton(-1), Interaction::Pressed))
+            .id();
+        app.update();
+        assert_eq!(app.world().resource::<RosterPage>().index, 2);
+        assert_eq!(app.world().resource::<Selection>().0, Some(ids[12]));
+        app.world_mut()
+            .entity_mut(previous)
+            .insert(Interaction::None);
+        app.world_mut()
+            .entity_mut(next)
+            .insert(Interaction::Pressed);
+        app.update();
+        assert_eq!(app.world().resource::<RosterPage>().index, 3);
+        app.world_mut().entity_mut(next).insert(Interaction::None);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit6);
+        app.update();
+        assert_eq!(app.world().resource::<Selection>().0, Some(ids[23]));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        app.update();
+        assert_eq!(app.world().resource::<RosterPage>().index, 0);
+        assert_eq!(app.world().resource::<Selection>().0, Some(ids[0]));
+    }
+
+    #[test]
     fn selection_survives_snapshots_and_repairs_after_restart() {
         let universe = simulation::new_universe().unwrap();
         let sorted = sorted_agents(&universe);
@@ -630,6 +784,7 @@ mod tests {
             sorted
                 .iter()
                 .map(|(_, agent)| agent.name.as_str())
+                .take(6)
                 .collect::<Vec<_>>(),
             ["Ada", "Bram", "Cleo", "Dara", "Eira", "Finn"]
         );
@@ -643,6 +798,7 @@ mod tests {
             revision: 0,
         }))
         .init_resource::<Selection>()
+        .init_resource::<RosterPage>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_systems(Update, handle_selection);
         let card = app.world_mut().spawn((Card(3), Interaction::Pressed)).id();
