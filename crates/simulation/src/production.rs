@@ -227,6 +227,8 @@ impl ProductionTargets {
         let start = now_ms.saturating_sub(window);
         let observed_days = now_ms.min(window).max(DAY_MS) as f64 / DAY_MS as f64;
         for (recipe, _) in recipes {
+            let duration = recipe.duration_ms(citizen)? as f64;
+            let daily_batches = (DAILY_CAPACITY_MS as f64 / duration).floor();
             let mut wanted: f64 = 0.0;
             for &(good, yield_grams) in recipe.outputs() {
                 let sales: f64 = citizen
@@ -242,11 +244,7 @@ impl ProductionTargets {
                     .map(|trade| trade.grams)
                     .sum();
                 let unmet = citizen.market().unmet_grams(good);
-                let desired = if sales > 0.0 || unmet > 0.0 {
-                    sales / observed_days + unmet
-                } else {
-                    yield_grams
-                };
+                let desired = (sales / observed_days + unmet).max(yield_grams * daily_batches);
                 let owned = citizen.grams(good) + citizen.market().listed_grams(citizen.id(), good);
                 let saleable = (owned - personal_reserve[good as usize]).max(0.0);
                 let progress = active.map_or(0.0, |(active, _)| {
@@ -260,7 +258,6 @@ impl ProductionTargets {
                 wanted =
                     wanted.max(((desired - saleable - progress).max(0.0) / yield_grams).ceil());
             }
-            let duration = recipe.duration_ms(citizen)? as f64;
             let mut count = wanted.min((capacity / duration).floor());
             if count <= 0.0 {
                 continue;

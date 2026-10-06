@@ -654,6 +654,68 @@ pub(super) fn variants_after(
     variants_from(initial, goal, prefix.actions.len())
 }
 
+fn production_prefixes(
+    initial: Prediction,
+    prior_actions: usize,
+) -> Result<Vec<Prediction>, SimulationError> {
+    let Some(targets) = initial.citizen.production_targets() else {
+        return Ok(Vec::new());
+    };
+    let mut recipes: Vec<_> = targets
+        .batches()
+        .filter_map(|(recipe, _)| {
+            let profit = crate::production::recipe_profit(recipe, &initial.citizen)?;
+            (profit > 0.0).then_some((
+                recipe,
+                profit / recipe.duration_ms(&initial.citizen).ok()? as f64,
+            ))
+        })
+        .collect();
+    recipes.sort_by(|(a, ap), (b, bp)| {
+        bp.total_cmp(ap)
+            .then_with(|| (*a as usize).cmp(&(*b as usize)))
+    });
+    let mut variants = Vec::new();
+    let mut pending = vec![(initial, 0)];
+    while let Some((state, mut index)) = pending.pop() {
+        if state.elapsed_ms >= GOAL_HORIZON_MS {
+            continue;
+        }
+        while index < recipes.len()
+            && state
+                .citizen
+                .production_targets()
+                .is_none_or(|targets| targets.remaining_batches(recipes[index].0) <= 0.0)
+        {
+            index += 1;
+        }
+        let Some(&(recipe, _)) = recipes.get(index) else {
+            continue;
+        };
+        let next = order_variants(
+            &state,
+            CitizenAction::Produce(recipe),
+            0.0,
+            0,
+            prior_actions,
+        )?;
+        if next.is_empty() {
+            pending.push((state, index + 1));
+        } else {
+            for candidate in next {
+                if !variants
+                    .iter()
+                    .any(|old: &Prediction| old.actions == candidate.actions)
+                {
+                    variants.push(candidate.clone());
+                    pending.push((candidate, index));
+                }
+            }
+        }
+    }
+    Ok(variants)
+}
+
 fn variants_from(
     initial: Prediction,
     goal: Effect,
@@ -667,6 +729,9 @@ fn variants_from(
             variants.push(candidate);
         }
     };
+    if goal == Effect::Production {
+        return production_prefixes(initial, prior_actions);
+    }
     if goal == Effect::ReplenishReserves {
         for target in [
             crate::FOOD_RESERVE_FULL_BONUS_NUTRITION,
@@ -686,15 +751,6 @@ fn variants_from(
         .into_iter()
         .filter(|action| action.effects().contains(&goal))
         .collect();
-    if goal == Effect::Production
-        && let Some(targets) = citizen.production_targets()
-    {
-        goal_actions.extend(
-            targets
-                .batches()
-                .map(|(recipe, _)| CitizenAction::Produce(recipe)),
-        );
-    }
     if goal == Effect::ListExcess && citizen.excess_value()? >= crate::production::MIN_LISTING_VALUE
     {
         goal_actions.push(CitizenAction::ListExcess);
@@ -748,6 +804,123 @@ mod tests {
         .into_iter()
         .filter_map(|ready| ready.perform(CitizenAction::Eat, 0).unwrap())
         .collect()
+    }
+
+    fn baker() -> Citizen {
+        use crate::{AgentKind, StartingRole, Universe};
+        let worker = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Baker)
+            .with_good(Good::Flour, 2000.0)
+            .unwrap()
+            .with_good(Good::Wood, 500.0)
+            .unwrap()
+            .with_good(Good::Water, 2000.0)
+            .unwrap()
+            .with_good(Good::Berries, 2000.0)
+            .unwrap();
+        let (world, id) = Universe::with_map(crate::locations::Map::default())
+            .with_citizen("Baker", worker)
+            .unwrap();
+        let world = world
+            .with_property(id, crate::locations::Location::Bakery)
+            .unwrap()
+            .0;
+        let AgentKind::Citizen(mut worker) = world.agents()[&id].kind.clone();
+        worker.refresh_production_targets(true).unwrap();
+        worker
+    }
+
+    #[test]
+    fn production_prefixes_repeat_batches_stop_after_crossing_and_follow_caps() {
+        use crate::production::{Recipe, recipe_profit};
+        let mut worker = baker();
+        let bread_rate = recipe_profit(Recipe::BakeBread, &worker).unwrap()
+            / Recipe::BakeBread.duration_ms(&worker).unwrap() as f64;
+        let pie_rate = recipe_profit(Recipe::BakeBerryPie, &worker).unwrap()
+            / Recipe::BakeBerryPie.duration_ms(&worker).unwrap() as f64;
+        let first = if bread_rate >= pie_rate {
+            Recipe::BakeBread
+        } else {
+            Recipe::BakeBerryPie
+        };
+        let output = first.outputs()[0];
+        let daily_batches =
+            crate::production::DAILY_CAPACITY_MS / first.duration_ms(&worker).unwrap();
+        worker = worker
+            .with_good(output.0, output.1 * (daily_batches - 2) as f64)
+            .unwrap();
+        worker.refresh_production_targets(true).unwrap();
+        let variants = variants_after(
+            &Prediction::new(&worker, Cooldowns::default()),
+            Effect::Production,
+        )
+        .unwrap();
+        assert!(variants.len() >= 3);
+        assert_eq!(
+            variants[0].actions.last(),
+            Some(&CitizenAction::Produce(first))
+        );
+        let longest = variants
+            .iter()
+            .max_by_key(|variant| variant.elapsed_ms)
+            .unwrap();
+        let produced: Vec<_> = longest
+            .actions
+            .iter()
+            .filter_map(|action| {
+                if let CitizenAction::Produce(recipe) = action {
+                    Some(*recipe)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(&produced[..2], &[first, first]);
+        assert_ne!(produced[2], first);
+        assert!(longest.elapsed_ms >= GOAL_HORIZON_MS);
+        assert!(longest.elapsed_ms - longest.action_durations_ms.last().unwrap() < GOAL_HORIZON_MS);
+        assert!(variants.iter().all(|variant| variant.elapsed_ms
+            - variant.action_durations_ms.last().unwrap()
+            < GOAL_HORIZON_MS));
+    }
+
+    #[test]
+    fn production_crossing_budget_includes_travel_and_input_preparation() {
+        use crate::locations::Position;
+        let worker = baker()
+            .with_position(Position { x: 1000.0, y: 0.0 })
+            .unwrap();
+        let variants = variants_after(
+            &Prediction::new(&worker, Cooldowns::default()),
+            Effect::Production,
+        )
+        .unwrap();
+        assert!(!variants.is_empty());
+        let longest = variants
+            .iter()
+            .max_by_key(|variant| variant.elapsed_ms)
+            .unwrap();
+        assert!(matches!(longest.actions[0], CitizenAction::Travel(_)));
+        assert_eq!(longest.action_durations_ms[0], 600_000);
+        assert!(longest.elapsed_ms >= GOAL_HORIZON_MS);
+        assert!(longest.elapsed_ms - longest.action_durations_ms.last().unwrap() < GOAL_HORIZON_MS);
+        let short = baker().with_good(Good::Water, 0.0).unwrap();
+        let supplied = variants_after(
+            &Prediction::new(&short, Cooldowns::default()),
+            Effect::Production,
+        )
+        .unwrap();
+        assert!(
+            supplied
+                .iter()
+                .any(|variant| variant.actions.contains(&CitizenAction::Produce(
+                    crate::production::Recipe::FetchWater
+                )))
+        );
+        assert!(supplied.iter().all(|variant| variant.elapsed_ms
+            - variant.action_durations_ms.last().unwrap()
+            < GOAL_HORIZON_MS));
     }
 
     #[test]

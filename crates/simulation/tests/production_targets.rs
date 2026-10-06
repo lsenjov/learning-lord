@@ -64,11 +64,12 @@ fn list(universe: Universe, id: AgentId, good: Good, grams: f64) -> Universe {
 #[test]
 fn competing_bakers_each_consider_the_full_unmet_demand() {
     let inputs = [
-        (Good::Berries, 310.0),
-        (Good::Flour, 1_000.0),
-        (Good::Wood, 250.0),
-        (Good::Water, 1_000.0),
-        (Good::BerryPie, 250.0),
+        (Good::Berries, 930.0),
+        (Good::Bread, 800.0),
+        (Good::Flour, 2_000.0),
+        (Good::Wood, 500.0),
+        (Good::Water, 2_000.0),
+        (Good::BerryPie, 2_000.0),
     ];
     let (universe, first) = producer(
         Universe::with_map(Map::default()),
@@ -78,18 +79,146 @@ fn competing_bakers_each_consider_the_full_unmet_demand() {
         0.0,
     );
     let (universe, second) = producer(universe, "Second", StartingRole::Baker, &inputs, 0.0);
-    let universe = demand(universe, &[(Good::Bread, 800.0)]);
-    assert_eq!(universe.market().unmet_grams(Good::Bread), 800.0);
+    let universe = demand(universe, &[(Good::Bread, 2_800.0)]);
+    assert_eq!(universe.market().unmet_grams(Good::Bread), 2_800.0);
     for id in [first, second] {
         assert_eq!(
             targets(&universe, id).remaining_batches(Recipe::BakeBread),
-            4.0
+            10.0
         );
     }
 }
 
 #[test]
-fn unsold_exploratory_output_suppresses_more_batches_whether_carried_or_listed() {
+fn carried_and_listed_stock_reduce_the_daily_floor() {
+    let (universe, farmer) = producer(
+        Universe::with_map(Map::default()),
+        "Farmer",
+        StartingRole::Farmer,
+        &[(Good::Wheat, 400.0)],
+        0.0,
+    );
+    assert_eq!(
+        targets(&universe, farmer).remaining_batches(Recipe::GrowWheat),
+        10.0
+    );
+    let fully_stocked = citizen(&universe, farmer)
+        .with_good(Good::Wheat, 2_400.0)
+        .unwrap();
+    assert_eq!(
+        ProductionTargets::calculate(&fully_stocked, 0)
+            .unwrap()
+            .remaining_batches(Recipe::GrowWheat),
+        0.0
+    );
+    let listed = list(universe, farmer, Good::Wheat, 200.0);
+    assert_eq!(citizen(&listed, farmer).grams(Good::Wheat), 200.0);
+    assert_eq!(
+        targets(&listed, farmer).remaining_batches(Recipe::GrowWheat),
+        10.0
+    );
+    let withdrawn = listed
+        .start_action(farmer, CitizenAction::Withdraw(Good::Wheat, 200.0))
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    assert_eq!(
+        targets(&withdrawn, farmer).remaining_batches(Recipe::GrowWheat),
+        10.0
+    );
+}
+
+#[test]
+fn skill_adjusted_floor_subtracts_adas_existing_listing() {
+    let (universe, farmer) = producer(
+        Universe::with_map(Map::default()),
+        "Ada",
+        StartingRole::Farmer,
+        &[(Good::Wheat, 200.0)],
+        0.0,
+    );
+    let universe = list(universe, farmer, Good::Wheat, 200.0);
+    let worker = citizen(&universe, farmer)
+        .with_skill(Skill::Farming, 1.1)
+        .unwrap();
+    assert_eq!(Recipe::GrowWheat.duration_ms(&worker).unwrap(), 3_582_090);
+    assert_eq!(
+        ProductionTargets::calculate(&worker, 0)
+            .unwrap()
+            .remaining_batches(Recipe::GrowWheat),
+        11.0
+    );
+}
+
+#[test]
+fn completed_work_reduces_capacity_without_shrinking_the_stock_floor() {
+    let (universe, farmer) = producer(
+        Universe::with_map(Map::default()),
+        "Farmer",
+        StartingRole::Farmer,
+        &[(Good::Wheat, 2_000.0)],
+        0.0,
+    );
+    let working = citizen(&universe, farmer)
+        .start_action(CitizenAction::Produce(Recipe::GrowWheat))
+        .unwrap();
+    let finished = working
+        .advance(working.active_action().unwrap().duration_ms())
+        .unwrap();
+    assert_eq!(finished.production_work_today_ms(), 60 * 60_000);
+    assert_eq!(finished.grams(Good::Wheat), 2_200.0);
+    assert_eq!(
+        ProductionTargets::calculate(&finished, 60 * 60_000)
+            .unwrap()
+            .remaining_batches(Recipe::GrowWheat),
+        1.0
+    );
+}
+
+#[test]
+fn in_progress_output_counts_toward_the_floor() {
+    let (universe, farmer) = producer(
+        Universe::with_map(Map::default()),
+        "Farmer",
+        StartingRole::Farmer,
+        &[(Good::Wheat, 2_000.0)],
+        0.0,
+    );
+    let working = citizen(&universe, farmer)
+        .start_action(CitizenAction::Produce(Recipe::GrowWheat))
+        .unwrap();
+    let target = ProductionTargets::calculate(&working, 0).unwrap();
+    assert_eq!(target.remaining_batches(Recipe::GrowWheat), 2.0);
+}
+
+#[test]
+fn each_profitable_good_has_a_floor_with_a_shared_work_budget() {
+    let (universe, baker) = producer(
+        Universe::with_map(Map::default()),
+        "Baker",
+        StartingRole::Baker,
+        &[
+            (Good::Berries, 3_000.0),
+            (Good::Flour, 3_000.0),
+            (Good::Wood, 750.0),
+            (Good::Water, 3_000.0),
+            (Good::BerryPie, 1_000.0),
+        ],
+        0.0,
+    );
+    let target = targets(&universe, baker);
+    assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 4.0);
+    assert_eq!(target.remaining_batches(Recipe::BakeBread), 6.0);
+    let worker = citizen(&universe, baker);
+    let work: f64 = target
+        .batches()
+        .map(|(recipe, count)| count * recipe.duration_ms(worker).unwrap() as f64)
+        .sum();
+    assert_eq!(work, DAILY_CAPACITY_MS as f64);
+}
+
+#[test]
+fn low_positive_demand_keeps_the_daily_floor() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Farmer",
@@ -99,42 +228,12 @@ fn unsold_exploratory_output_suppresses_more_batches_whether_carried_or_listed()
     );
     assert_eq!(
         targets(&universe, farmer).remaining_batches(Recipe::GrowWheat),
-        1.0
+        12.0
     );
-    let worker = citizen(&universe, farmer)
-        .start_action(CitizenAction::Produce(Recipe::GrowWheat))
-        .unwrap();
-    let finished = worker
-        .advance(worker.active_action().unwrap().duration_ms())
-        .unwrap();
+    let universe = demand(universe, &[(Good::Wheat, 200.0)]);
     assert_eq!(
-        ProductionTargets::calculate(&finished, DAY_MS)
-            .unwrap()
-            .remaining_batches(Recipe::GrowWheat),
-        0.0
-    );
-    let (universe, stocked) = producer(
-        Universe::with_map(Map::default()),
-        "Stocked",
-        StartingRole::Farmer,
-        &[(Good::Wheat, 200.0)],
-        0.0,
-    );
-    let listed = list(universe, stocked, Good::Wheat, 200.0);
-    assert_eq!(citizen(&listed, stocked).grams(Good::Wheat), 0.0);
-    assert_eq!(
-        targets(&listed, stocked).remaining_batches(Recipe::GrowWheat),
-        0.0
-    );
-    let withdrawn = listed
-        .start_action(stocked, CitizenAction::Withdraw(Good::Wheat, 200.0))
-        .unwrap()
-        .advance(TRADE_DURATION_MS)
-        .unwrap();
-    assert_eq!(citizen(&withdrawn, stocked).grams(Good::Wheat), 200.0);
-    assert_eq!(
-        targets(&withdrawn, stocked).remaining_batches(Recipe::GrowWheat),
-        0.0
+        targets(&universe, farmer).remaining_batches(Recipe::GrowWheat),
+        12.0
     );
 }
 
@@ -178,7 +277,6 @@ fn missing_skill_or_property_prevents_targets_and_faster_skill_increases_capacit
         &[],
         0.0,
     );
-    let universe = demand(universe, &[(Good::Wheat, 20_000.0)]);
     let worker = citizen(&universe, farmer);
     let unskilled = worker.with_skill(Skill::Farming, 0.0).unwrap();
     assert_eq!(
@@ -192,7 +290,8 @@ fn missing_skill_or_property_prevents_targets_and_faster_skill_increases_capacit
     let faster = ProductionTargets::calculate(&skilled, 0)
         .unwrap()
         .remaining_batches(Recipe::GrowWheat);
-    assert!(faster > normal);
+    assert_eq!(normal, 12.0);
+    assert_eq!(faster, 18.0);
     assert!(
         faster * Recipe::GrowWheat.duration_ms(&skilled).unwrap() as f64
             <= DAILY_CAPACITY_MS as f64
@@ -210,7 +309,7 @@ fn active_batch_uses_inputs_once_and_subtracts_its_output_from_the_target() {
             (Good::Flour, 200.0),
             (Good::Wood, 50.0),
             (Good::Water, 200.0),
-            (Good::BerryPie, 250.0),
+            (Good::BerryPie, 2_000.0),
         ],
         0.0,
     );
@@ -293,17 +392,17 @@ fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
         Universe::with_map(Map::default()),
         "Farmer",
         StartingRole::Farmer,
-        &[(Good::Wheat, 400.0)],
+        &[(Good::Wheat, 2_800.0)],
         0.0,
     );
-    let universe = list(universe, farmer, Good::Wheat, 400.0);
+    let universe = list(universe, farmer, Good::Wheat, 2_800.0);
     let (universe, buyer) = universe
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(2.0).unwrap())
         .unwrap();
     let universe = universe
         .start_action(
             buyer,
-            CitizenAction::Buy(ShoppingList::single(Good::Wheat, 400.0)),
+            CitizenAction::Buy(ShoppingList::single(Good::Wheat, 2_800.0)),
         )
         .unwrap()
         .advance(TRADE_DURATION_MS)
@@ -312,12 +411,17 @@ fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
         .with_purchase_request(buyer, ShoppingList::single(Good::Wheat, 200.0))
         .unwrap();
     assert_eq!(universe.market().unmet_grams(Good::Wheat), 200.0);
+    let worker = citizen(&universe, farmer)
+        .with_good(Good::Wheat, 800.0)
+        .unwrap();
     assert_eq!(
-        targets(&universe, farmer).remaining_batches(Recipe::GrowWheat),
-        3.0
+        ProductionTargets::calculate(&worker, universe.current_time_ms())
+            .unwrap()
+            .remaining_batches(Recipe::GrowWheat),
+        11.0
     );
-    let later = ProductionTargets::calculate(citizen(&universe, farmer), 2 * DAY_MS).unwrap();
-    assert_eq!(later.remaining_batches(Recipe::GrowWheat), 2.0);
+    let later = ProductionTargets::calculate(&worker, 2 * DAY_MS).unwrap();
+    assert_eq!(later.remaining_batches(Recipe::GrowWheat), 8.0);
 }
 
 #[test]
@@ -377,6 +481,8 @@ fn remaining_recipe_inputs_and_personal_food_use_separate_portions_of_inventory(
             (Good::Flour, 200.0),
             (Good::Wood, 50.0),
             (Good::Water, 150.0),
+            (Good::Bread, 2_200.0),
+            (Good::BerryPie, 1_900.0),
         ],
         0.0,
     );

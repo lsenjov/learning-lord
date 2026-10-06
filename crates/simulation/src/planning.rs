@@ -315,14 +315,15 @@ fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), Sim
 
 #[derive(Default)]
 struct Continuations {
-    plans: HashMap<u64, Vec<(Vec<CitizenAction>, Plan)>>,
+    plans: HashMap<u64, Vec<(Vec<CitizenAction>, u8, Plan)>>,
     #[cfg(test)]
     disabled: bool,
 }
 
 impl Continuations {
-    fn key(actions: &[CitizenAction]) -> u64 {
+    fn key(actions: &[CitizenAction], used_goals: u8) -> u64 {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
+        used_goals.hash(&mut hash);
         for action in actions {
             std::mem::discriminant(action).hash(&mut hash);
             match action {
@@ -345,7 +346,7 @@ impl Continuations {
         hash.finish()
     }
 
-    fn get(&self, key: u64, actions: &[CitizenAction]) -> Option<&Plan> {
+    fn get(&self, key: u64, actions: &[CitizenAction], used_goals: u8) -> Option<&Plan> {
         #[cfg(test)]
         if self.disabled {
             return None;
@@ -353,16 +354,31 @@ impl Continuations {
         self.plans
             .get(&key)?
             .iter()
-            .find(|(path, _)| path == actions)
-            .map(|(_, plan)| plan)
+            .find(|(path, used, _)| path == actions && *used == used_goals)
+            .map(|(_, _, plan)| plan)
     }
 
-    fn insert(&mut self, key: u64, actions: Vec<CitizenAction>, plan: Plan) {
+    fn insert(&mut self, key: u64, actions: Vec<CitizenAction>, used_goals: u8, plan: Plan) {
         #[cfg(test)]
         if self.disabled {
             return;
         }
-        self.plans.entry(key).or_default().push((actions, plan));
+        self.plans
+            .entry(key)
+            .or_default()
+            .push((actions, used_goals, plan));
+    }
+}
+
+fn goal_bit(goal: Effect) -> u8 {
+    match goal {
+        Effect::ReduceHunger => 1,
+        Effect::ReduceTiredness => 2,
+        Effect::IncreaseWealth => 4,
+        Effect::ReplenishReserves => 8,
+        Effect::Production => 16,
+        Effect::ListExcess => 32,
+        Effect::Food | Effect::Coins => unreachable!("resources are not planning goals"),
     }
 }
 
@@ -386,8 +402,11 @@ fn search_with_goals(
         }
         return Ok(());
     }
-    let key = Continuations::key(&state.actions);
-    if let Some(cached) = cache.get(key, &state.actions) {
+    let used_goals = boundaries
+        .iter()
+        .fold(0, |used, boundary| used | goal_bit(boundary.goal));
+    let key = Continuations::key(&state.actions, used_goals);
+    if let Some(cached) = cache.get(key, &state.actions, used_goals) {
         if cached.average_wellbeing > best.average_wellbeing {
             let mut result = cached.clone();
             result
@@ -406,6 +425,9 @@ fn search_with_goals(
         Effect::ReplenishReserves,
         Effect::Production,
     ] {
+        if used_goals & goal_bit(goal) != 0 {
+            continue;
+        }
         for variant in goals::variants_after(&state, goal)? {
             let mut next = variant;
             next.elapsed_ms += state.elapsed_ms;
@@ -423,8 +445,8 @@ fn search_with_goals(
             search_with_goals(next, horizon_ms, &mut continuation, goals, cache)?;
         }
     }
-    // An identical primitive prefix has the same predicted state and score across goal labels.
-    cache.insert(key, state.actions, continuation.clone());
+    // Goal availability affects continuation even when primitive prefixes are identical.
+    cache.insert(key, state.actions, used_goals, continuation.clone());
     if continuation.average_wellbeing > best.average_wellbeing {
         *best = continuation;
     }
@@ -466,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_continuations_replace_prefix_labels_and_preserve_suffix_boundaries() {
+    fn cached_continuations_distinguish_prefix_goal_availability() {
         let citizen = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
             .with_berries(300.0)
@@ -495,7 +517,11 @@ mod tests {
         .unwrap();
         assert!(
             cache
-                .get(Continuations::key(&prefix.actions), &prefix.actions)
+                .get(
+                    Continuations::key(&prefix.actions, goal_bit(Effect::IncreaseWealth)),
+                    &prefix.actions,
+                    goal_bit(Effect::IncreaseWealth)
+                )
                 .is_some()
         );
         let mut reused = empty_plan();
@@ -520,12 +546,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reused, reference);
-        assert_eq!(reused.actions(), first.actions());
-        assert_eq!(reused.action_durations_ms(), first.action_durations_ms());
-        assert_eq!(reused.average_wellbeing(), first.average_wellbeing());
+
         assert_eq!(reused.goals()[0].goal, Effect::ReplenishReserves);
-        assert_eq!(&reused.goals()[1..], &first.goals()[1..]);
+        assert!(
+            reused.goals()[1..]
+                .iter()
+                .all(|goal| goal.goal != Effect::ReplenishReserves)
+        );
         assert_eq!(reused.goals()[1].actions.start, prefix.actions.len());
+    }
+
+    #[test]
+    fn continuation_cache_checks_used_goals_even_on_hash_collision() {
+        let mut cache = Continuations::default();
+        cache.insert(
+            7,
+            vec![CitizenAction::Forage],
+            goal_bit(Effect::IncreaseWealth),
+            empty_plan(),
+        );
+        assert!(
+            cache
+                .get(
+                    7,
+                    &[CitizenAction::Forage],
+                    goal_bit(Effect::IncreaseWealth)
+                )
+                .is_some()
+        );
+        assert!(
+            cache
+                .get(
+                    7,
+                    &[CitizenAction::Forage],
+                    goal_bit(Effect::ReplenishReserves)
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn selected_plans_use_each_goal_once_and_reset_on_replanning() {
+        let source = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_berries(300.0)
+            .unwrap();
+        for citizen in [&source, &source.with_coins(3.0).unwrap()] {
+            let first = plan(citizen).unwrap();
+            assert!(!first.actions().is_empty());
+            let mut used = 0;
+            for goal in first.goals() {
+                assert_eq!(used & goal_bit(goal.goal), 0);
+                used |= goal_bit(goal.goal);
+            }
+            assert_eq!(plan(citizen).unwrap(), first);
+        }
     }
 
     #[test]
