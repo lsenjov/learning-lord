@@ -16,20 +16,14 @@ fn every_good_validates_weights_and_inventory_branches_are_independent() {
     let empty = Citizen::new(40.0).unwrap();
     let source = empty.clone();
     for good in Good::ALL {
-        assert_eq!(empty.grams(good), 0.0);
-        for invalid in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(
-                empty.with_good(good, invalid),
-                Err(SimulationError::InvalidInventory)
-            );
-        }
-        let full = empty.with_good(good, 125.5).unwrap();
-        let sibling = empty.with_good(good, 20.0).unwrap();
-        assert_eq!(full.grams(good), 125.5);
-        assert_eq!(sibling.grams(good), 20.0);
+        assert_eq!(empty.units(good), 0);
+        let full = empty.with_good(good, 125).unwrap();
+        let sibling = empty.with_good(good, 20).unwrap();
+        assert_eq!(full.units(good), 125);
+        assert_eq!(sibling.units(good), 20);
         assert_eq!(empty, source);
         let busy = full.start_action(CitizenAction::Wait).unwrap();
-        assert_eq!(busy.with_good(good, 1.0), Err(SimulationError::CitizenBusy));
+        assert_eq!(busy.with_good(good, 1), Err(SimulationError::CitizenBusy));
     }
 }
 
@@ -37,9 +31,9 @@ fn every_good_validates_weights_and_inventory_branches_are_independent() {
 fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     let mut stocked = Citizen::new(40.0)
         .unwrap()
-        .with_berries(200.0)
+        .with_berries(200)
         .unwrap()
-        .with_coins(2.0)
+        .with_coins(200)
         .unwrap();
     for good in [
         Good::Wheat,
@@ -50,15 +44,15 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     ] {
         assert!(
             Prices::default()
-                .coins_per_kg(good)
+                .price(good)
                 .is_some_and(|price| price > 0.0)
         );
-        stocked = stocked.with_good(good, 1000.5).unwrap();
+        stocked = stocked.with_good(good, 1000).unwrap();
     }
-    let expected = stocked.coins()
+    let expected = stocked.coins() as f64
         + Good::ALL
             .into_iter()
-            .map(|good| Prices::default().value(good, stocked.grams(good)).unwrap())
+            .map(|good| Prices::default().value(good, stocked.units(good)).unwrap())
             .sum::<f64>();
     assert!((stocked.wealth().unwrap() - expected).abs() < 1e-12);
     let eaten = stocked
@@ -66,16 +60,16 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         .unwrap()
         .advance(50_000)
         .unwrap();
-    assert_eq!(eaten.berries_grams(), 150.0);
-    assert_eq!(eaten.grams(Good::Bread), 1000.5);
+    assert_eq!(eaten.berries_units(), 45);
+    assert_eq!(eaten.units(Good::Bread), 1000);
     let sold = stocked
-        .start_action(CitizenAction::List(Good::Berries, 50.0))
+        .start_action(CitizenAction::List(Good::Berries, 50))
         .unwrap()
         .advance(300_000)
         .unwrap();
-    assert_eq!(sold.berries_grams(), 150.0);
-    assert_eq!(sold.market().listed_grams(sold.id(), Good::Berries), 50.0);
-    assert_eq!(sold.coins(), 2.0);
+    assert_eq!(sold.berries_units(), 150);
+    assert_eq!(sold.market().listed_units(sold.id(), Good::Berries), 50);
+    assert_eq!(sold.coins(), 200);
     assert!((sold.wealth().unwrap() - stocked.wealth().unwrap()).abs() < 1e-12);
     for good in [
         Good::Wheat,
@@ -84,20 +78,17 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         Good::Water,
         Good::Bread,
     ] {
-        assert_eq!(eaten.grams(good), stocked.grams(good));
-        assert_eq!(sold.grams(good), stocked.grams(good));
+        assert_eq!(eaten.units(good), stocked.units(good));
+        assert_eq!(sold.units(good), stocked.units(good));
     }
     let bread_only = Citizen::new(40.0)
         .unwrap()
-        .with_good(Good::Bread, 1000.0)
+        .with_good(Good::Bread, 10)
         .unwrap();
     let bread_meal = bread_only.start_action(CitizenAction::Eat).unwrap();
     assert_eq!(bread_meal.active_action().unwrap().duration_ms(), 100_000);
-    assert_eq!(
-        bread_meal.advance(100_000).unwrap().grams(Good::Bread),
-        900.0
-    );
-    assert_eq!(bread_only.wealth().unwrap(), 1.5);
+    assert_eq!(bread_meal.advance(100_000).unwrap().units(Good::Bread), 9);
+    assert_eq!(bread_only.wealth().unwrap(), 150.0);
 }
 
 #[test]

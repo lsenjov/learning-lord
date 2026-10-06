@@ -10,7 +10,7 @@ fn assert_close(actual: f64, expected: f64) {
 
 #[test]
 fn two_meals_balance_a_day_of_standard_hunger_including_time_spent_eating() {
-    let original = Citizen::new(-25.0).unwrap().with_berries(310.0).unwrap();
+    let original = Citizen::new(-25.0).unwrap().with_berries(310).unwrap();
     assert_close(original.advance(DAY_MS).unwrap().hunger(), 75.0);
     assert_eq!(original.active_action(), None);
 
@@ -22,7 +22,7 @@ fn two_meals_balance_a_day_of_standard_hunger_including_time_spent_eating() {
     }
 
     assert_close(citizen.hunger(), -25.0);
-    assert_eq!(citizen.berries_grams(), 0.0);
+    assert_eq!(citizen.berries_units(), 0);
     assert_eq!(citizen.active_action(), None);
     assert_eq!(original.hunger(), -25.0);
 }
@@ -32,7 +32,7 @@ fn meals_nourish_gradually_for_the_duration_of_the_selected_portion() {
     for (action, completed_hunger) in [(CitizenAction::Eat, -50.0), (CitizenAction::Wait, 0.0)] {
         let original = Citizen::with_hunger_rate(0.0, 0.0)
             .unwrap()
-            .with_berries(155.0)
+            .with_berries(155)
             .unwrap();
         let duration = if action == CitizenAction::Eat {
             155_000
@@ -77,7 +77,7 @@ fn busy_citizens_reject_all_actions_without_replacing_the_current_action() {
     ] {
         let citizen = Citizen::new(0.0)
             .unwrap()
-            .with_berries(155.0)
+            .with_berries(155)
             .unwrap()
             .start_action(current)
             .unwrap()
@@ -107,7 +107,7 @@ fn hunger_advances_during_actions_and_after_their_completion() {
     ] {
         let started = Citizen::new(0.0)
             .unwrap()
-            .with_berries(155.0)
+            .with_berries(155)
             .unwrap()
             .start_action(action)
             .unwrap();
@@ -141,7 +141,7 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
     ] {
         let original = Citizen::new(-80.0)
             .unwrap()
-            .with_berries(150.1234)
+            .with_berries(150)
             .unwrap()
             .start_action(action)
             .unwrap();
@@ -153,7 +153,7 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
 
         assert_close(small_ticks.hunger(), large_tick.hunger());
         assert_close(small_ticks.tiredness(), large_tick.tiredness());
-        assert_close(small_ticks.berries_grams(), large_tick.berries_grams());
+        assert_eq!(small_ticks.berries_units(), large_tick.berries_units());
         assert_eq!(small_ticks.active_action(), large_tick.active_action());
     }
 }
@@ -161,7 +161,7 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
 #[test]
 fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
     for (hunger, eating_is_better) in [(-80.0, false), (50.0, true)] {
-        let citizen = Citizen::new(hunger).unwrap().with_berries(155.0).unwrap();
+        let citizen = Citizen::new(hunger).unwrap().with_berries(155).unwrap();
         let eat = citizen
             .start_action(CitizenAction::Eat)
             .unwrap()
@@ -184,10 +184,7 @@ fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
 fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen(
-            "Ada",
-            Citizen::new(0.0).unwrap().with_berries(155.0).unwrap(),
-        )
+        .with_citizen("Ada", Citizen::new(0.0).unwrap().with_berries(155).unwrap())
         .unwrap();
     let (original, other_id) = original
         .with_citizen("Bea", Citizen::new(10.0).unwrap())
@@ -248,7 +245,7 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
         for hunger in [0.0, f64::MAX] {
             let citizen = Citizen::with_hunger_rate(hunger, f64::MAX)
                 .unwrap()
-                .with_berries(155.0)
+                .with_berries(155)
                 .unwrap()
                 .start_action(action)
                 .unwrap();

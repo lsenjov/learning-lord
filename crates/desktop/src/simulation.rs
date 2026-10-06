@@ -190,11 +190,11 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         ("Dara", StartingRole::Baker),
     ] {
         let mut citizen = Citizen::with_needs(-50.0, -66.6)?
-            .with_berries(310.0)?
+            .with_berries(310)?
             .with_starting_role(role)
             .with_coins(learning_lord_simulation::production::starting_coins(role))?;
-        for (good, grams) in learning_lord_simulation::production::starting_inputs(role).items() {
-            citizen = citizen.with_good(good, grams)?;
+        for (good, units) in learning_lord_simulation::production::starting_inputs(role).items() {
+            citizen = citizen.with_good(good, units)?;
         }
         let (next, id) = universe.with_citizen(name, citizen)?;
         universe = next;
@@ -420,8 +420,8 @@ mod tests {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert_eq!(citizen.hunger(), -50.0);
             assert_eq!(citizen.tiredness(), -66.6);
-            assert_eq!(citizen.coins(), 3.0);
-            assert_eq!(citizen.berries_grams(), 310.0);
+            assert_eq!(citizen.coins(), 300);
+            assert_eq!(citizen.berries_units(), 310);
             assert_eq!(citizen.map(), universe.map());
             assert_eq!(citizen.prices(), universe.prices());
             assert_eq!(citizen.position(), universe.map().position(citizen.home()));
@@ -451,7 +451,7 @@ mod tests {
             for agent in universe.agents().values() {
                 let AgentKind::Citizen(citizen) = &agent.kind;
                 assert!(citizen.hunger().is_finite() && citizen.tiredness().is_finite());
-                assert!(citizen.coins() >= 0.0);
+                assert!(citizen.coins() >= 0);
             }
         }
         println!(
@@ -467,7 +467,7 @@ mod tests {
                 agent.name,
                 citizen.hunger(),
                 citizen.coins(),
-                Good::ALL.map(|good| (good, citizen.grams(good))),
+                Good::ALL.map(|good| (good, citizen.units(good))),
                 citizen.production_targets(),
                 universe.market().requested(citizen.id())
             );
@@ -475,7 +475,7 @@ mod tests {
         for order in universe.market().orders() {
             println!(
                 "Order {:?} {} {}",
-                order.good, order.grams, order.coins_per_kg
+                order.good, order.units, order.quoted_price
             );
         }
         assert!(
@@ -537,7 +537,7 @@ mod tests {
                 let AgentKind::Citizen(citizen) = &agent.kind;
                 assert_eq!(citizen.id(), *id);
                 assert_eq!(citizen.id().0.get_version_num(), 4);
-                assert_eq!(citizen.berries_grams(), 310.0);
+                assert_eq!(citizen.berries_units(), 310);
                 assert_eq!(
                     citizen.coins(),
                     learning_lord_simulation::production::starting_coins(
@@ -550,8 +550,8 @@ mod tests {
                     )
                     .items()
                     .find(|(g, _)| *g == good)
-                    .map_or(0.0, |(_, grams)| grams);
-                    assert_eq!(citizen.grams(good), expected);
+                    .map_or(0, |(_, units)| units);
+                    assert_eq!(citizen.units(good), expected);
                 }
                 assert_eq!(map.place(citizen.home()).unwrap().owner, Some(*id));
                 assert_eq!(citizen.position(), map.position(citizen.home()));
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(citizen.map(), state.universe.map());
         assert_eq!(citizen.hunger(), -50.0);
         assert_eq!(citizen.tiredness(), -66.6);
-        assert_eq!(citizen.coins(), 3.0);
+        assert_eq!(citizen.coins(), 300);
         assert!(citizen.active_plan().is_some());
     }
 

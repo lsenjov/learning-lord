@@ -355,7 +355,7 @@ pub fn refresh_cards(
                 .wealth()
                 .map_or_else(|e| e.to_string(), |v| format!("{v:.3}"));
             let next = format!(
-                "{}{}\nCoins {:.2}  |  Wealth {}\nWellbeing {}  |  {}",
+                "{}{}\nCoins {}  |  Wealth {}\nWellbeing {}  |  {}",
                 agent.name,
                 if Some(*id) == selection.0 {
                     "  [selected]"
@@ -609,7 +609,7 @@ mod tests {
                 "Ada",
                 Citizen::with_needs(60.0, 100.0)
                     .unwrap()
-                    .with_berries(310.0)
+                    .with_berries(310)
                     .unwrap(),
             )
             .unwrap();
@@ -651,6 +651,6 @@ mod tests {
         assert!(details.starts_with("Bram"));
         assert!(details.contains("Hunger: -9.8"));
         assert!(details.contains("Location: Bram's home"));
-        assert!(!details.contains("Berries: 0.0 g"));
+        assert!(!details.contains("Berries: 0 g"));
     }
 }

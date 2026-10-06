@@ -67,7 +67,7 @@ pub struct OrderDisplay(Vec<SellerOrders>);
 struct SellerOrders {
     id: AgentId,
     name: String,
-    orders: Vec<(u64, f64, f64)>,
+    orders: Vec<(u64, u64, f64)>,
 }
 
 fn choice(value: Choice) -> impl Bundle {
@@ -231,7 +231,7 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
             });
         groups[index]
             .orders
-            .push((order.id.0, order.grams, order.coins_per_kg));
+            .push((order.id.0, order.units, order.quoted_price));
     }
     for group in &mut groups {
         group.orders.sort_by_key(|order| order.0);
@@ -240,10 +240,12 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
     groups
 }
 
-fn order_label(grams: f64, price: f64) -> String {
+fn order_label(good: Good, units: u64, price: f64) -> String {
     format!(
-        "{grams:.1} g remaining  |  {price:.3} coins/kg  |  {:.3} coins total",
-        grams / 1000.0 * price
+        "{} remaining  |  {price:.3} coins/{}  |  {:.3} coins quoted value",
+        crate::quantity_label(good, units),
+        good.price_unit_name(),
+        units as f64 / good.units_per_price_unit() as f64 * price
     )
 }
 
@@ -253,13 +255,13 @@ fn buyer_requests(universe: &Universe, good: Good) -> String {
         .agents()
         .iter()
         .filter_map(|(id, agent)| {
-            let requested = market.requested(*id).grams(good);
-            (requested > 0.0).then(|| {
+            let requested = market.requested(*id).units(good);
+            (requested > 0).then(|| {
                 (
                     *id,
                     &agent.name,
                     requested,
-                    market.affordable_request(*id).grams(good),
+                    market.affordable_request(*id).units(good),
                 )
             })
         })
@@ -276,19 +278,31 @@ fn buyer_requests(universe: &Universe, good: Good) -> String {
             } else {
                 (*name).clone()
             };
-            format!("{identity}\n{requested:.1} g requested  |  {affordable:.1} g affordable")
+            format!(
+                "{identity}\n{} requested  |  {} affordable",
+                crate::quantity_label(good, *requested),
+                crate::quantity_label(good, *affordable)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-fn metrics(activity: GoodActivity) -> String {
+fn metrics(good: Good, activity: GoodActivity) -> String {
     format!(
-        "Buy volume: {:.1} g\nSell volume: {:.1} g\nTraded volume: {:.1} g\nUnfulfilled demand: {:.1} g",
-        activity.traded_grams + activity.affordable_demand_grams,
-        activity.traded_grams + activity.listed_grams,
-        activity.traded_grams,
-        activity.affordable_demand_grams
+        "Buy volume: {}\nSell volume: {}\nTraded volume: {}\nUnfulfilled demand: {}",
+        crate::quantity_label(
+            good,
+            activity
+                .traded_units
+                .saturating_add(activity.affordable_demand_units)
+        ),
+        crate::quantity_label(
+            good,
+            activity.traded_units.saturating_add(activity.listed_units)
+        ),
+        crate::quantity_label(good, activity.traded_units),
+        crate::quantity_label(good, activity.affordable_demand_units)
     )
 }
 
@@ -366,13 +380,15 @@ pub fn refresh(
     for (readout, mut value) in &mut readouts {
         let next = match *readout {
             Readout::Price(good) => format!(
-                "{:.3} coins/kg",
-                universe.prices().coins_per_kg(good).unwrap()
+                "{:.3} coins/{}",
+                universe.prices().price(good).unwrap(),
+                good.price_unit_name()
             ),
             Readout::Title => selection.good().name().into(),
             Readout::PriceNow => format!(
-                "Current price: {:.3} coins/kg",
-                universe.prices().coins_per_kg(selection.good()).unwrap()
+                "Current price: {:.3} coins/{}",
+                universe.prices().price(selection.good()).unwrap(),
+                selection.good().price_unit_name()
             ),
             Readout::Period => selected_period.as_ref().map_or_else(
                 || "No closed market day yet. The first period closes at Day 0 | 04:00:00.".into(),
@@ -380,7 +396,7 @@ pub fn refresh(
             ),
             Readout::Metrics => selected_period.as_ref().map_or_else(
                 || "No previous-day figures available.".into(),
-                |period| metrics(period.goods[selection.good() as usize]),
+                |period| metrics(selection.good(), period.goods[selection.good() as usize]),
             ),
             Readout::Buyers => buyer_requests(universe, selection.good()),
         };
@@ -420,8 +436,12 @@ pub fn refresh(
                                         MUTED,
                                     ));
                                 }
-                                for &(_, grams, price) in &group.orders {
-                                    seller.spawn(text(order_label(grams, price), 14.0, MUTED));
+                                for &(_, units, price) in &group.orders {
+                                    seller.spawn(text(
+                                        order_label(selection.good(), units, price),
+                                        14.0,
+                                        MUTED,
+                                    ));
                                 }
                             });
                     }
@@ -441,14 +461,17 @@ mod tests {
 
     #[test]
     fn quantities_include_transactions_once_and_label_periods() {
-        let value = metrics(GoodActivity {
-            traded_grams: 200.0,
-            listed_grams: 800.0,
-            affordable_demand_grams: 500.0,
-        });
+        let value = metrics(
+            Good::Berries,
+            GoodActivity {
+                traded_units: 200,
+                listed_units: 800,
+                affordable_demand_units: 500,
+            },
+        );
         assert_eq!(
             value,
-            "Buy volume: 700.0 g\nSell volume: 1000.0 g\nTraded volume: 200.0 g\nUnfulfilled demand: 500.0 g"
+            "Buy volume: 700 g\nSell volume: 1000 g\nTraded volume: 200 g\nUnfulfilled demand: 500 g"
         );
         let period = Universe::default().market().current_period();
         assert!(period_label(&period, Period::Current, 1_000).contains("CURRENT MARKET DAY"));
@@ -456,12 +479,35 @@ mod tests {
     }
 
     #[test]
+    fn counted_goods_display_integer_quantities_and_item_prices() {
+        assert_eq!(
+            order_label(Good::Bread, 2, 15.0),
+            "2 loaves remaining  |  15.000 coins/loaf  |  30.000 coins quoted value"
+        );
+        assert_eq!(
+            order_label(Good::BerryPie, 1, 25.0),
+            "1 pie remaining  |  25.000 coins/pie  |  25.000 coins quoted value"
+        );
+        assert!(
+            metrics(
+                Good::Bread,
+                GoodActivity {
+                    traded_units: 1,
+                    listed_units: 2,
+                    affordable_demand_units: 3
+                }
+            )
+            .contains("Buy volume: 4 loaves")
+        );
+    }
+
+    #[test]
     fn buy_requests_include_cashless_buyers_and_stay_live_in_previous_view() {
         use learning_lord_simulation::marketplace::ShoppingList;
 
         let (universe, funded) = Universe::with_map(Map::default())
-            .with_prices(Prices::new(1.0).unwrap())
-            .with_citizen("Same", Citizen::new(0.0).unwrap().with_coins(0.1).unwrap())
+            .with_prices(Prices::new(10.0).unwrap())
+            .with_citizen("Same", Citizen::new(0.0).unwrap().with_coins(1).unwrap())
             .unwrap();
         let (universe, cashless) = universe
             .with_citizen("Same", Citizen::new(0.0).unwrap())
@@ -470,15 +516,15 @@ mod tests {
             .with_citizen("Water buyer", Citizen::new(0.0).unwrap())
             .unwrap();
         let universe = universe
-            .with_purchase_request(funded, ShoppingList::single(Good::Berries, 200.0))
+            .with_purchase_request(funded, ShoppingList::single(Good::Berries, 200))
             .unwrap()
-            .with_purchase_request(cashless, ShoppingList::single(Good::Berries, 300.0))
+            .with_purchase_request(cashless, ShoppingList::single(Good::Berries, 300))
             .unwrap()
-            .with_purchase_request(water_buyer, ShoppingList::single(Good::Water, 400.0))
+            .with_purchase_request(water_buyer, ShoppingList::single(Good::Water, 400))
             .unwrap();
         let mut expected = [
-            (funded, "200.0 g requested  |  100.0 g affordable"),
-            (cashless, "300.0 g requested  |  0.0 g affordable"),
+            (funded, "200 g requested  |  100 g affordable"),
+            (cashless, "300 g requested  |  0 g affordable"),
         ];
         expected.sort_by_key(|(id, _)| id.0);
         let expected = expected
@@ -512,18 +558,18 @@ mod tests {
         app.update();
         assert_eq!(
             displayed(&mut app),
-            "Same\n200.0 g requested  |  100.0 g affordable"
+            "Same\n200 g requested  |  100 g affordable"
         );
         assert_eq!(app.world().resource::<Selection>().period, Period::Previous);
         press(&mut app, Choice::Good(Good::Water));
         assert_eq!(
             displayed(&mut app),
-            "Water buyer\n400.0 g requested  |  0.0 g affordable"
+            "Water buyer\n400 g requested  |  0 g affordable"
         );
         press(&mut app, Choice::Period(Period::Current));
         assert_eq!(
             displayed(&mut app),
-            "Water buyer\n400.0 g requested  |  0.0 g affordable"
+            "Water buyer\n400 g requested  |  0 g affordable"
         );
         assert!(
             app.world_mut()
@@ -539,33 +585,30 @@ mod tests {
             .with_prices(Prices::new(1.0).unwrap())
             .with_citizen(
                 "Same",
-                Citizen::new(0.0).unwrap().with_berries(1_000.0).unwrap(),
+                Citizen::new(0.0).unwrap().with_berries(1_000).unwrap(),
             )
             .unwrap();
         let (universe, second) = universe
             .with_citizen(
                 "Same",
-                Citizen::new(0.0).unwrap().with_berries(1_000.0).unwrap(),
+                Citizen::new(0.0).unwrap().with_berries(1_000).unwrap(),
             )
             .unwrap();
         let (universe, buyer) = universe
-            .with_citizen(
-                "Buyer",
-                Citizen::new(0.0).unwrap().with_coins(10.0).unwrap(),
-            )
+            .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(10).unwrap())
             .unwrap();
         let universe = universe
-            .start_action(first, CitizenAction::List(Good::Berries, 200.0))
+            .start_action(first, CitizenAction::List(Good::Berries, 200))
             .unwrap()
             .advance(TRADE_DURATION_MS)
             .unwrap()
-            .start_action(second, CitizenAction::List(Good::Berries, 300.0))
+            .start_action(second, CitizenAction::List(Good::Berries, 300))
             .unwrap()
             .advance(TRADE_DURATION_MS)
             .unwrap();
         let universe = universe
             .with_prices(Prices::new(2.0).unwrap())
-            .start_action(first, CitizenAction::List(Good::Berries, 100.0))
+            .start_action(first, CitizenAction::List(Good::Berries, 100))
             .unwrap()
             .advance(TRADE_DURATION_MS)
             .unwrap();
@@ -574,7 +617,7 @@ mod tests {
                 buyer,
                 CitizenAction::Buy(learning_lord_simulation::marketplace::ShoppingList::single(
                     Good::Berries,
-                    50.0,
+                    50,
                 )),
             )
             .unwrap()
@@ -585,9 +628,9 @@ mod tests {
         assert!(groups.iter().all(|group| group.name == "Same"));
         let first_group = groups.iter().find(|group| group.id == first).unwrap();
         assert_eq!(first_group.orders.len(), 2);
-        assert_eq!(first_group.orders[0].1, 150.0);
+        assert_eq!(first_group.orders[0].1, 150);
         assert_eq!(first_group.orders[0].2, 1.0);
-        assert_eq!(first_group.orders[1].1, 100.0);
+        assert_eq!(first_group.orders[1].1, 100);
         assert_eq!(first_group.orders[1].2, 2.0);
         assert_eq!(
             groups
@@ -596,16 +639,16 @@ mod tests {
                 .unwrap()
                 .orders[0]
                 .1,
-            300.0
+            300
         );
         assert!(seller_orders(&universe, Good::Water).is_empty());
         assert_eq!(
-            order_label(150.0, 1.0),
-            "150.0 g remaining  |  1.000 coins/kg  |  0.150 coins total"
+            order_label(Good::Berries, 150, 1.0),
+            "150 g remaining  |  1.000 coins/kg  |  0.150 coins quoted value"
         );
         assert_eq!(
-            order_label(100.0, 2.0),
-            "100.0 g remaining  |  2.000 coins/kg  |  0.200 coins total"
+            order_label(Good::Berries, 100, 2.0),
+            "100 g remaining  |  2.000 coins/kg  |  0.200 coins quoted value"
         );
         let mut app = app();
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe;
@@ -615,7 +658,7 @@ mod tests {
             app.world_mut()
                 .query::<&Text>()
                 .iter(app.world())
-                .any(|text| text.0 == order_label(150.0, 1.0))
+                .any(|text| text.0 == order_label(Good::Berries, 150, 1.0))
         );
         assert!(
             app.world_mut()

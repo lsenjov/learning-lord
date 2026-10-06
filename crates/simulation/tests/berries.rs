@@ -1,6 +1,4 @@
-use learning_lord_simulation::{
-    BERRY_NUTRITION_PER_GRAM, Citizen, CitizenAction, SimulationError, planning::plan,
-};
+use learning_lord_simulation::{Citizen, CitizenAction, SimulationError, planning::plan};
 
 const HALF_HOUR_MS: u64 = 1_800_000;
 
@@ -9,66 +7,55 @@ fn assert_close(actual: f64, expected: f64) {
 }
 
 #[test]
-fn inventory_starts_empty_and_rejects_invalid_quantities_or_busy_replacement() {
+fn inventory_is_integer_and_busy_replacement_is_rejected() {
     let original = Citizen::new(0.0).unwrap();
-    assert_eq!(original.berries_grams(), 0.0);
-    for grams in [-1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-        assert_eq!(
-            original.with_berries(grams),
-            Err(SimulationError::InvalidBerries)
-        );
-    }
-    let stocked = original.with_berries(12.345).unwrap();
-    assert_eq!(stocked.berries_grams(), 12.345);
-    assert_eq!(original.berries_grams(), 0.0);
+    assert_eq!(original.berries_units(), 0);
+    let stocked = original.with_berries(310).unwrap();
+    assert_eq!(stocked.berries_units(), 310);
+    assert_eq!(original.berries_units(), 0);
     let busy = stocked.start_action(CitizenAction::Eat).unwrap();
-    assert_eq!(busy.with_berries(1.0), Err(SimulationError::CitizenBusy));
+    assert_eq!(busy.with_berries(1), Err(SimulationError::CitizenBusy));
 }
 
 #[test]
-fn meals_use_available_grams_up_to_fifty_nutrition_and_consume_continuously() {
-    for (stock, portion) in [(10.0, 10.0), (63.25, 63.25), (180.5, 155.0)] {
+fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() {
+    for stock in [155, 310, 500] {
         let source = Citizen::new(20.0).unwrap().with_berries(stock).unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
-        let duration_ms = (portion * 1000.0) as u64;
+        let duration_ms = 155_000;
         assert_eq!(started.active_action().unwrap().duration_ms(), duration_ms);
-        assert_eq!(started.berries_grams(), stock);
+        assert_eq!(started.berries_units(), stock - 155);
         let halfway = started.advance(duration_ms / 2).unwrap();
-        assert_close(halfway.berries_grams(), stock - portion / 2.0);
+        assert_eq!(halfway.berries_units(), stock - 155);
         assert_close(
             halfway.hunger(),
-            20.0 + 100.0 / 24.0 * duration_ms as f64 / 7_200_000.0
-                - portion * BERRY_NUTRITION_PER_GRAM / 2.0,
+            20.0 + 100.0 / 24.0 * duration_ms as f64 / 7_200_000.0 - 25.0,
         );
         let completed = halfway.advance(duration_ms / 2).unwrap();
         assert_eq!(completed.active_action(), None);
-        assert_close(completed.berries_grams(), stock - portion);
+        assert_eq!(completed.berries_units(), stock - 155);
         assert_close(
             completed.hunger(),
-            20.0 + 100.0 / 24.0 * duration_ms as f64 / 3_600_000.0
-                - portion * BERRY_NUTRITION_PER_GRAM,
+            20.0 + 100.0 / 24.0 * duration_ms as f64 / 3_600_000.0 - 50.0,
         );
-        assert_eq!(source.berries_grams(), stock);
+        assert_eq!(source.berries_units(), stock);
     }
 }
 
 #[test]
-fn tiny_meals_round_up_to_one_millisecond_and_empty_meals_are_skipped() {
+fn empty_meals_skip_and_partial_berries_use_whole_available_units() {
     let empty = Citizen::new(0.0).unwrap();
     assert_eq!(empty.start_action(CitizenAction::Eat).unwrap(), empty);
-    for grams in [0.0001, f64::MIN_POSITIVE, f64::from_bits(1)] {
-        let started = empty
-            .with_berries(grams)
-            .unwrap()
-            .start_action(CitizenAction::Eat)
-            .unwrap();
-        assert_eq!(started.active_action().unwrap().remaining_ms(), 1);
-        let finished = started.advance(1).unwrap();
-        assert_eq!(finished.berries_grams(), 0.0);
-        assert_eq!(finished.active_action(), None);
+    for units in [1, 154] {
+        let citizen = empty.with_berries(units).unwrap();
+        let eating = citizen.start_action(CitizenAction::Eat).unwrap();
+        assert_eq!(eating.berries_units(), 0);
+        assert_eq!(eating.active_action().unwrap().duration_ms(), units * 1000);
+        let eaten = eating.advance(units * 1000).unwrap();
         assert_close(
-            finished.hunger(),
-            100.0 / 24.0 / 3_600_000.0 - grams * BERRY_NUTRITION_PER_GRAM,
+            eaten.hunger(),
+            citizen.hunger_per_hour() * units as f64 / 3600.0
+                - units as f64 * learning_lord_simulation::BERRY_NUTRITION_PER_GRAM,
         );
     }
 }
@@ -82,9 +69,9 @@ fn forage_yields_only_at_completion_and_prediction_preserves_actual_outcomes() {
     assert_eq!(original, snapshot);
     let foraging = original.start_action(CitizenAction::Forage).unwrap();
     let almost_done = foraging.advance(HALF_HOUR_MS - 1).unwrap();
-    assert_eq!(almost_done.berries_grams(), 0.0);
+    assert_eq!(almost_done.berries_units(), 0);
     let completed = almost_done.advance(1).unwrap();
-    assert!((5.0..=15.0).contains(&completed.berries_grams()));
+    assert!((5..=15).contains(&completed.berries_units()));
     assert_close(completed.hunger(), 20.0 + 100.0 / 48.0);
     assert_close(completed.tiredness(), 100.0 / 48.0);
     let direct = snapshot
@@ -92,8 +79,8 @@ fn forage_yields_only_at_completion_and_prediction_preserves_actual_outcomes() {
         .unwrap()
         .advance(HALF_HOUR_MS)
         .unwrap();
-    assert_eq!(completed.berries_grams(), direct.berries_grams());
-    assert_eq!(foraging.berries_grams(), 0.0);
+    assert_eq!(completed.berries_units(), direct.berries_units());
+    assert_eq!(foraging.berries_units(), 0);
     assert_eq!(completed.active_action(), None);
 }
 
@@ -108,7 +95,6 @@ fn empty_hungry_citizens_can_plan_and_advance_without_zero_duration_loops() {
     let advanced = planned.advance(24 * 3_600_000).unwrap();
     assert!(advanced.hunger().is_finite());
     assert!(advanced.tiredness().is_finite());
-    assert!(advanced.berries_grams() >= 0.0);
     assert!(advanced.active_action().unwrap().remaining_ms() > 0);
-    assert_eq!(source.berries_grams(), 0.0);
+    assert_eq!(source.berries_units(), 0);
 }

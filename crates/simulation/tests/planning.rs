@@ -35,7 +35,7 @@ fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
         citizen
             .advance(HALF_HOUR_MS)
             .unwrap()
-            .with_berries(citizen.berries_grams() + 10.0)
+            .with_berries(citizen.berries_units() + 10)
             .unwrap()
     } else {
         citizen
@@ -49,10 +49,10 @@ fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
 #[test]
 fn goal_planning_scores_action_endpoints_and_preserves_the_source() {
     for (hunger, tiredness, berries) in [
-        (-140.0, 0.0, 0.0),
-        (-80.0, -100.0, 40.0),
-        (25.0, 0.0, 10.1234),
-        (150.0, 100.0, 200.0),
+        (-140.0, 0.0, 0),
+        (-80.0, -100.0, 40),
+        (25.0, 0.0, 10),
+        (150.0, 100.0, 200),
     ] {
         let original = Citizen::with_needs(hunger, tiredness)
             .unwrap()
@@ -321,7 +321,7 @@ fn planning_sleeps_when_tired_and_eats_before_sleep_when_hungry() {
     assert_eq!(plan(&tired).unwrap().actions(), &[CitizenAction::Sleep]);
     let hungry = Citizen::with_needs(60.0, 100.0)
         .unwrap()
-        .with_berries(200.0)
+        .with_berries(200)
         .unwrap();
     let chosen = plan(&hungry).unwrap();
     assert_eq!(chosen.actions()[0], CitizenAction::Eat);

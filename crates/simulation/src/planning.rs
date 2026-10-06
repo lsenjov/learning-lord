@@ -37,8 +37,8 @@ impl GoalDecision {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductionInputDecision {
     pub good: crate::marketplace::Good,
-    pub required_grams: f64,
-    pub carried_grams: f64,
+    pub required_units: crate::Quantity,
+    pub carried_units: crate::Quantity,
     pub supply_shortfall: bool,
 }
 
@@ -46,7 +46,7 @@ pub struct ProductionInputDecision {
 pub struct ProductionDecision {
     pub recipe: crate::production::Recipe,
     pub profit_per_hour: Option<f64>,
-    pub remaining_batches: Option<f64>,
+    pub remaining_batches: Option<crate::Quantity>,
     pub inputs: Vec<ProductionInputDecision>,
     pub prefix_attempted: bool,
     pub preparation_limit_observed: bool,
@@ -68,20 +68,20 @@ impl ProductionDecision {
             inputs: recipe
                 .inputs()
                 .iter()
-                .map(|&(good, required_grams)| {
-                    let carried_grams = citizen.grams(good);
-                    let obtainable = carried_grams
-                        + citizen.market().listed_grams(citizen.id(), good)
-                        + citizen.market().available_grams(citizen.id(), good);
+                .map(|&(good, required_units)| {
+                    let carried_units = citizen.units(good);
+                    let obtainable = carried_units
+                        .saturating_add(citizen.market().listed_units(citizen.id(), good))
+                        .saturating_add(citizen.market().available_units(citizen.id(), good));
                     let can_gather = good == crate::marketplace::Good::Berries
                         || citizen
                             .available_recipes()
                             .any(|r| r.outputs().iter().any(|&(g, _)| g == good));
                     ProductionInputDecision {
                         good,
-                        required_grams,
-                        carried_grams,
-                        supply_shortfall: obtainable < required_grams && !can_gather,
+                        required_units,
+                        carried_units,
+                        supply_shortfall: obtainable < required_units && !can_gather,
                     }
                 })
                 .collect(),
@@ -271,7 +271,7 @@ fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -
             CitizenAction::Produce(recipe) => recipe
                 .inputs()
                 .iter()
-                .any(|&(good, grams)| citizen.grams(good) < grams),
+                .any(|&(good, units)| citizen.units(good) < units),
             _ => false,
         }
 }
@@ -428,14 +428,14 @@ impl Continuations {
                 CitizenAction::Travel(place) => place.hash(&mut hash),
                 CitizenAction::BuyFood(good) => good.hash(&mut hash),
                 CitizenAction::Produce(recipe) => recipe.hash(&mut hash),
-                CitizenAction::List(good, grams) | CitizenAction::Withdraw(good, grams) => {
+                CitizenAction::List(good, units) | CitizenAction::Withdraw(good, units) => {
                     good.hash(&mut hash);
-                    grams.to_bits().hash(&mut hash);
+                    units.hash(&mut hash);
                 }
                 CitizenAction::Buy(list) => {
-                    for (good, grams) in list.items() {
+                    for (good, units) in list.items() {
                         good.hash(&mut hash);
-                        grams.to_bits().hash(&mut hash);
+                        units.hash(&mut hash);
                     }
                 }
                 _ => {}
@@ -589,7 +589,7 @@ mod tests {
     fn cached_continuations_distinguish_prefix_goal_availability() {
         let citizen = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
-            .with_berries(300.0)
+            .with_berries(300)
             .unwrap();
         let prefix = goals::variants_after(
             &Prediction::new(&citizen, Cooldowns::default()),
@@ -687,9 +687,9 @@ mod tests {
     fn selected_plans_use_each_goal_once_and_reset_on_replanning() {
         let source = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
-            .with_berries(300.0)
+            .with_berries(300)
             .unwrap();
-        for citizen in [&source, &source.with_coins(3.0).unwrap()] {
+        for citizen in [&source, &source.with_coins(300).unwrap()] {
             let first = plan(citizen).unwrap();
             assert!(!first.actions().is_empty());
             let mut used = 0;
@@ -715,7 +715,7 @@ mod tests {
         )
         .unwrap();
         let travel = CitizenAction::Travel(map.public_place(Location::Market));
-        let purchase = CitizenAction::Buy(ShoppingList::single(Good::Bread, 60.0));
+        let purchase = CitizenAction::Buy(ShoppingList::single(Good::Bread, 60));
         let source = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
             .with_map(map.clone())
@@ -771,7 +771,7 @@ mod tests {
         use crate::marketplace::Prices;
         let citizen = Citizen::with_needs(70.0, -100.0)
             .unwrap()
-            .with_prices(Prices::new(2.0).unwrap());
+            .with_prices(Prices::new(200.0).unwrap());
         let selected = plan(&citizen).unwrap();
         let forecast = selected
             .decision()
@@ -811,7 +811,7 @@ mod tests {
     fn goal_boundaries_cover_actions_and_metadata_survives_execution() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
-            .with_berries(310.0)
+            .with_berries(310)
             .unwrap();
         let started = start(&citizen).unwrap();
         let plan = started.active_plan().unwrap().plan();
@@ -854,7 +854,7 @@ mod tests {
                 .advance(crate::ACTION_DURATION_MS)
                 .unwrap();
             planned = planned.advance(crate::ACTION_DURATION_MS).unwrap();
-            assert_eq!(planned.berries_grams(), replay.berries_grams());
+            assert_eq!(planned.berries_units(), replay.berries_units());
             assert_eq!(planned.forage_rng, replay.forage_rng);
         }
     }
@@ -927,11 +927,11 @@ mod tests {
     #[test]
     fn decision_records_existing_candidates_and_preserves_search_result() {
         use crate::marketplace::Prices;
-        for prices in [Prices::new(2.0).unwrap(), Prices::new(1.0).unwrap()] {
+        for prices in [Prices::new(200.0).unwrap(), Prices::new(100.0).unwrap()] {
             let citizen = Citizen::with_needs(50.0, -100.0)
                 .unwrap()
                 .with_prices(prices)
-                .with_berries(33.0)
+                .with_berries(33)
                 .unwrap();
             let snapshot = citizen.clone();
             let chosen = plan(&citizen).unwrap();
@@ -990,8 +990,8 @@ mod tests {
     fn full_continuations_can_outscore_the_local_goal_winner() {
         let citizen = Citizen::with_needs(0.0, -100.0)
             .unwrap()
-            .with_prices(crate::marketplace::Prices::new(5.0).unwrap())
-            .with_berries(120.0)
+            .with_prices(crate::marketplace::Prices::new(500.0).unwrap())
+            .with_berries(120)
             .unwrap();
         let local = goals::best_variant(&citizen, Effect::ReduceHunger, Cooldowns::default(), 0)
             .unwrap()
@@ -1045,17 +1045,17 @@ mod tests {
                 .unwrap()
                 .with_position(map.position(map.public_place(Location::River)))
                 .unwrap()
-                .with_prices(Prices::new(1.8975551078215391).unwrap())
-                .with_berries(25.36314504117695)
+                .with_prices(Prices::new(189.75551078215392).unwrap())
+                .with_berries(25)
                 .unwrap()
-                .with_coins(1.0)
+                .with_coins(100)
                 .unwrap();
         let mut market = citizen.market().clone();
         market
             .list(
                 crate::AgentId(uuid::Uuid::new_v4()),
                 crate::marketplace::Good::Berries,
-                1000.0,
+                1000,
             )
             .unwrap();
         let citizen = citizen.with_market(market);
@@ -1111,7 +1111,7 @@ mod tests {
             .decision
             .clone()
             .unwrap();
-        let repriced = source.with_prices(Prices::new(2.0).unwrap());
+        let repriced = source.with_prices(Prices::new(200.0).unwrap());
         let partial = repriced.advance(1).unwrap();
         assert!(Arc::ptr_eq(
             &report,
@@ -1135,7 +1135,7 @@ mod tests {
                 .as_ref()
                 .unwrap();
             if !Arc::ptr_eq(&report, current) {
-                assert_eq!(current.prices, Prices::new(2.0).unwrap());
+                assert_eq!(current.prices, Prices::new(200.0).unwrap());
                 return;
             }
         }
@@ -1148,10 +1148,10 @@ mod tests {
             AgentKind, Universe,
             marketplace::{Good, Prices, UPDATE_TIME_MS},
         };
-        let citizen = Citizen::new(0.0).unwrap().with_coins(1.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
         let mut market = citizen.market().clone();
         let seller = Citizen::new(0.0).unwrap().with_map(citizen.map()).unwrap();
-        market.list(seller.id(), Good::Berries, 1000.0).unwrap();
+        market.list(seller.id(), Good::Berries, 1000).unwrap();
         let citizen = citizen.with_market(market.clone());
         let planned = executing(
             &citizen,
@@ -1188,9 +1188,9 @@ mod tests {
         let AgentKind::Citizen(buyer) = &after.agents()[&id].kind;
         assert_eq!(
             buyer.coins(),
-            1.0 - boundary
+            100 - boundary
                 .market()
-                .purchase_cost(id, Good::Berries, 155.0)
+                .purchase_cost(id, Good::Berries, 155)
                 .unwrap()
         );
         let combined = universe
@@ -1201,14 +1201,14 @@ mod tests {
 
     #[test]
     fn replan_check_is_strictly_below_twenty_nutrition_and_only_before_later_meals() {
-        for grams in [0.0, 61.999, 62.0, 77.5] {
+        for units in [0, 61, 62, 77] {
             let citizen = Citizen::with_needs(100.0, -100.0)
                 .unwrap()
-                .with_berries(grams)
+                .with_berries(units)
                 .unwrap();
             assert!(!replan_check(&citizen, CitizenAction::Eat, 0));
             assert!(!replan_check(&citizen, CitizenAction::Forage, 1));
-            assert_eq!(replan_check(&citizen, CitizenAction::Eat, 1), grams < 62.0);
+            assert_eq!(replan_check(&citizen, CitizenAction::Eat, 1), units < 62);
             let planned = executing(
                 &citizen,
                 vec![
@@ -1218,7 +1218,7 @@ mod tests {
                 ],
             );
             let next = planned.advance(30 * MINUTE_MS).unwrap();
-            if grams < 62.0 {
+            if units < 62 {
                 assert_eq!(next.active_plan().unwrap().action_index(), 0);
                 assert_eq!(next.active_plan().unwrap().elapsed_ms(), 0);
             } else {
@@ -1228,19 +1228,16 @@ mod tests {
                 );
                 assert_eq!(next.active_plan().unwrap().action_index(), 1);
                 assert_eq!(next.active_plan().unwrap().elapsed_ms(), 30 * MINUTE_MS);
-                assert_eq!(
-                    next.active_action().unwrap().remaining_ms(),
-                    (grams * 1000.0) as u64
-                );
+                assert_eq!(next.active_action().unwrap().remaining_ms(), units * 1000);
                 let partial = next.advance(20_000).unwrap();
-                assert!(partial.berries_grams() < 62.0);
+                assert!(partial.berries_units() < 62);
                 assert_eq!(partial.active_plan().unwrap().action_index(), 1);
                 assert_eq!(
                     partial.active_action().unwrap().action(),
                     CitizenAction::Eat
                 );
             }
-            assert_eq!(planned.berries_grams(), grams);
+            assert_eq!(planned.berries_units(), units);
         }
     }
 
@@ -1248,7 +1245,7 @@ mod tests {
     fn a_low_actual_forage_yield_replans_from_actual_inventory() {
         let mut citizen = Citizen::with_needs(100.0, -100.0)
             .unwrap()
-            .with_berries(30.0)
+            .with_berries(30)
             .unwrap();
         let (source, actual) = (0..100)
             .find_map(|seed| {
@@ -1258,7 +1255,7 @@ mod tests {
                     .unwrap()
                     .advance(30 * MINUTE_MS)
                     .unwrap();
-                (actual.berries_grams() < 40.0).then(|| (citizen.clone(), actual))
+                (actual.berries_units() < 40).then(|| (citizen.clone(), actual))
             })
             .unwrap();
         let planned = executing(
@@ -1278,9 +1275,15 @@ mod tests {
             result.active_action().unwrap().action(),
             actual_plan.actions()[0]
         );
-        assert_eq!(result.berries_grams(), actual.berries_grams());
+        assert_eq!(
+            result.berries_units(),
+            actual
+                .start_action(actual_plan.actions()[0])
+                .unwrap()
+                .berries_units()
+        );
         assert_eq!(result.forage_rng, actual.forage_rng);
-        assert_eq!(source.berries_grams(), 30.0);
+        assert_eq!(source.berries_units(), 30);
     }
 
     #[test]
@@ -1309,13 +1312,8 @@ mod tests {
 
     #[test]
     fn stocked_hungry_citizens_plan_at_most_one_meal_in_the_current_horizon() {
-        for (hunger, grams) in [
-            (50.0, 200.0),
-            (150.0, 1000.0),
-            (500.0, 1000.0),
-            (500.0, 10_000.0),
-        ] {
-            let citizen = Citizen::new(hunger).unwrap().with_berries(grams).unwrap();
+        for (hunger, units) in [(50.0, 200), (150.0, 1000), (500.0, 1000), (500.0, 10_000)] {
+            let citizen = Citizen::new(hunger).unwrap().with_berries(units).unwrap();
             let chosen = plan(&citizen).unwrap();
             assert_eq!(
                 chosen

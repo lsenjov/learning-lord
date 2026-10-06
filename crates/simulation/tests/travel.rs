@@ -57,7 +57,7 @@ fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
         .unwrap()
         .with_map(map())
         .unwrap()
-        .with_berries(100.0)
+        .with_berries(100)
         .unwrap();
     for (action, location) in [
         (CitizenAction::Sleep, Location::Home),
@@ -67,7 +67,7 @@ fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
             Location::Market,
         ),
         (
-            CitizenAction::List(learning_lord_simulation::marketplace::Good::Berries, 10.0),
+            CitizenAction::List(learning_lord_simulation::marketplace::Good::Berries, 10),
             Location::Market,
         ),
     ] {

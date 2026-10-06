@@ -27,7 +27,7 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
     let (first, created) = market.initial_period();
     let mut start = current.start_ms;
     let mut result: Vec<Day> = Vec::new();
-    let mut price = universe.prices().coins_per_kg(good).unwrap();
+    let mut price = universe.prices().price(good).unwrap();
     let mut history = market
         .history()
         .iter()
@@ -46,9 +46,9 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
             let entry = history.next().unwrap();
             price = entry.price_before;
             GoodActivity {
-                traded_grams: entry.traded_grams,
-                listed_grams: entry.remaining_supply_grams,
-                affordable_demand_grams: entry.unmet_demand_grams,
+                traded_units: entry.traded_units,
+                listed_units: entry.remaining_supply_units,
+                affordable_demand_units: entry.unmet_demand_units,
             }
         } else {
             GoodActivity::default()
@@ -95,20 +95,22 @@ impl Scale {
             .iter()
             .flat_map(|day| {
                 [
-                    day.activity.traded_grams,
-                    day.activity.affordable_demand_grams,
-                    day.activity.listed_grams,
+                    day.activity.traded_units,
+                    day.activity.affordable_demand_units,
+                    day.activity.listed_units,
                 ]
             })
-            .fold(1.0, f64::max);
+            .max()
+            .unwrap_or(1)
+            .max(1) as f64;
         let extent = days
             .iter()
             .map(|day| {
-                day.activity.traded_grams / quantity_max / 2.0
+                day.activity.traded_units as f64 / quantity_max / 2.0
                     + day
                         .activity
-                        .affordable_demand_grams
-                        .max(day.activity.listed_grams)
+                        .affordable_demand_units
+                        .max(day.activity.listed_units) as f64
                         / quantity_max
             })
             .fold(1.0, f64::max);
@@ -127,8 +129,8 @@ impl Scale {
             180.0 - ((price / self.price_max - self.low) / (self.high - self.low)) as f32 * 80.0
         }
     }
-    fn quantity(&self, grams: f64) -> f32 {
-        ((grams / self.quantity_max) / self.extent) as f32 * 80.0
+    fn quantity(&self, units: f64) -> f32 {
+        ((units / self.quantity_max) / self.extent) as f32 * 80.0
     }
 }
 
@@ -152,7 +154,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue step line + body center: price (coins/kg). Body height: traded quantity.\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Close pressure affects the next 04:00 price.", 13.0, MUTED));
+    parent.spawn(text("Blue step line + body center: price (coins per kg, loaf or pie). Body height: traded quantity.\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Close pressure affects the next 04:00 price.", 13.0, MUTED));
     parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
@@ -278,8 +280,8 @@ pub fn refresh(
     let scale = Scale::new(&values);
     for mut legend in &mut legends {
         legend.0 = format!(
-            "Quantity size key at left: {:.3} kg  |  one linear scale across these days",
-            scale.quantity_max / 1000.0
+            "Quantity size key at left: {}  |  one linear scale across these days",
+            chart_quantity_label(good, scale.quantity_max)
         );
     }
     for entity in &axes {
@@ -287,7 +289,13 @@ pub fn refresh(
             .entity(entity)
             .despawn_children()
             .with_children(|axis| {
-                label(axis, "coins/kg".into(), 0.0, 5.0, PRICE);
+                label(
+                    axis,
+                    format!("coins/{}", good.price_unit_name()),
+                    0.0,
+                    5.0,
+                    PRICE,
+                );
                 rect(
                     axis,
                     78.0,
@@ -298,7 +306,7 @@ pub fn refresh(
                 );
                 label(
                     axis,
-                    format!("{:.3} kg", scale.quantity_max / 1000.0),
+                    chart_quantity_label(good, scale.quantity_max),
                     0.0,
                     218.0,
                     BODY,
@@ -357,14 +365,14 @@ pub fn refresh(
                             PRICE,
                         );
                     }
-                    let body = scale.quantity(day.activity.traded_grams);
+                    let body = scale.quantity(day.activity.traded_units as f64);
                     let top = y - body / 2.0;
                     rect(
                         plot,
                         center - 0.1,
-                        top - scale.quantity(day.activity.affordable_demand_grams),
+                        top - scale.quantity(day.activity.affordable_demand_units as f64),
                         0.2,
-                        scale.quantity(day.activity.affordable_demand_grams),
+                        scale.quantity(day.activity.affordable_demand_units as f64),
                         DEMAND,
                     );
                     rect(
@@ -372,7 +380,7 @@ pub fn refresh(
                         center - 0.1,
                         y + body / 2.0,
                         0.2,
-                        scale.quantity(day.activity.listed_grams),
+                        scale.quantity(day.activity.listed_units as f64),
                         STOCK,
                     );
                     body_mark(
@@ -414,6 +422,19 @@ pub fn refresh(
     cached.good = Some(good);
 }
 
+fn chart_quantity_label(good: Good, units: f64) -> String {
+    if good.units_per_price_unit() == 1 {
+        let unit = if units == 1.0 {
+            good.price_unit_name()
+        } else {
+            good.unit_name()
+        };
+        format!("{units:.0} {unit}")
+    } else {
+        format!("{:.3} kg", units / good.units_per_price_unit() as f64)
+    }
+}
+
 fn hover_index(position: Option<Vec2>, over: bool, count: usize) -> Option<usize> {
     position
         .filter(|point| {
@@ -440,7 +461,8 @@ pub fn hover(
         .find_map(|cursor| hover_index(cursor.normalized, cursor.cursor_over, cached.days.len()));
     let value = selected.map_or_else(|| "Hover a market day for exact figures. Cyan body marks the current partial day.".into(), |index| {
         let day = &cached.days[index];
-        format!("{} to {}  |  {}\nPrice: {:.6} coins/kg  |  traded: {:.3} g\nAffordable unmet demand: {:.3} g  |  unsold stock: {:.3} g", format_clock(day.start), format_clock(day.end), if day.partial { "PARTIAL | live quantities so far" } else { "CLOSED | quantities at close" }, day.price, day.activity.traded_grams, day.activity.affordable_demand_grams, day.activity.listed_grams)
+        let good = selection.good();
+        format!("{} to {}  |  {}\nPrice: {:.6} coins/{}  |  traded: {}\nAffordable unmet demand: {}  |  unsold stock: {}", format_clock(day.start), format_clock(day.end), if day.partial { "PARTIAL | live quantities so far" } else { "CLOSED | quantities at close" }, day.price, good.price_unit_name(), crate::quantity_label(good, day.activity.traded_units), crate::quantity_label(good, day.activity.affordable_demand_units), crate::quantity_label(good, day.activity.listed_units))
     });
     for mut text in &mut readouts {
         if text.0 != value {
@@ -460,13 +482,10 @@ mod tests {
     #[test]
     fn fills_inactive_days_without_precreation_history_and_carries_prices() {
         let (universe, buyer) = Universe::starting_at(6 * 60 * 60 * 1000)
-            .with_citizen(
-                "Buyer",
-                Citizen::new(0.0).unwrap().with_coins(10.0).unwrap(),
-            )
+            .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(10).unwrap())
             .unwrap();
         let universe = universe
-            .with_purchase_request(buyer, ShoppingList::single(Good::Water, 100.0))
+            .with_purchase_request(buyer, ShoppingList::single(Good::Water, 100))
             .unwrap();
         let universe = universe.advance(DAY_MS).unwrap();
         let old_price = universe
@@ -476,13 +495,13 @@ mod tests {
             .find(|entry| entry.good == Good::Water)
             .unwrap()
             .price_before;
-        let new_price = universe.prices().coins_per_kg(Good::Water).unwrap();
+        let new_price = universe.prices().price(Good::Water).unwrap();
         let values = days(&universe, Good::Water);
         assert_eq!(values.len(), 2);
         assert_eq!(values[0].start, 6 * 60 * 60 * 1000);
         assert_eq!(values[0].end, DAY_MS + UPDATE_TIME_MS);
         assert_eq!(values[0].price, old_price);
-        assert_eq!(values[0].activity.affordable_demand_grams, 100.0);
+        assert_eq!(values[0].activity.affordable_demand_units, 100);
         assert_eq!(values[1].price, new_price);
         let universe = universe
             .with_purchase_request(buyer, ShoppingList::default())
@@ -527,18 +546,18 @@ mod tests {
             Good::Water,
         );
         values[0].activity = GoodActivity {
-            traded_grams: f64::MAX,
-            affordable_demand_grams: f64::MAX,
-            listed_grams: f64::MAX,
+            traded_units: u64::MAX,
+            affordable_demand_units: u64::MAX,
+            listed_units: u64::MAX,
         };
         let scale = Scale::new(&values);
         assert_eq!(scale.y(f64::MAX), HEIGHT / 2.0);
-        assert!(scale.quantity(f64::MAX).is_finite());
+        assert!(scale.quantity(u64::MAX as f64).is_finite());
         assert_eq!(
-            scale.quantity(f64::MAX / 2.0),
-            scale.quantity(f64::MAX) / 2.0
+            scale.quantity(u64::MAX as f64 / 2.0),
+            scale.quantity(u64::MAX as f64) / 2.0
         );
-        assert!(scale.quantity(f64::MAX) * 1.5 <= 80.0);
+        assert!(scale.quantity(u64::MAX as f64) * 1.5 <= 80.0);
         assert_eq!(scale.quantity(0.0), 0.0);
         assert!(Scale::new(&[]).y(0.0).is_finite());
     }
@@ -590,6 +609,15 @@ mod tests {
             assert!(!node.is_changed());
             assert!(text.is_none_or(|value| !value.is_changed()));
         }
+    }
+
+    #[test]
+    fn chart_quantities_distinguish_bulk_and_counted_goods() {
+        assert_eq!(chart_quantity_label(Good::Berries, 1500.0), "1.500 kg");
+        assert_eq!(chart_quantity_label(Good::Bread, 1.0), "1 loaf");
+        assert_eq!(chart_quantity_label(Good::Bread, 2.0), "2 loaves");
+        assert_eq!(chart_quantity_label(Good::BerryPie, 1.0), "1 pie");
+        assert_eq!(chart_quantity_label(Good::BerryPie, 3.0), "3 pies");
     }
 
     #[test]

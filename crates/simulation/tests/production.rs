@@ -26,7 +26,26 @@ fn worker(recipe: Recipe) -> Citizen {
     citizen.clone()
 }
 
-fn close(a: f64, b: f64) {
+trait Numeric {
+    fn number(self) -> f64;
+}
+impl Numeric for f64 {
+    fn number(self) -> f64 {
+        self
+    }
+}
+impl Numeric for u64 {
+    fn number(self) -> f64 {
+        self as f64
+    }
+}
+impl Numeric for i64 {
+    fn number(self) -> f64 {
+        self as f64
+    }
+}
+fn close(a: impl Numeric, b: impl Numeric) {
+    let (a, b) = (a.number(), b.number());
     assert!((a - b).abs() < 1e-9, "{a} != {b}");
 }
 
@@ -38,15 +57,15 @@ fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stoc
         let duration = started.active_action().unwrap().duration_ms();
         let partial = started.advance(duration - 1).unwrap();
         for good in Good::ALL {
-            assert_eq!(partial.grams(good), source.grams(good));
+            assert_eq!(partial.units(good), source.units(good));
         }
         let complete = partial.advance(1).unwrap();
         for &(good, grams) in recipe.inputs() {
-            assert_eq!(source.grams(good), grams);
-            assert_eq!(complete.grams(good), 0.0);
+            assert_eq!(source.units(good), grams);
+            assert_eq!(complete.units(good), 0);
         }
         for &(good, grams) in recipe.outputs() {
-            assert_eq!(complete.grams(good), grams);
+            assert_eq!(complete.units(good), grams);
         }
         assert!(complete.hunger() > source.hunger());
         assert!(complete.tiredness() > source.tiredness());
@@ -56,7 +75,7 @@ fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stoc
         }
         let direct = started.advance(duration).unwrap();
         for good in Good::ALL {
-            assert_eq!(complete.grams(good), direct.grams(good));
+            assert_eq!(complete.units(good), direct.units(good));
         }
         close(complete.hunger(), direct.hunger());
         close(complete.tiredness(), direct.tiredness());
@@ -68,7 +87,7 @@ fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stoc
 fn all_inputs_skill_and_owned_property_are_required_before_work_starts() {
     let baker = worker(Recipe::BakeBread);
     for &(good, grams) in Recipe::BakeBread.inputs() {
-        let short = baker.with_good(good, grams - 1.0).unwrap();
+        let short = baker.with_good(good, grams - 1).unwrap();
         assert_eq!(
             short.start_action(CitizenAction::Produce(Recipe::BakeBread)),
             Err(SimulationError::MissingInputs)
@@ -129,7 +148,7 @@ fn skill_levels_shorten_work_and_completion_improves_future_batches() {
 #[test]
 fn failed_production_does_not_consume_inputs_or_change_progress() {
     let source = worker(Recipe::BakeBread)
-        .with_good(Good::Bread, f64::MAX)
+        .with_good(Good::Bread, u64::MAX)
         .unwrap();
     let started = source
         .start_action(CitizenAction::Produce(Recipe::BakeBread))
@@ -139,7 +158,7 @@ fn failed_production_does_not_consume_inputs_or_change_progress() {
         Err(SimulationError::InventoryOverflow)
     );
     for &(good, grams) in Recipe::BakeBread.inputs() {
-        assert_eq!(started.grams(good), grams);
+        assert_eq!(started.units(good), grams);
     }
     assert_eq!(started.active_action().unwrap().remaining_ms(), 3_600_000);
     assert_eq!(started.skill_level(Skill::Baking), 1.0);
@@ -155,7 +174,7 @@ fn starting_inputs_cover_four_baseline_hours_of_the_selected_profession() {
         for &(good, grams) in recipe.inputs() {
             assert_eq!(
                 inputs.iter().find(|(g, _)| *g == good).unwrap().1,
-                4.0 * grams
+                4 * grams
             );
         }
         assert_eq!(inputs.len(), recipe.inputs().len());
@@ -175,51 +194,48 @@ fn starting_inputs_cover_four_baseline_hours_of_the_selected_profession() {
 }
 
 #[test]
-fn mixed_food_meals_consume_and_restore_nutrition_continuously() {
+fn meals_choose_one_available_food_and_keep_other_inventory() {
     let source = Citizen::new(80.0)
         .unwrap()
-        .with_berries(40.0)
+        .with_berries(40)
         .unwrap()
-        .with_good(Good::Bread, 40.0)
+        .with_good(Good::Bread, 1)
         .unwrap()
-        .with_good(Good::BerryPie, 50.0)
+        .with_good(Good::BerryPie, 1)
         .unwrap();
-    let total_nutrition = 40.0 * Good::Berries.nutrition_per_gram().unwrap() + 20.0 + 30.0;
-    close(source.food_nutrition(), total_nutrition);
     let started = source.start_action(CitizenAction::Eat).unwrap();
+    assert_eq!(started.units(Good::Bread), 0);
+    assert_eq!(started.units(Good::BerryPie), 1);
+    assert_eq!(started.berries_units(), 40);
     let duration = started.active_action().unwrap().duration_ms();
-    assert_eq!(duration, 108_495);
+    assert_eq!(duration, 100_000);
     let partial = started.advance(duration / 2).unwrap();
-    let fraction = (duration / 2) as f64 / duration as f64;
-    close(partial.berries_grams(), 40.0 * (1.0 - fraction));
-    close(partial.grams(Good::Bread), 40.0 * (1.0 - fraction));
     close(
         partial.hunger(),
-        80.0 + (duration / 2) as f64 / 3_600_000.0 * source.hunger_per_hour() - 50.0 * fraction,
+        80.0 + duration as f64 / 7_200_000.0 * source.hunger_per_hour() - 25.0,
     );
     let complete = started.advance(duration).unwrap();
-    assert_eq!(complete.berries_grams(), 0.0);
-    assert_eq!(complete.grams(Good::Bread), 0.0);
-    close(complete.food_nutrition(), total_nutrition - 50.0);
     close(
         complete.hunger(),
         80.0 + duration as f64 / 3_600_000.0 * source.hunger_per_hour() - 50.0,
     );
-    assert_eq!(source.grams(Good::BerryPie), 50.0);
 }
 
 #[test]
-fn each_edible_good_supports_partial_meals_and_nonfood_cannot_be_requested_as_food() {
-    for good in Good::FOOD {
-        let grams = 30.0 / good.nutrition_per_gram().unwrap();
-        let source = Citizen::new(40.0).unwrap().with_good(good, grams).unwrap();
+fn each_food_requires_a_whole_meal_and_nonfood_is_rejected() {
+    for (good, units, nutrition) in [
+        (Good::Berries, 155, 50.0),
+        (Good::Bread, 1, 50.0),
+        (Good::BerryPie, 1, 60.0),
+    ] {
+        let source = Citizen::new(40.0).unwrap().with_good(good, units).unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
+        assert_eq!(started.units(good), 0);
         let duration = started.active_action().unwrap().duration_ms();
         let complete = started.advance(duration).unwrap();
-        close(complete.grams(good), 0.0);
         close(
             complete.hunger(),
-            40.0 + duration as f64 / 3_600_000.0 * source.hunger_per_hour() - 30.0,
+            40.0 + duration as f64 / 3_600_000.0 * source.hunger_per_hour() - nutrition,
         );
     }
     assert_eq!(

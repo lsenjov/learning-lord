@@ -1,4 +1,4 @@
-use crate::{Citizen, SimulationError, locations::Location, marketplace::Good};
+use crate::{Citizen, Coins, Quantity, SimulationError, locations::Location, marketplace::Good};
 
 pub const SKILL_GAIN_PER_BATCH: f64 = 0.1;
 pub const SPEED_GAIN_PER_LEVEL: f64 = 0.05;
@@ -77,31 +77,27 @@ impl Recipe {
             Self::BakeBread | Self::BakeBerryPie => Location::Bakery,
         }
     }
-    pub fn inputs(self) -> &'static [(Good, f64)] {
+    pub fn inputs(self) -> &'static [(Good, Quantity)] {
         match self {
             Self::GrowWheat | Self::ChopWood | Self::FetchWater => &[],
-            Self::MillFlour => &[(Good::Wheat, 300.0)],
-            Self::BakeBread => &[
-                (Good::Flour, 100.0),
-                (Good::Wood, 25.0),
-                (Good::Water, 100.0),
-            ],
+            Self::MillFlour => &[(Good::Wheat, 300)],
+            Self::BakeBread => &[(Good::Flour, 100), (Good::Wood, 25), (Good::Water, 100)],
             Self::BakeBerryPie => &[
-                (Good::Flour, 100.0),
-                (Good::Wood, 25.0),
-                (Good::Water, 50.0),
-                (Good::Berries, 100.0),
+                (Good::Flour, 100),
+                (Good::Wood, 25),
+                (Good::Water, 50),
+                (Good::Berries, 100),
             ],
         }
     }
-    pub fn outputs(self) -> &'static [(Good, f64)] {
+    pub fn outputs(self) -> &'static [(Good, Quantity)] {
         match self {
-            Self::GrowWheat => &[(Good::Wheat, 200.0)],
-            Self::MillFlour => &[(Good::Flour, 240.0)],
-            Self::ChopWood => &[(Good::Wood, 200.0)],
-            Self::FetchWater => &[(Good::Water, 200.0)],
-            Self::BakeBread => &[(Good::Bread, 200.0)],
-            Self::BakeBerryPie => &[(Good::BerryPie, 250.0)],
+            Self::GrowWheat => &[(Good::Wheat, 200)],
+            Self::MillFlour => &[(Good::Flour, 240)],
+            Self::ChopWood => &[(Good::Wood, 200)],
+            Self::FetchWater => &[(Good::Water, 200)],
+            Self::BakeBread => &[(Good::Bread, 2)],
+            Self::BakeBerryPie => &[(Good::BerryPie, 2)],
         }
     }
     pub fn base_duration_ms(self) -> u64 {
@@ -131,57 +127,57 @@ pub fn starting_inputs(role: crate::StartingRole) -> crate::marketplace::Shoppin
         crate::StartingRole::Baker => Recipe::BakeBread,
         _ => return crate::marketplace::ShoppingList::default(),
     };
-    let batches = (4 * 60 * 60_000) as f64 / recipe.base_duration_ms() as f64;
+    let batches = (4 * 60 * 60_000) / recipe.base_duration_ms();
     crate::marketplace::ShoppingList::new(
         recipe
             .inputs()
             .iter()
-            .map(|&(good, grams)| (good, grams * batches)),
+            .map(|&(good, units)| (good, units * batches)),
     )
     .expect("prototype recipe quantities are finite")
 }
 
-pub fn starting_coins(_role: crate::StartingRole) -> f64 {
-    let base = 1.0;
-    let purchase_allowance = 2.0;
+pub fn starting_coins(_role: crate::StartingRole) -> Coins {
+    let base = 100;
+    let purchase_allowance = 200;
     base + purchase_allowance
 }
 
 pub const DAILY_CAPACITY_MS: u64 = 12 * 60 * 60_000;
 pub const SALES_HISTORY_DAYS: u64 = 7;
 pub const PERSONAL_FOOD_RESERVE: f64 = crate::FOOD_RESERVE_CAP_NUTRITION;
-pub const MIN_LISTING_VALUE: f64 = 0.02;
+pub const MIN_LISTING_VALUE: f64 = 2.0;
 pub const URGENT_HUNGER: f64 = 20.0;
 pub const URGENT_TIREDNESS: f64 = 50.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductionTargets {
     pub calculated_at_ms: u64,
-    remaining_batches: [f64; Recipe::COUNT],
+    remaining_batches: [Quantity; Recipe::COUNT],
 }
 
 impl ProductionTargets {
-    pub fn remaining_batches(&self, recipe: Recipe) -> f64 {
+    pub fn remaining_batches(&self, recipe: Recipe) -> Quantity {
         self.remaining_batches[recipe as usize]
     }
-    pub fn batches(&self) -> impl Iterator<Item = (Recipe, f64)> + '_ {
+    pub fn batches(&self) -> impl Iterator<Item = (Recipe, Quantity)> + '_ {
         Recipe::ALL
             .into_iter()
             .map(|recipe| (recipe, self.remaining_batches(recipe)))
-            .filter(|(_, batches)| *batches > 0.0)
+            .filter(|(_, batches)| *batches > 0)
     }
     pub fn is_empty(&self) -> bool {
         self.batches().next().is_none()
     }
     pub(crate) fn complete(&mut self, recipe: Recipe) {
-        self.remaining_batches[recipe as usize] = (self.remaining_batches(recipe) - 1.0).max(0.0);
+        self.remaining_batches[recipe as usize] = self.remaining_batches(recipe).saturating_sub(1);
     }
 
     pub fn calculate(citizen: &Citizen, now_ms: u64) -> Result<Self, SimulationError> {
         use crate::marketplace::DAY_MS;
         let mut target = Self {
             calculated_at_ms: now_ms,
-            remaining_batches: [0.0; Recipe::COUNT],
+            remaining_batches: [0; Recipe::COUNT],
         };
         let active = citizen.active_action().and_then(|active| {
             if let crate::CitizenAction::Produce(recipe) = active.action() {
@@ -190,22 +186,26 @@ impl ProductionTargets {
                 None
             }
         });
-        let mut stocks: [f64; Good::COUNT] = std::array::from_fn(|i| {
-            citizen.grams(Good::ALL[i]) + citizen.market().listed_grams(citizen.id(), Good::ALL[i])
-        });
-        let coins = citizen.coins().max(0.0);
+        let mut stocks = [0; Good::COUNT];
+        for good in Good::ALL {
+            stocks[good as usize] = citizen
+                .units(good)
+                .checked_add(citizen.market().listed_units(citizen.id(), good))
+                .ok_or(SimulationError::InventoryOverflow)?;
+        }
+        let coins = citizen.coins().max(0);
         if let Some(recipe) = active {
-            for &(good, grams) in recipe.inputs() {
-                stocks[good as usize] = (stocks[good as usize] - grams).max(0.0);
+            for &(good, units) in recipe.inputs() {
+                stocks[good as usize] = stocks[good as usize].saturating_sub(units);
             }
         }
         let mut food_left = PERSONAL_FOOD_RESERVE;
-        let mut personal_reserve = [0.0; Good::COUNT];
+        let mut personal_reserve = [0; Good::COUNT];
         for good in Good::FOOD {
-            let nutrition = good.nutrition_per_gram().unwrap();
-            let kept = stocks[good as usize].min(food_left / nutrition);
+            let nutrition = good.nutrition_per_unit().unwrap();
+            let kept = stocks[good as usize].min((food_left / nutrition).ceil() as Quantity);
             personal_reserve[good as usize] = kept;
-            food_left = (food_left - kept * nutrition).max(0.0);
+            food_left = (food_left - kept as f64 * nutrition).max(0.0);
         }
         let mut recipes: Vec<_> = citizen
             .available_recipes()
@@ -226,7 +226,7 @@ impl ProductionTargets {
             let duration = recipe.duration_ms(citizen)? as f64;
             let daily_batches = (DAILY_CAPACITY_MS as f64 / duration).floor();
             let mut wanted: f64 = 0.0;
-            for &(good, yield_grams) in recipe.outputs() {
+            for &(good, yield_units) in recipe.outputs() {
                 let sales: f64 = citizen
                     .market()
                     .trades()
@@ -237,61 +237,63 @@ impl ProductionTargets {
                             && trade.time_ms > start
                             && trade.time_ms <= now_ms
                     })
-                    .map(|trade| trade.grams)
+                    .map(|trade| trade.units as f64)
                     .sum();
-                let unmet = citizen.market().unmet_grams(good);
-                let desired = (sales / observed_days + unmet).max(yield_grams * daily_batches);
-                let owned = citizen.grams(good) + citizen.market().listed_grams(citizen.id(), good);
-                let saleable = (owned - personal_reserve[good as usize]).max(0.0);
+                let unmet = citizen.market().unmet_units(good) as f64;
+                let desired =
+                    (sales / observed_days + unmet).max(yield_units as f64 * daily_batches);
+                let owned = stocks[good as usize];
+                let saleable = owned.saturating_sub(personal_reserve[good as usize]) as f64;
                 let progress = active.map_or(0.0, |active| {
                     active
                         .outputs()
                         .iter()
                         .filter(|(g, _)| *g == good)
-                        .map(|(_, grams)| *grams)
+                        .map(|(_, units)| *units as f64)
                         .sum()
                 });
-                wanted =
-                    wanted.max(((desired - saleable - progress).max(0.0) / yield_grams).ceil());
+                wanted = wanted
+                    .max(((desired - saleable - progress).max(0.0) / yield_units as f64).ceil());
             }
-            let mut count = wanted.min(daily_batches);
-            if count <= 0.0 {
+            let mut count = wanted.min(daily_batches) as Quantity;
+            if count == 0 {
                 continue;
             }
-            let cost = |count: f64| -> Option<f64> {
+            let cost = |count: Quantity| -> Option<Coins> {
                 recipe
                     .inputs()
                     .iter()
-                    .map(|&(good, grams)| {
+                    .map(|&(good, units)| {
                         citizen.market().estimated_purchase_cost(
                             citizen.id(),
                             good,
-                            (grams * count - stocks[good as usize]).max(0.0),
+                            units
+                                .checked_mul(count)?
+                                .saturating_sub(stocks[good as usize]),
                         )
                     })
-                    .try_fold(0.0, |sum, cost| Some(sum + cost?))
-                    .filter(|cost| cost.is_finite())
+                    .try_fold(0_i64, |sum, cost| sum.checked_add(cost?))
             };
             if cost(count).is_none_or(|cost| cost > coins) {
                 let mut low = 0u64;
-                let mut high = count as u64;
+                let mut high = count;
                 while low < high {
                     let middle = low + (high - low).div_ceil(2);
-                    if cost(middle as f64).is_some_and(|cost| cost <= coins) {
+                    if cost(middle).is_some_and(|cost| cost <= coins) {
                         low = middle;
                     } else {
                         high = middle - 1;
                     }
                 }
-                count = low as f64;
+                count = low;
             }
-            if count <= 0.0 {
+            if count == 0 {
                 continue;
             }
             target.remaining_batches[recipe as usize] = count;
         }
         if let Some(recipe) = active {
-            target.remaining_batches[recipe as usize] += 1.0;
+            target.remaining_batches[recipe as usize] += 1;
         }
         Ok(target)
     }
@@ -301,15 +303,16 @@ pub fn recipe_profit(recipe: Recipe, citizen: &Citizen) -> Option<f64> {
     let outputs: f64 = recipe
         .outputs()
         .iter()
-        .map(|&(good, grams)| citizen.prices().value(good, grams))
+        .map(|&(good, units)| citizen.prices().value(good, units))
         .try_fold(0.0, |sum, value| Some(sum + value?))?;
     let inputs: f64 = recipe
         .inputs()
         .iter()
-        .map(|&(good, grams)| {
+        .map(|&(good, units)| {
             citizen
                 .market()
-                .estimated_purchase_cost(citizen.id(), good, grams)
+                .estimated_purchase_cost(citizen.id(), good, units)
+                .map(|coins| coins as f64)
         })
         .try_fold(0.0, |sum, value| Some(sum + value?))?;
     let profit = outputs - inputs;

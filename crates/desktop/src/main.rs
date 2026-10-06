@@ -326,10 +326,16 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                 CitizenAction::BuyFood(good) => format!("Buying {}", good.name().to_lowercase()),
                 CitizenAction::Produce(recipe) => recipe.name().into(),
                 CitizenAction::ListExcess => "List excess goods".into(),
-                CitizenAction::List(good, grams) => format!("Listing {grams:.1} g {}", good.name()),
+                CitizenAction::List(good, units) => {
+                    format!("Listing {} {}", quantity_label(good, units), good.name())
+                }
                 CitizenAction::Buy(list) => format!("Buying {}", shopping_list_label(list)),
-                CitizenAction::Withdraw(good, grams) => {
-                    format!("Withdrawing {grams:.1} g {}", good.name())
+                CitizenAction::Withdraw(good, units) => {
+                    format!(
+                        "Withdrawing {} {}",
+                        quantity_label(good, units),
+                        good.name()
+                    )
                 }
                 CitizenAction::Travel(id) => {
                     format!("Walking to {}", citizen.map().place(id).unwrap().name)
@@ -363,8 +369,14 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .map_or_else(String::new, |role| format!(" | {}", role.name()));
     let inventory = Good::ALL
         .into_iter()
-        .filter(|good| citizen.grams(*good) != 0.0)
-        .map(|good| format!("{}: {:.1} g", good.name(), citizen.grams(good)))
+        .filter(|good| citizen.units(*good) != 0)
+        .map(|good| {
+            format!(
+                "{}: {}",
+                good.name(),
+                quantity_label(good, citizen.units(good))
+            )
+        })
         .collect::<Vec<_>>()
         .chunks(3)
         .map(|row| row.join(" | "))
@@ -377,7 +389,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
     properties.sort();
     let properties = properties.join(", ");
     format!(
-        "{}{role}\n{inventory}\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
+        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
         agent.name,
         citizen.coins(),
         citizen
@@ -391,9 +403,18 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
     )
 }
 
+fn quantity_label(good: Good, units: u64) -> String {
+    let unit = if units == 1 && good.units_per_price_unit() == 1 {
+        good.price_unit_name()
+    } else {
+        good.unit_name()
+    };
+    format!("{units} {unit}")
+}
+
 fn shopping_list_label(list: learning_lord_simulation::marketplace::ShoppingList) -> String {
     list.items()
-        .map(|(good, grams)| format!("{grams:.1} g {}", good.name()))
+        .map(|(good, units)| format!("{} {}", quantity_label(good, units), good.name()))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -407,9 +428,13 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
         CitizenAction::BuyFood(good) => format!("Buy {}", good.name().to_lowercase()),
         CitizenAction::Produce(recipe) => recipe.name().into(),
         CitizenAction::ListExcess => "List excess goods".into(),
-        CitizenAction::List(good, grams) => format!("List {grams:.1} g {}", good.name()),
+        CitizenAction::List(good, units) => {
+            format!("List {} {}", quantity_label(good, units), good.name())
+        }
         CitizenAction::Buy(list) => format!("Buy {}", shopping_list_label(list)),
-        CitizenAction::Withdraw(good, grams) => format!("Withdraw {grams:.1} g {}", good.name()),
+        CitizenAction::Withdraw(good, units) => {
+            format!("Withdraw {} {}", quantity_label(good, units), good.name())
+        }
         CitizenAction::Travel(id) => format!("Travel to {}", citizen.map().place(id).unwrap().name),
     }
 }
@@ -453,7 +478,7 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
         "Last planning decision".to_string(),
         format!(
             "Prices used: berries {:.3} coins/kg",
-            decision.prices.coins_per_kg(Good::Berries).unwrap()
+            decision.prices.price(Good::Berries).unwrap()
         ),
     ];
     for candidate in &decision.candidates {
@@ -497,10 +522,9 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
             let profit = recipe
                 .profit_per_hour
                 .map_or_else(|| "unknown".into(), |value| format!("{value:.3} coins/h"));
-            let target = recipe.remaining_batches.map_or_else(
-                || "not tracked".into(),
-                |value| format!("{value:.2} batches"),
-            );
+            let target = recipe
+                .remaining_batches
+                .map_or_else(|| "not tracked".into(), |value| format!("{value} batches"));
             lines.push(format!(
                 "\n{} | Estimated profit {} | Target remaining {}",
                 recipe.recipe.name(),
@@ -512,11 +536,14 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
             } else {
                 for input in &recipe.inputs {
                     lines.push(format!(
-                        "Inputs per batch — {}: {:.1}/{:.1} g carried | {:.1} g missing{}",
+                        "Inputs per batch — {}: {} / {} carried | {} missing{}",
                         input.good.name(),
-                        input.carried_grams,
-                        input.required_grams,
-                        (input.required_grams - input.carried_grams).max(0.0),
+                        quantity_label(input.good, input.carried_units),
+                        quantity_label(input.good, input.required_units),
+                        quantity_label(
+                            input.good,
+                            input.required_units.saturating_sub(input.carried_units)
+                        ),
                         if input.supply_shortfall {
                             " | insufficient accessible supplies"
                         } else {
@@ -535,7 +562,7 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
                 "Feasible sequence found; absent from selected full plan (ties can retain the earlier plan)."
             } else if recipe.inputs.iter().any(|input| input.supply_shortfall) {
                 "No feasible sequence found; insufficient accessible input supplies."
-            } else if recipe.remaining_batches == Some(0.0) {
+            } else if recipe.remaining_batches == Some(0) {
                 "No sequence found; production target already met (prerequisites or food goals may still use this recipe)."
             } else if recipe.profit_per_hour.is_some_and(|profit| profit <= 0.0) {
                 "No sequence found; nonpositive estimated profit excludes this recipe from the production target queue."
@@ -625,10 +652,7 @@ mod tests {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(prices)
-                .with_citizen(
-                    "Ada",
-                    Citizen::new(0.0).unwrap().with_berries(35.0).unwrap(),
-                )
+                .with_citizen("Ada", Citizen::new(0.0).unwrap().with_berries(35).unwrap())
                 .unwrap();
         assert!(decision_readout(&universe, None).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
@@ -682,7 +706,7 @@ mod tests {
                     Citizen::new(0.0)
                         .unwrap()
                         .with_starting_role(StartingRole::Baker)
-                        .with_berries(930.0)
+                        .with_berries(930)
                         .unwrap(),
                 )
                 .unwrap();
@@ -696,7 +720,7 @@ mod tests {
         assert!(text.contains("Bake bread | Estimated profit"));
         assert!(text.contains("Target remaining"));
         assert!(text.contains("insufficient accessible input supplies"));
-        assert!(text.contains("100.0 g missing"));
+        assert!(text.contains("100 g missing"));
         let later = universe.advance(1).unwrap();
         assert_eq!(text, decision_readout(&later, Some(id)));
     }
@@ -705,7 +729,7 @@ mod tests {
     fn readout_shows_berries_upcoming_actions_and_commitment() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
-            .with_berries(310.0)
+            .with_berries(310)
             .unwrap();
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
@@ -721,10 +745,10 @@ mod tests {
         assert!(readout.contains("Eating | 00:01:45 remaining"));
         assert!(readout.contains("Location:"));
         assert!(readout.contains("Commitment left: 01:59:10"));
-        assert!(readout.contains("Berries: 260.0 g"));
-        assert!(!readout.contains("Water: 0.0 g"));
-        assert!(!readout.contains("Bread: 0.0 g"));
-        assert!(readout.contains("Coins: 0.00 | Wealth: 0.260 coins"));
+        assert!(readout.contains("Berries: 155 g"));
+        assert!(!readout.contains("Water: 0 g"));
+        assert!(!readout.contains("Bread: 0 loaves"));
+        assert!(readout.contains("Coins: 0 | Wealth: 0.260 coins"));
     }
 
     #[test]
