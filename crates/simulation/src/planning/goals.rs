@@ -14,7 +14,6 @@ pub enum Effect {
     ReduceHunger,
     ReduceTiredness,
     ReduceClothingNeed,
-    IncreaseWealth,
     ReplenishReserves,
     Production,
     ListExcess,
@@ -34,7 +33,6 @@ impl CitizenAction {
             Self::Eat => &[ReduceHunger],
             Self::Sleep => &[ReduceTiredness],
             Self::EquipClothing => &[ReduceClothingNeed],
-            Self::Forage => &[Food, IncreaseWealth, ReplenishReserves],
             Self::BuyFood(good) if good.nutrition_per_unit().is_some() => {
                 &[Food, ReplenishReserves]
             }
@@ -45,7 +43,7 @@ impl CitizenAction {
                     .iter()
                     .any(|(good, _)| good.nutrition_per_unit().is_some()) =>
             {
-                &[Food, ReplenishReserves]
+                &[Food, ReplenishReserves, Production]
             }
             Self::Withdraw(good, _) if good.nutrition_per_unit().is_some() => {
                 &[Food, ReplenishReserves]
@@ -57,9 +55,9 @@ impl CitizenAction {
             {
                 &[Food, ReplenishReserves]
             }
+            Self::Produce(_) => &[Production],
             Self::Wait
             | Self::Travel(_)
-            | Self::Produce(_)
             | Self::ListExcess
             | Self::List(..)
             | Self::Buy(..)
@@ -113,7 +111,7 @@ impl CitizenAction {
 const ACTIONS: [CitizenAction; 6] = [
     CitizenAction::Eat,
     CitizenAction::Sleep,
-    CitizenAction::Forage,
+    CitizenAction::Produce(crate::production::Recipe::Forage),
     CitizenAction::BuyFood(Good::Berries),
     CitizenAction::BuyFood(Good::Bread),
     CitizenAction::BuyFood(Good::BerryPie),
@@ -211,7 +209,10 @@ impl Prediction {
         next.citizen = citizen;
         next.score.add(before, after, duration)?;
         next.goal_score.add(before, after, duration)?;
-        if !matches!(action, CitizenAction::Forage | CitizenAction::Travel(_)) {
+        if !matches!(
+            action,
+            CitizenAction::Produce(crate::production::Recipe::Forage) | CitizenAction::Travel(_)
+        ) {
             next.last_gathering_order = None;
         }
         next.actions.push(action);
@@ -322,7 +323,10 @@ fn suppliers(
             .iter()
             .any(|(good, _)| good.nutrition_per_unit().is_some())
         {
-            actions.push(CitizenAction::Produce(recipe));
+            let action = CitizenAction::Produce(recipe);
+            if !actions.contains(&action) {
+                actions.push(action);
+            }
         }
     }
     for good in Good::FOOD {
@@ -429,11 +433,15 @@ fn order_variants(
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
     if let CitizenAction::Produce(recipe) = action
+        && recipe != crate::production::Recipe::Forage
         && amount > state.citizen.food_nutrition()
     {
         return food_production_variants(state, recipe, amount, reserved_ms, prior_actions);
     }
-    let gathering = matches!(action, CitizenAction::Forage);
+    let gathering = matches!(
+        action,
+        CitizenAction::Produce(crate::production::Recipe::Forage)
+    );
     if gathering && state.last_gathering_order == Some(action) {
         return Ok(Vec::new());
     }
@@ -577,6 +585,13 @@ fn production_order_with_evidence(
                 break;
             }
             let action = CitizenAction::Produce(recipe);
+            if recipe == crate::production::Recipe::Forage
+                && (index == 0 || recipes[index - 1] != recipe)
+                && state.last_gathering_order == Some(action)
+            {
+                complete = false;
+                break;
+            }
             if let Some(location) = action.required_place(&state.citizen)
                 && state.citizen.position() != state.citizen.map().position(location)
             {
@@ -600,6 +615,9 @@ fn production_order_with_evidence(
                 break;
             };
             state = next;
+            if recipe == crate::production::Recipe::Forage {
+                state.last_gathering_order = Some(action);
+            }
         }
         if complete {
             variants.push((path, state));
@@ -681,15 +699,12 @@ fn prepare_inputs(
             }
             next_states.push(current.clone());
             if current.citizen.units(good) < units {
-                let mut suppliers: Vec<_> = current
+                let suppliers: Vec<_> = current
                     .citizen
                     .available_recipes()
                     .filter(|r| r.outputs().iter().any(|(output, _)| *output == good))
                     .map(CitizenAction::Produce)
                     .collect();
-                if good == Good::Berries {
-                    suppliers.push(CitizenAction::Forage);
-                }
                 for supplier in suppliers {
                     next_states.extend(gather_input(
                         &current,
@@ -909,8 +924,16 @@ pub(super) fn production_prefixes(
     prior_actions: usize,
     diagnostics: &mut [super::ProductionDecision],
 ) -> Result<Vec<Prediction>, SimulationError> {
-    let Some(targets) = initial.citizen.production_targets() else {
-        return Ok(Vec::new());
+    let calculated;
+    let targets = match initial.citizen.production_targets() {
+        Some(targets) => targets,
+        None => {
+            calculated = crate::production::ProductionTargets::calculate(
+                &initial.citizen,
+                initial.citizen.market_time_ms,
+            )?;
+            &calculated
+        }
     };
     let mut recipes: Vec<_> = targets
         .batches()
@@ -1025,18 +1048,8 @@ fn variants_from(
     }
     for action in goal_actions {
         let candidates = order_variants(&initial, action, MEAL_NOURISHMENT, 0, prior_actions)?;
-        if goal == Effect::IncreaseWealth {
-            let mut checkpoints = WorkCheckpoints::default();
-            for candidate in candidates {
-                checkpoints.consider(Vec::new(), candidate);
-            }
-            for candidate in checkpoints.finish() {
-                consider(candidate);
-            }
-        } else {
-            for candidate in candidates {
-                consider(candidate);
-            }
+        for candidate in candidates {
+            consider(candidate);
         }
         // Existing small meals remain useful when acquiring a full meal would delay relief.
         if action == CitizenAction::Eat
@@ -1055,7 +1068,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wealth_checkpoints_include_travel_and_keep_half_hour_primitives() {
+    fn exhausted_forage_targets_allow_food_and_recipe_preparation() {
+        use crate::production::Recipe;
+        let mut source = baker().with_berries(0).unwrap();
+        source.refresh_production_targets(true).unwrap();
+        let target = source.production_targets.as_mut().unwrap();
+        for _ in 0..24 {
+            target.complete(Recipe::Forage);
+        }
+        let initial = Prediction::new(&source, Cooldowns::default());
+        let forage = CitizenAction::Produce(Recipe::Forage);
+        assert!(
+            production_prefixes(initial.clone(), 0, &mut [])
+                .unwrap()
+                .iter()
+                .all(|v| !v.actions.contains(&forage))
+        );
+        for goal in [Effect::ReduceHunger, Effect::ReplenishReserves] {
+            assert!(
+                variants_after(&initial, goal)
+                    .unwrap()
+                    .iter()
+                    .any(|v| v.actions.contains(&forage))
+            );
+        }
+        let ingredients = crate::marketplace::ShoppingList::single(Good::Berries, 50);
+        assert!(
+            prepare_inputs(&initial, &ingredients, 0, 0)
+                .unwrap()
+                .iter()
+                .any(|v| v.actions.contains(&forage) && v.citizen.berries_units() >= 50)
+        );
+    }
+
+    #[test]
+    fn forage_production_checkpoints_include_travel_and_keep_half_hour_primitives() {
         use crate::locations::{Map, Position};
         for (travel_ms, counts) in [(0, vec![2, 4, 6, 8]), (5 * 60_000, vec![2, 4, 6, 8])] {
             let map = Map::new(
@@ -1070,16 +1117,18 @@ mod tests {
             let citizen = Citizen::with_needs(-50.0, -100.0)
                 .unwrap()
                 .with_map(map)
+                .unwrap()
+                .with_good(Good::Water, 10_000)
                 .unwrap();
             let initial = Prediction::new(&citizen, Cooldowns::default());
-            let variants = variants_from(initial.clone(), Effect::IncreaseWealth, 0).unwrap();
+            let variants = variants_from(initial.clone(), Effect::Production, 0).unwrap();
             assert_eq!(variants.len(), 4);
             for (candidate, count) in variants.iter().zip(counts) {
                 assert_eq!(
                     candidate
                         .actions
                         .iter()
-                        .filter(|&&a| a == CitizenAction::Forage)
+                        .filter(|&&a| a == CitizenAction::Produce(crate::production::Recipe::Forage))
                         .count(),
                     count
                 );
@@ -1092,18 +1141,30 @@ mod tests {
                         .actions
                         .iter()
                         .zip(&candidate.action_durations_ms)
-                        .all(|(action, duration)| *action != CitizenAction::Forage
+                        .all(|(action, duration)| *action
+                            != CitizenAction::Produce(crate::production::Recipe::Forage)
                             || *duration == ACTION_DURATION_MS)
                 );
             }
-            let suppliers = order_variants(&initial, CitizenAction::Forage, 0.0, 0, 0).unwrap();
+            let suppliers = order_variants(
+                &initial,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
+                0.0,
+                0,
+                0,
+            )
+            .unwrap();
             assert_eq!(suppliers.len(), 8);
             assert_eq!(suppliers[0].elapsed_ms, travel_ms + ACTION_DURATION_MS);
         }
     }
 
     fn bread_only(mut worker: Citizen) -> Citizen {
-        worker = worker.with_good(Good::BerryPie, 10_000).unwrap();
+        worker = worker
+            .with_good(Good::BerryPie, 10_000)
+            .unwrap()
+            .with_berries(10_000)
+            .unwrap();
         worker.refresh_production_targets(true).unwrap();
         worker
     }
@@ -1807,40 +1868,74 @@ mod tests {
     #[test]
     fn gathering_order_metadata_survives_goals_and_nested_supply() {
         let initial = Prediction::new(&hungry(30), Cooldowns::default());
-        let orders = order_variants(&initial, CitizenAction::Forage, 0.0, 0, 0).unwrap();
+        let orders = order_variants(
+            &initial,
+            CitizenAction::Produce(crate::production::Recipe::Forage),
+            0.0,
+            0,
+            0,
+        )
+        .unwrap();
         assert_eq!(
             orders.len(),
             gathering_segments(super::super::HORIZON_MS, ACTION_DURATION_MS) as usize
         );
         let gathered = &orders[1];
-        assert_eq!(gathered.actions, [CitizenAction::Forage; 2]);
-        assert!(
-            order_variants(gathered, CitizenAction::Forage, 0.0, 0, 0)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            gathered.actions,
+            [CitizenAction::Produce(crate::production::Recipe::Forage); 2]
         );
         assert!(
-            best_variant_after(gathered, Effect::IncreaseWealth)
+            order_variants(
+                gathered,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
+                0.0,
+                0,
+                0
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            best_variant_after(gathered, Effect::Production)
                 .unwrap()
-                .is_none()
+                .is_none_or(|v| !v
+                    .actions
+                    .contains(&CitizenAction::Produce(crate::production::Recipe::Forage)))
         );
         let mut funded = gathered.clone();
         funded.citizen = funded.citizen.with_coins(100).unwrap();
         let hunger = best_variant_after(&funded, Effect::ReduceHunger)
             .unwrap()
             .unwrap();
-        assert!(!hunger.actions.contains(&CitizenAction::Forage));
+        assert!(
+            !hunger
+                .actions
+                .contains(&CitizenAction::Produce(crate::production::Recipe::Forage))
+        );
         let eaten = orders[5].perform(CitizenAction::Eat, 0).unwrap().unwrap();
         assert!(
-            !order_variants(&eaten, CitizenAction::Forage, 0.0, 0, 0)
-                .unwrap()
-                .is_empty()
+            !order_variants(
+                &eaten,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
+                0.0,
+                0,
+                0
+            )
+            .unwrap()
+            .is_empty()
         );
         let reset = Prediction::new(&gathered.citizen, Cooldowns::default());
         assert!(
-            !order_variants(&reset, CitizenAction::Forage, 0.0, 0, 0)
-                .unwrap()
-                .is_empty()
+            !order_variants(
+                &reset,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
+                0.0,
+                0,
+                0
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -1862,15 +1957,22 @@ mod tests {
                 sell: 0,
             },
         );
-        let orders = order_variants(&initial, CitizenAction::Forage, 0.0, 0, 0).unwrap();
+        let orders = order_variants(
+            &initial,
+            CitizenAction::Produce(crate::production::Recipe::Forage),
+            0.0,
+            0,
+            0,
+        )
+        .unwrap();
         let order = &orders[2];
         assert_eq!(
             order.actions,
             [
                 CitizenAction::Travel(map.public_place(Location::Forest)),
-                CitizenAction::Forage,
-                CitizenAction::Forage,
-                CitizenAction::Forage
+                CitizenAction::Produce(crate::production::Recipe::Forage),
+                CitizenAction::Produce(crate::production::Recipe::Forage),
+                CitizenAction::Produce(crate::production::Recipe::Forage)
             ]
         );
         let mut replay = initial;
@@ -1897,10 +1999,14 @@ mod tests {
         );
         let source = hungry(75);
         let acquired = full_meals(&source);
-        assert!(
-            acquired.iter().any(|v| v.actions
-                == [vec![CitizenAction::Forage; 8], vec![CitizenAction::Eat]].concat())
-        );
+        assert!(acquired.iter().any(|v| {
+            v.actions
+                == [
+                    vec![CitizenAction::Produce(crate::production::Recipe::Forage); 8],
+                    vec![CitizenAction::Eat],
+                ]
+                .concat()
+        }));
         let variants = variants_after(
             &Prediction::new(&source, Cooldowns::default()),
             Effect::ReduceHunger,
@@ -1961,7 +2067,7 @@ mod tests {
     fn requirements_discover_gathering_trading_and_mixed_supply_chains() {
         let source = hungry(95);
         let variants = full_meals(&source);
-        let mut foraged = vec![CitizenAction::Forage; 6];
+        let mut foraged = vec![CitizenAction::Produce(crate::production::Recipe::Forage); 6];
         foraged.push(CitizenAction::Eat);
         assert!(variants.iter().any(|v| v.actions == foraged));
         for variant in variants {
@@ -2021,10 +2127,10 @@ mod tests {
         let short = hungry(0).with_coins(9).unwrap();
         let full = full_meals(&short);
         assert!(!full.is_empty());
-        assert!(
-            full.iter()
-                .all(|v| v.actions.contains(&CitizenAction::Forage))
-        );
+        assert!(full.iter().all(|v| {
+            v.actions
+                .contains(&CitizenAction::Produce(crate::production::Recipe::Forage))
+        }));
     }
 
     #[test]
@@ -2035,7 +2141,7 @@ mod tests {
             .find(|v| {
                 v.actions
                     .iter()
-                    .filter(|&&a| a == CitizenAction::Forage)
+                    .filter(|&&a| a == CitizenAction::Produce(crate::production::Recipe::Forage))
                     .count()
                     == 8
             })
@@ -2044,7 +2150,7 @@ mod tests {
         assert!(!full_meals(&hungry(65)).iter().any(|v| {
             v.actions
                 .iter()
-                .filter(|&&a| a == CitizenAction::Forage)
+                .filter(|&&a| a == CitizenAction::Produce(crate::production::Recipe::Forage))
                 .count()
                 == 9
         }));
@@ -2234,7 +2340,7 @@ mod tests {
             .perform(CitizenAction::Travel(map.public_place(Location::Forest)), 0)
             .unwrap()
             .unwrap();
-        let next = best_variant_after(&prefix, Effect::IncreaseWealth)
+        let next = best_variant_after(&prefix, Effect::Production)
             .unwrap()
             .unwrap();
         let mut replay = prefix.clone();
@@ -2246,7 +2352,7 @@ mod tests {
         assert_eq!(next.score.elapsed_ms, prefix.elapsed_ms + next.elapsed_ms);
         let local = best_variant(
             &prefix.citizen,
-            Effect::IncreaseWealth,
+            Effect::Production,
             prefix.cooldowns,
             prefix.actions.len(),
         )
@@ -2349,7 +2455,7 @@ mod tests {
             .unwrap()
             .with_prices(crate::marketplace::Prices::new(100.0).unwrap());
         let gathered = Prediction::new(&citizen, Cooldowns::default())
-            .perform(CitizenAction::Forage, 0)
+            .perform(CitizenAction::Produce(crate::production::Recipe::Forage), 0)
             .unwrap()
             .unwrap();
         assert!(
@@ -2432,7 +2538,7 @@ mod tests {
         let source = hungry(95).with_map(map.clone()).unwrap();
         let variants = full_meals(&source);
         let mut foraged = vec![CitizenAction::Travel(map.public_place(Location::Forest))];
-        foraged.extend([CitizenAction::Forage; 6]);
+        foraged.extend([CitizenAction::Produce(crate::production::Recipe::Forage); 6]);
         foraged.push(CitizenAction::Eat);
         let gathered = variants.iter().find(|v| v.actions == foraged).unwrap();
         assert_eq!(
@@ -2486,29 +2592,35 @@ mod tests {
         assert!(!full_meals(&at_home).iter().any(|v| {
             v.actions
                 .iter()
-                .filter(|&&a| a == CitizenAction::Forage)
+                .filter(|&&a| a == CitizenAction::Produce(crate::production::Recipe::Forage))
                 .count()
                 == 8
         }));
-        assert!(
-            full_meals(&away).iter().any(|v| v.actions
-                == [vec![CitizenAction::Forage; 8], vec![CitizenAction::Eat]].concat())
-        );
+        assert!(full_meals(&away).iter().any(|v| {
+            v.actions
+                == [
+                    vec![CitizenAction::Produce(crate::production::Recipe::Forage); 8],
+                    vec![CitizenAction::Eat],
+                ]
+                .concat()
+        }));
     }
 
     #[test]
-    fn wealth_goal_uses_current_prices_and_expected_berry_yield() {
+    fn forage_production_uses_current_prices_and_expected_berry_yield() {
         for berries in [1.0, 4.0] {
             let source = Citizen::with_needs(-50.0, -100.0)
                 .unwrap()
-                .with_prices(crate::marketplace::Prices::new(berries).unwrap());
-            let chosen = best_variant(&source, Effect::IncreaseWealth, Cooldowns::default(), 0)
+                .with_prices(crate::marketplace::Prices::new(berries).unwrap())
+                .with_good(Good::Water, 10_000)
+                .unwrap();
+            let chosen = best_variant(&source, Effect::Production, Cooldowns::default(), 0)
                 .unwrap()
                 .unwrap();
             let segments = gathering_segments(super::super::HORIZON_MS, ACTION_DURATION_MS);
             assert_eq!(
                 chosen.actions,
-                vec![CitizenAction::Forage; segments as usize]
+                vec![CitizenAction::Produce(crate::production::Recipe::Forage); segments as usize]
             );
             assert_eq!(chosen.citizen.prices(), source.prices());
             assert_eq!(chosen.citizen.berries_units(), 10 * segments);

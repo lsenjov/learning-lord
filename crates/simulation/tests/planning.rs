@@ -31,7 +31,7 @@ fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
 }
 
 fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
-    if action == CitizenAction::Forage {
+    if action == CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage) {
         citizen
             .advance(HALF_HOUR_MS)
             .unwrap()

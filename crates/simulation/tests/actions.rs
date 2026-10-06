@@ -73,7 +73,7 @@ fn busy_citizens_reject_all_actions_without_replacing_the_current_action() {
         CitizenAction::Eat,
         CitizenAction::Wait,
         CitizenAction::Sleep,
-        CitizenAction::Forage,
+        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
     ] {
         let citizen = Citizen::new(0.0)
             .unwrap()
@@ -88,7 +88,7 @@ fn busy_citizens_reject_all_actions_without_replacing_the_current_action() {
             CitizenAction::Eat,
             CitizenAction::Wait,
             CitizenAction::Sleep,
-            CitizenAction::Forage,
+            CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
         ] {
             assert_eq!(
                 citizen.start_action(requested),
@@ -137,7 +137,7 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
         CitizenAction::Eat,
         CitizenAction::Wait,
         CitizenAction::Sleep,
-        CitizenAction::Forage,
+        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
     ] {
         let original = Citizen::new(-80.0)
             .unwrap()
@@ -240,7 +240,7 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
     for action in [
         CitizenAction::Eat,
         CitizenAction::Wait,
-        CitizenAction::Forage,
+        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
     ] {
         for hunger in [0.0, f64::MAX] {
             let citizen = Citizen::with_hunger_rate(hunger, f64::MAX)

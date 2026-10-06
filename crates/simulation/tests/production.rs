@@ -11,7 +11,7 @@ fn worker(recipe: Recipe) -> Citizen {
         Recipe::MillFlour => StartingRole::Miller,
         Recipe::SpinThread | Recipe::WeaveCloth => StartingRole::Weaver,
         Recipe::MakeClothingBlock | Recipe::AssembleGarment => StartingRole::Tailor,
-        Recipe::ChopWood => StartingRole::Woodcutter,
+        Recipe::ChopWood | Recipe::Forage => StartingRole::Woodcutter,
         Recipe::FetchWater | Recipe::BakeBread | Recipe::BakeBerryPie => StartingRole::Baker,
     };
     let mut citizen = Citizen::new(0.0).unwrap().with_starting_role(role);
@@ -53,7 +53,7 @@ fn close(a: impl Numeric, b: impl Numeric) {
 
 #[test]
 fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stocks() {
-    for recipe in Recipe::ALL {
+    for recipe in Recipe::ALL.into_iter().filter(|r| *r != Recipe::Forage) {
         let source = worker(recipe);
         let started = source.start_action(CitizenAction::Produce(recipe)).unwrap();
         let duration = started.active_action().unwrap().duration_ms();
@@ -116,7 +116,7 @@ fn all_inputs_skill_and_owned_property_are_required_before_work_starts() {
     );
     assert_eq!(
         public.available_recipes().collect::<Vec<_>>(),
-        vec![Recipe::FetchWater]
+        vec![Recipe::Forage, Recipe::FetchWater]
     );
 }
 

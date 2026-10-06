@@ -323,7 +323,9 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                 CitizenAction::Wait => "Waiting".into(),
                 CitizenAction::Sleep => "Sleeping".into(),
                 CitizenAction::EquipClothing => "Equipping clothing".into(),
-                CitizenAction::Forage => "Foraging".into(),
+                CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage) => {
+                    "Foraging".into()
+                }
                 CitizenAction::BuyFood(good) => format!("Buying {}", good.name().to_lowercase()),
                 CitizenAction::Produce(recipe) => recipe.name().into(),
                 CitizenAction::ListExcess => "List excess goods".into(),
@@ -435,7 +437,9 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
         CitizenAction::Wait => "Wait".into(),
         CitizenAction::Sleep => "Sleep".into(),
         CitizenAction::EquipClothing => "Equip clothing".into(),
-        CitizenAction::Forage => "Forage".into(),
+        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage) => {
+            "Forage".into()
+        }
         CitizenAction::BuyFood(good) => format!("Buy {}", good.name().to_lowercase()),
         CitizenAction::Produce(recipe) => recipe.name().into(),
         CitizenAction::ListExcess => "List excess goods".into(),
@@ -497,7 +501,6 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
             Effect::ReduceHunger => "Hunger",
             Effect::ReduceTiredness => "Sleep",
             Effect::ReduceClothingNeed => "Clothing",
-            Effect::IncreaseWealth => "Wealth",
             Effect::Production => "Production",
             Effect::ReplenishReserves => "Replenish reserves",
             Effect::ListExcess => "List excess",
@@ -680,7 +683,7 @@ mod tests {
             .unwrap();
         assert!(!hunger.contains("Unavailable:"));
         assert!(text.contains("Sleep"));
-        assert!(text.contains("Wealth"));
+        assert!(text.contains("Production"));
         assert_eq!(text.matches("[chosen first]").count(), 1);
         assert!(text.contains("Goal avg"));
         assert!(text.contains("Plan avg"));
@@ -698,8 +701,8 @@ mod tests {
         assert_eq!(
             sequence_readout(
                 &[
-                    CitizenAction::Forage,
-                    CitizenAction::Forage,
+                    CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
+                    CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
                     CitizenAction::Eat
                 ],
                 &Citizen::new(0.0).unwrap()

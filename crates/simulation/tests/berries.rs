@@ -67,7 +67,11 @@ fn forage_yields_only_at_completion_and_prediction_preserves_actual_outcomes() {
     let predicted = plan(&original).unwrap();
     assert_eq!(predicted, plan(&original).unwrap());
     assert_eq!(original, snapshot);
-    let foraging = original.start_action(CitizenAction::Forage).unwrap();
+    let foraging = original
+        .start_action(CitizenAction::Produce(
+            learning_lord_simulation::production::Recipe::Forage,
+        ))
+        .unwrap();
     let almost_done = foraging.advance(HALF_HOUR_MS - 1).unwrap();
     assert_eq!(almost_done.berries_units(), 0);
     let completed = almost_done.advance(1).unwrap();
@@ -75,7 +79,9 @@ fn forage_yields_only_at_completion_and_prediction_preserves_actual_outcomes() {
     assert_close(completed.hunger(), 20.0 + 100.0 / 48.0);
     assert_close(completed.tiredness(), 100.0 / 48.0);
     let direct = snapshot
-        .start_action(CitizenAction::Forage)
+        .start_action(CitizenAction::Produce(
+            learning_lord_simulation::production::Recipe::Forage,
+        ))
         .unwrap()
         .advance(HALF_HOUR_MS)
         .unwrap();
@@ -90,7 +96,7 @@ fn empty_hungry_citizens_can_plan_and_advance_without_zero_duration_loops() {
     let planned = source.start_planning().unwrap();
     assert!(matches!(
         planned.active_action().unwrap().action(),
-        CitizenAction::Forage
+        CitizenAction::Produce(_)
     ));
     let advanced = planned.advance(24 * 3_600_000).unwrap();
     assert!(advanced.hunger().is_finite());

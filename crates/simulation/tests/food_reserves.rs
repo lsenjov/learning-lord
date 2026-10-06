@@ -204,7 +204,10 @@ fn foraging_does_not_publish_a_food_reserve_wishlist() {
     let universe = universe
         .advance(travel_ms)
         .unwrap()
-        .start_action(worker, CitizenAction::Forage)
+        .start_action(
+            worker,
+            CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
+        )
         .unwrap();
     assert_eq!(universe.market().requested(worker), ShoppingList::default());
 }

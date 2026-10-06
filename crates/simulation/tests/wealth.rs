@@ -31,7 +31,11 @@ fn integer_coin_boundaries_and_busy_setup_are_supported() {
     for coins in [i64::MIN, 0, i64::MAX] {
         assert_eq!(source.with_coins(coins).unwrap().coins(), coins);
     }
-    let busy = source.start_action(CitizenAction::Forage).unwrap();
+    let busy = source
+        .start_action(CitizenAction::Produce(
+            learning_lord_simulation::production::Recipe::Forage,
+        ))
+        .unwrap();
     assert_eq!(busy.with_coins(100), Err(SimulationError::CitizenBusy));
     assert_eq!(busy.with_berries(1), Err(SimulationError::CitizenBusy));
     assert_eq!(
@@ -46,18 +50,23 @@ fn integer_coin_boundaries_and_busy_setup_are_supported() {
 
 #[test]
 fn berries_arrive_on_completion_and_prediction_preserves_randomness() {
-    let source = Citizen::with_needs(-50.0, -100.0).unwrap();
+    let source = Citizen::with_needs(-50.0, -100.0)
+        .unwrap()
+        .with_good(learning_lord_simulation::marketplace::Good::Water, 10_000)
+        .unwrap();
     let original = source.clone();
     let planned = plan(&source).unwrap();
-    assert!(
-        planned
-            .actions()
-            .iter()
-            .any(|a| matches!(a, CitizenAction::Forage))
-    );
+    assert!(planned.actions().iter().any(|a| matches!(
+        a,
+        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage)
+    )));
     assert!(planned.average_wellbeing() > -20.0);
     assert_eq!(source, original);
-    let started = source.start_action(CitizenAction::Forage).unwrap();
+    let started = source
+        .start_action(CitizenAction::Produce(
+            learning_lord_simulation::production::Recipe::Forage,
+        ))
+        .unwrap();
     let partial = started.advance(ACTION_DURATION_MS - 1).unwrap();
     assert_eq!(partial.berries_units(), 0);
     let complete = partial.advance(1).unwrap();
@@ -66,7 +75,9 @@ fn berries_arrive_on_completion_and_prediction_preserves_randomness() {
     assert_eq!(
         complete.berries_units(),
         original
-            .start_action(CitizenAction::Forage)
+            .start_action(CitizenAction::Produce(
+                learning_lord_simulation::production::Recipe::Forage
+            ))
             .unwrap()
             .advance(ACTION_DURATION_MS)
             .unwrap()

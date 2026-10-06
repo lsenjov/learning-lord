@@ -407,22 +407,13 @@ pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationEr
         && citizen.excess_value()? >= crate::production::MIN_LISTING_VALUE;
     let goals: &[Effect] = if standing_listing {
         &[Effect::ListExcess]
-    } else if citizen.production_targets().is_some() {
-        &[
-            Effect::ReduceHunger,
-            Effect::ReduceTiredness,
-            Effect::IncreaseWealth,
-            Effect::ReplenishReserves,
-            Effect::ReduceClothingNeed,
-            Effect::Production,
-        ]
     } else {
         &[
             Effect::ReduceHunger,
             Effect::ReduceTiredness,
-            Effect::IncreaseWealth,
             Effect::ReplenishReserves,
             Effect::ReduceClothingNeed,
+            Effect::Production,
         ]
     };
     let mut goals = goals.to_vec();
@@ -587,22 +578,13 @@ fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
         && citizen.excess_value()? >= crate::production::MIN_LISTING_VALUE;
     let goals: &[Effect] = if standing_listing {
         &[Effect::ListExcess]
-    } else if citizen.production_targets().is_some() {
-        &[
-            Effect::ReduceHunger,
-            Effect::ReduceTiredness,
-            Effect::IncreaseWealth,
-            Effect::ReplenishReserves,
-            Effect::ReduceClothingNeed,
-            Effect::Production,
-        ]
     } else {
         &[
             Effect::ReduceHunger,
             Effect::ReduceTiredness,
-            Effect::IncreaseWealth,
             Effect::ReplenishReserves,
             Effect::ReduceClothingNeed,
+            Effect::Production,
         ]
     };
     let mut goals = goals.to_vec();
@@ -772,7 +754,6 @@ fn goal_bit(goal: Effect) -> u8 {
     match goal {
         Effect::ReduceHunger => 1,
         Effect::ReduceTiredness => 2,
-        Effect::IncreaseWealth => 4,
         Effect::ReplenishReserves => 8,
         Effect::Production => 16,
         Effect::ListExcess => 32,
@@ -820,7 +801,6 @@ fn search_with_goals(
     for goal in [
         Effect::ReduceHunger,
         Effect::ReduceTiredness,
-        Effect::IncreaseWealth,
         Effect::ReplenishReserves,
         Effect::ReduceClothingNeed,
         Effect::Production,
@@ -1062,7 +1042,7 @@ mod tests {
             .unwrap();
         let prefix = goals::variants_after(
             &Prediction::new(&citizen, Cooldowns::default()),
-            Effect::IncreaseWealth,
+            Effect::Production,
         )
         .unwrap()
         .remove(0);
@@ -1078,16 +1058,16 @@ mod tests {
             prefix.clone(),
             HORIZON_MS,
             &mut first,
-            boundary(Effect::IncreaseWealth),
+            boundary(Effect::Production),
             &mut cache,
         )
         .unwrap();
         assert!(
             cache
                 .get(
-                    Continuations::key(&prefix.actions, goal_bit(Effect::IncreaseWealth)),
+                    Continuations::key(&prefix.actions, goal_bit(Effect::Production)),
                     &prefix.actions,
-                    goal_bit(Effect::IncreaseWealth)
+                    goal_bit(Effect::Production)
                 )
                 .is_some()
         );
@@ -1128,16 +1108,16 @@ mod tests {
         let mut cache = Continuations::default();
         cache.insert(
             7,
-            vec![CitizenAction::Forage],
-            goal_bit(Effect::IncreaseWealth),
+            vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
+            goal_bit(Effect::Production),
             empty_plan(),
         );
         assert!(
             cache
                 .get(
                     7,
-                    &[CitizenAction::Forage],
-                    goal_bit(Effect::IncreaseWealth)
+                    &[CitizenAction::Produce(crate::production::Recipe::Forage)],
+                    goal_bit(Effect::Production)
                 )
                 .is_some()
         );
@@ -1145,7 +1125,7 @@ mod tests {
             cache
                 .get(
                     7,
-                    &[CitizenAction::Forage],
+                    &[CitizenAction::Produce(crate::production::Recipe::Forage)],
                     goal_bit(Effect::ReplenishReserves)
                 )
                 .is_none()
@@ -1193,7 +1173,7 @@ mod tests {
         let execution = buyer.active_plan.as_mut().unwrap();
         execution.plan.goals = vec![
             PlanGoal {
-                goal: Effect::IncreaseWealth,
+                goal: Effect::Production,
                 actions: 0..1,
             },
             PlanGoal {
@@ -1314,11 +1294,14 @@ mod tests {
     #[test]
     fn gathering_order_execution_delivers_each_primitive_random_yield() {
         let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
-        let mut planned = executing(&citizen, vec![CitizenAction::Forage; 4]);
+        let mut planned = executing(
+            &citizen,
+            vec![CitizenAction::Produce(crate::production::Recipe::Forage); 4],
+        );
         let mut replay = citizen.clone();
         for _ in 0..3 {
             replay = replay
-                .start_action(CitizenAction::Forage)
+                .start_action(CitizenAction::Produce(crate::production::Recipe::Forage))
                 .unwrap()
                 .advance(crate::ACTION_DURATION_MS)
                 .unwrap();
@@ -1337,7 +1320,7 @@ mod tests {
             .unwrap()
             .candidates
             .iter()
-            .find(|candidate| candidate.goal == Effect::IncreaseWealth)
+            .find(|candidate| candidate.goal == Effect::Production)
             .unwrap()
             .forecast
             .as_ref()
@@ -1371,7 +1354,7 @@ mod tests {
             &source,
             vec![
                 CitizenAction::Travel(map.public_place(Location::Forest)),
-                CitizenAction::Forage,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
             ],
         );
         planned.active_plan.as_mut().unwrap().elapsed_ms = COMMITMENT_MS - 60_000;
@@ -1676,7 +1659,11 @@ mod tests {
                 .with_berries(units)
                 .unwrap();
             assert!(!replan_check(&citizen, CitizenAction::Eat, 0));
-            assert!(!replan_check(&citizen, CitizenAction::Forage, 1));
+            assert!(!replan_check(
+                &citizen,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
+                1
+            ));
             assert_eq!(replan_check(&citizen, CitizenAction::Eat, 1), units < 62);
             let planned = executing(
                 &citizen,
@@ -1720,7 +1707,7 @@ mod tests {
             .find_map(|seed| {
                 citizen.forage_rng = SmallRng::seed_from_u64(seed);
                 let actual = citizen
-                    .start_action(CitizenAction::Forage)
+                    .start_action(CitizenAction::Produce(crate::production::Recipe::Forage))
                     .unwrap()
                     .advance(30 * MINUTE_MS)
                     .unwrap();
@@ -1730,7 +1717,7 @@ mod tests {
         let planned = executing(
             &source,
             vec![
-                CitizenAction::Forage,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
                 CitizenAction::Eat,
                 CitizenAction::Sleep,
             ],

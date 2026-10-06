@@ -37,6 +37,7 @@ impl Skill {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Recipe {
+    Forage,
     GrowWheat,
     MillFlour,
     ChopWood,
@@ -51,8 +52,9 @@ pub enum Recipe {
 }
 
 impl Recipe {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 12;
     pub const ALL: [Self; Self::COUNT] = [
+        Self::Forage,
         Self::GrowWheat,
         Self::MillFlour,
         Self::ChopWood,
@@ -67,6 +69,7 @@ impl Recipe {
     ];
     pub fn name(self) -> &'static str {
         match self {
+            Self::Forage => "Forage",
             Self::GrowWheat => "Grow wheat",
             Self::MillFlour => "Mill flour",
             Self::ChopWood => "Chop wood",
@@ -85,7 +88,7 @@ impl Recipe {
             Self::GrowWheat | Self::GrowFlax => Some(Skill::Farming),
             Self::MillFlour => Some(Skill::Milling),
             Self::ChopWood => Some(Skill::Woodcutting),
-            Self::FetchWater => None,
+            Self::FetchWater | Self::Forage => None,
             Self::BakeBread | Self::BakeBerryPie => Some(Skill::Baking),
             Self::SpinThread | Self::WeaveCloth => Some(Skill::Weaving),
             Self::MakeClothingBlock | Self::AssembleGarment => Some(Skill::Tailoring),
@@ -95,7 +98,7 @@ impl Recipe {
         match self {
             Self::GrowWheat | Self::GrowFlax => Location::Field,
             Self::MillFlour => Location::Mill,
-            Self::ChopWood => Location::Forest,
+            Self::ChopWood | Self::Forage => Location::Forest,
             Self::FetchWater => Location::River,
             Self::BakeBread | Self::BakeBerryPie => Location::Bakery,
             Self::SpinThread | Self::WeaveCloth => Location::Weavery,
@@ -104,7 +107,9 @@ impl Recipe {
     }
     pub fn inputs(self) -> &'static [(Good, Quantity)] {
         match self {
-            Self::GrowWheat | Self::GrowFlax | Self::ChopWood | Self::FetchWater => &[],
+            Self::GrowWheat | Self::GrowFlax | Self::ChopWood | Self::FetchWater | Self::Forage => {
+                &[]
+            }
             Self::MillFlour => &[(Good::Wheat, 300)],
             Self::SpinThread => &[(Good::Flax, 200)],
             Self::WeaveCloth => &[(Good::Thread, 200)],
@@ -121,6 +126,7 @@ impl Recipe {
     }
     pub fn outputs(self) -> &'static [(Good, Quantity)] {
         match self {
+            Self::Forage => &[(Good::Berries, crate::FORAGE_AVERAGE_GRAMS)],
             Self::GrowWheat => &[(Good::Wheat, 200)],
             Self::GrowFlax => &[(Good::Flax, 200)],
             Self::SpinThread => &[(Good::Thread, 200)],
@@ -136,7 +142,8 @@ impl Recipe {
     }
     pub fn base_duration_ms(self) -> u64 {
         match self {
-            Self::FetchWater
+            Self::Forage
+            | Self::FetchWater
             | Self::SpinThread
             | Self::WeaveCloth
             | Self::MakeClothingBlock

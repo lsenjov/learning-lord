@@ -61,7 +61,10 @@ fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
         .unwrap();
     for (action, location) in [
         (CitizenAction::Sleep, Location::Home),
-        (CitizenAction::Forage, Location::Forest),
+        (
+            CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
+            Location::Forest,
+        ),
         (
             CitizenAction::BuyFood(learning_lord_simulation::marketplace::Good::Berries),
             Location::Market,

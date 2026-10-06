@@ -309,7 +309,6 @@ fn goal_label(goal: Effect) -> &'static str {
         Effect::ReduceHunger => "Reduce Hunger",
         Effect::ReduceTiredness => "Reduce Sleep Need",
         Effect::ReduceClothingNeed => "Reduce Clothing Need",
-        Effect::IncreaseWealth => "Increase Wealth",
         Effect::Production => "Production",
         Effect::ReplenishReserves => "Replenish reserves",
         Effect::ListExcess => "List excess",

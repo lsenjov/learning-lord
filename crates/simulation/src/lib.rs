@@ -94,7 +94,6 @@ pub enum CitizenAction {
     EquipClothing,
     Wait,
     Sleep,
-    Forage,
     BuyFood(Good),
     Produce(production::Recipe),
     ListExcess,
@@ -108,7 +107,6 @@ impl CitizenAction {
     pub fn required_place(self, citizen: &Citizen) -> Option<PlaceId> {
         match self {
             Self::Sleep => Some(citizen.home),
-            Self::Forage => Some(citizen.map.public_place(Location::Forest)),
             Self::Produce(recipe) => citizen.production_place(recipe).ok(),
             Self::BuyFood(_)
             | Self::ListExcess
@@ -450,7 +448,7 @@ impl Citizen {
                 self.production_place(recipe)?;
                 recipe.duration_ms(self)?
             }
-            CitizenAction::Wait | CitizenAction::Forage => ACTION_DURATION_MS,
+            CitizenAction::Wait => ACTION_DURATION_MS,
             CitizenAction::Sleep => SLEEP_DURATION_MS,
             CitizenAction::EquipClothing => EQUIP_CLOTHING_DURATION_MS,
             CitizenAction::BuyFood(_)
@@ -837,7 +835,9 @@ impl Citizen {
                             action_elapsed_ms,
                         )?);
                     }
-                    CitizenAction::Produce(recipe) => citizen.complete_production(recipe)?,
+                    CitizenAction::Produce(recipe) => {
+                        citizen.complete_production(recipe, prediction)?
+                    }
                     CitizenAction::EquipClothing => {
                         let remaining = citizen
                             .units(Good::FlaxGarment)
@@ -875,20 +875,6 @@ impl Citizen {
                             .ok_or(SimulationError::WealthOverflow)?;
                         citizen.inventory.insert(good, stock);
                     }
-                    CitizenAction::Forage => {
-                        let units = if prediction {
-                            FORAGE_AVERAGE_GRAMS
-                        } else {
-                            citizen
-                                .forage_rng
-                                .random_range(FORAGE_MIN_GRAMS..=FORAGE_MAX_GRAMS)
-                        };
-                        let stock = citizen
-                            .berries_units()
-                            .checked_add(units)
-                            .ok_or(SimulationError::BerriesOverflow)?;
-                        citizen.inventory.insert(Good::Berries, stock);
-                    }
                     _ => {}
                 }
                 citizen.active_action = None;
@@ -906,7 +892,11 @@ impl Citizen {
         Ok((citizen, payments))
     }
 
-    fn complete_production(&mut self, recipe: production::Recipe) -> Result<(), SimulationError> {
+    fn complete_production(
+        &mut self,
+        recipe: production::Recipe,
+        prediction: bool,
+    ) -> Result<(), SimulationError> {
         for &(good, units) in recipe.inputs() {
             let stock = self.units(good);
             if stock < units {
@@ -915,6 +905,12 @@ impl Citizen {
             self.inventory.insert(good, stock - units);
         }
         for &(good, units) in recipe.outputs() {
+            let units = if recipe == production::Recipe::Forage && !prediction {
+                self.forage_rng
+                    .random_range(FORAGE_MIN_GRAMS..=FORAGE_MAX_GRAMS)
+            } else {
+                units
+            };
             let stock = self.units(good);
             let next = stock
                 .checked_add(units)
@@ -1559,10 +1555,48 @@ mod tests {
     }
 
     #[test]
+    fn forage_targets_account_for_active_and_completed_batches() {
+        let recipe = production::Recipe::Forage;
+        let reserve = (production::PERSONAL_FOOD_RESERVE / BERRY_NUTRITION_PER_GRAM).ceil() as u64;
+        let mut source = Citizen::new(0.0)
+            .unwrap()
+            .with_berries(reserve + 230)
+            .unwrap();
+        source.production_targets =
+            Some(production::ProductionTargets::calculate(&source, 0).unwrap());
+        assert_eq!(
+            source
+                .production_targets()
+                .unwrap()
+                .remaining_batches(recipe),
+            1
+        );
+        let started = source.start_action(CitizenAction::Produce(recipe)).unwrap();
+        let refreshed = production::ProductionTargets::calculate(&started, 0).unwrap();
+        assert_eq!(refreshed.remaining_batches(recipe), 1);
+        let predicted = started.advance_predicted(ACTION_DURATION_MS).unwrap();
+        let actual = started.advance(ACTION_DURATION_MS).unwrap();
+        for completed in [&predicted, &actual] {
+            assert_eq!(
+                completed
+                    .production_targets()
+                    .unwrap()
+                    .remaining_batches(recipe),
+                0
+            );
+            assert_eq!(completed.production_work_today_ms(), ACTION_DURATION_MS);
+        }
+        assert_eq!(predicted.berries_units(), reserve + 240);
+        assert!((reserve + 235..=reserve + 245).contains(&actual.berries_units()));
+    }
+
+    #[test]
     fn prediction_uses_average_yield_without_advancing_the_random_stream() {
         let mut citizen = Citizen::new(0.0).unwrap();
         citizen.forage_rng = SmallRng::seed_from_u64(42);
-        let started = citizen.start_action(CitizenAction::Forage).unwrap();
+        let started = citizen
+            .start_action(CitizenAction::Produce(crate::production::Recipe::Forage))
+            .unwrap();
         let predicted = started.advance_predicted(ACTION_DURATION_MS).unwrap();
         assert_eq!(predicted.berries_units(), 10);
         assert_eq!(predicted.forage_rng, citizen.forage_rng);
@@ -1573,7 +1607,7 @@ mod tests {
         let mut total = 0_u64;
         for _ in 0..2000 {
             let next = citizen
-                .start_action(CitizenAction::Forage)
+                .start_action(CitizenAction::Produce(crate::production::Recipe::Forage))
                 .unwrap()
                 .advance(ACTION_DURATION_MS)
                 .unwrap();

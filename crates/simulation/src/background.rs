@@ -228,7 +228,10 @@ mod tests {
     #[test]
     fn short_exhaustion_submits_immediately_once_and_expected_forage_preserves_rng() {
         let citizen = Citizen::with_needs(-50.0, -50.0).unwrap();
-        let source = executing_fixture(&citizen, vec![CitizenAction::Forage]);
+        let source = executing_fixture(
+            &citizen,
+            vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
+        );
         let saved = source.clone();
         let (boundary, projected, _) = project(&source, 0).unwrap().unwrap();
         assert_eq!(boundary, ACTION_DURATION_MS);
@@ -248,7 +251,10 @@ mod tests {
     #[test]
     fn only_current_known_final_action_can_submit_before_a_boundary() {
         let citizen = Citizen::with_needs(-50.0, -50.0).unwrap();
-        let source = executing_fixture(&citizen, vec![CitizenAction::Forage; 10]);
+        let source = executing_fixture(
+            &citizen,
+            vec![CitizenAction::Produce(crate::production::Recipe::Forage); 10],
+        );
         let mut runtime = PlanningRuntime::default();
         assert!(project(&source, 0).unwrap().is_none());
         assert_eq!(runtime.planning_event(&source, 0).unwrap(), None);
@@ -295,7 +301,7 @@ mod tests {
         let source = executing_fixture(
             &citizen,
             vec![
-                CitizenAction::Forage,
+                CitizenAction::Produce(crate::production::Recipe::Forage),
                 CitizenAction::Eat,
                 CitizenAction::Sleep,
             ],
@@ -382,7 +388,10 @@ mod tests {
     #[test]
     fn missing_first_meal_uses_fresh_actual_state_and_reset_discards_old_request() {
         let citizen = Citizen::with_needs(80.0, -50.0).unwrap();
-        let source = executing_fixture(&citizen, vec![CitizenAction::Forage]);
+        let source = executing_fixture(
+            &citizen,
+            vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
+        );
         let mut execution = source.active_plan().unwrap().clone();
         let forecast = citizen.with_berries(310).unwrap();
         let expected_forecast = planning::plan(&forecast).unwrap();
@@ -414,7 +423,10 @@ mod tests {
     #[test]
     fn interruption_and_overflow_keep_source_snapshot_and_cancel_pending_work() {
         let citizen = Citizen::with_needs(-50.0, -50.0).unwrap();
-        let (world, _) = universe(executing_fixture(&citizen, vec![CitizenAction::Forage]));
+        let (world, _) = universe(executing_fixture(
+            &citizen,
+            vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
+        ));
         let saved = world.clone();
         let mut runtime = PlanningRuntime::default();
         runtime
