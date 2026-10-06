@@ -489,6 +489,7 @@ mod tests {
     fn hungry(berries: f64) -> Citizen {
         let citizen = Citizen::with_needs(100.0, -100.0)
             .unwrap()
+            .with_prices(crate::marketplace::Prices::new(1.0).unwrap())
             .with_berries(berries)
             .unwrap();
         let mut market = citizen.market().clone();
@@ -1003,7 +1004,9 @@ mod tests {
 
     #[test]
     fn gathering_completion_wealth_is_spread_across_the_action() {
-        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_prices(crate::marketplace::Prices::new(1.0).unwrap());
         let gathered = Prediction::new(&citizen, Cooldowns::default())
             .perform(CitizenAction::Forage, 0)
             .unwrap()

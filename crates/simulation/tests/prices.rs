@@ -30,6 +30,7 @@ fn inactive_prices_validate_and_remain_stable_across_daily_boundaries() {
 #[test]
 fn explicit_setup_prices_share_citizen_context_without_running_the_daily_update() {
     let (universe, seller) = Universe::with_map(Map::default())
+        .with_prices(Prices::new(1.0).unwrap())
         .with_citizen(
             "Seller",
             Citizen::new(0.0).unwrap().with_berries(100.0).unwrap(),
@@ -60,7 +61,7 @@ fn explicit_setup_prices_share_citizen_context_without_running_the_daily_update(
     assert_eq!(citizen(&bought, buyer).berries_grams(), 100.0);
     assert_eq!(citizen(&bought, buyer).coins(), 0.9);
     assert_eq!(citizen(&bought, seller).coins(), 0.1);
-    assert_eq!(listed.prices(), Prices::default());
+    assert_eq!(listed.prices(), Prices::new(1.0).unwrap());
 }
 
 #[test]

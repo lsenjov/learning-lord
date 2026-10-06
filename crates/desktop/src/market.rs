@@ -459,6 +459,7 @@ mod tests {
         use learning_lord_simulation::marketplace::ShoppingList;
 
         let (universe, funded) = Universe::with_map(Map::default())
+            .with_prices(Prices::new(1.0).unwrap())
             .with_citizen("Same", Citizen::new(0.0).unwrap().with_coins(0.1).unwrap())
             .unwrap();
         let (universe, cashless) = universe
@@ -534,6 +535,7 @@ mod tests {
     #[test]
     fn orders_preserve_seller_identity_remaining_stock_and_distinct_asks() {
         let (universe, first) = Universe::with_map(Map::default())
+            .with_prices(Prices::new(1.0).unwrap())
             .with_citizen(
                 "Same",
                 Citizen::new(0.0).unwrap().with_berries(1_000.0).unwrap(),

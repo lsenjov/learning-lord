@@ -4,9 +4,11 @@ use learning_lord_simulation::{ACTION_DURATION_MS, Citizen, CitizenAction, Simul
 
 #[test]
 fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
-    let source = Citizen::with_needs(20.0, 10.0).unwrap();
+    let source = Citizen::with_needs(20.0, 10.0)
+        .unwrap()
+        .with_prices(Prices::new(1.0).unwrap());
     assert_eq!(source.coins(), 0.0);
-    assert_eq!(Prices::default().coins_per_kg(Good::Berries).unwrap(), 1.0);
+    assert_eq!(Prices::default().coins_per_kg(Good::Berries).unwrap(), 0.05);
     let rich = source.with_berries(500.0).unwrap().with_coins(2.5).unwrap();
     assert_eq!(rich.wealth(), Ok(3.0));
     assert_eq!(rich.personal_wellbeing(), Ok(0.0));

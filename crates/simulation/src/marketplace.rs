@@ -109,7 +109,7 @@ pub struct Prices {
 impl Default for Prices {
     fn default() -> Self {
         Self {
-            coins_per_kg: [1.0, 0.4, 1.0, 0.5, 0.1, 1.5, 2.0],
+            coins_per_kg: [0.05, 0.4, 1.0, 0.5, 0.1, 1.5, 2.0],
         }
     }
 }

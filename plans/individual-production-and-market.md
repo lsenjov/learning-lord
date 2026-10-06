@@ -69,3 +69,7 @@ Each step must pass appropriate formatting, tests and Clippy, receive independen
 - Completions exactly at the boundary settle before repricing; purchases spanning the boundary use the updated live asks when they finish. Historical trades remain unchanged.
 - Explicit `with_prices` fixture setup changes reference context without simulating a daily update.
 - Independent review found no high, medium or low issues; all 27 demand, price and trading tests passed.
+
+## Starting economy tuning
+
+- Berries now start at 0.05 coins/kg. All four citizens receive 1 base coin plus 2 coins for purchases (3 coins total), preserving their berries and production inputs. Earlier diagnostic observations above describe the previous starting economy.

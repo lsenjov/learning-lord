@@ -589,7 +589,7 @@ mod tests {
             .unwrap();
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
-                .with_prices(learning_lord_simulation::marketplace::Prices::default())
+                .with_prices(learning_lord_simulation::marketplace::Prices::new(1.0).unwrap())
                 .with_citizen("Ada", citizen)
                 .unwrap();
         let universe = universe

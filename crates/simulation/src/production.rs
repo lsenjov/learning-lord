@@ -140,9 +140,8 @@ pub fn starting_inputs(role: crate::StartingRole) -> crate::marketplace::Shoppin
     .expect("prototype recipe quantities are finite")
 }
 
-pub fn starting_coins(role: crate::StartingRole) -> f64 {
-    match role {
-        crate::StartingRole::Farmer | crate::StartingRole::Woodcutter => 2.0,
-        _ => 0.0,
-    }
+pub fn starting_coins(_role: crate::StartingRole) -> f64 {
+    let base = 1.0;
+    let purchase_allowance = 2.0;
+    base + purchase_allowance
 }

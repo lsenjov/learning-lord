@@ -13,6 +13,7 @@ fn citizen(universe: &Universe, id: AgentId) -> &Citizen {
 }
 fn supply(grams: f64) -> (Universe, AgentId) {
     let (universe, seller) = Universe::with_map(Map::default())
+        .with_prices(Prices::new(1.0).unwrap())
         .with_citizen(
             "Seller",
             Citizen::new(0.0).unwrap().with_berries(grams).unwrap(),
@@ -464,6 +465,7 @@ fn production_supply() -> (Universe, AgentId) {
         .with_good(Good::Water, 200.0)
         .unwrap();
     let (mut universe, id) = Universe::with_map(Map::default())
+        .with_prices(Prices::new(1.0).unwrap())
         .with_citizen("Supplier", seller)
         .unwrap();
     for (good, grams) in [

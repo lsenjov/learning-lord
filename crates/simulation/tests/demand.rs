@@ -15,6 +15,7 @@ fn citizen(u: &Universe, id: AgentId) -> &Citizen {
 }
 fn buyer(coins: f64) -> (Universe, AgentId) {
     Universe::with_map(Map::default())
+        .with_prices(Prices::new(1.0).unwrap())
         .with_citizen(
             "Buyer",
             Citizen::new(0.0).unwrap().with_coins(coins).unwrap(),
@@ -23,6 +24,7 @@ fn buyer(coins: f64) -> (Universe, AgentId) {
 }
 fn supply(grams: f64) -> (Universe, AgentId) {
     let (u, seller) = Universe::with_map(Map::default())
+        .with_prices(Prices::new(1.0).unwrap())
         .with_citizen(
             "Seller",
             Citizen::new(0.0).unwrap().with_berries(grams).unwrap(),
@@ -51,7 +53,7 @@ fn affordable_shortages_raise_prices_at_four_and_repeated_requests_replace_inten
         100.0
     );
     let before = u.advance(UPDATE_TIME_MS - 1).unwrap();
-    assert_eq!(before.prices(), Prices::default());
+    assert_eq!(before.prices(), Prices::new(1.0).unwrap());
     assert!(before.market().history().is_empty());
     let after = before.advance(1).unwrap();
     close(after.prices().coins_per_kg(Good::Berries).unwrap(), 1.1);
