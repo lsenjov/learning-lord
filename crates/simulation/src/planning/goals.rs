@@ -13,6 +13,7 @@ pub enum Effect {
     Coins,
     ReduceHunger,
     ReduceTiredness,
+    ReduceClothingNeed,
     IncreaseWealth,
     ReplenishReserves,
     Production,
@@ -32,6 +33,7 @@ impl CitizenAction {
         match self {
             Self::Eat => &[ReduceHunger],
             Self::Sleep => &[ReduceTiredness],
+            Self::EquipClothing => &[ReduceClothingNeed],
             Self::Forage => &[Food, IncreaseWealth, ReplenishReserves],
             Self::BuyFood(good) if good.nutrition_per_unit().is_some() => {
                 &[Food, ReplenishReserves]
@@ -891,6 +893,20 @@ fn variants_from(
             variants.push(candidate);
         }
     };
+    if goal == Effect::ReduceClothingNeed {
+        if citizen.clothing_need() <= 0.0 {
+            return Ok(variants);
+        }
+        let garments = crate::marketplace::ShoppingList::single(Good::FlaxGarment, 1);
+        for ready in prepare_inputs(&initial, &garments, 0, prior_actions)? {
+            for candidate in
+                order_variants(&ready, CitizenAction::EquipClothing, 0.0, 0, prior_actions)?
+            {
+                consider(candidate);
+            }
+        }
+        return Ok(variants);
+    }
     if goal == Effect::Production {
         return production_prefixes(initial, prior_actions, &mut []);
     }
@@ -936,6 +952,114 @@ fn variants_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clothing_goal_equips_carried_listed_and_bought_garments() {
+        for source in 0..3 {
+            let mut citizen = Citizen::with_needs(-50.0, -100.0)
+                .unwrap()
+                .with_coins(1000)
+                .unwrap();
+            if source == 0 {
+                citizen = citizen.with_good(Good::FlaxGarment, 1).unwrap();
+            } else {
+                let mut market = citizen.market().clone();
+                let seller = if source == 1 {
+                    citizen.id()
+                } else {
+                    crate::AgentId(uuid::Uuid::new_v4())
+                };
+                market.list(seller, Good::FlaxGarment, 1).unwrap();
+                citizen = citizen.with_market(market);
+            }
+            let snapshot = citizen.clone();
+            let variants = variants_after(
+                &Prediction::new(&citizen, Cooldowns::default()),
+                Effect::ReduceClothingNeed,
+            )
+            .unwrap();
+            assert!(!variants.is_empty());
+            for variant in variants {
+                assert_eq!(variant.actions.last(), Some(&CitizenAction::EquipClothing));
+                assert_eq!(variant.citizen.garment_condition(), Some(1.0));
+                assert_eq!(variant.citizen.units(Good::FlaxGarment), 0);
+                assert!(variant.citizen.clothing_need() < citizen.clothing_need());
+            }
+            assert_eq!(citizen, snapshot);
+        }
+    }
+
+    #[test]
+    fn clothing_goal_does_not_replace_a_fresh_garment_or_invent_supply() {
+        for condition in [None, Some(1.0)] {
+            let citizen = Citizen::new(0.0)
+                .unwrap()
+                .with_garment_condition(condition)
+                .unwrap();
+            assert!(
+                variants_after(
+                    &Prediction::new(&citizen, Cooldowns::default()),
+                    Effect::ReduceClothingNeed,
+                )
+                .unwrap()
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn clothing_chain_requirements_reuse_upstream_outputs() {
+        use crate::production::Recipe;
+        let mut recipes = vec![Recipe::MakeClothingBlock; 8];
+        recipes.push(Recipe::AssembleGarment);
+        let requirements = recipe_requirements(&recipes).unwrap();
+        assert_eq!(requirements.units(Good::Cloth), 200);
+        assert_eq!(requirements.units(Good::FlaxBlock), 0);
+    }
+
+    #[test]
+    fn tailor_prefixes_keep_blocks_and_allow_downstream_assembly() {
+        use crate::{AgentKind, StartingRole, Universe, production::Recipe};
+        let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Tailor)
+            .with_coins(1000)
+            .unwrap()
+            .with_good(Good::Cloth, 200)
+            .unwrap()
+            .with_good(Good::FlaxBlock, 7)
+            .unwrap();
+        let (world, id) = Universe::with_map(citizen.map())
+            .with_citizen("Tailor", citizen)
+            .unwrap();
+        let world = world
+            .with_property(id, Recipe::AssembleGarment.location())
+            .unwrap()
+            .0;
+        let AgentKind::Citizen(mut citizen) = world.agents()[&id].kind.clone();
+        citizen.refresh_production_targets(true).unwrap();
+        let variants =
+            production_prefixes(Prediction::new(&citizen, Cooldowns::default()), 0, &mut [])
+                .unwrap();
+        let progress = variants
+            .iter()
+            .find(|variant| {
+                variant.actions.last() == Some(&CitizenAction::Produce(Recipe::MakeClothingBlock))
+                    && variant.citizen.units(Good::FlaxBlock) >= 8
+            })
+            .unwrap();
+        let clothing = variants_after(
+            &Prediction::new(&progress.citizen, Cooldowns::default()),
+            Effect::ReduceClothingNeed,
+        )
+        .unwrap();
+        assert!(clothing.iter().any(|variant| {
+            variant
+                .actions
+                .contains(&CitizenAction::Produce(Recipe::AssembleGarment))
+                && variant.actions.last() == Some(&CitizenAction::EquipClothing)
+        }));
+    }
 
     fn hungry(berries: u64) -> Citizen {
         let citizen = Citizen::with_needs(100.0, -100.0)
@@ -1762,7 +1886,7 @@ mod tests {
             .unwrap();
         assert!((direct.average().unwrap() - split.average().unwrap()).abs() < 1e-12);
         let rate_per_ms = 100.0 / (24.0 * 60.0 * 60_000.0);
-        let expected = -10.0 - 45_000.0 * rate_per_ms;
+        let expected = -30.0 - 45_000.0 * rate_per_ms;
         assert!((direct.average().unwrap() - expected).abs() < 1e-12);
         assert_eq!(direct.score.elapsed_ms, 90_000);
     }
@@ -1904,7 +2028,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            (gathered.average().unwrap() - (0.05 + 0.05 * 10.0 * BERRY_NUTRITION_PER_GRAM)).abs()
+            (gathered.average().unwrap() - (-20.0 + 0.05 + 0.05 * 10.0 * BERRY_NUTRITION_PER_GRAM))
+                .abs()
                 < 1e-12
         );
     }

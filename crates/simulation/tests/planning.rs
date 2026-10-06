@@ -90,7 +90,7 @@ fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
         score_actions(&satiated, chosen.actions()),
         chosen.average_wellbeing(),
     );
-    assert!(chosen.average_wellbeing() > 0.0);
+    assert!(chosen.average_wellbeing() > -20.0);
 }
 
 #[test]

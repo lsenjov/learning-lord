@@ -7,8 +7,10 @@ use learning_lord_simulation::{
 
 fn worker(recipe: Recipe) -> Citizen {
     let role = match recipe {
-        Recipe::GrowWheat => StartingRole::Farmer,
+        Recipe::GrowWheat | Recipe::GrowFlax => StartingRole::Farmer,
         Recipe::MillFlour => StartingRole::Miller,
+        Recipe::SpinThread | Recipe::WeaveCloth => StartingRole::Weaver,
+        Recipe::MakeClothingBlock | Recipe::AssembleGarment => StartingRole::Tailor,
         Recipe::ChopWood => StartingRole::Woodcutter,
         Recipe::FetchWater | Recipe::BakeBread | Recipe::BakeBerryPie => StartingRole::Baker,
     };

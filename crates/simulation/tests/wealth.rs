@@ -11,7 +11,10 @@ fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
     assert_eq!(Prices::default().price(Good::Berries).unwrap(), 5.0);
     let rich = source.with_berries(500).unwrap().with_coins(250).unwrap();
     assert_eq!(rich.wealth(), Ok(300.0));
-    assert_eq!(rich.personal_wellbeing(), Ok(rich.food_reserve_wellbeing()));
+    assert_eq!(
+        rich.personal_wellbeing(),
+        Ok(rich.food_reserve_wellbeing() - 20.0)
+    );
     assert_eq!(source.wealth(), Ok(0.0));
     assert_eq!(rich.with_coins(-250).unwrap().wealth(), Ok(-200.0));
     let half = rich
@@ -52,7 +55,7 @@ fn berries_arrive_on_completion_and_prediction_preserves_randomness() {
             .iter()
             .any(|a| matches!(a, CitizenAction::Forage))
     );
-    assert!(planned.average_wellbeing() > 0.0);
+    assert!(planned.average_wellbeing() > -20.0);
     assert_eq!(source, original);
     let started = source.start_action(CitizenAction::Forage).unwrap();
     let partial = started.advance(ACTION_DURATION_MS - 1).unwrap();

@@ -21,10 +21,34 @@ pub struct PlanDisplay {
 pub struct Card(usize);
 #[derive(Component)]
 pub struct Summary(usize);
+#[derive(Clone, Copy)]
+pub enum Need {
+    Hunger,
+    Sleep,
+    Clothing,
+}
+
+impl Need {
+    fn value(self, citizen: &Citizen) -> f64 {
+        match self {
+            Self::Hunger => citizen.hunger(),
+            Self::Sleep => citizen.tiredness(),
+            Self::Clothing => citizen.clothing_need(),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hunger => "Hunger",
+            Self::Sleep => "Sleep",
+            Self::Clothing => "Clothing",
+        }
+    }
+}
+
 #[derive(Component)]
-pub struct NeedLabel(usize, bool);
+pub struct NeedLabel(usize, Need);
 #[derive(Component)]
-pub struct NeedFill(usize, bool);
+pub struct NeedFill(usize, Need);
 #[derive(Component)]
 pub struct PlanContent;
 #[derive(Component)]
@@ -58,7 +82,7 @@ pub fn selected_agent(universe: &Universe, id: Option<AgentId>) -> Option<&Agent
         .or_else(|| sorted_agents(universe).first().map(|(_, agent)| *agent))
 }
 
-pub fn spawn_roster(parent: &mut ChildSpawnerCommands) {
+pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
     parent
         .spawn(Node {
             width: percent(100),
@@ -67,7 +91,7 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands) {
             ..default()
         })
         .with_children(|row| {
-            for slot in 0..4 {
+            for slot in 0..count {
                 row.spawn((
                     Button,
                     Card(slot),
@@ -85,8 +109,8 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands) {
                 ))
                 .with_children(|card| {
                     card.spawn((text("", 15.0, TEXT), Summary(slot)));
-                    for sleep in [false, true] {
-                        card.spawn((text("", 12.0, TEXT), NeedLabel(slot, sleep)));
+                    for need in [Need::Hunger, Need::Sleep, Need::Clothing] {
+                        card.spawn((text("", 12.0, TEXT), NeedLabel(slot, need)));
                         card.spawn((
                             Node {
                                 width: percent(100),
@@ -104,18 +128,20 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands) {
                                     ..default()
                                 },
                                 BackgroundColor(SELECTED),
-                                NeedFill(slot, sleep),
+                                NeedFill(slot, need),
                             ));
-                            bar.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: percent(50),
-                                    width: px(1),
-                                    height: percent(100),
-                                    ..default()
-                                },
-                                BackgroundColor(MUTED),
-                            ));
+                            if !matches!(need, Need::Clothing) {
+                                bar.spawn((
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: percent(50),
+                                        width: px(1),
+                                        height: percent(100),
+                                        ..default()
+                                    },
+                                    BackgroundColor(MUTED),
+                                ));
+                            }
                         });
                     }
                 });
@@ -192,6 +218,11 @@ pub fn handle_selection(
         KeyCode::Digit2,
         KeyCode::Digit3,
         KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
     ]
     .into_iter()
     .enumerate()
@@ -255,6 +286,15 @@ fn need_label(value: f64, sleep: bool) -> &'static str {
     }
 }
 
+fn clothing_geometry(value: f64) -> (f32, f32) {
+    let width = if value.is_finite() {
+        (value / learning_lord_simulation::CLOTHING_MAX_PENALTY).clamp(0.0, 1.0) as f32 * 100.0
+    } else {
+        0.0
+    };
+    (0.0, width)
+}
+
 fn need_geometry(value: f64) -> (f32, f32) {
     let value = if value.is_finite() {
         value.clamp(-100.0, 100.0) as f32
@@ -268,6 +308,7 @@ fn goal_label(goal: Effect) -> &'static str {
     match goal {
         Effect::ReduceHunger => "Reduce Hunger",
         Effect::ReduceTiredness => "Reduce Sleep Need",
+        Effect::ReduceClothingNeed => "Reduce Clothing Need",
         Effect::IncreaseWealth => "Increase Wealth",
         Effect::Production => "Production",
         Effect::ReplenishReserves => "Replenish reserves",
@@ -380,18 +421,22 @@ pub fn refresh_cards(
     for (label, mut value) in &mut labels {
         if let Some((_, agent)) = agents.get(label.0) {
             let AgentKind::Citizen(citizen) = &agent.kind;
-            let next = format!(
-                "{}: {}   (- < 0 > +)",
-                if label.1 { "Sleep" } else { "Hunger" },
-                need_label(
-                    if label.1 {
-                        citizen.tiredness()
-                    } else {
-                        citizen.hunger()
-                    },
-                    label.1
-                )
-            );
+            let next = match label.1 {
+                Need::Clothing => format!(
+                    "Clothing: {}",
+                    match citizen.garment_condition() {
+                        None => "Absent",
+                        Some(0.0) => "Worn out",
+                        Some(1.0) => "Clothed",
+                        Some(_) => "Worn",
+                    }
+                ),
+                Need::Hunger | Need::Sleep => format!(
+                    "{}: {}   (- < 0 > +)",
+                    label.1.name(),
+                    need_label(label.1.value(citizen), matches!(label.1, Need::Sleep))
+                ),
+            };
             if value.0 != next {
                 value.0 = next;
             }
@@ -400,12 +445,12 @@ pub fn refresh_cards(
     for (fill, mut node, mut color) in &mut fills {
         if let Some((_, agent)) = agents.get(fill.0) {
             let AgentKind::Citizen(citizen) = &agent.kind;
-            let value = if fill.1 {
-                citizen.tiredness()
+            let value = fill.1.value(citizen);
+            let (left, width) = if matches!(fill.1, Need::Clothing) {
+                clothing_geometry(value)
             } else {
-                citizen.hunger()
+                need_geometry(value)
             };
-            let (left, width) = need_geometry(value);
             let next = percent(left);
             if node.left != next {
                 node.left = next;
@@ -414,9 +459,16 @@ pub fn refresh_cards(
             if node.width != next {
                 node.width = next;
             }
-            let next = if !(-100.0..=100.0).contains(&value) {
+            let severity = if matches!(fill.1, Need::Clothing) {
+                width as f64
+            } else {
+                value
+            };
+            let next = if matches!(fill.1, Need::Clothing) && severity >= 100.0
+                || !(-100.0..=100.0).contains(&severity)
+            {
                 Color::srgb(0.95, 0.35, 0.25)
-            } else if value > 50.0 {
+            } else if severity > 50.0 {
                 Color::srgb(0.88, 0.65, 0.23)
             } else {
                 Color::srgb(0.24, 0.67, 0.53)
@@ -527,6 +579,20 @@ mod tests {
     use learning_lord_simulation::{CitizenAction, locations::Map};
 
     #[test]
+    fn clothing_bar_covers_its_full_unsigned_range() {
+        for (need, width) in [
+            (0.0, 0.0),
+            (10.0, 50.0),
+            (20.0, 100.0),
+            (-1.0, 0.0),
+            (30.0, 100.0),
+            (f64::NAN, 0.0),
+        ] {
+            assert_eq!(clothing_geometry(need), (0.0, width));
+        }
+    }
+
+    #[test]
     fn signed_need_bars_cover_negative_zero_clamped_and_urgent_values() {
         assert_eq!(need_geometry(-50.0), (25.0, 25.0));
         assert_eq!(need_geometry(0.0), (50.0, 0.0));
@@ -552,7 +618,7 @@ mod tests {
                 .iter()
                 .map(|(_, agent)| agent.name.as_str())
                 .collect::<Vec<_>>(),
-            ["Ada", "Bram", "Cleo", "Dara"]
+            ["Ada", "Bram", "Cleo", "Dara", "Eira", "Finn"]
         );
         let dara = sorted[3].0;
         let mut app = App::new();

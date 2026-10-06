@@ -26,7 +26,7 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
         close(citizen.food_reserve_wellbeing(), bonus);
         close(
             citizen.personal_wellbeing().unwrap(),
-            citizen.wealth().unwrap() * 0.1 + bonus,
+            citizen.wealth().unwrap() * 0.1 + bonus - 20.0,
         );
     }
     let mixed = Citizen::new(0.0)

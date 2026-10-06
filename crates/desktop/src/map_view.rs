@@ -26,7 +26,7 @@ pub enum MapItem {
     Route,
 }
 
-pub fn spawn(parent: &mut ChildSpawnerCommands) {
+pub fn spawn(parent: &mut ChildSpawnerCommands, sites: usize, citizens: usize) {
     parent
         .spawn((
             Node {
@@ -63,7 +63,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                         BackgroundColor(Color::srgb(0.85, 0.66, 0.25)),
                         MapItem::Route,
                     ));
-                    for slot in 0..10 {
+                    for slot in 0..sites {
                         let color = Color::srgb(0.85, 0.75, 0.60);
                         map.spawn((
                             Node {
@@ -92,7 +92,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                             ));
                         });
                     }
-                    for slot in 0..4 {
+                    for slot in 0..citizens {
                         map.spawn((Node {
                             position_type: PositionType::Absolute, width: px(10), height: px(10),
                             border_radius: BorderRadius::MAX, ..default()
@@ -105,7 +105,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                         });
                     }
                 });
-            panel.spawn(text("Walking: 1 km in 10 minutes\nLabels: public + selected properties\n1-4: select citizen", 13.0, MUTED));
+            panel.spawn(text("Walking: 1 km in 10 minutes\nLabels: public + selected properties\n1-6: select citizen", 13.0, MUTED));
         });
 }
 
@@ -259,6 +259,8 @@ pub fn refresh(
                             Location::Forest => Color::srgb(0.25, 0.70, 0.40),
                             Location::River => Color::srgb(0.30, 0.65, 0.95),
                             Location::Market => Color::srgb(0.80, 0.50, 0.80),
+                            Location::Weavery => Color::srgb(0.55, 0.65, 0.85),
+                            Location::Tailory => Color::srgb(0.85, 0.55, 0.65),
                             _ => Color::srgb(0.85, 0.75, 0.60),
                         }
                     };
@@ -387,7 +389,7 @@ mod tests {
         }))
         .insert_resource(Selection(Some(ada)))
         .add_systems(Update, refresh);
-        let labels: Vec<_> = (0..10)
+        let labels: Vec<_> = (0..14)
             .map(|slot| {
                 app.world_mut()
                     .spawn((
@@ -399,7 +401,7 @@ mod tests {
                     .id()
             })
             .collect();
-        let markers: Vec<_> = (0..10)
+        let markers: Vec<_> = (0..14)
             .map(|slot| {
                 app.world_mut()
                     .spawn((

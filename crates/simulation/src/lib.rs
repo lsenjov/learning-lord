@@ -21,6 +21,9 @@ pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
 pub const TIREDNESS_PER_HOUR: f64 = 100.0 / 24.0;
 pub const MEAL_NOURISHMENT: f64 = 50.0;
 pub const ACTION_DURATION_MS: u64 = 30 * 60 * 1000;
+pub const GARMENT_LIFETIME_MS: u64 = 10 * 24 * 60 * 60_000;
+pub const CLOTHING_MAX_PENALTY: f64 = 20.0;
+pub const EQUIP_CLOTHING_DURATION_MS: u64 = 5 * 60_000;
 pub const TRADE_DURATION_MS: u64 = 5 * 60 * 1000;
 pub const SLEEP_DURATION_MS: u64 = 8 * 60 * 60 * 1000;
 pub const SLEEP_RECOVERY: f64 = 100.0;
@@ -86,6 +89,7 @@ pub enum AgentKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CitizenAction {
     Eat,
+    EquipClothing,
     Wait,
     Sleep,
     Forage,
@@ -145,6 +149,8 @@ pub enum StartingRole {
     Miller,
     Woodcutter,
     Baker,
+    Weaver,
+    Tailor,
 }
 
 impl StartingRole {
@@ -154,6 +160,8 @@ impl StartingRole {
             Self::Miller => "Miller",
             Self::Woodcutter => "Woodcutter",
             Self::Baker => "Baker",
+            Self::Weaver => "Weaver",
+            Self::Tailor => "Tailor",
         }
     }
 }
@@ -161,6 +169,7 @@ impl StartingRole {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Citizen {
     hunger: f64,
+    garment_condition: Option<f64>,
     hunger_per_hour: f64,
     tiredness: f64,
     inventory: HashMap<Good, Quantity>,
@@ -208,6 +217,7 @@ impl Citizen {
             Map::default().with_place(Location::Home, Position::default(), Some(id), "Home")?;
         Ok(Self {
             hunger,
+            garment_condition: None,
             hunger_per_hour,
             tiredness: 0.0,
             inventory: Good::ALL.into_iter().map(|good| (good, 0)).collect(),
@@ -288,6 +298,8 @@ impl Citizen {
             StartingRole::Miller => production::Skill::Milling,
             StartingRole::Woodcutter => production::Skill::Woodcutting,
             StartingRole::Baker => production::Skill::Baking,
+            StartingRole::Weaver => production::Skill::Weaving,
+            StartingRole::Tailor => production::Skill::Tailoring,
         };
         citizen.skills[skill as usize] = 1.0;
         citizen
@@ -363,8 +375,30 @@ impl Citizen {
         citizen
     }
 
+    pub fn garment_condition(&self) -> Option<f64> {
+        self.garment_condition
+    }
+
+    pub fn clothing_need(&self) -> f64 {
+        CLOTHING_MAX_PENALTY * (1.0 - self.garment_condition.unwrap_or(0.0))
+    }
+
+    pub fn with_garment_condition(&self, condition: Option<f64>) -> Result<Self, SimulationError> {
+        if condition.is_some_and(|value| !value.is_finite()) {
+            return Err(SimulationError::InvalidGarmentCondition);
+        }
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.garment_condition = condition.map(|value| value.clamp(0.0, 1.0));
+        Ok(citizen)
+    }
+
     pub fn wealth(&self) -> Result<f64, SimulationError> {
-        let mut wealth = self.coins as f64;
+        let mut wealth = self.coins as f64
+            + self.prices.value(Good::FlaxGarment, 1).unwrap_or(0.0)
+                * self.garment_condition.unwrap_or(0.0);
         for good in Good::ALL {
             let units = self
                 .units(good)
@@ -416,6 +450,7 @@ impl Citizen {
             }
             CitizenAction::Wait | CitizenAction::Forage => ACTION_DURATION_MS,
             CitizenAction::Sleep => SLEEP_DURATION_MS,
+            CitizenAction::EquipClothing => EQUIP_CLOTHING_DURATION_MS,
             CitizenAction::BuyFood(_)
             | CitizenAction::ListExcess
             | CitizenAction::List(..)
@@ -668,6 +703,9 @@ impl Citizen {
         {
             return Err(SimulationError::NotFood);
         }
+        if action == CitizenAction::EquipClothing && self.units(Good::FlaxGarment) == 0 {
+            return Err(SimulationError::MissingInputs);
+        }
         let (meal_units, meal_nutrition) = if action == CitizenAction::Eat {
             self.meal()
         } else {
@@ -706,7 +744,8 @@ impl Citizen {
     }
 
     pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
-        let wellbeing = -self.hunger.max(0.0)
+        let wellbeing = -self.clothing_need()
+            - self.hunger.max(0.0)
             - 4.0 * (self.hunger - 100.0).max(0.0)
             - (-self.hunger - 100.0).max(0.0)
             - self.tiredness.max(0.0)
@@ -797,6 +836,14 @@ impl Citizen {
                         )?);
                     }
                     CitizenAction::Produce(recipe) => citizen.complete_production(recipe)?,
+                    CitizenAction::EquipClothing => {
+                        let remaining = citizen
+                            .units(Good::FlaxGarment)
+                            .checked_sub(1)
+                            .ok_or(SimulationError::MissingInputs)?;
+                        citizen.inventory.insert(Good::FlaxGarment, remaining);
+                        citizen.garment_condition = Some(1.0);
+                    }
                     CitizenAction::ListExcess => {
                         for (good, units) in citizen.excess_goods()?.items() {
                             citizen.market.list(citizen.id, good, units)?;
@@ -918,6 +965,9 @@ impl Citizen {
         elapsed_ms: u64,
         active: Option<ActiveAction>,
     ) -> Result<(), SimulationError> {
+        self.garment_condition = self.garment_condition.map(|condition| {
+            (condition - elapsed_ms as f64 / GARMENT_LIFETIME_MS as f64).clamp(0.0, 1.0)
+        });
         let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
         let nourishment_per_hour = active.map_or(0.0, |action| {
             action.meal_nutrition * 3_600_000.0 / action.duration_ms as f64
@@ -1283,6 +1333,7 @@ pub enum SimulationError {
     InvalidHunger,
     InvalidHungerRate,
     InvalidTiredness,
+    InvalidGarmentCondition,
     InvalidBerries,
     InvalidQuantity,
     InvalidCoins,
@@ -1317,6 +1368,7 @@ impl fmt::Display for SimulationError {
             Self::PlaceNotFound => "place does not exist",
             Self::InvalidHunger => "hunger must be finite",
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
+            Self::InvalidGarmentCondition => "garment condition must be finite",
             Self::InvalidTiredness => "tiredness must be finite",
             Self::InvalidBerries => "berries use whole nonnegative units",
             Self::InvalidQuantity => "action quantities use whole nonnegative units",

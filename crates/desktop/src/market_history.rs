@@ -425,7 +425,11 @@ pub fn refresh(
 fn chart_quantity_label(good: Good, units: f64) -> String {
     if good.units_per_price_unit() == 1 {
         let unit = if units == 1.0 {
-            good.price_unit_name()
+            match good {
+                Good::FlaxBlock => "block",
+                Good::FlaxGarment => "garment",
+                _ => good.price_unit_name(),
+            }
         } else {
             good.unit_name()
         };
@@ -618,6 +622,8 @@ mod tests {
         assert_eq!(chart_quantity_label(Good::Bread, 2.0), "2 loaves");
         assert_eq!(chart_quantity_label(Good::BerryPie, 1.0), "1 pie");
         assert_eq!(chart_quantity_label(Good::BerryPie, 3.0), "3 pies");
+        assert_eq!(chart_quantity_label(Good::FlaxBlock, 1.0), "1 block");
+        assert_eq!(chart_quantity_label(Good::FlaxGarment, 2.0), "2 garments");
     }
 
     #[test]

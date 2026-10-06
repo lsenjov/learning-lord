@@ -32,6 +32,8 @@ fn producer(
         StartingRole::Miller => Recipe::MillFlour,
         StartingRole::Woodcutter => Recipe::ChopWood,
         StartingRole::Baker => Recipe::BakeBread,
+        StartingRole::Weaver => Recipe::SpinThread,
+        StartingRole::Tailor => Recipe::MakeClothingBlock,
     };
     let (universe, id) = universe.with_citizen(name, worker).unwrap();
     (universe.with_property(id, recipe.location()).unwrap().0, id)

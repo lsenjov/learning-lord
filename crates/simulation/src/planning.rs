@@ -268,6 +268,9 @@ fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -
     action_index > 0
         && match action {
             CitizenAction::Eat => citizen.food_nutrition() < REPLAN_MIN_NUTRITION,
+            CitizenAction::EquipClothing => {
+                citizen.units(crate::marketplace::Good::FlaxGarment) == 0
+            }
             CitizenAction::Produce(recipe) => recipe
                 .inputs()
                 .iter()
@@ -287,7 +290,11 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
         .map(|recipe| ProductionDecision::new(citizen, recipe))
         .collect();
     let mut selected_goal = Effect::ReduceTiredness;
-    let standing_listing = citizen.production_targets().is_some()
+    let clothing_choice =
+        citizen.units(crate::marketplace::Good::FlaxGarment) > 0 && citizen.clothing_need() > 0.0;
+    // Compare wearing an acquired garment with selling it after a commitment expires.
+    let standing_listing = !clothing_choice
+        && citizen.production_targets().is_some()
         && citizen.hunger() < crate::production::URGENT_HUNGER
         && citizen.tiredness() < crate::production::URGENT_TIREDNESS
         && citizen.excess_value()? >= crate::production::MIN_LISTING_VALUE;
@@ -299,6 +306,7 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
             Effect::ReduceTiredness,
             Effect::IncreaseWealth,
             Effect::ReplenishReserves,
+            Effect::ReduceClothingNeed,
             Effect::Production,
         ]
     } else {
@@ -307,10 +315,15 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
             Effect::ReduceTiredness,
             Effect::IncreaseWealth,
             Effect::ReplenishReserves,
+            Effect::ReduceClothingNeed,
         ]
     };
+    let mut goals = goals.to_vec();
+    if clothing_choice && citizen.production_targets().is_some() {
+        goals.push(Effect::ListExcess);
+    }
     let mut cache = Continuations::default();
-    for &goal in goals {
+    for goal in goals {
         let mut forecast = None;
         let mut goal_best = empty_plan();
         let initial = Prediction::new(citizen, Cooldowns::default());
@@ -476,6 +489,7 @@ fn goal_bit(goal: Effect) -> u8 {
         Effect::ReplenishReserves => 8,
         Effect::Production => 16,
         Effect::ListExcess => 32,
+        Effect::ReduceClothingNeed => 64,
         Effect::Food | Effect::Coins => unreachable!("resources are not planning goals"),
     }
 }
@@ -521,6 +535,7 @@ fn search_with_goals(
         Effect::ReduceTiredness,
         Effect::IncreaseWealth,
         Effect::ReplenishReserves,
+        Effect::ReduceClothingNeed,
         Effect::Production,
     ] {
         if used_goals & goal_bit(goal) != 0 {
@@ -583,6 +598,51 @@ mod tests {
             elapsed_ms: 0,
         });
         citizen
+    }
+
+    #[test]
+    fn failed_garment_purchase_replans_before_equipping() {
+        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
+        assert!(replan_check(&citizen, CitizenAction::EquipClothing, 1));
+        let planned = executing(
+            &citizen,
+            vec![CitizenAction::Wait, CitizenAction::EquipClothing],
+        );
+        let next = planned.advance(crate::ACTION_DURATION_MS).unwrap();
+        assert_eq!(next.active_plan().unwrap().elapsed_ms(), 0);
+        assert_ne!(
+            next.active_action().unwrap().action(),
+            CitizenAction::EquipClothing
+        );
+    }
+
+    #[test]
+    fn commitment_compares_wearing_an_acquired_garment_with_listing_it() {
+        use crate::{StartingRole, marketplace::Good};
+        let mut citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Tailor)
+            .with_good(Good::FlaxGarment, 1)
+            .unwrap();
+        citizen.refresh_production_targets(true).unwrap();
+        let mut planned = executing(
+            &citizen,
+            vec![CitizenAction::Wait, CitizenAction::EquipClothing],
+        );
+        planned.active_plan.as_mut().unwrap().elapsed_ms =
+            COMMITMENT_MS - crate::ACTION_DURATION_MS;
+        let replanned = planned.advance(crate::ACTION_DURATION_MS).unwrap();
+        let decision = replanned.active_plan().unwrap().plan().decision().unwrap();
+        assert!(decision.candidates.iter().any(|candidate| {
+            candidate.goal == Effect::ReduceClothingNeed && candidate.forecast.is_some()
+        }));
+        assert!(
+            decision
+                .candidates
+                .iter()
+                .any(|candidate| candidate.goal == Effect::ListExcess)
+        );
+        assert_eq!(replanned.active_plan().unwrap().elapsed_ms(), 0);
     }
 
     #[test]
@@ -945,7 +1005,7 @@ mod tests {
             assert_eq!(chosen.actions(), reference.actions());
             assert_eq!(chosen.average_wellbeing(), reference.average_wellbeing());
             let decision = chosen.decision().unwrap();
-            assert_eq!(decision.candidates.len(), 4);
+            assert_eq!(decision.candidates.len(), 5);
             assert_eq!(decision.prices, prices);
             for candidate in &decision.candidates {
                 let expected = goals::variants_after(

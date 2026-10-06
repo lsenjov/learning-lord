@@ -15,10 +15,15 @@ pub enum Good {
     Water,
     Bread,
     BerryPie,
+    Flax,
+    Thread,
+    Cloth,
+    FlaxBlock,
+    FlaxGarment,
 }
 
 impl Good {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 12;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Berries,
         Self::Wheat,
@@ -27,6 +32,11 @@ impl Good {
         Self::Water,
         Self::Bread,
         Self::BerryPie,
+        Self::Flax,
+        Self::Thread,
+        Self::Cloth,
+        Self::FlaxBlock,
+        Self::FlaxGarment,
     ];
     pub const FOOD: [Self; 3] = [Self::Berries, Self::Bread, Self::BerryPie];
     pub fn nutrition_per_unit(self) -> Option<f64> {
@@ -45,6 +55,8 @@ impl Good {
         match self {
             Self::Bread => 100,
             Self::BerryPie => 125,
+            Self::FlaxBlock => 25,
+            Self::FlaxGarment => 200,
             _ => 1,
         }
     }
@@ -52,6 +64,8 @@ impl Good {
         match self {
             Self::Bread => "loaves",
             Self::BerryPie => "pies",
+            Self::FlaxBlock => "blocks",
+            Self::FlaxGarment => "garments",
             _ => "g",
         }
     }
@@ -59,12 +73,13 @@ impl Good {
         match self {
             Self::Bread => "loaf",
             Self::BerryPie => "pie",
+            Self::FlaxBlock | Self::FlaxGarment => "each",
             _ => "kg",
         }
     }
     pub fn units_per_price_unit(self) -> u64 {
         match self {
-            Self::Bread | Self::BerryPie => 1,
+            Self::Bread | Self::BerryPie | Self::FlaxBlock | Self::FlaxGarment => 1,
             _ => 1000,
         }
     }
@@ -80,6 +95,11 @@ impl Good {
             Self::Water => "Water",
             Self::Bread => "Bread",
             Self::BerryPie => "Berry pie",
+            Self::Flax => "Flax",
+            Self::Thread => "Thread",
+            Self::Cloth => "Cloth",
+            Self::FlaxBlock => "Flax block",
+            Self::FlaxGarment => "Flax garment",
         }
     }
 }
@@ -134,7 +154,9 @@ pub struct Prices {
 impl Default for Prices {
     fn default() -> Self {
         Self {
-            quoted_price: [5.0, 40.0, 100.0, 50.0, 10.0, 15.0, 25.0],
+            quoted_price: [
+                5.0, 40.0, 100.0, 50.0, 10.0, 15.0, 25.0, 40.0, 80.0, 120.0, 11.0, 96.0,
+            ],
         }
     }
 }

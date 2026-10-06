@@ -157,7 +157,7 @@ fn button(control: Control) -> impl Bundle {
     )
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
     commands.spawn(Camera2d);
     commands.spawn(Node {
         width: percent(100), height: percent(100), padding: UiRect::all(px(16)),
@@ -192,19 +192,19 @@ fn setup(mut commands: Commands) {
             width: percent(100), flex_grow: 1.0, min_height: px(0),
             flex_direction: FlexDirection::Column, row_gap: px(10), ..default()
         })).with_children(|root| {
-        citizens::spawn_roster(root);
+        citizens::spawn_roster(root, snapshot.0.universe.agents().len().max(simulation::STARTING_CITIZENS.len()));
         root.spawn(Node { width: percent(100), flex_grow: 1.0, min_height: px(0), column_gap: px(14), ..default() })
             .with_children(|row| {
                 row.spawn((Node { width: px(324), flex_shrink: 0.0, flex_direction: FlexDirection::Column,
                     row_gap: px(12), min_height: px(0), overflow: Overflow::scroll_y(), ..default() }, ScrollPosition::default(), bevy::ui::RelativeCursorPosition::default()))
                     .with_children(|left| {
-                        map_view::spawn(left);
+                        map_view::spawn(left, snapshot.0.universe.map().places().len().max(14), snapshot.0.universe.agents().len().max(simulation::STARTING_CITIZENS.len()));
                     });
                 citizens::spawn_details(row);
             });
         });
         market::spawn(root);
-        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-4: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
+        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-6: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
         root.spawn((text("", 14.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
     });
 }
@@ -322,6 +322,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                 CitizenAction::Eat => "Eating".into(),
                 CitizenAction::Wait => "Waiting".into(),
                 CitizenAction::Sleep => "Sleeping".into(),
+                CitizenAction::EquipClothing => "Equipping clothing".into(),
                 CitizenAction::Forage => "Foraging".into(),
                 CitizenAction::BuyFood(good) => format!("Buying {}", good.name().to_lowercase()),
                 CitizenAction::Produce(recipe) => recipe.name().into(),
@@ -388,8 +389,12 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .collect::<Vec<_>>();
     properties.sort();
     let properties = properties.join(", ");
+    let garment = citizen.garment_condition().map_or_else(
+        || "None".into(),
+        |condition| format!("{:.1}%", condition * 100.0),
+    );
     format!(
-        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
+        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
         agent.name,
         citizen.coins(),
         citizen
@@ -397,6 +402,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
             .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}")),
         citizen.hunger(),
         citizen.tiredness(),
+        citizen.clothing_need(),
         citizen.food_nutrition(),
         citizen.food_reserve_wellbeing(),
         citizens::location_label(citizen)
@@ -405,7 +411,11 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
 
 fn quantity_label(good: Good, units: u64) -> String {
     let unit = if units == 1 && good.units_per_price_unit() == 1 {
-        good.price_unit_name()
+        match good {
+            Good::FlaxBlock => "block",
+            Good::FlaxGarment => "garment",
+            _ => good.price_unit_name(),
+        }
     } else {
         good.unit_name()
     };
@@ -424,6 +434,7 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
         CitizenAction::Eat => "Eat".into(),
         CitizenAction::Wait => "Wait".into(),
         CitizenAction::Sleep => "Sleep".into(),
+        CitizenAction::EquipClothing => "Equip clothing".into(),
         CitizenAction::Forage => "Forage".into(),
         CitizenAction::BuyFood(good) => format!("Buy {}", good.name().to_lowercase()),
         CitizenAction::Produce(recipe) => recipe.name().into(),
@@ -485,6 +496,7 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
         let name = match candidate.goal {
             Effect::ReduceHunger => "Hunger",
             Effect::ReduceTiredness => "Sleep",
+            Effect::ReduceClothingNeed => "Clothing",
             Effect::IncreaseWealth => "Wealth",
             Effect::Production => "Production",
             Effect::ReplenishReserves => "Replenish reserves",
@@ -746,6 +758,7 @@ mod tests {
         assert!(readout.contains("Location:"));
         assert!(readout.contains("Commitment left: 01:59:10"));
         assert!(readout.contains("Berries: 155 g"));
+        assert!(readout.contains("Clothing need: 20.0 | Garment condition: None"));
         assert!(!readout.contains("Water: 0 g"));
         assert!(!readout.contains("Bread: 0 loaves"));
         assert!(readout.contains("Coins: 0 | Wealth: 0.260 coins"));
@@ -1012,7 +1025,7 @@ mod tests {
             simulation::START_TIME_MS
         );
         assert_eq!(snapshot.universe.prices(), previous_prices);
-        assert_eq!(snapshot.universe.agents().len(), 4);
+        assert_eq!(snapshot.universe.agents().len(), 6);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);
@@ -1024,7 +1037,7 @@ mod tests {
             .find(|(readout, _)| matches!(readout, Readout::Market))
             .unwrap()
             .1;
-        assert!(market_text.0.contains("7 goods"));
+        assert!(market_text.0.contains("12 goods"));
 
         let directory = std::env::temp_dir().join(format!(
             "learning-lord-export-ui-{}-{}",

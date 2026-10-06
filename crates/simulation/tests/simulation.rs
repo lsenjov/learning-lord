@@ -96,7 +96,7 @@ fn personal_wellbeing_penalizes_hunger_and_weights_starvation_without_a_jump() {
 
         assert_eq!(
             citizen.personal_wellbeing(),
-            Ok(expected),
+            Ok(expected - 20.0),
             "hunger {hunger}"
         );
     }
@@ -111,14 +111,14 @@ fn personal_wellbeing_reflects_each_snapshot_without_changing_it() {
     let snapshot = original.clone();
     let advanced = original.advance(HOUR_MS).unwrap();
 
-    assert_eq!(original.agents()[&id].personal_wellbeing(), Ok(0.0));
+    assert_eq!(original.agents()[&id].personal_wellbeing(), Ok(-20.0));
     assert_eq!(
         advanced.agents()[&id].personal_wellbeing(),
-        Ok(-100.0 - 100.0 / 24.0)
+        Ok(-120.0 - 100.0 / 24.0)
     );
     assert_eq!(
         citizen(&advanced, id).personal_wellbeing(),
-        Ok(-100.0 - 100.0 / 24.0)
+        Ok(-120.0 - 100.0 / 24.0)
     );
     assert_eq!(original, snapshot);
     assert_eq!(citizen(&advanced, id).hunger(), 100.0);
