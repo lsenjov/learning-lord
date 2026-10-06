@@ -25,14 +25,14 @@ pub enum Period {
 
 #[derive(Resource, Default)]
 pub struct Selection {
-    view: View,
+    pub(super) view: View,
     good: Option<Good>,
     period: Period,
     generation: u64,
 }
 
 impl Selection {
-    fn good(&self) -> Good {
+    pub(super) fn good(&self) -> Good {
         self.good.unwrap_or(Good::Berries)
     }
 }
@@ -134,6 +134,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         .with_children(|details| {
             details.spawn((text("", 24.0, TEXT), Readout::Title));
             details.spawn((text("", 16.0, TEXT), Readout::PriceNow));
+            crate::market_history::spawn(details);
             details.spawn(Node { column_gap: px(8), row_gap: px(8), flex_wrap: FlexWrap::Wrap, flex_shrink: 0.0, ..default() })
                 .with_children(|row| {
                     for (period, label) in [(Period::Current, "Current market day"), (Period::Previous, "Previous market day")] {

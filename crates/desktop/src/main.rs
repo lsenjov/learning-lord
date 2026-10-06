@@ -2,6 +2,7 @@ mod citizens;
 mod debug_export;
 mod map_view;
 mod market;
+mod market_history;
 mod simulation;
 
 use bevy::{
@@ -100,6 +101,7 @@ fn main() -> Result<(), String> {
     .init_resource::<citizens::PlanDisplay>()
     .init_resource::<market::Selection>()
     .init_resource::<market::OrderDisplay>()
+    .init_resource::<market_history::ChartDisplay>()
     .init_resource::<debug_export::DebugExport>()
     .init_resource::<InputFocus>()
     .add_systems(Startup, setup)
@@ -117,6 +119,8 @@ fn main() -> Result<(), String> {
             map_view::refresh,
             market::refresh_choices,
             market::refresh,
+            market_history::refresh,
+            market_history::hover,
         )
             .chain(),
     )
@@ -751,6 +755,7 @@ mod tests {
             .init_resource::<citizens::PlanDisplay>()
             .init_resource::<market::Selection>()
             .init_resource::<market::OrderDisplay>()
+            .init_resource::<market_history::ChartDisplay>()
             .init_resource::<debug_export::DebugExport>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
@@ -770,6 +775,8 @@ mod tests {
                     map_view::refresh,
                     market::refresh_choices,
                     market::refresh,
+                    market_history::refresh,
+                    market_history::hover,
                 )
                     .chain(),
             );

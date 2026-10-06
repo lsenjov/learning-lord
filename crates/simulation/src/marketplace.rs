@@ -201,6 +201,7 @@ pub struct Market {
     history: Vector<DailyMarketActivity>,
     period_start_ms: u64,
     first_period_start_ms: u64,
+    started_at_ms: u64,
     period_trades: [TradedVolume; Good::COUNT],
 }
 
@@ -217,6 +218,7 @@ impl Market {
         Self {
             period_start_ms,
             first_period_start_ms: period_start_ms,
+            started_at_ms: time_ms,
             ..Self::default()
         }
     }
@@ -270,6 +272,11 @@ impl Market {
             end_ms: self.period_start_ms,
             goods,
         })
+    }
+
+    /// Initial market period and actual world creation time.
+    pub fn initial_period(&self) -> (u64, u64) {
+        (self.first_period_start_ms, self.started_at_ms)
     }
 
     pub fn history(&self) -> &Vector<DailyMarketActivity> {
