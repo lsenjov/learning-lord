@@ -420,6 +420,11 @@ fn order_variants(
     reserved_ms: u64,
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
+    if let CitizenAction::Produce(recipe) = action
+        && amount > state.citizen.food_nutrition()
+    {
+        return food_production_variants(state, recipe, amount, reserved_ms, prior_actions);
+    }
     let gathering = matches!(action, CitizenAction::Forage);
     if gathering && state.last_gathering_order == Some(action) {
         return Ok(Vec::new());
@@ -458,7 +463,12 @@ fn prepare(
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
     let prepared = if let CitizenAction::Produce(recipe) = action {
-        prepare_inputs(state, recipe, reserved_ms, prior_actions)?
+        prepare_inputs(
+            state,
+            &recipe_requirements(&[recipe])?,
+            reserved_ms,
+            prior_actions,
+        )?
     } else {
         match action.input_for(&state.citizen, amount) {
             Some(requirement) => satisfy(state, requirement, reserved_ms, prior_actions)?,
@@ -484,14 +494,133 @@ fn prepare(
     Ok(variants)
 }
 
-fn prepare_inputs(
+fn recipe_requirements(
+    recipes: &[crate::production::Recipe],
+) -> Result<crate::marketplace::ShoppingList, SimulationError> {
+    let mut balance = [0.0_f64; Good::COUNT];
+    let mut needed = [0.0_f64; Good::COUNT];
+    for recipe in recipes {
+        for &(good, grams) in recipe.inputs() {
+            balance[good as usize] -= grams;
+            needed[good as usize] = needed[good as usize].max(-balance[good as usize]);
+        }
+        for &(good, grams) in recipe.outputs() {
+            balance[good as usize] += grams;
+        }
+    }
+    crate::marketplace::ShoppingList::new(
+        Good::ALL
+            .into_iter()
+            .map(|good| (good, needed[good as usize])),
+    )
+}
+
+fn production_order(
+    initial: &Prediction,
+    recipes: &[crate::production::Recipe],
+    food_target: Option<f64>,
+    reserved_ms: u64,
+    prior_actions: usize,
+) -> Result<Vec<Prediction>, SimulationError> {
+    let requirements = recipe_requirements(recipes)?;
+    let mut variants = Vec::new();
+    for mut state in prepare_inputs(initial, &requirements, reserved_ms, prior_actions)? {
+        let mut complete = requirements
+            .items()
+            .all(|(good, grams)| state.citizen.grams(good) >= grams);
+        for (index, &recipe) in recipes.iter().enumerate() {
+            if !complete
+                || index > 0
+                    && food_target.is_some_and(|target| state.citizen.food_nutrition() >= target)
+            {
+                complete = false;
+                break;
+            }
+            if food_target.is_none()
+                && state
+                    .citizen
+                    .production_targets()
+                    .is_some_and(|targets| targets.remaining_batches(recipe) <= 0.0)
+            {
+                complete = false;
+                break;
+            }
+            let action = CitizenAction::Produce(recipe);
+            if let Some(location) = action.required_place(&state.citizen)
+                && state.citizen.position() != state.citizen.map().position(location)
+            {
+                let Some(travelled) =
+                    state.perform(CitizenAction::Travel(location), prior_actions)?
+                else {
+                    complete = false;
+                    break;
+                };
+                state = travelled;
+            }
+            if state.elapsed_ms >= GOAL_HORIZON_MS
+                || state.elapsed_ms + reserved_ms > GOAL_HORIZON_MS
+            {
+                complete = false;
+                break;
+            }
+            let Some(next) = state.perform(action, prior_actions)? else {
+                complete = false;
+                break;
+            };
+            state = next;
+        }
+        if complete {
+            variants.push(state);
+        }
+    }
+    Ok(variants)
+}
+
+fn food_production_variants(
     state: &Prediction,
     recipe: crate::production::Recipe,
+    target: f64,
+    reserved_ms: u64,
+    prior_actions: usize,
+) -> Result<Vec<Prediction>, SimulationError> {
+    let nutrition = |items: &[(Good, f64)]| -> f64 {
+        items
+            .iter()
+            .map(|(good, grams)| good.nutrition_per_gram().unwrap_or(0.0) * grams)
+            .sum()
+    };
+    let gain = nutrition(recipe.outputs()) - nutrition(recipe.inputs());
+    if gain <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let count = ((target - state.citizen.food_nutrition()) / gain).ceil() as usize;
+    let mut recipes = Vec::new();
+    let mut variants = Vec::new();
+    for _ in 0..count {
+        recipes.push(recipe);
+        let next = production_order(state, &recipes, Some(target), reserved_ms, prior_actions)?;
+        if next.is_empty() {
+            break;
+        }
+        let can_extend = next.iter().any(|candidate| {
+            candidate.elapsed_ms < GOAL_HORIZON_MS && candidate.citizen.food_nutrition() < target
+        });
+        variants.extend(next);
+        if !can_extend {
+            break;
+        }
+    }
+    Ok(variants)
+}
+
+fn prepare_inputs(
+    state: &Prediction,
+    requirements: &crate::marketplace::ShoppingList,
     reserved_ms: u64,
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
     let mut states = vec![state.clone()];
-    for &(good, grams) in recipe.inputs() {
+    for (good, grams) in requirements.items() {
         let mut next_states = Vec::new();
         for current in states {
             if current.elapsed_ms + reserved_ms > GOAL_HORIZON_MS {
@@ -546,10 +675,9 @@ fn prepare_inputs(
     let mut ready = Vec::new();
     for state in states {
         let list = crate::marketplace::ShoppingList::new(
-            recipe
-                .inputs()
-                .iter()
-                .map(|&(good, grams)| (good, (grams - state.citizen.grams(good)).max(0.0))),
+            requirements
+                .items()
+                .map(|(good, grams)| (good, (grams - state.citizen.grams(good)).max(0.0))),
         )?;
         if list.items().next().is_none() {
             ready.push(state);
@@ -562,10 +690,9 @@ fn prepare_inputs(
             reserved_ms,
             prior_actions,
         )? {
-            if recipe
-                .inputs()
-                .iter()
-                .all(|&(good, grams)| bought.citizen.grams(good) >= grams)
+            if requirements
+                .items()
+                .all(|(good, grams)| bought.citizen.grams(good) >= grams)
             {
                 ready.push(bought);
             }
@@ -676,40 +803,36 @@ fn production_prefixes(
             .then_with(|| (*a as usize).cmp(&(*b as usize)))
     });
     let mut variants = Vec::new();
-    let mut pending = vec![(initial, 0)];
-    while let Some((state, mut index)) = pending.pop() {
-        if state.elapsed_ms >= GOAL_HORIZON_MS {
-            continue;
-        }
+    let mut pending = vec![(Vec::new(), 0)];
+    while let Some((order, mut index)) = pending.pop() {
         while index < recipes.len()
-            && state
-                .citizen
-                .production_targets()
-                .is_none_or(|targets| targets.remaining_batches(recipes[index].0) <= 0.0)
+            && order.iter().filter(|&&r| r == recipes[index].0).count() as f64
+                >= targets.remaining_batches(recipes[index].0).ceil()
         {
             index += 1;
         }
         let Some(&(recipe, _)) = recipes.get(index) else {
             continue;
         };
-        let next = order_variants(
-            &state,
-            CitizenAction::Produce(recipe),
-            0.0,
-            0,
-            prior_actions,
-        )?;
+        let mut extended = order.clone();
+        extended.push(recipe);
+        let next = production_order(&initial, &extended, None, 0, prior_actions)?;
         if next.is_empty() {
-            pending.push((state, index + 1));
+            pending.push((order, index + 1));
         } else {
+            let can_extend = next
+                .iter()
+                .any(|candidate| candidate.elapsed_ms < GOAL_HORIZON_MS);
             for candidate in next {
                 if !variants
                     .iter()
                     .any(|old: &Prediction| old.actions == candidate.actions)
                 {
-                    variants.push(candidate.clone());
-                    pending.push((candidate, index));
+                    variants.push(candidate);
                 }
+            }
+            if can_extend {
+                pending.push((extended, index));
             }
         }
     }
@@ -921,6 +1044,232 @@ mod tests {
         assert!(supplied.iter().all(|variant| variant.elapsed_ms
             - variant.action_durations_ms.last().unwrap()
             < GOAL_HORIZON_MS));
+    }
+
+    fn buying_baker(flour_stock: f64) -> Citizen {
+        let worker = baker()
+            .with_good(Good::Flour, 0.0)
+            .unwrap()
+            .with_good(Good::Wood, 0.0)
+            .unwrap()
+            .with_good(Good::Water, 0.0)
+            .unwrap()
+            .with_good(Good::Berries, 0.0)
+            .unwrap()
+            .with_good(Good::BerryPie, 2000.0)
+            .unwrap()
+            .with_coins(20.0)
+            .unwrap();
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        let mut market = worker.market().clone();
+        for (good, grams) in [
+            (Good::Flour, flour_stock),
+            (Good::Wood, 1000.0),
+            (Good::Water, 2000.0),
+            (Good::Berries, 1000.0),
+        ] {
+            market.list(seller, good, grams).unwrap();
+        }
+        let mut worker = worker.with_market(market);
+        worker.refresh_production_targets(true).unwrap();
+        worker
+    }
+
+    #[test]
+    fn repeated_batches_buy_the_candidate_inputs_once_and_advance_each_batch() {
+        use crate::production::{Recipe, Skill};
+        let source = buying_baker(2000.0);
+        let initial = Prediction::new(&source, Cooldowns::default());
+        let variants = production_order(&initial, &[Recipe::BakeBread; 2], None, 0, 0).unwrap();
+        let candidate = variants
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.actions.as_slice(),
+                    [
+                        CitizenAction::Buy(_),
+                        CitizenAction::Produce(Recipe::BakeBread),
+                        CitizenAction::Produce(Recipe::BakeBread)
+                    ]
+                )
+            })
+            .unwrap();
+        let CitizenAction::Buy(list) = candidate.actions[0] else {
+            unreachable!()
+        };
+        assert_eq!(list.grams(Good::Flour), 200.0);
+        assert_eq!(list.grams(Good::Wood), 50.0);
+        assert_eq!(list.grams(Good::Water), 200.0);
+        assert_eq!(candidate.citizen.grams(Good::Bread), 400.0);
+        assert_eq!(candidate.citizen.grams(Good::Flour), 0.0);
+        assert!(
+            (candidate.citizen.skill_level(Skill::Baking)
+                - source.skill_level(Skill::Baking)
+                - 0.2)
+                .abs()
+                < 1e-12
+        );
+        assert!(candidate.action_durations_ms[2] < candidate.action_durations_ms[1]);
+        assert!(
+            candidate
+                .perform(CitizenAction::Buy(list), 0)
+                .unwrap()
+                .is_none()
+        );
+        let one = production_order(&initial, &[Recipe::BakeBread], None, 0, 0).unwrap();
+        let CitizenAction::Buy(list) = one[0].actions[0] else {
+            unreachable!()
+        };
+        assert_eq!(list.grams(Good::Flour), 100.0);
+        assert_eq!(source.grams(Good::Flour), 0.0);
+    }
+
+    #[test]
+    fn mixed_recipe_order_combines_inputs_and_preserves_actions() {
+        use crate::production::Recipe;
+        let initial = Prediction::new(&buying_baker(2000.0), Cooldowns::default());
+        let variants = production_order(
+            &initial,
+            &[Recipe::BakeBread, Recipe::BakeBerryPie],
+            None,
+            0,
+            0,
+        )
+        .unwrap();
+        let candidate = variants
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.actions.as_slice(),
+                    [
+                        CitizenAction::Buy(_),
+                        CitizenAction::Produce(Recipe::BakeBread),
+                        CitizenAction::Produce(Recipe::BakeBerryPie)
+                    ]
+                )
+            })
+            .unwrap();
+        let CitizenAction::Buy(list) = candidate.actions[0] else {
+            unreachable!()
+        };
+        assert_eq!(list.grams(Good::Flour), 200.0);
+        assert_eq!(list.grams(Good::Wood), 50.0);
+        assert_eq!(list.grams(Good::Water), 150.0);
+        assert_eq!(list.grams(Good::Berries), 100.0);
+        assert_eq!(candidate.citizen.grams(Good::Bread), 200.0);
+        assert_eq!(
+            candidate.citizen.grams(Good::BerryPie),
+            initial.citizen.grams(Good::BerryPie) + 250.0
+        );
+    }
+
+    #[test]
+    fn reserve_production_procures_repeated_batches_and_counts_edible_inputs() {
+        use crate::production::Recipe;
+        let initial = Prediction::new(
+            &buying_baker(2000.0).with_good(Good::BerryPie, 0.0).unwrap(),
+            Cooldowns::default(),
+        );
+        let variants = replenish(&initial, 200.0, 0).unwrap();
+        assert!(variants.iter().any(|candidate| matches!(candidate.actions.as_slice(), [CitizenAction::Buy(list), CitizenAction::Produce(Recipe::BakeBread), CitizenAction::Produce(Recipe::BakeBread)] if list.grams(Good::Flour) == 200.0) && candidate.citizen.food_nutrition() >= 200.0));
+        let source = buying_baker(2000.0)
+            .with_good(Good::BerryPie, 0.0)
+            .unwrap()
+            .with_good(Good::Berries, 100.0)
+            .unwrap();
+        let variants = food_production_variants(
+            &Prediction::new(&source, Cooldowns::default()),
+            Recipe::BakeBerryPie,
+            200.0,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(variants.iter().any(|candidate| matches!(
+            candidate.actions.as_slice(),
+            [
+                CitizenAction::Buy(_),
+                CitizenAction::Produce(Recipe::BakeBerryPie),
+                CitizenAction::Produce(Recipe::BakeBerryPie)
+            ]
+        ) && candidate.citizen.food_nutrition() >= 200.0));
+        assert!(
+            variants
+                .iter()
+                .filter(|candidate| candidate
+                    .actions
+                    .iter()
+                    .filter(|action| **action == CitizenAction::Produce(Recipe::BakeBerryPie))
+                    .count()
+                    == 1)
+                .all(|candidate| candidate.citizen.food_nutrition() < 200.0)
+        );
+    }
+
+    #[test]
+    fn combined_procurement_keeps_only_the_final_crossing_batch() {
+        use crate::production::Recipe;
+        let mut initial = Prediction::new(&buying_baker(2000.0), Cooldowns::default());
+        initial.elapsed_ms = GOAL_HORIZON_MS - 60 * 60_000;
+        let one = production_order(&initial, &[Recipe::BakeBread], None, 0, 0).unwrap();
+        assert!(
+            one.iter()
+                .any(|candidate| candidate.elapsed_ms >= GOAL_HORIZON_MS)
+        );
+        assert!(
+            production_order(&initial, &[Recipe::BakeBread; 2], None, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+        initial.elapsed_ms = GOAL_HORIZON_MS;
+        assert!(
+            production_order(&initial, &[Recipe::BakeBread], None, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn input_stock_shortage_retains_shorter_prefixes_and_next_recipe_fallback() {
+        use crate::production::Recipe;
+        let initial = Prediction::new(&buying_baker(100.0), Cooldowns::default());
+        assert!(
+            !production_order(&initial, &[Recipe::BakeBread], None, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            production_order(&initial, &[Recipe::BakeBread; 2], None, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!production_prefixes(initial, 0).unwrap().is_empty());
+        let source = buying_baker(2000.0).with_good(Good::Flour, 100.0).unwrap();
+        let mut market = source.market().clone();
+        // Pie cannot obtain its berries; bread remains available after the preferred recipe fails.
+        let berries: Vec<_> = market
+            .orders()
+            .filter(|order| order.good == Good::Berries)
+            .cloned()
+            .collect();
+        for order in berries {
+            market
+                .withdraw(order.seller, Good::Berries, order.grams)
+                .unwrap();
+        }
+        let mut source = source
+            .with_market(market)
+            .with_good(Good::Berries, 0.0)
+            .unwrap();
+        source.refresh_production_targets(true).unwrap();
+        assert!(
+            production_prefixes(Prediction::new(&source, Cooldowns::default()), 0)
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate
+                    .actions
+                    .contains(&CitizenAction::Produce(Recipe::BakeBread)))
+        );
     }
 
     #[test]
