@@ -1,10 +1,11 @@
 use crate::{Citizen, CitizenAction, SimulationError};
 pub mod goals;
 use goals::{Cooldowns, Effect, Prediction};
+use rayon::prelude::*;
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 pub const HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
@@ -279,7 +280,189 @@ fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -
         }
 }
 
+fn worker_count(available: Option<usize>) -> usize {
+    available.map_or(2, |count| count.saturating_sub(4).max(2))
+}
+
+fn planning_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count(
+                std::thread::available_parallelism().ok().map(usize::from),
+            ))
+            .thread_name(|index| format!("citizen-planning-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
 pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
+    if citizen.active_action().is_some() || citizen.active_plan().is_some() {
+        return Err(SimulationError::CitizenBusy);
+    }
+    let mut best = empty_plan();
+    let mut candidates = Vec::new();
+    let mut production: Vec<_> = citizen
+        .available_recipes()
+        .map(|recipe| ProductionDecision::new(citizen, recipe))
+        .collect();
+    let mut selected_goal = Effect::ReduceTiredness;
+    let clothing_choice =
+        citizen.units(crate::marketplace::Good::FlaxGarment) > 0 && citizen.clothing_need() > 0.0;
+    // Compare wearing an acquired garment with selling it after a commitment expires.
+    let standing_listing = !clothing_choice
+        && citizen.production_targets().is_some()
+        && citizen.hunger() < crate::production::URGENT_HUNGER
+        && citizen.tiredness() < crate::production::URGENT_TIREDNESS
+        && citizen.excess_value()? >= crate::production::MIN_LISTING_VALUE;
+    let goals: &[Effect] = if standing_listing {
+        &[Effect::ListExcess]
+    } else if citizen.production_targets().is_some() {
+        &[
+            Effect::ReduceHunger,
+            Effect::ReduceTiredness,
+            Effect::IncreaseWealth,
+            Effect::ReplenishReserves,
+            Effect::ReduceClothingNeed,
+            Effect::Production,
+        ]
+    } else {
+        &[
+            Effect::ReduceHunger,
+            Effect::ReduceTiredness,
+            Effect::IncreaseWealth,
+            Effect::ReplenishReserves,
+            Effect::ReduceClothingNeed,
+        ]
+    };
+    let mut goals = goals.to_vec();
+    if clothing_choice && citizen.production_targets().is_some() {
+        goals.push(Effect::ListExcess);
+    }
+    let results = if let Some(pool) = planning_pool() {
+        pool.install(|| {
+            goals
+                .par_iter()
+                .map(|&goal| {
+                    evaluate_goal(
+                        citizen,
+                        goal,
+                        production.clone(),
+                        &mut Continuations::default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    } else {
+        let mut cache = Continuations::default();
+        goals
+            .iter()
+            .map(|&goal| evaluate_goal(citizen, goal, production.clone(), &mut cache))
+            .collect()
+    };
+    for result in results {
+        let (goal_best, candidate, diagnostics) = result?;
+        for (combined, diagnostic) in production.iter_mut().zip(diagnostics) {
+            combined.prefix_attempted |= diagnostic.prefix_attempted;
+            combined.preparation_limit_observed |= diagnostic.preparation_limit_observed;
+            combined.feasible_sequence_found |= diagnostic.feasible_sequence_found;
+            if let Some(score) = diagnostic.best_competing_score {
+                combined.best_competing_score = Some(
+                    combined
+                        .best_competing_score
+                        .map_or(score, |old| old.max(score)),
+                );
+            }
+        }
+        if goal_best.average_wellbeing > best.average_wellbeing {
+            best = goal_best;
+            selected_goal = candidate.goal;
+        }
+        candidates.push(candidate);
+    }
+    for diagnostic in &mut production {
+        diagnostic.selected = best
+            .actions
+            .contains(&CitizenAction::Produce(diagnostic.recipe));
+    }
+    best.decision = Some(Arc::new(PlanningDecision {
+        candidates,
+        selected_goal,
+        production,
+        prices: citizen.prices(),
+    }));
+    Ok(best)
+}
+
+fn evaluate_goal(
+    citizen: &Citizen,
+    goal: Effect,
+    mut production: Vec<ProductionDecision>,
+    cache: &mut Continuations,
+) -> Result<(Plan, GoalDecision, Vec<ProductionDecision>), SimulationError> {
+    let mut forecast = None;
+    let mut goal_best = empty_plan();
+    let initial = Prediction::new(citizen, Cooldowns::default());
+    let variants = if goal == Effect::Production {
+        goals::production_prefixes(initial, 0, &mut production)?
+    } else {
+        goals::variants_after(&initial, goal)?
+    };
+    for variant in variants {
+        for diagnostic in &mut production {
+            diagnostic.feasible_sequence_found |= variant
+                .actions
+                .contains(&CitizenAction::Produce(diagnostic.recipe));
+        }
+        let actions = variant.actions.clone();
+        let duration_ms = variant.elapsed_ms;
+        let average_wellbeing = variant.average()?;
+        let mut continuation = empty_plan();
+        let boundary = PlanGoal {
+            goal,
+            actions: 0..variant.actions.len(),
+        };
+        search_with_goals(
+            variant,
+            HORIZON_MS,
+            &mut continuation,
+            vec![boundary],
+            cache,
+        )?;
+        if continuation.average_wellbeing.is_finite() {
+            for diagnostic in &mut production {
+                if continuation
+                    .actions
+                    .contains(&CitizenAction::Produce(diagnostic.recipe))
+                {
+                    diagnostic.feasible_sequence_found = true;
+                    diagnostic.best_competing_score = Some(
+                        diagnostic
+                            .best_competing_score
+                            .map_or(continuation.average_wellbeing, |score| {
+                                score.max(continuation.average_wellbeing)
+                            }),
+                    );
+                }
+            }
+        }
+        if continuation.average_wellbeing > goal_best.average_wellbeing {
+            forecast = Some(GoalForecast {
+                actions,
+                duration_ms,
+                average_wellbeing,
+                full_plan_wellbeing: continuation.average_wellbeing,
+            });
+            goal_best = continuation;
+        }
+    }
+    Ok((goal_best, GoalDecision { goal, forecast }, production))
+}
+
+#[cfg(test)]
+fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
     if citizen.active_action().is_some() || citizen.active_plan().is_some() {
         return Err(SimulationError::CitizenBusy);
     }
@@ -583,6 +766,86 @@ mod tests {
     use rand::{SeedableRng, rngs::SmallRng};
 
     const MINUTE_MS: u64 = 60_000;
+
+    #[test]
+    fn worker_count_reserves_four_threads_with_a_minimum_of_two() {
+        for (available, expected) in [
+            (None, 2),
+            (Some(1), 2),
+            (Some(4), 2),
+            (Some(5), 2),
+            (Some(6), 2),
+            (Some(7), 3),
+            (Some(16), 12),
+        ] {
+            assert_eq!(worker_count(available), expected);
+        }
+        assert_eq!(
+            planning_pool().unwrap().current_num_threads(),
+            worker_count(std::thread::available_parallelism().ok().map(usize::from))
+        );
+    }
+
+    #[test]
+    fn parallel_plans_match_the_shared_cache_reference_and_preserve_snapshots() {
+        use crate::{
+            StartingRole,
+            marketplace::{Good, Market},
+        };
+        let hungry = Citizen::with_needs(70.0, 10.0)
+            .unwrap()
+            .with_berries(33)
+            .unwrap();
+        let seller = Citizen::new(0.0).unwrap();
+        let mut market = Market::default();
+        market.list(seller.id(), Good::Bread, 8).unwrap();
+        market.list(seller.id(), Good::FlaxGarment, 2).unwrap();
+        let trader = hungry.with_coins(100).unwrap().with_market(market);
+        let mut tailor = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Tailor)
+            .with_good(Good::FlaxGarment, 1)
+            .unwrap();
+        tailor.refresh_production_targets(true).unwrap();
+        let mut producer = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Tailor)
+            .with_good(Good::Cloth, 800)
+            .unwrap()
+            .with_good(Good::Thread, 800)
+            .unwrap()
+            .with_good(Good::FlaxGarment, 1)
+            .unwrap();
+        producer.refresh_production_targets(true).unwrap();
+        for citizen in [
+            Citizen::new(0.0).unwrap(),
+            hungry,
+            trader,
+            tailor,
+            producer,
+            Citizen::with_needs(0.0, f64::MAX).unwrap(),
+        ] {
+            let snapshot = citizen.clone();
+            let expected = sequential_reference(&citizen).unwrap();
+            for _ in 0..2 {
+                assert_eq!(plan(&citizen).unwrap(), expected);
+                assert_eq!(citizen, snapshot);
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_planning_preserves_errors() {
+        let busy = Citizen::new(0.0)
+            .unwrap()
+            .start_action(CitizenAction::Wait)
+            .unwrap();
+        let overflow = Citizen::with_hunger_rate(0.0, f64::MAX).unwrap();
+        for citizen in [busy, overflow] {
+            let expected = sequential_reference(&citizen).unwrap_err();
+            assert_eq!(plan(&citizen).unwrap_err(), expected);
+        }
+    }
 
     fn executing(citizen: &Citizen, actions: Vec<CitizenAction>) -> Citizen {
         let mut citizen = citizen.start_action(actions[0]).unwrap();
