@@ -54,6 +54,7 @@ pub enum Readout {
     PriceNow,
     Period,
     Metrics,
+    Buyers,
 }
 
 #[derive(Component)]
@@ -142,6 +143,8 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
             details.spawn((text("", 14.0, MUTED), Readout::Period));
             details.spawn((text("", 17.0, TEXT), Readout::Metrics));
             details.spawn(text("Buy = traded + affordable unfulfilled demand\nSell = traded + listed stock\nUnfulfilled demand may exist while stock is available.", 13.0, MUTED));
+            details.spawn(text("CURRENT BUY REQUESTS  |  live in either period view", 14.0, MUTED));
+            details.spawn((text("", 14.0, TEXT), Node { flex_shrink: 0.0, ..default() }, Readout::Buyers));
             details.spawn(text("CURRENT SELL ORDERS  |  live in either period view", 14.0, MUTED));
             details.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(10), flex_shrink: 0.0, ..default() }, Orders));
         });
@@ -241,6 +244,41 @@ fn order_label(grams: f64, price: f64) -> String {
         "{grams:.1} g remaining  |  {price:.3} coins/kg  |  {:.3} coins total",
         grams / 1000.0 * price
     )
+}
+
+fn buyer_requests(universe: &Universe, good: Good) -> String {
+    let market = universe.market();
+    let mut buyers: Vec<_> = universe
+        .agents()
+        .iter()
+        .filter_map(|(id, agent)| {
+            let requested = market.requested(*id).grams(good);
+            (requested > 0.0).then(|| {
+                (
+                    *id,
+                    &agent.name,
+                    requested,
+                    market.affordable_request(*id).grams(good),
+                )
+            })
+        })
+        .collect();
+    buyers.sort_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.0.cmp(&b.0.0)));
+    if buyers.is_empty() {
+        return "No current buy requests for this good.".into();
+    }
+    buyers
+        .iter()
+        .map(|(id, name, requested, affordable)| {
+            let identity = if buyers.iter().filter(|buyer| buyer.1 == *name).count() > 1 {
+                format!("{name}\nBuyer {}", id.0)
+            } else {
+                (*name).clone()
+            };
+            format!("{identity}\n{requested:.1} g requested  |  {affordable:.1} g affordable")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn metrics(activity: GoodActivity) -> String {
@@ -343,6 +381,7 @@ pub fn refresh(
                 || "No previous-day figures available.".into(),
                 |period| metrics(period.goods[selection.good() as usize]),
             ),
+            Readout::Buyers => buyer_requests(universe, selection.good()),
         };
         if value.0 != next {
             value.0 = next;
@@ -413,6 +452,83 @@ mod tests {
         let period = Universe::default().market().current_period();
         assert!(period_label(&period, Period::Current, 1_000).contains("CURRENT MARKET DAY"));
         assert!(period_label(&period, Period::Previous, 1_000).contains("CLOSED MARKET DAY"));
+    }
+
+    #[test]
+    fn buy_requests_include_cashless_buyers_and_stay_live_in_previous_view() {
+        use learning_lord_simulation::marketplace::ShoppingList;
+
+        let (universe, funded) = Universe::with_map(Map::default())
+            .with_citizen("Same", Citizen::new(0.0).unwrap().with_coins(0.1).unwrap())
+            .unwrap();
+        let (universe, cashless) = universe
+            .with_citizen("Same", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (universe, water_buyer) = universe
+            .with_citizen("Water buyer", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let universe = universe
+            .with_purchase_request(funded, ShoppingList::single(Good::Berries, 200.0))
+            .unwrap()
+            .with_purchase_request(cashless, ShoppingList::single(Good::Berries, 300.0))
+            .unwrap()
+            .with_purchase_request(water_buyer, ShoppingList::single(Good::Water, 400.0))
+            .unwrap();
+        let mut expected = [
+            (funded, "200.0 g requested  |  100.0 g affordable"),
+            (cashless, "300.0 g requested  |  0.0 g affordable"),
+        ];
+        expected.sort_by_key(|(id, _)| id.0);
+        let expected = expected
+            .iter()
+            .map(|(id, quantities)| format!("Same\nBuyer {}\n{quantities}", id.0))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(buyer_requests(&universe, Good::Berries), expected);
+        assert_eq!(
+            buyer_requests(&universe, Good::Bread),
+            "No current buy requests for this good."
+        );
+
+        let mut app = app();
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe.clone();
+        press(&mut app, Choice::Period(Period::Previous));
+        let displayed = |app: &mut App| {
+            app.world_mut()
+                .query::<(&Readout, &Text)>()
+                .iter(app.world())
+                .find(|(readout, _)| matches!(readout, Readout::Buyers))
+                .unwrap()
+                .1
+                .0
+                .clone()
+        };
+        assert_eq!(displayed(&mut app), expected);
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe
+            .with_purchase_request(cashless, ShoppingList::default())
+            .unwrap();
+        app.update();
+        assert_eq!(
+            displayed(&mut app),
+            "Same\n200.0 g requested  |  100.0 g affordable"
+        );
+        assert_eq!(app.world().resource::<Selection>().period, Period::Previous);
+        press(&mut app, Choice::Good(Good::Water));
+        assert_eq!(
+            displayed(&mut app),
+            "Water buyer\n400.0 g requested  |  0.0 g affordable"
+        );
+        press(&mut app, Choice::Period(Period::Current));
+        assert_eq!(
+            displayed(&mut app),
+            "Water buyer\n400.0 g requested  |  0.0 g affordable"
+        );
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|text| text.0.starts_with("CURRENT BUY REQUESTS"))
+        );
     }
 
     #[test]
