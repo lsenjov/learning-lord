@@ -651,6 +651,6 @@ mod tests {
         assert!(details.starts_with("Bram"));
         assert!(details.contains("Hunger: -9.8"));
         assert!(details.contains("Location: Bram's home"));
-        assert!(details.contains("Berries: 0.0 g"));
+        assert!(!details.contains("Berries: 0.0 g"));
     }
 }

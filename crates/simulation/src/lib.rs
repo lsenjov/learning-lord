@@ -933,6 +933,15 @@ impl Default for Universe {
 }
 
 impl Universe {
+    /// Creates an empty universe at the given time without advancing the simulation.
+    pub fn starting_at(current_time_ms: u64) -> Self {
+        Self {
+            current_time_ms,
+            market: Market::starting_at(current_time_ms),
+            ..Self::default()
+        }
+    }
+
     pub fn map(&self) -> Map {
         self.map.clone()
     }
@@ -999,6 +1008,7 @@ impl Universe {
         citizen.map = universe.map.clone();
         citizen.market = universe.market.clone();
         citizen.market_time_ms = universe.current_time_ms;
+        citizen.work_period = production::work_period(universe.current_time_ms);
         for (_, agent) in universe.agents.iter_mut() {
             let AgentKind::Citizen(existing) = &mut agent.kind;
             existing.map = universe.map.clone();

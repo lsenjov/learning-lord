@@ -8,6 +8,7 @@ use std::{
 };
 
 pub const SPEEDS: [u32; 6] = [1, 2, 3, 5, 10, 20];
+pub const START_TIME_MS: u64 = 6 * 60 * 60 * 1000;
 pub const STEP_MS: u64 = 30 * 60 * 1000;
 const NANOS_PER_MS: u128 = 1_000_000;
 
@@ -178,7 +179,7 @@ impl Pacing {
 }
 
 pub fn new_universe() -> Result<Universe, SimulationError> {
-    let mut universe = Universe::default();
+    let mut universe = Universe::starting_at(START_TIME_MS);
     let mut ids = Vec::new();
     use learning_lord_simulation::StartingRole;
     for (name, role) in [
@@ -187,7 +188,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         ("Cleo", StartingRole::Woodcutter),
         ("Dara", StartingRole::Baker),
     ] {
-        let mut citizen = Citizen::new(0.0)?
+        let mut citizen = Citizen::with_needs(-50.0, -100.0)?
             .with_berries(310.0)?
             .with_starting_role(role)
             .with_coins(learning_lord_simulation::production::starting_coins(role))?;
@@ -371,7 +372,7 @@ mod tests {
         received.recv_timeout(Duration::from_secs(5)).unwrap();
         let restarted = worker.snapshot_after(stepped.revision).unwrap();
         assert_eq!(restarted.generation, 1);
-        assert_eq!(restarted.universe.current_time_ms(), 0);
+        assert_eq!(restarted.universe.current_time_ms(), START_TIME_MS);
         assert_eq!(restarted.revision, 2);
         assert_eq!(
             received.recv_timeout(Duration::from_millis(50)),
@@ -397,10 +398,21 @@ mod tests {
         let universe = new_universe().unwrap();
         let source = universe.clone();
         assert_eq!(universe.agents().len(), 4);
+        assert_eq!(universe.current_time_ms(), START_TIME_MS);
+        assert!(universe.market().previous_period().is_none());
+        assert_eq!(
+            universe.market().current_period().start_ms,
+            learning_lord_simulation::marketplace::UPDATE_TIME_MS
+        );
+        assert_eq!(
+            universe.market().current_period().end_ms,
+            learning_lord_simulation::marketplace::UPDATE_TIME_MS
+                + learning_lord_simulation::marketplace::DAY_MS
+        );
         for agent in universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
-            assert_eq!(citizen.hunger(), 0.0);
-            assert_eq!(citizen.tiredness(), 0.0);
+            assert_eq!(citizen.hunger(), -50.0);
+            assert_eq!(citizen.tiredness(), -100.0);
             assert_eq!(citizen.coins(), 3.0);
             assert_eq!(citizen.berries_grams(), 310.0);
             assert_eq!(citizen.map(), universe.map());
@@ -410,7 +422,7 @@ mod tests {
         }
         let next = universe.advance(STEP_MS).unwrap();
         assert_eq!(universe, source);
-        assert_eq!(next.current_time_ms(), STEP_MS);
+        assert_eq!(next.current_time_ms(), START_TIME_MS + STEP_MS);
         for (id, agent) in next.agents() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert!(citizen.active_plan().is_some());
@@ -571,7 +583,7 @@ mod tests {
         state.pacing.speed = 20;
         state.pacing.pending_simulated_ns = 123456789;
         assert!(state.apply(Command::Restart, Duration::from_secs(10)));
-        assert_eq!(state.universe.current_time_ms(), 0);
+        assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
         assert_eq!(state.universe.agents().len(), 4);
         assert!(!state.universe.agents().contains_key(&old_ids[0]));
         assert_eq!(state.universe.prices(), old_prices);
@@ -593,8 +605,8 @@ mod tests {
             state.universe.map().position(citizen.home())
         );
         assert_eq!(citizen.map(), state.universe.map());
-        assert_eq!(citizen.hunger(), 0.0);
-        assert_eq!(citizen.tiredness(), 0.0);
+        assert_eq!(citizen.hunger(), -50.0);
+        assert_eq!(citizen.tiredness(), -100.0);
         assert_eq!(citizen.coins(), 3.0);
         assert!(citizen.active_plan().is_some());
     }

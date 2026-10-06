@@ -351,6 +351,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .map_or_else(String::new, |role| format!(" | {}", role.name()));
     let inventory = Good::ALL
         .into_iter()
+        .filter(|good| citizen.grams(*good) != 0.0)
         .map(|good| format!("{}: {:.1} g", good.name(), citizen.grams(good)))
         .collect::<Vec<_>>()
         .chunks(3)
@@ -620,6 +621,8 @@ mod tests {
         assert!(readout.contains("Location:"));
         assert!(readout.contains("Commitment left: 01:59:10"));
         assert!(readout.contains("Berries: 260.0 g"));
+        assert!(!readout.contains("Water: 0.0 g"));
+        assert!(!readout.contains("Bread: 0.0 g"));
         assert!(readout.contains("Coins: 0.00 | Wealth: 0.260 coins"));
     }
 
@@ -834,7 +837,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let snapshot = &app.world().resource::<DisplaySnapshot>().0;
-        assert_eq!(snapshot.universe.current_time_ms(), 0);
+        assert_eq!(
+            snapshot.universe.current_time_ms(),
+            simulation::START_TIME_MS
+        );
         assert_eq!(snapshot.universe.prices(), previous_prices);
         assert_eq!(snapshot.universe.agents().len(), 4);
         let controls = app.world().resource::<Controls>();

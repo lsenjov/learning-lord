@@ -200,6 +200,7 @@ pub struct Market {
     affordable_requests: HashMap<AgentId, ShoppingList>,
     history: Vector<DailyMarketActivity>,
     period_start_ms: u64,
+    first_period_start_ms: u64,
     period_trades: [TradedVolume; Good::COUNT],
 }
 
@@ -210,6 +211,16 @@ pub(crate) struct Purchase {
 }
 
 impl Market {
+    pub(crate) fn starting_at(time_ms: u64) -> Self {
+        let period_start_ms =
+            crate::production::period_start(crate::production::work_period(time_ms));
+        Self {
+            period_start_ms,
+            first_period_start_ms: period_start_ms,
+            ..Self::default()
+        }
+    }
+
     /// Current activity; the end is the next scheduled 04:00 close.
     pub fn current_period(&self) -> MarketPeriod {
         let mut goods = [GoodActivity::default(); Good::COUNT];
@@ -237,7 +248,7 @@ impl Market {
 
     /// Latest closed period, including zero activity for inactive goods.
     pub fn previous_period(&self) -> Option<MarketPeriod> {
-        if self.period_start_ms == 0 {
+        if self.period_start_ms == self.first_period_start_ms {
             return None;
         }
         let mut goods = [GoodActivity::default(); Good::COUNT];
@@ -630,6 +641,21 @@ pub(crate) fn until_update(time_ms: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_start_has_no_closed_period_until_the_next_four_am_update() {
+        let mut market = Market::starting_at(6 * 60 * 60 * 1000);
+        let initial = market.current_period();
+        assert_eq!(initial.start_ms, UPDATE_TIME_MS);
+        assert_eq!(initial.end_ms, UPDATE_TIME_MS + DAY_MS);
+        assert!(market.previous_period().is_none());
+        market.update(initial.end_ms - 1).unwrap();
+        assert!(market.previous_period().is_none());
+        market.update(initial.end_ms).unwrap();
+        assert_eq!(market.current_period().start_ms, initial.end_ms);
+        assert_eq!(market.previous_period(), Some(initial));
+        assert!(market.history().is_empty());
+    }
 
     #[test]
     fn period_statistics_count_fills_once_and_close_at_four() {
