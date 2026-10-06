@@ -50,6 +50,7 @@ struct DisplaySnapshot(Snapshot);
 enum Control {
     ToggleRunning,
     Step,
+    NextDay,
     Restart,
     Export,
     Speed(u32),
@@ -203,7 +204,7 @@ fn setup(mut commands: Commands) {
             });
         });
         market::spawn(root);
-        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   1-4: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
+        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-4: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
         root.spawn((text("", 14.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
     });
 }
@@ -247,7 +248,8 @@ fn apply_control(control: Control, controls: &mut Controls, worker: &SimulationW
             SimulationCommand::SetRunning(controls.running)
         }
         Control::Step if !controls.running => SimulationCommand::Step,
-        Control::Step => return,
+        Control::NextDay if !controls.running => SimulationCommand::NextDay,
+        Control::Step | Control::NextDay => return,
         Control::Speed(speed) => {
             controls.speed = speed;
             SimulationCommand::SetSpeed(speed)
@@ -273,7 +275,13 @@ fn handle_controls(
         apply_control(Control::ToggleRunning, &mut controls, &worker);
     }
     if keyboard.just_pressed(KeyCode::ArrowRight) {
-        apply_control(Control::Step, &mut controls, &worker);
+        let control =
+            if keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight) {
+                Control::NextDay
+            } else {
+                Control::Step
+            };
+        apply_control(control, &mut controls, &worker);
     }
     for (entity, interaction, control) in &buttons {
         if *interaction == Interaction::Pressed {
@@ -736,6 +744,48 @@ mod tests {
         assert!(readout.contains("Sleeping | 06:00:00 remaining"));
         assert!(readout.contains("Location: Ada's home"));
         assert!(readout.contains("Replan after current action"));
+    }
+
+    #[test]
+    fn right_arrow_steps_and_either_shift_key_advances_to_next_day() {
+        use std::time::{Duration, Instant};
+
+        for shift in [None, Some(KeyCode::ShiftLeft), Some(KeyCode::ShiftRight)] {
+            let worker = SimulationWorker::spawn(
+                Universe::with_map(learning_lord_simulation::locations::Map::default()),
+                60.try_into().unwrap(),
+            );
+            let mut app = App::new();
+            app.insert_resource(DisplaySnapshot(worker.snapshot()))
+                .insert_resource(worker)
+                .init_resource::<Controls>()
+                .init_resource::<debug_export::DebugExport>()
+                .init_resource::<InputFocus>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .add_systems(Update, handle_controls);
+            let mut keyboard = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            if let Some(shift) = shift {
+                keyboard.press(shift);
+            }
+            keyboard.press(KeyCode::ArrowRight);
+            app.update();
+            let expected = if shift.is_some() {
+                28 * 60 * 60 * 1000
+            } else {
+                simulation::STEP_MS
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let snapshot = app.world().resource::<SimulationWorker>().snapshot();
+                assert!(snapshot.error.is_none());
+                if snapshot.revision > 0 {
+                    assert_eq!(snapshot.universe.current_time_ms(), expected);
+                    break;
+                }
+                assert!(Instant::now() < deadline, "worker did not process shortcut");
+                std::thread::yield_now();
+            }
+        }
     }
 
     #[test]

@@ -94,6 +94,7 @@ Each good includes a recent 30-market-day chart. The blue line steps at 04:00 an
 - **Run / Pause** (or **Space**) controls automatic advancement.
 - **1x, 2x, 3x, 5x, 10x, 20x** select simulation speed without unpausing.
 - **Advance 30 minutes** (or **Right arrow**) advances exactly 1,800,000 simulation milliseconds while paused, independent of speed. The button is unavailable while running.
+- **Shift+Right arrow** advances to 04:00 on the following calendar day while paused, independent of speed. Actions, trades and daily price updates run normally throughout the interval.
 - At **1x**, one real second advances the universe by **60,000 ms**. Automatic update starts are capped at 60 per real second by default. The worker measures elapsed monotonic time, including processing delays, and increases subsequent time jumps when work takes longer. It retains fractional milliseconds and does not queue fixed catch-up ticks.
 - Pausing lets an in-progress update finish. Paused time does not accumulate; unapplied time accrued while running is retained for the next automatic update after resuming. Simulation errors pause advancement and appear in the window.
 

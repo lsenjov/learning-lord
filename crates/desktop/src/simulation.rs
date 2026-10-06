@@ -27,6 +27,7 @@ pub enum Command {
     SetRunning(bool),
     SetSpeed(u32),
     Step,
+    NextDay,
     Restart,
     Shutdown,
 }
@@ -261,7 +262,13 @@ impl WorkerState {
             Command::SetRunning(running) => self.pacing.set_running(running, at),
             Command::SetSpeed(speed) => self.pacing.set_speed(speed, at),
             Command::Step if !self.pacing.running => self.advance(STEP_MS),
-            Command::Step | Command::Shutdown | Command::Restart => {}
+            Command::NextDay if !self.pacing.running => {
+                const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+                let time = self.universe.current_time_ms();
+                let elapsed = DAY_MS - time % DAY_MS + 4 * 60 * 60 * 1000;
+                self.advance(elapsed);
+            }
+            Command::Step | Command::NextDay | Command::Shutdown | Command::Restart => {}
         }
         true
     }
@@ -731,6 +738,60 @@ mod tests {
         state.apply(Command::Step, Duration::from_secs(12));
         assert_eq!(state.universe.current_time_ms(), STEP_MS);
         assert_eq!(original.current_time_ms(), 0);
+    }
+
+    #[test]
+    fn next_day_advances_normally_to_the_following_calendar_day_at_four() {
+        const HOUR_MS: u64 = 60 * 60 * 1000;
+        const DAY_MS: u64 = 24 * HOUR_MS;
+        for start in [3 * HOUR_MS, 4 * HOUR_MS, 6 * HOUR_MS, DAY_MS - 60_000] {
+            let (universe, id) =
+                Universe::with_map(learning_lord_simulation::locations::Map::default())
+                    .with_citizen("Ada", Citizen::new(0.0).unwrap())
+                    .unwrap();
+            let universe = universe.start_planning(id).unwrap().advance(start).unwrap();
+            let expected = universe.advance(DAY_MS + 4 * HOUR_MS - start).unwrap();
+            let mut state = WorkerState {
+                universe,
+                pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
+                error: None,
+                generation: 0,
+            };
+            state.apply(Command::SetSpeed(20), Duration::ZERO);
+            state.apply(Command::NextDay, Duration::from_secs(10));
+            assert!(state.error.is_none());
+            assert_eq!(state.universe.current_time_ms(), DAY_MS + 4 * HOUR_MS);
+            assert_eq!(state.universe, expected);
+            assert_eq!(state.pacing.speed, 20);
+            assert!(!state.pacing.running);
+            state.apply(Command::SetRunning(true), Duration::from_secs(11));
+            state.apply(Command::NextDay, Duration::from_secs(12));
+            assert_eq!(state.universe, expected);
+        }
+    }
+
+    #[test]
+    fn next_day_uses_the_clock_after_preceding_commands() {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let universe = Universe::with_map(learning_lord_simulation::locations::Map::default())
+            .advance(DAY_MS - 60_000)
+            .unwrap();
+        let worker = SimulationWorker::spawn(universe, NonZeroU32::new(60).unwrap());
+        worker.send(Command::Step).unwrap();
+        worker.send(Command::NextDay).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = worker.snapshot();
+            assert!(snapshot.error.is_none());
+            if snapshot.universe.current_time_ms() == 2 * DAY_MS + 4 * 60 * 60 * 1000 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not advance to the next day"
+            );
+            thread::yield_now();
+        }
     }
 
     #[test]
