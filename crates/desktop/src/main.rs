@@ -1,6 +1,7 @@
 mod citizens;
 mod debug_export;
 mod map_view;
+mod market;
 mod simulation;
 
 use bevy::{
@@ -97,6 +98,8 @@ fn main() -> Result<(), String> {
     .init_resource::<Controls>()
     .init_resource::<citizens::Selection>()
     .init_resource::<citizens::PlanDisplay>()
+    .init_resource::<market::Selection>()
+    .init_resource::<market::OrderDisplay>()
     .init_resource::<debug_export::DebugExport>()
     .init_resource::<InputFocus>()
     .add_systems(Startup, setup)
@@ -106,11 +109,14 @@ fn main() -> Result<(), String> {
             poll_worker,
             handle_controls,
             citizens::handle_selection,
+            market::handle_selection,
             refresh_display,
             citizens::refresh_cards,
             citizens::refresh_plan,
             citizens::scroll_panels,
             map_view::refresh,
+            market::refresh_choices,
+            market::refresh,
         )
             .chain(),
     )
@@ -176,6 +182,11 @@ fn setup(mut commands: Commands) {
             });
         root.spawn((text("", 14.0, MUTED), Readout::Market));
         root.spawn((text("", 13.0, MUTED), Readout::ExportStatus));
+        market::spawn_tabs(root);
+        root.spawn((market::ViewPanel(market::View::Citizens), Node {
+            width: percent(100), flex_grow: 1.0, min_height: px(0),
+            flex_direction: FlexDirection::Column, row_gap: px(10), ..default()
+        })).with_children(|root| {
         citizens::spawn_roster(root);
         root.spawn(Node { width: percent(100), flex_grow: 1.0, min_height: px(0), column_gap: px(14), ..default() })
             .with_children(|row| {
@@ -186,7 +197,9 @@ fn setup(mut commands: Commands) {
                     });
                 citizens::spawn_details(row);
             });
-        root.spawn(text("Space: run / pause   |   Right: advance 30 min   |   1-4: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
+        });
+        market::spawn(root);
+        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   1-4: select citizen   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
         root.spawn((text("", 14.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
     });
 }
@@ -474,13 +487,8 @@ fn refresh_display(
     for (readout, mut text) in &mut readouts {
         let value = match readout {
             Readout::Market => format!(
-                "Market: berries {:.3} coins/kg | {} sell orders | {} trades",
-                snapshot
-                    .0
-                    .universe
-                    .prices()
-                    .coins_per_kg(Good::Berries)
-                    .unwrap(),
+                "Market: {} goods | {} sell orders | {} trades",
+                Good::COUNT,
                 snapshot.0.universe.market().orders().count(),
                 snapshot.0.universe.market().trades().len()
             ),
@@ -631,6 +639,8 @@ mod tests {
             .init_resource::<Controls>()
             .init_resource::<citizens::Selection>()
             .init_resource::<citizens::PlanDisplay>()
+            .init_resource::<market::Selection>()
+            .init_resource::<market::OrderDisplay>()
             .init_resource::<debug_export::DebugExport>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
@@ -642,11 +652,14 @@ mod tests {
                     poll_worker,
                     handle_controls,
                     citizens::handle_selection,
+                    market::handle_selection,
                     refresh_display,
                     citizens::refresh_cards,
                     citizens::refresh_plan,
                     citizens::scroll_panels,
                     map_view::refresh,
+                    market::refresh_choices,
+                    market::refresh,
                 )
                     .chain(),
             );
@@ -817,7 +830,7 @@ mod tests {
             .find(|(readout, _)| matches!(readout, Readout::Market))
             .unwrap()
             .1;
-        assert!(market_text.0.contains("coins/kg"));
+        assert!(market_text.0.contains("7 goods"));
 
         let directory = std::env::temp_dir().join(format!(
             "learning-lord-export-ui-{}-{}",

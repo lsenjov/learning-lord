@@ -11,3 +11,4 @@ Existing economy changes are pending separately and the town trade acceptance te
 ## Progress
 
 - Step 1: current and previous period statistics are implemented. Independent Sol-6.1 review found no issues. Tests cover fulfilled requests counted once, the first 04:00 close, period reset, and inactive periods without stale history.
+- Step 2: Market/Citizens tabs, all seven goods, period selection and live seller orders are implemented. Three desktop tests cover quantity definitions, seller identity and partial orders, selection, restart and idle UI writes. Independent review found no remaining issues.

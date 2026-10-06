@@ -487,7 +487,12 @@ pub fn refresh_plan(
 
 pub fn scroll_panels(
     mut wheel: MessageReader<MouseWheel>,
-    mut panels: Query<(&RelativeCursorPosition, &ComputedNode, &mut ScrollPosition)>,
+    mut panels: Query<(
+        &RelativeCursorPosition,
+        &ComputedNode,
+        &mut ScrollPosition,
+        &InheritedVisibility,
+    )>,
 ) {
     for event in wheel.read() {
         let delta = -event.y
@@ -496,7 +501,10 @@ pub fn scroll_panels(
             } else {
                 1.0
             };
-        for (cursor, computed, mut scroll) in &mut panels {
+        for (cursor, computed, mut scroll, visibility) in &mut panels {
+            if !visibility.get() {
+                continue;
+            }
             let max = ((computed.content_size().y - computed.size().y)
                 * computed.inverse_scale_factor())
             .max(0.0);
