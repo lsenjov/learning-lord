@@ -175,6 +175,20 @@ pub struct DailyMarketActivity {
     pub price_after: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GoodActivity {
+    pub traded_grams: f64,
+    pub listed_grams: f64,
+    pub affordable_demand_grams: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketPeriod {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub goods: [GoodActivity; Good::COUNT],
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Market {
     pub prices: Prices,
@@ -195,6 +209,57 @@ pub(crate) struct Purchase {
 }
 
 impl Market {
+    /// Current activity; the end is the next scheduled 04:00 close.
+    pub fn current_period(&self) -> MarketPeriod {
+        let mut goods = [GoodActivity::default(); Good::COUNT];
+        for good in Good::ALL {
+            goods[good as usize].traded_grams = self.period_trades[good as usize].grams;
+        }
+        for order in self.orders() {
+            goods[order.good as usize].listed_grams += order.grams;
+        }
+        for request in self.affordable_requests.values() {
+            for (good, grams) in request.items() {
+                goods[good as usize].affordable_demand_grams += grams;
+            }
+        }
+        MarketPeriod {
+            start_ms: self.period_start_ms,
+            end_ms: if self.period_start_ms == 0 {
+                UPDATE_TIME_MS
+            } else {
+                self.period_start_ms.saturating_add(DAY_MS)
+            },
+            goods,
+        }
+    }
+
+    /// Latest closed period, including zero activity for inactive goods.
+    pub fn previous_period(&self) -> Option<MarketPeriod> {
+        if self.period_start_ms == 0 {
+            return None;
+        }
+        let mut goods = [GoodActivity::default(); Good::COUNT];
+        // History omits inactive goods and entire inactive periods.
+        for activity in self
+            .history
+            .iter()
+            .rev()
+            .take_while(|activity| activity.end_ms == self.period_start_ms)
+        {
+            goods[activity.good as usize] = GoodActivity {
+                traded_grams: activity.traded_grams,
+                listed_grams: activity.remaining_supply_grams,
+                affordable_demand_grams: activity.unmet_demand_grams,
+            };
+        }
+        Some(MarketPeriod {
+            start_ms: self.period_start_ms.saturating_sub(DAY_MS),
+            end_ms: self.period_start_ms,
+            goods,
+        })
+    }
+
     pub fn history(&self) -> &Vector<DailyMarketActivity> {
         &self.history
     }
@@ -540,5 +605,72 @@ pub(crate) fn until_update(time_ms: u64) -> u64 {
         UPDATE_TIME_MS - time_of_day
     } else {
         DAY_MS - time_of_day + UPDATE_TIME_MS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn period_statistics_count_fills_once_and_close_at_four() {
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market.list(seller, Good::Bread, 1_000.0).unwrap();
+        market
+            .set_request(buyer, ShoppingList::single(Good::Bread, 700.0))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 10.0)]);
+        market
+            .purchase(buyer, Good::Bread, 200.0, 10.0, UPDATE_TIME_MS, true)
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 9.7)]);
+        let current = market.current_period();
+        assert_eq!((current.start_ms, current.end_ms), (0, UPDATE_TIME_MS));
+        assert_eq!(
+            current.goods[Good::Bread as usize],
+            GoodActivity {
+                traded_grams: 200.0,
+                listed_grams: 800.0,
+                affordable_demand_grams: 500.0,
+            }
+        );
+        assert!(market.previous_period().is_none());
+        market.update(UPDATE_TIME_MS - 1).unwrap();
+        assert!(market.previous_period().is_none());
+        market.update(UPDATE_TIME_MS).unwrap();
+        assert_eq!(market.previous_period().unwrap(), current);
+        assert_eq!(
+            market.current_period().goods[Good::Bread as usize].traded_grams,
+            0.0
+        );
+        assert_eq!(market.current_period().start_ms, UPDATE_TIME_MS);
+        assert_eq!(market.current_period().end_ms, UPDATE_TIME_MS + DAY_MS);
+        assert_eq!(
+            market.previous_period().unwrap().goods[Good::Water as usize],
+            GoodActivity::default()
+        );
+    }
+
+    #[test]
+    fn inactive_latest_period_does_not_reuse_older_history() {
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market.list(seller, Good::Water, 50.0).unwrap();
+        market.update(UPDATE_TIME_MS).unwrap();
+        assert_eq!(
+            market.previous_period().unwrap().goods[Good::Water as usize].listed_grams,
+            50.0
+        );
+        market.withdraw(seller, Good::Water, 50.0).unwrap();
+        market.update(UPDATE_TIME_MS + DAY_MS).unwrap();
+        let previous = market.previous_period().unwrap();
+        assert_eq!(
+            (previous.start_ms, previous.end_ms),
+            (UPDATE_TIME_MS, UPDATE_TIME_MS + DAY_MS)
+        );
+        assert_eq!(previous.goods, [GoodActivity::default(); Good::COUNT]);
+        assert_eq!(market.history().len(), 1);
     }
 }
