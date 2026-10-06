@@ -113,6 +113,7 @@ impl CitizenHistory {
             Some(
                 CitizenAction::BuyFood(_)
                 | CitizenAction::Buy(_)
+                | CitizenAction::BuyAt { .. }
                 | CitizenAction::ListExcess
                 | CitizenAction::List(..)
                 | CitizenAction::Withdraw(..),

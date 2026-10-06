@@ -155,7 +155,15 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
     assert_eq!(
         &chosen.actions()[..2],
         &[
-            CitizenAction::BuyFood(learning_lord_simulation::marketplace::Good::Berries),
+            CitizenAction::BuyAt {
+                place: source
+                    .map()
+                    .public_place(learning_lord_simulation::locations::Location::Market),
+                list: learning_lord_simulation::marketplace::ShoppingList::single(
+                    Good::Berries,
+                    155
+                )
+            },
             CitizenAction::Eat
         ]
     );
@@ -357,7 +365,15 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
     assert_eq!(
         &chosen.actions()[..2],
         &[
-            CitizenAction::BuyFood(learning_lord_simulation::marketplace::Good::Berries),
+            CitizenAction::BuyAt {
+                place: universe
+                    .map()
+                    .public_place(learning_lord_simulation::locations::Location::Market),
+                list: learning_lord_simulation::marketplace::ShoppingList::single(
+                    Good::Berries,
+                    155
+                )
+            },
             CitizenAction::Eat
         ]
     );
@@ -423,6 +439,8 @@ fn listing_identity_and_local_predictions_are_independent_of_tick_partitioning()
         .unwrap();
     assert_eq!(direct.market(), split.market());
     let buyer = Citizen::new(0.0)
+        .unwrap()
+        .with_map(direct.map())
         .unwrap()
         .with_coins(100)
         .unwrap()
@@ -635,4 +653,87 @@ fn purchases_cannot_buy_sub_coin_value_without_a_coin_and_preserve_stock() {
     assert_eq!(citizen(&bought, buyer).coins(), 0);
     assert_eq!(bought.market().listed_units(seller, Good::Berries), 1);
     assert!(bought.market().trades().is_empty());
+}
+
+#[test]
+fn owned_workshop_sells_incidental_goods_and_customers_visit_without_production_access() {
+    use learning_lord_simulation::locations::{Location, Position};
+    use learning_lord_simulation::marketplace::ShoppingList;
+    use learning_lord_simulation::production::Recipe;
+    let (universe, seller) = Universe::with_map(Map::default())
+        .with_citizen(
+            "Miller",
+            Citizen::new(0.0).unwrap().with_berries(100).unwrap(),
+        )
+        .unwrap();
+    let (universe, mill) = universe.with_property(seller, Location::Mill).unwrap();
+    let (universe, buyer) = universe
+        .with_citizen(
+            "Customer",
+            Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(citizen(&universe, seller).selling_place(), mill);
+    let listed = universe
+        .start_action(seller, CitizenAction::List(Good::Berries, 100))
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    assert_eq!(listed.market().orders().next().unwrap().place, mill);
+    let customer = citizen(&listed, buyer);
+    assert!(customer.start_action(CitizenAction::Travel(mill)).is_ok());
+    assert_eq!(
+        customer.start_action(CitizenAction::Travel(citizen(&listed, seller).home())),
+        Err(SimulationError::PrivateProperty)
+    );
+    assert_eq!(
+        customer.production_place(Recipe::MillFlour),
+        Err(SimulationError::MissingProperty)
+    );
+    assert_eq!(
+        customer.start_action(CitizenAction::BuyAt {
+            place: customer.home(),
+            list: ShoppingList::single(Good::Berries, 1),
+        }),
+        Err(SimulationError::PrivateProperty)
+    );
+    assert_eq!(
+        customer.start_action(CitizenAction::BuyAt {
+            place: learning_lord_simulation::locations::PlaceId(uuid::Uuid::nil()),
+            list: ShoppingList::single(Good::Berries, 1),
+        }),
+        Err(SimulationError::PlaceNotFound)
+    );
+    let market_only = listed
+        .start_action(
+            buyer,
+            CitizenAction::Buy(ShoppingList::single(Good::Berries, 100)),
+        )
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    assert_eq!(citizen(&market_only, buyer).berries_units(), 0);
+    let bought = market_only
+        .start_action(
+            buyer,
+            CitizenAction::BuyAt {
+                place: mill,
+                list: ShoppingList::single(Good::Berries, 100),
+            },
+        )
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    assert_eq!(citizen(&bought, buyer).berries_units(), 100);
+    assert_eq!(citizen(&bought, seller).coins(), 1);
+    let away = citizen(&bought, buyer)
+        .with_position(Position { x: 1.0, y: 1.0 })
+        .unwrap();
+    assert_eq!(
+        away.start_action(CitizenAction::BuyAt {
+            place: mill,
+            list: ShoppingList::single(Good::Berries, 1)
+        }),
+        Err(SimulationError::WrongLocation)
+    );
 }

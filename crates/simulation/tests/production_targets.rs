@@ -410,7 +410,10 @@ fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
     let universe = universe
         .start_action(
             buyer,
-            CitizenAction::Buy(ShoppingList::single(Good::Wheat, 2_800)),
+            CitizenAction::BuyAt {
+                place: citizen(&universe, farmer).selling_place(),
+                list: ShoppingList::single(Good::Wheat, 2_800),
+            },
         )
         .unwrap()
         .advance(TRADE_DURATION_MS)

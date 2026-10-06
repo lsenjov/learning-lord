@@ -704,8 +704,22 @@ mod tests {
                 hunger_max = hunger_max.max(citizen.hunger());
                 wealth += citizen.coins();
             }
+            let private_trades = world
+                .market()
+                .trades()
+                .iter()
+                .filter(|trade| {
+                    let AgentKind::Citizen(seller) = &world.agents()[&trade.seller].kind;
+                    world
+                        .map()
+                        .place(seller.selling_place())
+                        .unwrap()
+                        .owner
+                        .is_some()
+                })
+                .count();
             println!(
-                "citizens={count} day={day} elapsed_ms={:.3} trades={} orders={} max_hunger={hunger_max:.3} coins={wealth}",
+                "citizens={count} day={day} elapsed_ms={:.3} trades={} orders={} private_trades={private_trades} max_hunger={hunger_max:.3} coins={wealth}",
                 day_start.elapsed().as_secs_f64() * 1000.0,
                 world.market().trades().len(),
                 world.market().orders().count()

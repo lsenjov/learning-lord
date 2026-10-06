@@ -339,6 +339,11 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                     format!("Listing {} {}", quantity_label(good, units), good.name())
                 }
                 CitizenAction::Buy(list) => format!("Buying {}", shopping_list_label(list)),
+                CitizenAction::BuyAt { place, list } => format!(
+                    "Buying {} at {}",
+                    shopping_list_label(list),
+                    citizen.map().place(place).unwrap().name
+                ),
                 CitizenAction::Withdraw(good, units) => {
                     format!(
                         "Withdrawing {} {}",
@@ -453,6 +458,11 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
             format!("List {} {}", quantity_label(good, units), good.name())
         }
         CitizenAction::Buy(list) => format!("Buy {}", shopping_list_label(list)),
+        CitizenAction::BuyAt { place, list } => format!(
+            "Buy {} at {}",
+            shopping_list_label(list),
+            citizen.map().place(place).unwrap().name
+        ),
         CitizenAction::Withdraw(good, units) => {
             format!("Withdraw {} {}", quantity_label(good, units), good.name())
         }

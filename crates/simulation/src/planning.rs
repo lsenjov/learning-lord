@@ -165,6 +165,43 @@ impl ActivePlan {
         self.elapsed_ms
     }
 
+    pub(crate) fn shopping_request(
+        &self,
+        remaining_ms: u64,
+    ) -> Result<Option<crate::marketplace::ShoppingList>, SimulationError> {
+        let Some(goal) = self
+            .plan
+            .goals
+            .iter()
+            .find(|goal| goal.actions.contains(&self.action_index))
+        else {
+            return Ok(None);
+        };
+        let mut items = Vec::new();
+        let mut elapsed_ms = self.elapsed_ms;
+        for index in self.action_index..goal.actions.end {
+            if index > self.action_index && elapsed_ms >= COMMITMENT_MS {
+                break;
+            }
+            match self.plan.actions[index] {
+                CitizenAction::Travel(_) => {}
+                CitizenAction::BuyAt { list, .. } => items.extend(list.items()),
+                _ => break,
+            }
+            let duration_ms = if index == self.action_index {
+                remaining_ms
+            } else {
+                self.plan.action_durations_ms[index]
+            };
+            elapsed_ms = elapsed_ms.saturating_add(duration_ms);
+        }
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(crate::marketplace::ShoppingList::new(items)?))
+        }
+    }
+
     pub(crate) fn travelling_purchase(&self, remaining_ms: u64) -> Option<CitizenAction> {
         if self.elapsed_ms.saturating_add(remaining_ms) >= COMMITMENT_MS {
             return None;
@@ -718,6 +755,13 @@ impl Continuations {
                     good.hash(&mut hash);
                     units.hash(&mut hash);
                 }
+                CitizenAction::BuyAt { place, list } => {
+                    place.hash(&mut hash);
+                    for (good, units) in list.items() {
+                        good.hash(&mut hash);
+                        units.hash(&mut hash);
+                    }
+                }
                 CitizenAction::Buy(list) => {
                     for (good, units) in list.items() {
                         good.hash(&mut hash);
@@ -928,8 +972,26 @@ mod tests {
             .unwrap();
         let seller = Citizen::new(0.0).unwrap();
         let mut market = Market::default();
-        market.list(seller.id(), Good::Bread, 8).unwrap();
-        market.list(seller.id(), Good::FlaxGarment, 2).unwrap();
+        market
+            .list(
+                seller.id(),
+                hungry
+                    .map()
+                    .public_place(crate::locations::Location::Market),
+                Good::Bread,
+                8,
+            )
+            .unwrap();
+        market
+            .list(
+                seller.id(),
+                hungry
+                    .map()
+                    .public_place(crate::locations::Location::Market),
+                Good::FlaxGarment,
+                2,
+            )
+            .unwrap();
         let trader = hungry.with_coins(100).unwrap().with_market(market);
         let mut tailor = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
@@ -975,6 +1037,87 @@ mod tests {
             let expected = sequential_reference(&citizen).unwrap_err();
             assert_eq!(plan(&citizen).unwrap_err(), expected);
         }
+    }
+
+    #[test]
+    fn shopping_requests_cover_remaining_stops_within_the_current_goal() {
+        use crate::marketplace::{Good, ShoppingList};
+        let citizen = Citizen::new(0.0).unwrap();
+        let place = citizen.selling_place();
+        let mut execution = ActivePlan {
+            plan: Plan {
+                actions: vec![
+                    CitizenAction::Travel(place),
+                    CitizenAction::BuyAt {
+                        place,
+                        list: ShoppingList::single(Good::Bread, 1),
+                    },
+                    CitizenAction::Travel(place),
+                    CitizenAction::BuyAt {
+                        place,
+                        list: ShoppingList::single(Good::BerryPie, 1),
+                    },
+                    CitizenAction::BuyAt {
+                        place,
+                        list: ShoppingList::single(Good::Bread, 10),
+                    },
+                ],
+                action_durations_ms: vec![
+                    60_000,
+                    crate::TRADE_DURATION_MS,
+                    60_000,
+                    crate::TRADE_DURATION_MS,
+                    crate::TRADE_DURATION_MS,
+                ],
+                goals: vec![
+                    PlanGoal {
+                        goal: Effect::ReplenishReserves,
+                        actions: 0..4,
+                    },
+                    PlanGoal {
+                        goal: Effect::ReduceHunger,
+                        actions: 4..5,
+                    },
+                ],
+                average_wellbeing: 0.0,
+                decision: None,
+            },
+            action_index: 0,
+            elapsed_ms: 0,
+        };
+        let request = execution.shopping_request(1).unwrap().unwrap();
+        assert_eq!(request.units(Good::Bread), 1);
+        assert_eq!(request.units(Good::BerryPie), 1);
+        execution.action_index = 2;
+        assert_eq!(
+            execution
+                .shopping_request(1)
+                .unwrap()
+                .unwrap()
+                .units(Good::Bread),
+            0
+        );
+        execution.elapsed_ms = COMMITMENT_MS - 1;
+        assert!(execution.shopping_request(1).unwrap().is_none());
+        execution.action_index = 3;
+        assert_eq!(
+            execution
+                .shopping_request(1)
+                .unwrap()
+                .unwrap()
+                .units(Good::BerryPie),
+            1
+        );
+
+        execution.action_index = 1;
+        let request = execution.shopping_request(1).unwrap().unwrap();
+        assert_eq!(request.units(Good::Bread), 1);
+        assert_eq!(request.units(Good::BerryPie), 0);
+        execution.action_index = 0;
+        execution.elapsed_ms = COMMITMENT_MS - crate::TRADE_DURATION_MS - 2;
+        let request = execution.shopping_request(1).unwrap().unwrap();
+        assert_eq!(request.units(Good::Bread), 1);
+        assert_eq!(request.units(Good::BerryPie), 0);
     }
 
     fn executing(citizen: &Citizen, actions: Vec<CitizenAction>) -> Citizen {
@@ -1510,6 +1653,9 @@ mod tests {
         market
             .list(
                 crate::AgentId(uuid::Uuid::new_v4()),
+                citizen
+                    .map()
+                    .public_place(crate::locations::Location::Market),
                 crate::marketplace::Good::Berries,
                 1000,
             )
@@ -1526,7 +1672,13 @@ mod tests {
                 variant.actions
                     == [
                         CitizenAction::Travel(map.public_place(Location::Market)),
-                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
+                        CitizenAction::BuyAt {
+                            place: map.public_place(Location::Market),
+                            list: crate::marketplace::ShoppingList::single(
+                                crate::marketplace::Good::Berries,
+                                130,
+                            ),
+                        },
                         CitizenAction::Eat,
                     ]
             })
@@ -1607,7 +1759,16 @@ mod tests {
         let citizen = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
         let mut market = citizen.market().clone();
         let seller = Citizen::new(0.0).unwrap().with_map(citizen.map()).unwrap();
-        market.list(seller.id(), Good::Berries, 1000).unwrap();
+        market
+            .list(
+                seller.id(),
+                citizen
+                    .map()
+                    .public_place(crate::locations::Location::Market),
+                Good::Berries,
+                1000,
+            )
+            .unwrap();
         let citizen = citizen.with_market(market.clone());
         let planned = executing(
             &citizen,

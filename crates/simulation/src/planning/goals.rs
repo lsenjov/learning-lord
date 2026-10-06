@@ -48,7 +48,7 @@ impl CitizenAction {
             Self::Withdraw(good, _) if good.nutrition_per_unit().is_some() => {
                 &[Food, ReplenishReserves]
             }
-            Self::Buy(list)
+            Self::Buy(list) | Self::BuyAt { list, .. }
                 if list
                     .items()
                     .any(|(good, _)| good.nutrition_per_unit().is_some()) =>
@@ -61,6 +61,7 @@ impl CitizenAction {
             | Self::ListExcess
             | Self::List(..)
             | Self::Buy(..)
+            | Self::BuyAt { .. }
             | Self::Withdraw(..) => &[],
         }
     }
@@ -84,6 +85,14 @@ impl CitizenAction {
             Self::Buy(list) => list.items().try_fold(0_i64, |sum, (good, units)| {
                 sum.checked_add(citizen.market().purchase_cost(citizen.id(), good, units)?)
             }),
+            Self::BuyAt { place, list } => list.items().try_fold(0_i64, |sum, (good, units)| {
+                sum.checked_add(citizen.market().purchase_cost_at(
+                    citizen.id(),
+                    place,
+                    good,
+                    units,
+                )?)
+            }),
             _ => return None,
         };
         Some(Requirement {
@@ -102,6 +111,7 @@ impl CitizenAction {
             | Self::ListExcess
             | Self::List(..)
             | Self::Buy(..)
+            | Self::BuyAt { .. }
             | Self::Withdraw(..) => TRADE_DURATION_MS,
             _ => ACTION_DURATION_MS,
         }
@@ -128,7 +138,9 @@ impl Cooldowns {
     fn remaining(self, action: CitizenAction) -> u64 {
         match action {
             CitizenAction::Eat => self.eat,
-            CitizenAction::BuyFood(_) | CitizenAction::Buy(..) => self.buy,
+            CitizenAction::BuyFood(_) | CitizenAction::Buy(..) | CitizenAction::BuyAt { .. } => {
+                self.buy
+            }
             CitizenAction::ListExcess | CitizenAction::List(..) => self.sell,
             _ => 0,
         }
@@ -141,7 +153,10 @@ impl Cooldowns {
             } else {
                 self.eat.saturating_sub(duration)
             },
-            buy: if matches!(action, CitizenAction::BuyFood(_) | CitizenAction::Buy(..)) {
+            buy: if matches!(
+                action,
+                CitizenAction::BuyFood(_) | CitizenAction::Buy(..) | CitizenAction::BuyAt { .. }
+            ) {
                 TRADE_PLAN_COOLDOWN_MS
             } else {
                 self.buy.saturating_sub(duration)
@@ -200,8 +215,10 @@ impl Prediction {
         let before = self.citizen.personal_wellbeing()?;
         let after = citizen.personal_wellbeing()?;
         let mut next = self.clone();
-        if matches!(action, CitizenAction::BuyFood(_) | CitizenAction::Buy(_))
-            && action.effects().contains(&Effect::Food)
+        if matches!(
+            action,
+            CitizenAction::BuyFood(_) | CitizenAction::Buy(_) | CitizenAction::BuyAt { .. }
+        ) && action.effects().contains(&Effect::Food)
             && citizen.food_nutrition() <= self.citizen.food_nutrition()
         {
             return Ok(None);
@@ -432,6 +449,19 @@ fn order_variants(
     reserved_ms: u64,
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
+    let list = match action {
+        CitizenAction::Buy(list) => Some(list),
+        CitizenAction::BuyFood(good) => Some(crate::marketplace::ShoppingList::single(
+            good,
+            ((amount.max(MEAL_NOURISHMENT) - state.citizen.food_nutrition()).max(0.0)
+                / good.nutrition_per_unit().unwrap())
+            .ceil() as crate::Quantity,
+        )),
+        _ => None,
+    };
+    if let Some(list) = list {
+        return shopping_trip(state, list, reserved_ms, prior_actions);
+    }
     if let CitizenAction::Produce(recipe) = action
         && recipe != crate::production::Recipe::Forage
         && amount > state.citizen.food_nutrition()
@@ -469,6 +499,100 @@ fn order_variants(
         }
     }
     Ok(variants)
+}
+
+fn shopping_trip(
+    initial: &Prediction,
+    list: crate::marketplace::ShoppingList,
+    reserved_ms: u64,
+    prior_actions: usize,
+) -> Result<Vec<Prediction>, SimulationError> {
+    if initial.cooldowns.buy > 0 {
+        return Ok(Vec::new());
+    }
+    let mut state = initial.clone();
+    let mut remaining = list;
+    while remaining.items().next().is_some() {
+        let citizen = &state.citizen;
+        let place = citizen
+            .map()
+            .places()
+            .values()
+            .filter(|place| place.kind != crate::locations::Location::Home)
+            .filter(|place| {
+                remaining.items().any(|(good, _)| {
+                    citizen
+                        .market()
+                        .available_units_at(citizen.id(), place.id, good)
+                        > 0
+                })
+            })
+            .min_by(|a, b| {
+                citizen
+                    .position()
+                    .distance(a.position)
+                    .total_cmp(&citizen.position().distance(b.position))
+                    .then_with(|| a.id.0.cmp(&b.id.0))
+            })
+            .map(|place| place.id);
+        let Some(place) = place else {
+            return Ok(Vec::new());
+        };
+        let basket =
+            crate::marketplace::ShoppingList::new(remaining.items().map(|(good, units)| {
+                (
+                    good,
+                    units.min(
+                        citizen
+                            .market()
+                            .available_units_at(citizen.id(), place, good),
+                    ),
+                )
+            }))?;
+        if citizen.position() != citizen.map().position(place) {
+            let Some(travelled) = state.perform(CitizenAction::Travel(place), prior_actions)?
+            else {
+                return Ok(Vec::new());
+            };
+            state = travelled;
+        }
+        if state.elapsed_ms + reserved_ms > GOAL_HORIZON_MS {
+            return Ok(Vec::new());
+        }
+        let inventory = state.citizen.clone();
+        // Only this trip's next stop may bypass the cooldown from its previous purchase.
+        state.cooldowns.buy = 0;
+        let Some(bought) = state.perform(
+            CitizenAction::BuyAt {
+                place,
+                list: basket,
+            },
+            prior_actions,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+        remaining =
+            crate::marketplace::ShoppingList::new(remaining.items().map(|(good, units)| {
+                (
+                    good,
+                    units.saturating_sub(
+                        bought
+                            .citizen
+                            .units(good)
+                            .saturating_sub(inventory.units(good)),
+                    ),
+                )
+            }))?;
+        if !basket
+            .items()
+            .any(|(good, _)| bought.citizen.units(good) > inventory.units(good))
+        {
+            return Ok(Vec::new());
+        }
+        state = bought;
+    }
+    Ok(vec![state])
 }
 
 fn prepare(
@@ -838,6 +962,13 @@ fn acquisition_path(actions: &[CitizenAction]) -> Vec<CitizenAction> {
                 crate::marketplace::ShoppingList::new(list.items().map(|(good, _)| (good, 1)))
                     .expect("an existing basket contains valid goods"),
             ),
+            CitizenAction::BuyAt { place, list } => CitizenAction::BuyAt {
+                place,
+                list: crate::marketplace::ShoppingList::new(
+                    list.items().map(|(good, _)| (good, 1)),
+                )
+                .expect("an existing basket contains valid goods"),
+            },
             CitizenAction::Withdraw(good, _) => CitizenAction::Withdraw(good, 1),
             other => other,
         };
@@ -1066,6 +1197,183 @@ fn variants_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workplace_shopper() -> (
+        Citizen,
+        crate::locations::PlaceId,
+        crate::locations::PlaceId,
+    ) {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position::default(),
+            Position::default(),
+            Position { x: 400.0, y: 0.0 },
+        )
+        .unwrap();
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        let (map, mill) = map
+            .with_place(
+                Location::Mill,
+                Position { x: 100.0, y: 0.0 },
+                Some(seller),
+                "Mill",
+            )
+            .unwrap();
+        let market_place = map.public_place(Location::Market);
+        let buyer = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_map(map)
+            .unwrap()
+            .with_coins(2000)
+            .unwrap();
+        let mut market = buyer.market().clone();
+        market.list(seller, mill, Good::Flour, 100).unwrap();
+        market.list(seller, mill, Good::Bread, 1).unwrap();
+        market.list(seller, market_place, Good::Flour, 100).unwrap();
+        market.list(seller, market_place, Good::Wood, 25).unwrap();
+        market
+            .list(seller, market_place, Good::BerryPie, 1)
+            .unwrap();
+        (buyer.with_market(market), mill, market_place)
+    }
+
+    #[test]
+    fn shopping_trip_visits_nearest_useful_stock_and_keeps_one_cooldown() {
+        let (buyer, mill, market) = workplace_shopper();
+        let initial = Prediction::new(&buyer, Cooldowns::default());
+        let list =
+            crate::marketplace::ShoppingList::new([(Good::Flour, 100), (Good::Wood, 25)]).unwrap();
+        let trip = shopping_trip(&initial, list, 0, 0).unwrap().pop().unwrap();
+        assert_eq!(
+            trip.actions,
+            [
+                CitizenAction::Travel(mill),
+                CitizenAction::BuyAt {
+                    place: mill,
+                    list: crate::marketplace::ShoppingList::single(Good::Flour, 100)
+                },
+                CitizenAction::Travel(market),
+                CitizenAction::BuyAt {
+                    place: market,
+                    list: crate::marketplace::ShoppingList::single(Good::Wood, 25)
+                },
+            ]
+        );
+        assert_eq!(trip.elapsed_ms, 240_000 + 2 * TRADE_DURATION_MS);
+        assert_eq!(trip.cooldowns.buy, TRADE_PLAN_COOLDOWN_MS);
+        assert_eq!(
+            trip.citizen
+                .market()
+                .available_units_at(buyer.id(), market, Good::Flour),
+            100
+        );
+        assert!(shopping_trip(&trip, list, 0, 0).unwrap().is_empty());
+        assert_eq!(buyer.units(Good::Flour), 0);
+        let mut blocked = initial;
+        blocked.cooldowns.buy = 1;
+        assert!(shopping_trip(&blocked, list, 0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shopping_trip_food_suppliers_fill_mixed_meals_from_multiple_places() {
+        let (buyer, mill, market) = workplace_shopper();
+        let initial = Prediction::new(&buyer, Cooldowns::default());
+        let variants = satisfy(
+            &initial,
+            Requirement {
+                resource: Effect::Food,
+                amount: 100.0,
+                coins: None,
+            },
+            0,
+            0,
+        )
+        .unwrap();
+        let trip = variants
+            .iter()
+            .find(|trip| {
+                trip.citizen.units(Good::Bread) == 1
+                    && trip.citizen.units(Good::BerryPie) == 1
+                    && trip.actions.len() == 4
+            })
+            .unwrap();
+        assert_eq!(
+            trip.citizen.food_nutrition(),
+            Good::Bread.nutrition_per_unit().unwrap()
+                + Good::BerryPie.nutrition_per_unit().unwrap()
+        );
+        assert_eq!(
+            trip.actions
+                .iter()
+                .filter(|action| matches!(action, CitizenAction::BuyAt { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(trip.actions[0], CitizenAction::Travel(mill));
+        assert_eq!(trip.citizen.position(), buyer.map().position(market));
+    }
+
+    #[test]
+    fn shopping_trip_reserves_time_for_later_prerequisites_and_rejects_unfilled_baskets() {
+        let (buyer, _, _) = workplace_shopper();
+        let mut initial = Prediction::new(&buyer, Cooldowns::default());
+        let list =
+            crate::marketplace::ShoppingList::new([(Good::Flour, 100), (Good::Wood, 25)]).unwrap();
+        let duration = 240_000 + 2 * TRADE_DURATION_MS;
+        initial.elapsed_ms = GOAL_HORIZON_MS - duration;
+        assert!(!shopping_trip(&initial, list, 0, 0).unwrap().is_empty());
+        assert!(
+            shopping_trip(&initial, list, TRADE_DURATION_MS + 1, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let impossible = crate::marketplace::ShoppingList::single(Good::Wood, 26);
+        assert!(
+            shopping_trip(
+                &Prediction::new(&buyer, Cooldowns::default()),
+                impossible,
+                0,
+                0
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    fn food_purchase(citizen: &Citizen, good: Good) -> CitizenAction {
+        CitizenAction::BuyAt {
+            place: citizen
+                .map()
+                .public_place(crate::locations::Location::Market),
+            list: crate::marketplace::ShoppingList::single(
+                good,
+                ((MEAL_NOURISHMENT - citizen.food_nutrition()).max(0.0)
+                    / good.nutrition_per_unit().unwrap())
+                .ceil() as crate::Quantity,
+            ),
+        }
+    }
+
+    fn relocate_stock(citizen: &Citizen) -> Citizen {
+        let mut market = citizen.market().clone();
+        let orders: Vec<_> = market.orders().cloned().collect();
+        for order in orders {
+            market
+                .withdraw(order.seller, order.place, order.good, order.units)
+                .unwrap();
+            market
+                .list(
+                    order.seller,
+                    citizen
+                        .map()
+                        .public_place(crate::locations::Location::Market),
+                    order.good,
+                    order.units,
+                )
+                .unwrap();
+        }
+        citizen.with_market(market)
+    }
 
     #[test]
     fn exhausted_forage_targets_allow_food_and_recipe_preparation() {
@@ -1322,10 +1630,10 @@ mod tests {
                 assert_eq!(candidate.elapsed_ms, replay.elapsed_ms);
                 assert_eq!(candidate.action_durations_ms, replay.action_durations_ms);
                 assert_eq!(candidate.citizen.coins(), replay.citizen.coins());
-                let CitizenAction::Buy(list) = candidate
+                let CitizenAction::BuyAt { list, .. } = candidate
                     .actions
                     .iter()
-                    .find(|a| matches!(a, CitizenAction::Buy(_)))
+                    .find(|a| matches!(a, CitizenAction::BuyAt { .. }))
                     .unwrap()
                 else {
                     unreachable!()
@@ -1355,7 +1663,16 @@ mod tests {
                 } else {
                     crate::AgentId(uuid::Uuid::new_v4())
                 };
-                market.list(seller, Good::FlaxGarment, 1).unwrap();
+                market
+                    .list(
+                        seller,
+                        citizen
+                            .map()
+                            .public_place(crate::locations::Location::Market),
+                        Good::FlaxGarment,
+                        1,
+                    )
+                    .unwrap();
                 citizen = citizen.with_market(market);
             }
             let snapshot = citizen.clone();
@@ -1455,7 +1772,14 @@ mod tests {
             .unwrap();
         let mut market = citizen.market().clone();
         market
-            .list(crate::AgentId(uuid::Uuid::new_v4()), Good::Berries, 1000)
+            .list(
+                crate::AgentId(uuid::Uuid::new_v4()),
+                citizen
+                    .map()
+                    .public_place(crate::locations::Location::Market),
+                Good::Berries,
+                1000,
+            )
             .unwrap();
         citizen.with_market(market)
     }
@@ -1617,7 +1941,16 @@ mod tests {
             (Good::Water, 2000),
             (Good::Berries, 1000),
         ] {
-            market.list(seller, good, units).unwrap();
+            market
+                .list(
+                    seller,
+                    worker
+                        .map()
+                        .public_place(crate::locations::Location::Market),
+                    good,
+                    units,
+                )
+                .unwrap();
         }
         let mut worker = worker.with_market(market);
         worker.refresh_production_targets(true).unwrap();
@@ -1636,14 +1969,14 @@ mod tests {
                 matches!(
                     candidate.actions.as_slice(),
                     [
-                        CitizenAction::Buy(_),
+                        CitizenAction::BuyAt { .. },
                         CitizenAction::Produce(Recipe::BakeBread),
                         CitizenAction::Produce(Recipe::BakeBread)
                     ]
                 )
             })
             .unwrap();
-        let CitizenAction::Buy(list) = candidate.actions[0] else {
+        let CitizenAction::BuyAt { list, .. } = candidate.actions[0] else {
             unreachable!()
         };
         assert_eq!(list.units(Good::Flour), 200);
@@ -1666,7 +1999,7 @@ mod tests {
                 .is_none()
         );
         let one = production_order(&initial, &[Recipe::BakeBread], None, 0, 0).unwrap();
-        let CitizenAction::Buy(list) = one[0].actions[0] else {
+        let CitizenAction::BuyAt { list, .. } = one[0].actions[0] else {
             unreachable!()
         };
         assert_eq!(list.units(Good::Flour), 100);
@@ -1691,14 +2024,14 @@ mod tests {
                 matches!(
                     candidate.actions.as_slice(),
                     [
-                        CitizenAction::Buy(_),
+                        CitizenAction::BuyAt { .. },
                         CitizenAction::Produce(Recipe::BakeBread),
                         CitizenAction::Produce(Recipe::BakeBerryPie)
                     ]
                 )
             })
             .unwrap();
-        let CitizenAction::Buy(list) = candidate.actions[0] else {
+        let CitizenAction::BuyAt { list, .. } = candidate.actions[0] else {
             unreachable!()
         };
         assert_eq!(list.units(Good::Flour), 200);
@@ -1720,7 +2053,7 @@ mod tests {
             Cooldowns::default(),
         );
         let variants = replenish(&initial, 200.0, 0).unwrap();
-        assert!(variants.iter().any(|candidate| matches!(candidate.actions.as_slice(), [CitizenAction::Buy(list), CitizenAction::Produce(Recipe::BakeBread), CitizenAction::Produce(Recipe::BakeBread)] if list.units(Good::Flour) == 200) && candidate.citizen.food_nutrition() >= 200.0));
+        assert!(variants.iter().any(|candidate| matches!(candidate.actions.as_slice(), [CitizenAction::BuyAt { list, .. }, CitizenAction::Produce(Recipe::BakeBread), CitizenAction::Produce(Recipe::BakeBread)] if list.units(Good::Flour) == 200) && candidate.citizen.food_nutrition() >= 200.0));
         let source = buying_baker(2000)
             .with_good(Good::BerryPie, 0)
             .unwrap()
@@ -1737,7 +2070,7 @@ mod tests {
         assert!(variants.iter().any(|candidate| matches!(
             candidate.actions.as_slice(),
             [
-                CitizenAction::Buy(_),
+                CitizenAction::BuyAt { .. },
                 CitizenAction::Produce(Recipe::BakeBerryPie),
                 CitizenAction::Produce(Recipe::BakeBerryPie)
             ]
@@ -1838,7 +2171,7 @@ mod tests {
             .collect();
         for order in berries {
             market
-                .withdraw(order.seller, Good::Berries, order.units)
+                .withdraw(order.seller, order.place, Good::Berries, order.units)
                 .unwrap();
         }
         let mut source = source
@@ -2028,13 +2361,7 @@ mod tests {
         let variants = full_meals(&funded);
         let bought = variants
             .iter()
-            .find(|v| {
-                v.actions
-                    == [
-                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
-                        CitizenAction::Eat,
-                    ]
-            })
+            .find(|v| v.actions == [food_purchase(&funded, Good::Berries), CitizenAction::Eat])
             .unwrap();
         assert_eq!(bought.elapsed_ms, TRADE_DURATION_MS + 155_000);
         assert_eq!(bought.citizen.berries_units(), 0);
@@ -2042,13 +2369,7 @@ mod tests {
         let variants = full_meals(&rich);
         let bought = variants
             .iter()
-            .find(|v| {
-                v.actions
-                    == [
-                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
-                        CitizenAction::Eat,
-                    ]
-            })
+            .find(|v| v.actions == [food_purchase(&rich, Good::Berries), CitizenAction::Eat])
             .unwrap();
         assert_eq!(bought.elapsed_ms, TRADE_DURATION_MS + 155_000);
         let existing = variants_after(
@@ -2076,11 +2397,10 @@ mod tests {
             assert!(variant.citizen.hunger() < source.hunger());
         }
         let paid = full_meals(&source.with_coins(9).unwrap());
-        assert!(paid.iter().any(|v| v.actions
-            == [
-                CitizenAction::BuyFood(crate::marketplace::Good::Berries),
-                CitizenAction::Eat
-            ]));
+        assert!(
+            paid.iter()
+                .any(|v| v.actions == [food_purchase(&source, Good::Berries), CitizenAction::Eat])
+        );
     }
 
     #[test]
@@ -2116,10 +2436,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             chosen.actions,
-            [
-                CitizenAction::BuyFood(crate::marketplace::Good::Berries),
-                CitizenAction::Eat
-            ]
+            [food_purchase(&source, Good::Berries), CitizenAction::Eat]
         );
         assert!(chosen.citizen.coins() >= 0);
         assert_eq!(chosen.citizen.berries_units(), 0);
@@ -2381,7 +2698,14 @@ mod tests {
             .unwrap();
         let seller = Citizen::new(0.0).unwrap().with_map(map).unwrap();
         let mut market = buyer.market().clone();
-        market.list(seller.id(), Good::Bread, 1000).unwrap();
+        market
+            .list(
+                seller.id(),
+                buyer.map().public_place(crate::locations::Location::Market),
+                Good::Bread,
+                1000,
+            )
+            .unwrap();
         let buyer = buyer.with_market(market);
         let mut initial = Prediction::new(&buyer, Cooldowns::default());
         initial.elapsed_ms = GOAL_HORIZON_MS - 3 * 60_000;
@@ -2393,7 +2717,7 @@ mod tests {
                     (variant.citizen.food_nutrition() - target).abs() < 1e-9
                         && matches!(
                             variant.actions.as_slice(),
-                            [CitizenAction::Travel(_), CitizenAction::Buy(_)]
+                            [CitizenAction::Travel(_), CitizenAction::BuyAt { .. }]
                         )
                 })
                 .expect("each stock target has a completing purchase");
@@ -2402,7 +2726,7 @@ mod tests {
                 initial.elapsed_ms + travel_ms + TRADE_DURATION_MS
             );
             assert!(variant.elapsed_ms > GOAL_HORIZON_MS);
-            let CitizenAction::Buy(basket) = variant.actions[1] else {
+            let CitizenAction::BuyAt { list: basket, .. } = variant.actions[1] else {
                 unreachable!()
             };
             assert_eq!(
@@ -2488,6 +2812,7 @@ mod tests {
             .unwrap()
             .with_map(map.clone())
             .unwrap();
+        let source = relocate_stock(&source);
         let chosen = best_variant(&source, Effect::ReduceHunger, Cooldowns::default(), 0)
             .unwrap()
             .unwrap();
@@ -2495,7 +2820,7 @@ mod tests {
             chosen.actions,
             [
                 CitizenAction::Travel(map.public_place(Location::Market)),
-                CitizenAction::BuyFood(crate::marketplace::Good::Berries),
+                food_purchase(&source, Good::Berries),
                 CitizenAction::Eat
             ]
         );
@@ -2535,7 +2860,7 @@ mod tests {
             Position { x: 0.0, y: 600.0 },
         )
         .unwrap();
-        let source = hungry(95).with_map(map.clone()).unwrap();
+        let source = relocate_stock(&hungry(95).with_map(map.clone()).unwrap());
         let variants = full_meals(&source);
         let mut foraged = vec![CitizenAction::Travel(map.public_place(Location::Forest))];
         foraged.extend([CitizenAction::Produce(crate::production::Recipe::Forage); 6]);
@@ -2552,7 +2877,7 @@ mod tests {
                 v.actions
                     == [
                         CitizenAction::Travel(map.public_place(Location::Market)),
-                        CitizenAction::BuyFood(crate::marketplace::Good::Berries),
+                        food_purchase(&funded, Good::Berries),
                         CitizenAction::Eat,
                     ]
             })
@@ -2630,19 +2955,20 @@ mod tests {
     fn counted_market_food_supplies_a_complete_meal_without_mixing() {
         let mut market = crate::marketplace::Market::default();
         let seller = crate::AgentId(uuid::Uuid::new_v4());
-        market.list(seller, Good::Bread, 1).unwrap();
-        market.list(seller, Good::BerryPie, 1).unwrap();
-        let source = hungry(0)
-            .with_coins(100)
-            .unwrap()
-            .with_market(market.clone());
+        let source = hungry(0);
+        let place = source
+            .map()
+            .public_place(crate::locations::Location::Market);
+        market.list(seller, place, Good::Bread, 1).unwrap();
+        market.list(seller, place, Good::BerryPie, 1).unwrap();
+        let source = source.with_coins(100).unwrap().with_market(market.clone());
         let variants = full_meals(&source);
         let basket = variants
             .iter()
             .find(|variant| {
                 matches!(
                     variant.actions.as_slice(),
-                    [CitizenAction::BuyFood(_), CitizenAction::Eat]
+                    [CitizenAction::BuyAt { .. }, CitizenAction::Eat]
                 )
             })
             .unwrap();

@@ -100,6 +100,10 @@ pub enum CitizenAction {
     ListExcess,
     List(Good, Quantity),
     Buy(marketplace::ShoppingList),
+    BuyAt {
+        place: PlaceId,
+        list: marketplace::ShoppingList,
+    },
     Withdraw(Good, Quantity),
     Travel(PlaceId),
 }
@@ -109,11 +113,9 @@ impl CitizenAction {
         match self {
             Self::Sleep => Some(citizen.home),
             Self::Produce(recipe) => citizen.production_place(recipe).ok(),
-            Self::BuyFood(_)
-            | Self::ListExcess
-            | Self::List(..)
-            | Self::Buy(..)
-            | Self::Withdraw(..) => Some(citizen.map.public_place(Location::Market)),
+            Self::BuyFood(_) | Self::Buy(..) => Some(citizen.map.public_place(Location::Market)),
+            Self::BuyAt { place, .. } => Some(place),
+            Self::ListExcess | Self::List(..) | Self::Withdraw(..) => Some(citizen.selling_place()),
             _ => None,
         }
     }
@@ -425,7 +427,7 @@ impl Citizen {
 
     fn accessible_place(&self, id: PlaceId) -> Result<&locations::Place, SimulationError> {
         let place = self.map.place(id)?;
-        if place.owner.is_some_and(|owner| owner != self.id) {
+        if place.kind == Location::Home && place.owner.is_some_and(|owner| owner != self.id) {
             return Err(SimulationError::PrivateProperty);
         }
         Ok(place)
@@ -456,6 +458,7 @@ impl Citizen {
             | CitizenAction::ListExcess
             | CitizenAction::List(..)
             | CitizenAction::Buy(..)
+            | CitizenAction::BuyAt { .. }
             | CitizenAction::Withdraw(..) => TRADE_DURATION_MS,
         })
     }
@@ -528,6 +531,14 @@ impl Citizen {
         let mut citizen = self.clone();
         citizen.skills[skill as usize] = level;
         Ok(citizen)
+    }
+
+    pub fn selling_place(&self) -> PlaceId {
+        self.owned_properties()
+            .filter(|place| place.kind != Location::Home && !place.kind.is_public())
+            .map(|place| place.id)
+            .min_by_key(|id| id.0)
+            .unwrap_or_else(|| self.map.public_place(Location::Market))
     }
 
     pub fn production_place(&self, recipe: production::Recipe) -> Result<PlaceId, SimulationError> {
@@ -676,6 +687,12 @@ impl Citizen {
     pub fn start_action(&self, action: CitizenAction) -> Result<Self, SimulationError> {
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
+        }
+        if let CitizenAction::BuyAt { place, .. } = action {
+            let site = self.accessible_place(place)?;
+            if site.kind == Location::Home {
+                return Err(SimulationError::PrivateProperty);
+            }
         }
         if action
             .required_place(self)
@@ -830,6 +847,7 @@ impl Citizen {
                             / good.nutrition_per_unit().ok_or(SimulationError::NotFood)?)
                         .ceil() as Quantity;
                         payments.extend(citizen.complete_purchase(
+                            citizen.map.public_place(Location::Market),
                             good,
                             units,
                             record_trades,
@@ -849,13 +867,20 @@ impl Citizen {
                     }
                     CitizenAction::ListExcess => {
                         for (good, units) in citizen.excess_goods()?.items() {
-                            citizen.market.list(citizen.id, good, units)?;
+                            citizen.market.list(
+                                citizen.id,
+                                citizen.selling_place(),
+                                good,
+                                units,
+                            )?;
                             citizen.inventory.insert(good, citizen.units(good) - units);
                         }
                     }
-                    CitizenAction::Buy(list) => {
+                    CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } => {
+                        let place = active.action.required_place(&citizen).unwrap();
                         for (good, units) in list.items() {
                             payments.extend(citizen.complete_purchase(
+                                place,
                                 good,
                                 units,
                                 record_trades,
@@ -865,11 +890,18 @@ impl Citizen {
                     }
                     CitizenAction::List(good, requested) => {
                         let units = requested.min(citizen.units(good));
-                        citizen.market.list(citizen.id, good, units)?;
+                        citizen
+                            .market
+                            .list(citizen.id, citizen.selling_place(), good, units)?;
                         citizen.inventory.insert(good, citizen.units(good) - units);
                     }
                     CitizenAction::Withdraw(good, requested) => {
-                        let units = citizen.market.withdraw(citizen.id, good, requested)?;
+                        let units = citizen.market.withdraw(
+                            citizen.id,
+                            citizen.selling_place(),
+                            good,
+                            requested,
+                        )?;
                         let stock = citizen
                             .units(good)
                             .checked_add(units)
@@ -932,6 +964,7 @@ impl Citizen {
 
     fn complete_purchase(
         &mut self,
+        place: PlaceId,
         good: Good,
         units: Quantity,
         record_trades: bool,
@@ -939,8 +972,8 @@ impl Citizen {
     ) -> Result<Vec<(AgentId, Coins)>, SimulationError> {
         let purchase = self.market.purchase(
             self.id,
-            good,
-            units,
+            place,
+            (good, units),
             self.coins,
             self.market_time_ms
                 .checked_add(elapsed_ms)
@@ -1372,7 +1405,7 @@ impl Universe {
             action
         };
         let request = match action {
-            Some(CitizenAction::Buy(list)) => list,
+            Some(CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. }) => list,
             Some(CitizenAction::BuyFood(good)) => marketplace::ShoppingList::single(
                 good,
                 ((MEAL_NOURISHMENT - citizen.food_nutrition()).max(0.0)
@@ -1381,6 +1414,18 @@ impl Universe {
             ),
             _ => marketplace::ShoppingList::default(),
         };
+        let request = citizen
+            .active_plan()
+            .map(|plan| {
+                plan.shopping_request(
+                    citizen
+                        .active_action()
+                        .map_or(0, |active| active.remaining_ms()),
+                )
+            })
+            .transpose()?
+            .flatten()
+            .unwrap_or(request);
         let request = if citizen.production_targets.is_some() {
             let shortages = citizen.purchase_shortages()?;
             marketplace::ShoppingList::new(

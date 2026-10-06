@@ -92,7 +92,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
 }
 
 #[test]
-fn ownership_is_multiple_home_is_personal_and_invalid_or_foreign_travel_fails() {
+fn ownership_is_multiple_homes_are_private_and_workplaces_allow_customers() {
     let original = Citizen::new(0.0).unwrap();
     let original_id = original.id();
     let (universe, ada) = Universe::default()
@@ -113,17 +113,27 @@ fn ownership_is_multiple_home_is_personal_and_invalid_or_foreign_travel_fails() 
     assert_eq!(citizen(&before, ada).owned_properties().count(), 1);
     let ada_citizen = citizen(&universe, ada);
     assert_ne!(ada_citizen.home(), citizen(&universe, bram).home());
+    assert_eq!(
+        ada_citizen.selling_place(),
+        if field.0 < mill.0 { field } else { mill }
+    );
     for id in [ada_citizen.home(), field, mill] {
         assert!(ada_citizen.start_action(CitizenAction::Travel(id)).is_ok());
         let action = CitizenAction::Travel(id);
-        assert_eq!(
-            citizen(&universe, bram).start_action(action),
-            Err(SimulationError::PrivateProperty)
-        );
-        assert_eq!(
-            citizen(&universe, bram).action_duration_ms(action),
-            Err(SimulationError::PrivateProperty)
-        );
+        let visitor = citizen(&universe, bram);
+        if id == ada_citizen.home() {
+            assert_eq!(
+                visitor.start_action(action),
+                Err(SimulationError::PrivateProperty)
+            );
+            assert_eq!(
+                visitor.action_duration_ms(action),
+                Err(SimulationError::PrivateProperty)
+            );
+        } else {
+            assert!(visitor.start_action(action).is_ok());
+            assert!(visitor.action_duration_ms(action).is_ok());
+        }
     }
     let invalid = CitizenAction::Travel(PlaceId(Uuid::new_v4()));
     assert_eq!(

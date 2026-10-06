@@ -67,6 +67,7 @@ pub struct OrderDisplay(Vec<SellerOrders>);
 struct SellerOrders {
     id: AgentId,
     name: String,
+    location: String,
     orders: Vec<(u64, u64, f64)>,
 }
 
@@ -225,6 +226,10 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
                         .agents()
                         .get(&order.seller)
                         .map_or_else(|| "Unknown seller".into(), |agent| agent.name.clone()),
+                    location: universe
+                        .map()
+                        .place(order.place)
+                        .map_or_else(|_| "Unknown location".into(), |place| place.name.clone()),
                     orders: Vec::new(),
                 });
                 groups.len() - 1
@@ -424,6 +429,7 @@ pub fn refresh(
                             })
                             .with_children(|seller| {
                                 seller.spawn(text(&group.name, 16.0, TEXT));
+                                seller.spawn(text(&group.location, 14.0, MUTED));
                                 if groups
                                     .iter()
                                     .filter(|other| other.name == group.name)

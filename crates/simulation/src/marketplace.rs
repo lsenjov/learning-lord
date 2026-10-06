@@ -1,4 +1,4 @@
-use crate::{AgentId, Coins, Quantity, SimulationError};
+use crate::{AgentId, Coins, PlaceId, Quantity, SimulationError};
 use imbl::{HashMap, Vector};
 
 pub const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -188,6 +188,7 @@ pub struct OrderId(pub u64);
 pub struct SellOrder {
     pub id: OrderId,
     pub seller: AgentId,
+    pub place: PlaceId,
     pub good: Good,
     pub units: Quantity,
     pub quoted_price: f64,
@@ -366,7 +367,7 @@ impl Market {
             let mut funds = budget.max(0);
             let mut items = Vec::new();
             for (good, requested) in self.requested(buyer).items() {
-                if let Ok(fill) = self.fill_plan(buyer, good, requested, Some(funds)) {
+                if let Ok(fill) = self.fill_plan(buyer, None, good, requested, Some(funds)) {
                     funds -= fill.coins;
                     let unavailable = requested.saturating_sub(self.available_units(buyer, good));
                     let mut low = 0;
@@ -420,6 +421,27 @@ impl Market {
             .map(|o| o.units)
             .sum()
     }
+    pub fn available_units_at(&self, buyer: AgentId, place: PlaceId, good: Good) -> Quantity {
+        self.orders()
+            .filter(|order| order.seller != buyer && order.place == place && order.good == good)
+            .map(|order| order.units)
+            .sum()
+    }
+
+    pub fn purchase_cost_at(
+        &self,
+        buyer: AgentId,
+        place: PlaceId,
+        good: Good,
+        requested: Quantity,
+    ) -> Option<Coins> {
+        Some(
+            self.fill_plan(buyer, Some(place), good, requested, None)
+                .ok()?
+                .coins,
+        )
+    }
+
     pub fn unmet_units(&self, good: Good) -> Quantity {
         self.affordable_requests
             .values()
@@ -440,19 +462,24 @@ impl Market {
     }
 
     pub fn purchase_cost(&self, buyer: AgentId, good: Good, requested: Quantity) -> Option<Coins> {
-        Some(self.fill_plan(buyer, good, requested, None).ok()?.coins)
+        Some(
+            self.fill_plan(buyer, None, good, requested, None)
+                .ok()?
+                .coins,
+        )
     }
 
     fn fill_plan(
         &self,
         buyer: AgentId,
+        place: Option<PlaceId>,
         good: Good,
         requested: Quantity,
         budget: Option<Coins>,
     ) -> Result<FillPlan, SimulationError> {
         let mut orders: Vec<_> = self
             .orders()
-            .filter(|o| o.seller != buyer && o.good == good)
+            .filter(|o| o.seller != buyer && o.good == good && place.is_none_or(|id| o.place == id))
             .collect();
         orders.sort_by(|a, b| {
             a.quoted_price
@@ -510,6 +537,7 @@ impl Market {
     pub(crate) fn list(
         &mut self,
         seller: AgentId,
+        place: PlaceId,
         good: Good,
         units: Quantity,
     ) -> Result<(), SimulationError> {
@@ -538,6 +566,7 @@ impl Market {
             SellOrder {
                 id,
                 seller,
+                place,
                 good,
                 units,
                 quoted_price: price,
@@ -548,12 +577,13 @@ impl Market {
     pub(crate) fn withdraw(
         &mut self,
         owner: AgentId,
+        place: PlaceId,
         good: Good,
         requested: Quantity,
     ) -> Result<Quantity, SimulationError> {
         let mut orders: Vec<_> = self
             .orders()
-            .filter(|o| o.seller == owner && o.good == good)
+            .filter(|o| o.seller == owner && o.good == good && o.place == place)
             .cloned()
             .collect();
         orders.sort_by_key(|o| o.id.0);
@@ -578,13 +608,14 @@ impl Market {
     pub(crate) fn purchase(
         &mut self,
         buyer: AgentId,
-        good: Good,
-        requested: Quantity,
+        place: PlaceId,
+        item: (Good, Quantity),
         budget: Coins,
         time_ms: u64,
         record: bool,
     ) -> Result<Purchase, SimulationError> {
-        let plan = self.fill_plan(buyer, good, requested, Some(budget))?;
+        let (good, requested) = item;
+        let plan = self.fill_plan(buyer, Some(place), good, requested, Some(budget))?;
         let mut payments = std::collections::BTreeMap::new();
         for (id, units, coins) in plan.fills {
             let mut order = self.orders.get(&id).unwrap().clone();
@@ -713,6 +744,32 @@ pub(crate) fn until_update(time_ms: u64) -> u64 {
 mod tests {
     use super::*;
 
+    const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
+
+    #[test]
+    fn local_settlement_leaves_remote_supply_and_owner_stock_untouched() {
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let remote = PlaceId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market.list(seller, PLACE, Good::Bread, 2).unwrap();
+        market.list(seller, remote, Good::Bread, 3).unwrap();
+        market.list(buyer, PLACE, Good::Bread, 7).unwrap();
+        assert_eq!(market.available_units(buyer, Good::Bread), 5);
+        assert_eq!(market.available_units_at(buyer, PLACE, Good::Bread), 2);
+        let purchase = market
+            .purchase(buyer, PLACE, (Good::Bread, 10), 1000, 0, true)
+            .unwrap();
+        assert_eq!((purchase.units, purchase.coins), (2, 30));
+        assert_eq!(market.available_units_at(buyer, remote, Good::Bread), 3);
+        assert_eq!(market.listed_units(buyer, Good::Bread), 7);
+        assert_eq!(market.withdraw(seller, PLACE, Good::Bread, 10).unwrap(), 0);
+        assert_eq!(
+            market.current_period().goods[Good::Bread as usize].traded_units,
+            2
+        );
+    }
+
     #[test]
     fn later_start_has_no_closed_period_until_the_next_four_am_update() {
         let mut market = Market::starting_at(6 * 60 * 60 * 1000);
@@ -733,13 +790,13 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, Good::Bread, 10).unwrap();
+        market.list(seller, PLACE, Good::Bread, 10).unwrap();
         market
             .set_request(buyer, ShoppingList::single(Good::Bread, 7))
             .unwrap();
         market.refresh_affordability(&[(buyer, 1000)]);
         market
-            .purchase(buyer, Good::Bread, 2, 1000, UPDATE_TIME_MS, true)
+            .purchase(buyer, PLACE, (Good::Bread, 2), 1000, UPDATE_TIME_MS, true)
             .unwrap();
         market.refresh_affordability(&[(buyer, 970)]);
         let current = market.current_period();
@@ -773,13 +830,13 @@ mod tests {
     fn inactive_latest_period_does_not_reuse_older_history() {
         let seller = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, Good::Water, 50).unwrap();
+        market.list(seller, PLACE, Good::Water, 50).unwrap();
         market.update(UPDATE_TIME_MS).unwrap();
         assert_eq!(
             market.previous_period().unwrap().goods[Good::Water as usize].listed_units,
             50
         );
-        market.withdraw(seller, Good::Water, 50).unwrap();
+        market.withdraw(seller, PLACE, Good::Water, 50).unwrap();
         market.update(UPDATE_TIME_MS + DAY_MS).unwrap();
         let previous = market.previous_period().unwrap();
         assert_eq!(
@@ -795,7 +852,7 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, Good::Berries, 35).unwrap();
+        market.list(seller, PLACE, Good::Berries, 35).unwrap();
         let units = 0;
         market
             .set_request(buyer, ShoppingList::single(Good::Berries, units))
@@ -803,7 +860,7 @@ mod tests {
         market.refresh_affordability(&[(buyer, 2)]);
         let before = market.clone();
         let purchase = market
-            .purchase(buyer, Good::Berries, units, 200, 0, true)
+            .purchase(buyer, PLACE, (Good::Berries, units), 200, 0, true)
             .unwrap();
         assert_eq!(purchase.units, 0);
         assert_eq!(purchase.coins, 0);
@@ -816,9 +873,9 @@ mod tests {
         let buyer = AgentId(uuid::Uuid::new_v4());
         let other = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, Good::Berries, 100).unwrap();
-        market.list(other, Good::Berries, 100).unwrap();
-        market.list(seller, Good::Berries, 100).unwrap();
+        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        market.list(other, PLACE, Good::Berries, 100).unwrap();
+        market.list(seller, PLACE, Good::Berries, 100).unwrap();
         market
             .set_request(buyer, ShoppingList::single(Good::Berries, 300))
             .unwrap();
@@ -826,7 +883,7 @@ mod tests {
         assert_eq!(market.affordable_request(buyer).units(Good::Berries), 300);
         assert_eq!(market.purchase_cost(buyer, Good::Berries, 300), Some(2));
         let purchase = market
-            .purchase(buyer, Good::Berries, 300, 2, 0, true)
+            .purchase(buyer, PLACE, (Good::Berries, 300), 2, 0, true)
             .unwrap();
         assert_eq!((purchase.units, purchase.coins), (300, 2));
         assert_eq!(
@@ -855,22 +912,24 @@ mod tests {
             let buyer = AgentId(uuid::Uuid::new_v4());
             let mut market = Market::default();
             market.prices = market.prices.with_price(Good::Berries, price).unwrap();
-            market.list(seller, Good::Berries, 100).unwrap();
+            market.list(seller, PLACE, Good::Berries, 100).unwrap();
             assert_eq!(
                 market.purchase_cost(buyer, Good::Berries, 100),
                 Some(expected)
             );
             let purchase = market
-                .purchase(buyer, Good::Berries, 100, expected, 0, false)
+                .purchase(buyer, PLACE, (Good::Berries, 100), expected, 0, false)
                 .unwrap();
             assert_eq!((purchase.units, purchase.coins), (100, expected));
         }
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, Good::Bread, 2).unwrap();
+        market.list(seller, PLACE, Good::Bread, 2).unwrap();
         let before = market.clone();
-        let purchase = market.purchase(buyer, Good::Bread, 2, 14, 0, true).unwrap();
+        let purchase = market
+            .purchase(buyer, PLACE, (Good::Bread, 2), 14, 0, true)
+            .unwrap();
         assert_eq!((purchase.units, purchase.coins), (0, 0));
         assert_eq!(market, before);
     }
@@ -880,26 +939,28 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, Good::Berries, Quantity::MAX).unwrap();
+        market
+            .list(seller, PLACE, Good::Berries, Quantity::MAX)
+            .unwrap();
         let purchase = market
-            .purchase(buyer, Good::Berries, 1, 1, 0, true)
+            .purchase(buyer, PLACE, (Good::Berries, 1), 1, 0, true)
             .unwrap();
         assert_eq!((purchase.units, purchase.coins), (1, 1));
         assert_eq!(
             market.listed_units(seller, Good::Berries),
             Quantity::MAX - 1
         );
-        assert_eq!(market.withdraw(seller, Good::Berries, 1).unwrap(), 1);
+        assert_eq!(market.withdraw(seller, PLACE, Good::Berries, 1).unwrap(), 1);
         assert_eq!(
             market.listed_units(seller, Good::Berries),
             Quantity::MAX - 2
         );
         assert_eq!(
-            market.list(seller, Good::Berries, 3),
+            market.list(seller, PLACE, Good::Berries, 3),
             Err(SimulationError::WealthOverflow)
         );
         market.prices = market.prices.with_price(Good::Bread, f64::MAX).unwrap();
-        market.list(seller, Good::Bread, 1).unwrap();
+        market.list(seller, PLACE, Good::Bread, 1).unwrap();
         assert_eq!(market.purchase_cost(buyer, Good::Bread, 1), None);
     }
 
@@ -913,7 +974,7 @@ mod tests {
         market.refresh_affordability(&[(buyer, 1)]);
         assert_eq!(market.unmet_units(Good::Berries), 200);
         let purchase = market
-            .purchase(buyer, Good::Berries, 300, 1, 0, true)
+            .purchase(buyer, PLACE, (Good::Berries, 300), 1, 0, true)
             .unwrap();
         assert_eq!((purchase.units, purchase.coins), (0, 0));
         market.update(UPDATE_TIME_MS).unwrap();
