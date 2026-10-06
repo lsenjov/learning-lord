@@ -10,15 +10,15 @@ fn assert_close(actual: f64, expected: f64) {
 
 #[test]
 fn two_meals_balance_a_day_of_standard_hunger_including_time_spent_eating() {
-    let original = Citizen::new(-25.0).unwrap().with_berries(200.0).unwrap();
+    let original = Citizen::new(-25.0).unwrap().with_berries(310.0).unwrap();
     assert_close(original.advance(DAY_MS).unwrap().hunger(), 75.0);
     assert_eq!(original.active_action(), None);
 
     let mut citizen = original.clone();
     for _ in 0..2 {
-        citizen = citizen.advance(DAY_MS / 2 - 100_000).unwrap();
+        citizen = citizen.advance(DAY_MS / 2 - 155_000).unwrap();
         citizen = citizen.start_action(CitizenAction::Eat).unwrap();
-        citizen = citizen.advance(100_000).unwrap();
+        citizen = citizen.advance(155_000).unwrap();
     }
 
     assert_close(citizen.hunger(), -25.0);
@@ -32,10 +32,10 @@ fn meals_nourish_gradually_for_the_duration_of_the_selected_portion() {
     for (action, completed_hunger) in [(CitizenAction::Eat, -50.0), (CitizenAction::Wait, 0.0)] {
         let original = Citizen::with_hunger_rate(0.0, 0.0)
             .unwrap()
-            .with_berries(100.0)
+            .with_berries(155.0)
             .unwrap();
         let duration = if action == CitizenAction::Eat {
-            100_000
+            155_000
         } else {
             HALF_HOUR_MS
         };
@@ -77,7 +77,7 @@ fn busy_citizens_reject_all_actions_without_replacing_the_current_action() {
     ] {
         let citizen = Citizen::new(0.0)
             .unwrap()
-            .with_berries(100.0)
+            .with_berries(155.0)
             .unwrap()
             .start_action(current)
             .unwrap()
@@ -107,13 +107,13 @@ fn hunger_advances_during_actions_and_after_their_completion() {
     ] {
         let started = Citizen::new(0.0)
             .unwrap()
-            .with_berries(100.0)
+            .with_berries(155.0)
             .unwrap()
             .start_action(action)
             .unwrap();
         let midway = started.advance(50_000).unwrap();
         let nourishment = if action == CitizenAction::Eat {
-            25.0
+            50.0 * 50_000.0 / 155_000.0
         } else {
             0.0
         };
@@ -161,7 +161,7 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
 #[test]
 fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
     for (hunger, eating_is_better) in [(-80.0, false), (50.0, true)] {
-        let citizen = Citizen::new(hunger).unwrap().with_berries(100.0).unwrap();
+        let citizen = Citizen::new(hunger).unwrap().with_berries(155.0).unwrap();
         let eat = citizen
             .start_action(CitizenAction::Eat)
             .unwrap()
@@ -186,7 +186,7 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
         .with_citizen(
             "Ada",
-            Citizen::new(0.0).unwrap().with_berries(100.0).unwrap(),
+            Citizen::new(0.0).unwrap().with_berries(155.0).unwrap(),
         )
         .unwrap();
     let (original, other_id) = original
@@ -220,7 +220,10 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
         eaten.agents()[&id].personal_wellbeing().unwrap(),
         -100.0 / 24.0 * 31.0 / 60.0,
     );
-    assert!(waited.agents()[&id].personal_wellbeing().unwrap() < 0.0);
+    assert_close(
+        waited.agents()[&id].personal_wellbeing().unwrap(),
+        5.0 + 155.0 / 1000.0 * 0.05 * 10.0 - 2.0 * 100.0 / 24.0 * 31.0 / 60.0,
+    );
     assert_eq!(eating, eating_snapshot);
     assert_eq!(original, snapshot);
 
@@ -245,7 +248,7 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
         for hunger in [0.0, f64::MAX] {
             let citizen = Citizen::with_hunger_rate(hunger, f64::MAX)
                 .unwrap()
-                .with_berries(100.0)
+                .with_berries(155.0)
                 .unwrap()
                 .start_action(action)
                 .unwrap();

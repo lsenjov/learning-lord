@@ -30,8 +30,8 @@ fn supply(grams: f64) -> (Universe, AgentId) {
 #[test]
 fn purchases_top_up_at_completion_without_borrowing() {
     for (berries, coins, expected_berries, expected_coins) in [
-        (0.0, 1.0, 100.0, 0.9),
-        (40.0, 1.0, 100.0, 0.94),
+        (0.0, 1.0, 155.0, 0.845),
+        (40.0, 1.0, 155.0, 0.885),
         (40.0, 0.02, 60.0, 0.0),
         (0.0, 0.1, 100.0, 0.0),
     ] {
@@ -138,13 +138,13 @@ fn empty_or_unaffordable_purchases_take_time_without_creating_goods_or_coins() {
 
 #[test]
 fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_predictions() {
-    let (universe, seller) = supply(100.0);
+    let (universe, seller) = supply(155.0);
     let (source, buyer) = universe
         .with_citizen(
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
-                .with_coins(0.1)
+                .with_coins(0.155)
                 .unwrap(),
         )
         .unwrap();
@@ -167,10 +167,10 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
         citizen(&eating, buyer).active_action().unwrap().action(),
         CitizenAction::Eat
     );
-    close(citizen(&eating, buyer).berries_grams(), 100.0);
+    close(citizen(&eating, buyer).berries_grams(), 155.0);
     close(citizen(&eating, buyer).coins(), 0.0);
-    close(citizen(&eating, seller).coins(), 0.1);
-    assert_eq!(source.market().listed_grams(seller, Good::Berries), 100.0);
+    close(citizen(&eating, seller).coins(), 0.155);
+    assert_eq!(source.market().listed_grams(seller, Good::Berries), 155.0);
 }
 
 #[test]
@@ -262,7 +262,7 @@ fn withdrawal_is_partial_owned_and_requires_a_market_action() {
 }
 
 #[test]
-fn buyers_use_cheapest_orders_first_and_retain_each_orders_original_price() {
+fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
     let (universe, cheap) = supply(40.0);
     let universe = universe.with_prices(Prices::new(2.0).unwrap());
     let (universe, expensive) = universe
@@ -356,15 +356,15 @@ fn invalid_quantities_and_failed_settlements_preserve_the_source() {
 }
 
 #[test]
-fn hunger_planning_quotes_retained_asks_instead_of_new_reference_prices() {
-    let (universe, _) = supply(100.0);
+fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
+    let (universe, _) = supply(155.0);
     let (universe, buyer) = universe
         .with_prices(Prices::new(2.0).unwrap())
         .with_citizen(
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
-                .with_coins(0.1)
+                .with_coins(0.155)
                 .unwrap(),
         )
         .unwrap();

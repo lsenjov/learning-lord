@@ -269,6 +269,9 @@ fn goal_label(goal: Effect) -> &'static str {
         Effect::ReduceHunger => "Reduce Hunger",
         Effect::ReduceTiredness => "Reduce Sleep Need",
         Effect::IncreaseWealth => "Increase Wealth",
+        Effect::Production => "Production",
+        Effect::ReplenishReserves => "Replenish reserves",
+        Effect::ListExcess => "List excess",
         _ => unreachable!("plan boundaries contain goals"),
     }
 }
@@ -606,7 +609,7 @@ mod tests {
                 "Ada",
                 Citizen::with_needs(60.0, 100.0)
                     .unwrap()
-                    .with_berries(200.0)
+                    .with_berries(310.0)
                     .unwrap(),
             )
             .unwrap();
@@ -614,7 +617,7 @@ mod tests {
             .with_citizen("Bram", Citizen::new(-10.0).unwrap())
             .unwrap();
         let started = universe.start_planning(ada).unwrap();
-        let progressed = started.advance(100_000).unwrap();
+        let progressed = started.advance(155_000).unwrap();
         let AgentKind::Citizen(citizen) = &progressed.agents()[&ada].kind;
         assert_eq!(
             citizen.active_action().unwrap().action(),
@@ -646,7 +649,7 @@ mod tests {
         );
         let details = crate::citizen_readout(&progressed, Some(bram));
         assert!(details.starts_with("Bram"));
-        assert!(details.contains("Hunger: -9.9"));
+        assert!(details.contains("Hunger: -9.8"));
         assert!(details.contains("Location: Bram's home"));
         assert!(details.contains("Berries: 0.0 g"));
     }

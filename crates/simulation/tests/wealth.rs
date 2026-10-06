@@ -11,7 +11,7 @@ fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
     assert_eq!(Prices::default().coins_per_kg(Good::Berries).unwrap(), 0.05);
     let rich = source.with_berries(500.0).unwrap().with_coins(2.5).unwrap();
     assert_eq!(rich.wealth(), Ok(3.0));
-    assert_eq!(rich.personal_wellbeing(), Ok(0.0));
+    assert_eq!(rich.personal_wellbeing(), Ok(rich.food_reserve_wellbeing()));
     assert_eq!(source.wealth(), Ok(0.0));
     assert_eq!(rich.with_coins(-2.5).unwrap().wealth(), Ok(-2.0));
     let half = rich

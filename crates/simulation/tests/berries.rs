@@ -1,4 +1,6 @@
-use learning_lord_simulation::{Citizen, CitizenAction, SimulationError, planning::plan};
+use learning_lord_simulation::{
+    BERRY_NUTRITION_PER_GRAM, Citizen, CitizenAction, SimulationError, planning::plan,
+};
 
 const HALF_HOUR_MS: u64 = 1_800_000;
 
@@ -25,7 +27,7 @@ fn inventory_starts_empty_and_rejects_invalid_quantities_or_busy_replacement() {
 
 #[test]
 fn meals_use_available_grams_up_to_fifty_nutrition_and_consume_continuously() {
-    for (stock, portion) in [(10.0, 10.0), (63.25, 63.25), (150.5, 100.0)] {
+    for (stock, portion) in [(10.0, 10.0), (63.25, 63.25), (180.5, 155.0)] {
         let source = Citizen::new(20.0).unwrap().with_berries(stock).unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
         let duration_ms = (portion * 1000.0) as u64;
@@ -35,14 +37,16 @@ fn meals_use_available_grams_up_to_fifty_nutrition_and_consume_continuously() {
         assert_close(halfway.berries_grams(), stock - portion / 2.0);
         assert_close(
             halfway.hunger(),
-            20.0 + 100.0 / 24.0 * duration_ms as f64 / 7_200_000.0 - portion / 4.0,
+            20.0 + 100.0 / 24.0 * duration_ms as f64 / 7_200_000.0
+                - portion * BERRY_NUTRITION_PER_GRAM / 2.0,
         );
         let completed = halfway.advance(duration_ms / 2).unwrap();
         assert_eq!(completed.active_action(), None);
         assert_close(completed.berries_grams(), stock - portion);
         assert_close(
             completed.hunger(),
-            20.0 + 100.0 / 24.0 * duration_ms as f64 / 3_600_000.0 - portion / 2.0,
+            20.0 + 100.0 / 24.0 * duration_ms as f64 / 3_600_000.0
+                - portion * BERRY_NUTRITION_PER_GRAM,
         );
         assert_eq!(source.berries_grams(), stock);
     }
@@ -62,7 +66,10 @@ fn tiny_meals_round_up_to_one_millisecond_and_empty_meals_are_skipped() {
         let finished = started.advance(1).unwrap();
         assert_eq!(finished.berries_grams(), 0.0);
         assert_eq!(finished.active_action(), None);
-        assert_close(finished.hunger(), 100.0 / 24.0 / 3_600_000.0 - grams * 0.5);
+        assert_close(
+            finished.hunger(),
+            100.0 / 24.0 / 3_600_000.0 - grams * BERRY_NUTRITION_PER_GRAM,
+        );
     }
 }
 

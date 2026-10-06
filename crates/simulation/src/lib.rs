@@ -11,6 +11,8 @@ pub mod planning;
 pub mod production;
 
 pub const WEALTH_WELLBEING_PER_COIN: f64 = 10.0;
+pub const FOOD_RESERVE_FULL_BONUS_NUTRITION: f64 = 100.0;
+pub const FOOD_RESERVE_CAP_NUTRITION: f64 = 300.0;
 
 pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
 pub const TIREDNESS_PER_HOUR: f64 = 100.0 / 24.0;
@@ -19,7 +21,7 @@ pub const ACTION_DURATION_MS: u64 = 30 * 60 * 1000;
 pub const TRADE_DURATION_MS: u64 = 5 * 60 * 1000;
 pub const SLEEP_DURATION_MS: u64 = 8 * 60 * 60 * 1000;
 pub const SLEEP_RECOVERY: f64 = 100.0;
-pub const BERRY_NUTRITION_PER_GRAM: f64 = 0.5;
+pub const BERRY_NUTRITION_PER_GRAM: f64 = 100.0 / 310.0;
 pub const BERRY_EATING_MS_PER_GRAM: f64 = 1000.0;
 pub const FORAGE_MIN_GRAMS: f64 = 5.0;
 pub const FORAGE_MAX_GRAMS: f64 = 15.0;
@@ -86,6 +88,7 @@ pub enum CitizenAction {
     Forage,
     BuyFood(Good),
     Produce(production::Recipe),
+    ListExcess,
     List(Good, f64),
     Buy(marketplace::ShoppingList),
     Withdraw(Good, f64),
@@ -98,9 +101,11 @@ impl CitizenAction {
             Self::Sleep => Some(citizen.home),
             Self::Forage => Some(citizen.map.public_place(Location::Forest)),
             Self::Produce(recipe) => citizen.production_place(recipe).ok(),
-            Self::BuyFood(_) | Self::List(..) | Self::Buy(..) | Self::Withdraw(..) => {
-                Some(citizen.map.public_place(Location::Market))
-            }
+            Self::BuyFood(_)
+            | Self::ListExcess
+            | Self::List(..)
+            | Self::Buy(..)
+            | Self::Withdraw(..) => Some(citizen.map.public_place(Location::Market)),
             _ => None,
         }
     }
@@ -161,6 +166,9 @@ pub struct Citizen {
     home: PlaceId,
     starting_role: Option<StartingRole>,
     skills: [f64; production::Skill::COUNT],
+    production_targets: Option<production::ProductionTargets>,
+    work_period: u64,
+    work_ms: u64,
     coins: f64,
     forage_rng: SmallRng,
     prices: Prices,
@@ -205,6 +213,9 @@ impl Citizen {
             home,
             starting_role: None,
             skills: [0.0; production::Skill::COUNT],
+            production_targets: None,
+            work_period: 0,
+            work_ms: 0,
             coins: 0.0,
             forage_rng: rand::make_rng(),
             prices: Prices::default(),
@@ -405,6 +416,7 @@ impl Citizen {
             CitizenAction::Wait | CitizenAction::Forage => ACTION_DURATION_MS,
             CitizenAction::Sleep => SLEEP_DURATION_MS,
             CitizenAction::BuyFood(_)
+            | CitizenAction::ListExcess
             | CitizenAction::List(..)
             | CitizenAction::Buy(..)
             | CitizenAction::Withdraw(..) => TRADE_DURATION_MS,
@@ -468,6 +480,101 @@ impl Citizen {
         production::Recipe::ALL.into_iter().filter(|recipe| {
             recipe.duration_ms(self).is_ok() && self.production_place(*recipe).is_ok()
         })
+    }
+
+    pub fn production_targets(&self) -> Option<&production::ProductionTargets> {
+        self.production_targets.as_ref()
+    }
+
+    pub fn production_work_today_ms(&self) -> u64 {
+        if self.work_period == production::work_period(self.market_time_ms) {
+            self.work_ms
+        } else {
+            0
+        }
+    }
+
+    pub fn reserved_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
+        let mut reserve = [0.0; Good::COUNT];
+        if let Some(targets) = &self.production_targets {
+            for (recipe, count) in targets.batches() {
+                for &(good, grams) in recipe.inputs() {
+                    reserve[good as usize] += grams * count;
+                }
+            }
+        }
+        let mut nutrition = FOOD_RESERVE_CAP_NUTRITION;
+        for good in Good::FOOD {
+            let available = (self.grams(good) - reserve[good as usize]).max(0.0);
+            let kept = available.min(nutrition / good.nutrition_per_gram().unwrap());
+            reserve[good as usize] += kept;
+            nutrition = (nutrition - kept * good.nutrition_per_gram().unwrap()).max(0.0);
+        }
+        marketplace::ShoppingList::new(
+            Good::ALL
+                .into_iter()
+                .map(|good| (good, reserve[good as usize])),
+        )
+    }
+
+    pub fn purchase_shortages(&self) -> Result<marketplace::ShoppingList, SimulationError> {
+        let mut needed = [0.0; Good::COUNT];
+        if let Some(targets) = &self.production_targets {
+            for (recipe, count) in targets.batches() {
+                for &(good, grams) in recipe.inputs() {
+                    needed[good as usize] += grams * count;
+                }
+            }
+        }
+        for good in Good::ALL {
+            let held = self.grams(good) + self.market.listed_grams(self.id, good);
+            needed[good as usize] = (needed[good as usize] - held).max(0.0);
+        }
+        marketplace::ShoppingList::new(
+            Good::ALL
+                .into_iter()
+                .map(|good| (good, needed[good as usize])),
+        )
+    }
+
+    pub fn excess_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
+        let reserve = self.reserved_goods()?;
+        marketplace::ShoppingList::new(
+            Good::ALL
+                .into_iter()
+                .map(|good| (good, (self.grams(good) - reserve.grams(good)).max(0.0))),
+        )
+    }
+
+    pub fn excess_value(&self) -> Result<f64, SimulationError> {
+        let value: f64 = self
+            .excess_goods()?
+            .items()
+            .map(|(good, grams)| self.prices.value(good, grams).unwrap())
+            .sum();
+        if !value.is_finite() {
+            return Err(SimulationError::WealthOverflow);
+        }
+        Ok(value)
+    }
+
+    fn refresh_production_targets(&mut self, force: bool) -> Result<(), SimulationError> {
+        if self.starting_role.is_none() {
+            return Ok(());
+        }
+        let refresh = force
+            || self.production_targets.as_ref().is_none_or(|targets| {
+                targets.is_empty()
+                    || production::work_period(targets.calculated_at_ms)
+                        != production::work_period(self.market_time_ms)
+            });
+        if refresh {
+            self.production_targets = Some(production::ProductionTargets::calculate(
+                self,
+                self.market_time_ms,
+            )?);
+        }
+        Ok(())
     }
 
     pub fn active_action(&self) -> Option<ActiveAction> {
@@ -543,12 +650,21 @@ impl Citizen {
         Ok(citizen)
     }
 
+    pub fn food_reserve_wellbeing(&self) -> f64 {
+        let nutrition = self.food_nutrition();
+        0.10 * nutrition.min(FOOD_RESERVE_FULL_BONUS_NUTRITION)
+            + 0.02
+                * (nutrition.min(FOOD_RESERVE_CAP_NUTRITION) - FOOD_RESERVE_FULL_BONUS_NUTRITION)
+                    .max(0.0)
+    }
+
     pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
         let wellbeing = -self.hunger.max(0.0)
             - 4.0 * (self.hunger - 100.0).max(0.0)
             - (-self.hunger - 100.0).max(0.0)
             - self.tiredness.max(0.0)
-            + self.wealth()? * WEALTH_WELLBEING_PER_COIN;
+            + self.wealth()? * WEALTH_WELLBEING_PER_COIN
+            + self.food_reserve_wellbeing();
         if !wellbeing.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
@@ -588,6 +704,23 @@ impl Citizen {
         if let Some(mut active) = citizen.active_action {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
             citizen.advance_needs(action_elapsed_ms, Some(active))?;
+            if matches!(active.action, CitizenAction::Produce(_)) {
+                let end = self
+                    .market_time_ms
+                    .checked_add(action_elapsed_ms)
+                    .ok_or(SimulationError::TimeOverflow)?;
+                let period = production::work_period(end);
+                if period != self.work_period {
+                    citizen.work_ms =
+                        (end - production::period_start(period)).min(action_elapsed_ms);
+                } else {
+                    citizen.work_ms = citizen
+                        .work_ms
+                        .checked_add(action_elapsed_ms)
+                        .ok_or(SimulationError::TimeOverflow)?;
+                }
+                citizen.work_period = period;
+            }
             active.remaining_ms -= action_elapsed_ms;
             if let Some(destination) = active.travel_destination {
                 let fraction = 1.0 - active.remaining_ms as f64 / active.duration_ms as f64;
@@ -628,6 +761,15 @@ impl Citizen {
                         )?);
                     }
                     CitizenAction::Produce(recipe) => citizen.complete_production(recipe)?,
+                    CitizenAction::ListExcess => {
+                        for (good, grams) in citizen.excess_goods()?.items() {
+                            if grams > 0.0 && citizen.grams(good) - grams == citizen.grams(good) {
+                                return Err(SimulationError::WealthOverflow);
+                            }
+                            citizen.market.list(citizen.id, good, grams)?;
+                            citizen.inventory.insert(good, citizen.grams(good) - grams);
+                        }
+                    }
                     CitizenAction::Buy(list) => {
                         for (good, grams) in list.items() {
                             payments.extend(citizen.complete_purchase(
@@ -703,6 +845,9 @@ impl Citizen {
                 return Err(SimulationError::InventoryOverflow);
             }
             self.inventory.insert(good, next);
+        }
+        if let Some(targets) = &mut self.production_targets {
+            targets.complete(recipe);
         }
         if let Some(skill) = recipe.skill() {
             self.skills[skill as usize] += production::SKILL_GAIN_PER_BATCH;
@@ -963,6 +1108,10 @@ impl Universe {
                 citizen.market = universe.market.clone();
                 citizen.prices = universe.market.prices;
                 citizen.market_time_ms = finishing_time;
+                citizen.refresh_production_targets(false)?;
+                if citizen.production_targets.is_some() {
+                    new_actions.push(id);
+                }
                 if citizen.active_action.is_none()
                     && let Some(mut execution) = citizen.active_plan.take()
                 {
@@ -1003,7 +1152,15 @@ impl Universe {
             .get(&id)
             .ok_or(SimulationError::AgentNotFound)?
             .kind;
-        let request = match citizen.active_action().map(|active| active.action()) {
+        let action = citizen.active_action().map(|active| active.action());
+        let action = if matches!(action, Some(CitizenAction::Travel(_))) {
+            citizen.active_plan().and_then(|plan| {
+                plan.travelling_purchase(citizen.active_action().unwrap().remaining_ms())
+            })
+        } else {
+            action
+        };
+        let request = match action {
             Some(CitizenAction::Buy(list)) => list,
             Some(CitizenAction::BuyFood(good)) => marketplace::ShoppingList::single(
                 good,
@@ -1011,6 +1168,16 @@ impl Universe {
                     / good.nutrition_per_gram().ok_or(SimulationError::NotFood)?,
             ),
             _ => marketplace::ShoppingList::default(),
+        };
+        let request = if citizen.production_targets.is_some() {
+            let shortages = citizen.purchase_shortages()?;
+            marketplace::ShoppingList::new(
+                Good::ALL
+                    .into_iter()
+                    .map(|good| (good, shortages.grams(good).max(request.grams(good)))),
+            )?
+        } else {
+            request
         };
         self.market.set_request(id, request)
     }
@@ -1045,7 +1212,13 @@ impl Universe {
     }
 
     pub fn start_planning(&self, id: AgentId) -> Result<Self, SimulationError> {
-        let agent = self.agents.get(&id).ok_or(SimulationError::AgentNotFound)?;
+        let mut agent = self
+            .agents
+            .get(&id)
+            .ok_or(SimulationError::AgentNotFound)?
+            .clone();
+        let AgentKind::Citizen(citizen) = &mut agent.kind;
+        citizen.refresh_production_targets(false)?;
         let updated = agent.start_planning()?;
         let mut universe = self.clone();
         universe.agents.insert(id, updated);

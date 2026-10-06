@@ -313,6 +313,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                 CitizenAction::Forage => "Foraging".into(),
                 CitizenAction::BuyFood(good) => format!("Buying {}", good.name().to_lowercase()),
                 CitizenAction::Produce(recipe) => recipe.name().into(),
+                CitizenAction::ListExcess => "List excess goods".into(),
                 CitizenAction::List(good, grams) => format!("Listing {grams:.1} g {}", good.name()),
                 CitizenAction::Buy(list) => format!("Buying {}", shopping_list_label(list)),
                 CitizenAction::Withdraw(good, grams) => {
@@ -363,7 +364,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
     properties.sort();
     let properties = properties.join(", ");
     format!(
-        "{}{role}\n{inventory}\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
+        "{}{role}\n{inventory}\nCoins: {:.2} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
         agent.name,
         citizen.coins(),
         citizen
@@ -371,6 +372,8 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
             .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}")),
         citizen.hunger(),
         citizen.tiredness(),
+        citizen.food_nutrition(),
+        citizen.food_reserve_wellbeing(),
         citizens::location_label(citizen)
     )
 }
@@ -390,6 +393,7 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
         CitizenAction::Forage => "Forage".into(),
         CitizenAction::BuyFood(good) => format!("Buy {}", good.name().to_lowercase()),
         CitizenAction::Produce(recipe) => recipe.name().into(),
+        CitizenAction::ListExcess => "List excess goods".into(),
         CitizenAction::List(good, grams) => format!("List {grams:.1} g {}", good.name()),
         CitizenAction::Buy(list) => format!("Buy {}", shopping_list_label(list)),
         CitizenAction::Withdraw(good, grams) => format!("Withdraw {grams:.1} g {}", good.name()),
@@ -444,6 +448,9 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
             Effect::ReduceHunger => "Hunger",
             Effect::ReduceTiredness => "Sleep",
             Effect::IncreaseWealth => "Wealth",
+            Effect::Production => "Production",
+            Effect::ReplenishReserves => "Replenish reserves",
+            Effect::ListExcess => "List excess",
             _ => unreachable!("decision candidates are goals"),
         };
         let selected = if candidate.goal == decision.selected_goal {
@@ -545,13 +552,24 @@ mod tests {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(prices)
-                .with_citizen("Ada", Citizen::new(0.0).unwrap())
+                .with_citizen(
+                    "Ada",
+                    Citizen::new(0.0).unwrap().with_berries(35.0).unwrap(),
+                )
                 .unwrap();
         assert!(decision_readout(&universe, None).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
         let text = decision_readout(&planned, None);
         assert!(text.contains("Hunger"));
-        assert!(!text.contains("Unavailable:"));
+        assert!(text.contains("Replenish reserves"));
+        let hunger = text
+            .split("\nHunger")
+            .nth(1)
+            .unwrap()
+            .split("\nSleep")
+            .next()
+            .unwrap();
+        assert!(!hunger.contains("Unavailable:"));
         assert!(text.contains("Sleep"));
         assert!(text.contains("Wealth"));
         assert_eq!(text.matches("[chosen first]").count(), 1);
@@ -585,7 +603,7 @@ mod tests {
     fn readout_shows_berries_upcoming_actions_and_commitment() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
-            .with_berries(200.0)
+            .with_berries(310.0)
             .unwrap();
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
@@ -598,11 +616,11 @@ mod tests {
             .advance(50_000)
             .unwrap();
         let readout = citizen_readout(&universe, None);
-        assert!(readout.contains("Eating | 00:00:50 remaining"));
+        assert!(readout.contains("Eating | 00:01:45 remaining"));
         assert!(readout.contains("Location:"));
         assert!(readout.contains("Commitment left: 01:59:10"));
-        assert!(readout.contains("Berries: 150.0 g"));
-        assert!(readout.contains("Coins: 0.00 | Wealth: 0.150 coins"));
+        assert!(readout.contains("Berries: 260.0 g"));
+        assert!(readout.contains("Coins: 0.00 | Wealth: 0.260 coins"));
     }
 
     #[test]

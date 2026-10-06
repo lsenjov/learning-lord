@@ -31,7 +31,8 @@ impl Good {
     pub const FOOD: [Self; 3] = [Self::Berries, Self::Bread, Self::BerryPie];
     pub fn nutrition_per_gram(self) -> Option<f64> {
         match self {
-            Self::Berries | Self::Bread => Some(0.5),
+            Self::Berries => Some(crate::BERRY_NUTRITION_PER_GRAM),
+            Self::Bread => Some(0.5),
             Self::BerryPie => Some(0.6),
             _ => None,
         }
@@ -362,6 +363,23 @@ impl Market {
             .map(|o| o.grams)
             .sum()
     }
+    pub fn unmet_grams(&self, good: Good) -> f64 {
+        self.affordable_requests
+            .values()
+            .map(|list| list.grams(good))
+            .sum()
+    }
+
+    pub fn estimated_purchase_cost(&self, buyer: AgentId, good: Good, grams: f64) -> Option<f64> {
+        if !grams.is_finite() || grams < 0.0 {
+            return None;
+        }
+        let available = self.available_grams(buyer, good).min(grams);
+        let cost = self.purchase_cost(buyer, good, available)?
+            + self.prices.value(good, (grams - available).max(0.0))?;
+        cost.is_finite().then_some(cost)
+    }
+
     pub fn purchase_cost(&self, buyer: AgentId, good: Good, requested: f64) -> Option<f64> {
         if !requested.is_finite() || requested < 0.0 {
             return None;
@@ -492,10 +510,11 @@ impl Market {
             if grams <= 0.0 || cost <= 0.0 {
                 continue;
             }
-            if order.grams - grams == order.grams
-                || !(result.grams + grams).is_finite()
-                || !(result.coins + cost).is_finite()
-            {
+            if order.grams - grams == order.grams {
+                // Sub-ULP requests cannot transfer stock, so leave their funds and history untouched.
+                continue;
+            }
+            if !(result.grams + grams).is_finite() || !(result.coins + cost).is_finite() {
                 return Err(SimulationError::WealthOverflow);
             }
             result.grams += grams;
@@ -672,5 +691,28 @@ mod tests {
         );
         assert_eq!(previous.goods, [GoodActivity::default(); Good::COUNT]);
         assert_eq!(market.history().len(), 1);
+    }
+
+    #[test]
+    fn sub_ulp_purchases_preserve_stock_funds_requests_and_history() {
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market
+            .list(seller, Good::Berries, 35.48387096774195)
+            .unwrap();
+        let grams = 0.000000000000003552713678800501;
+        market
+            .set_request(buyer, ShoppingList::single(Good::Berries, grams))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 2.0)]);
+        let before = market.clone();
+        let purchase = market
+            .purchase(buyer, Good::Berries, grams, 2.0, 0, true)
+            .unwrap();
+        assert_eq!(purchase.grams, 0.0);
+        assert_eq!(purchase.coins, 0.0);
+        assert!(purchase.payments.is_empty());
+        assert_eq!(market, before);
     }
 }

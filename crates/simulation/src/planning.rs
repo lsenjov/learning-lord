@@ -1,7 +1,11 @@
 use crate::{Citizen, CitizenAction, SimulationError};
 pub mod goals;
 use goals::{Cooldowns, Effect, Prediction};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 pub const HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
 pub const COMMITMENT_MS: u64 = 2 * 60 * 60 * 1000;
@@ -99,6 +103,19 @@ impl ActivePlan {
         self.elapsed_ms
     }
 
+    pub(crate) fn travelling_purchase(&self, remaining_ms: u64) -> Option<CitizenAction> {
+        if self.elapsed_ms.saturating_add(remaining_ms) >= COMMITMENT_MS {
+            return None;
+        }
+        let next = self.action_index + 1;
+        let goal = self
+            .plan
+            .goals
+            .iter()
+            .find(|goal| goal.actions.contains(&self.action_index))?;
+        (next < goal.actions.end).then(|| self.plan.actions[next])
+    }
+
     pub(crate) fn advance(
         &self,
         source: &Citizen,
@@ -164,6 +181,15 @@ impl ActivePlan {
                     self.action_index,
                 )
             {
+                let shortage = self
+                    .plan
+                    .actions
+                    .get(self.action_index)
+                    .is_some_and(|action| {
+                        matches!(action, CitizenAction::Produce(_))
+                            && replan_check(&citizen, *action, self.action_index)
+                    });
+                citizen.refresh_production_targets(shortage)?;
                 self.plan = plan(&citizen)?;
                 self.action_index = 0;
                 self.elapsed_ms = 0;
@@ -178,9 +204,15 @@ impl ActivePlan {
 }
 
 fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -> bool {
-    action == CitizenAction::Eat
-        && action_index > 0
-        && citizen.food_nutrition() < REPLAN_MIN_NUTRITION
+    action_index > 0
+        && match action {
+            CitizenAction::Eat => citizen.food_nutrition() < REPLAN_MIN_NUTRITION,
+            CitizenAction::Produce(recipe) => recipe
+                .inputs()
+                .iter()
+                .any(|&(good, grams)| citizen.grams(good) < grams),
+            _ => false,
+        }
 }
 
 pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
@@ -190,11 +222,30 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
     let mut best = empty_plan();
     let mut candidates = Vec::new();
     let mut selected_goal = Effect::ReduceTiredness;
-    for goal in [
-        Effect::ReduceHunger,
-        Effect::ReduceTiredness,
-        Effect::IncreaseWealth,
-    ] {
+    let standing_listing = citizen.production_targets().is_some()
+        && citizen.hunger() < crate::production::URGENT_HUNGER
+        && citizen.tiredness() < crate::production::URGENT_TIREDNESS
+        && citizen.excess_value()? >= crate::production::MIN_LISTING_VALUE;
+    let goals: &[Effect] = if standing_listing {
+        &[Effect::ListExcess]
+    } else if citizen.production_targets().is_some() {
+        &[
+            Effect::ReduceHunger,
+            Effect::ReduceTiredness,
+            Effect::IncreaseWealth,
+            Effect::ReplenishReserves,
+            Effect::Production,
+        ]
+    } else {
+        &[
+            Effect::ReduceHunger,
+            Effect::ReduceTiredness,
+            Effect::IncreaseWealth,
+            Effect::ReplenishReserves,
+        ]
+    };
+    let mut cache = Continuations::default();
+    for &goal in goals {
         let mut forecast = None;
         let mut goal_best = empty_plan();
         let initial = Prediction::new(citizen, Cooldowns::default());
@@ -207,7 +258,13 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
                 goal,
                 actions: 0..variant.actions.len(),
             };
-            search_with_goals(variant, HORIZON_MS, &mut continuation, vec![boundary])?;
+            search_with_goals(
+                variant,
+                HORIZON_MS,
+                &mut continuation,
+                vec![boundary],
+                &mut cache,
+            )?;
             if continuation.average_wellbeing > goal_best.average_wellbeing {
                 forecast = Some(GoalForecast {
                     actions,
@@ -244,7 +301,69 @@ fn empty_plan() -> Plan {
 
 #[cfg(test)]
 fn search(state: Prediction, horizon_ms: u64, best: &mut Plan) -> Result<(), SimulationError> {
-    search_with_goals(state, horizon_ms, best, Vec::new())
+    search_with_goals(
+        state,
+        horizon_ms,
+        best,
+        Vec::new(),
+        &mut Continuations {
+            disabled: true,
+            ..Default::default()
+        },
+    )
+}
+
+#[derive(Default)]
+struct Continuations {
+    plans: HashMap<u64, Vec<(Vec<CitizenAction>, Plan)>>,
+    #[cfg(test)]
+    disabled: bool,
+}
+
+impl Continuations {
+    fn key(actions: &[CitizenAction]) -> u64 {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for action in actions {
+            std::mem::discriminant(action).hash(&mut hash);
+            match action {
+                CitizenAction::Travel(place) => place.hash(&mut hash),
+                CitizenAction::BuyFood(good) => good.hash(&mut hash),
+                CitizenAction::Produce(recipe) => recipe.hash(&mut hash),
+                CitizenAction::List(good, grams) | CitizenAction::Withdraw(good, grams) => {
+                    good.hash(&mut hash);
+                    grams.to_bits().hash(&mut hash);
+                }
+                CitizenAction::Buy(list) => {
+                    for (good, grams) in list.items() {
+                        good.hash(&mut hash);
+                        grams.to_bits().hash(&mut hash);
+                    }
+                }
+                _ => {}
+            }
+        }
+        hash.finish()
+    }
+
+    fn get(&self, key: u64, actions: &[CitizenAction]) -> Option<&Plan> {
+        #[cfg(test)]
+        if self.disabled {
+            return None;
+        }
+        self.plans
+            .get(&key)?
+            .iter()
+            .find(|(path, _)| path == actions)
+            .map(|(_, plan)| plan)
+    }
+
+    fn insert(&mut self, key: u64, actions: Vec<CitizenAction>, plan: Plan) {
+        #[cfg(test)]
+        if self.disabled {
+            return;
+        }
+        self.plans.entry(key).or_default().push((actions, plan));
+    }
 }
 
 fn search_with_goals(
@@ -252,6 +371,7 @@ fn search_with_goals(
     horizon_ms: u64,
     best: &mut Plan,
     boundaries: Vec<PlanGoal>,
+    cache: &mut Continuations,
 ) -> Result<(), SimulationError> {
     if state.elapsed_ms >= horizon_ms {
         let score = state.average()?;
@@ -266,10 +386,25 @@ fn search_with_goals(
         }
         return Ok(());
     }
+    let key = Continuations::key(&state.actions);
+    if let Some(cached) = cache.get(key, &state.actions) {
+        if cached.average_wellbeing > best.average_wellbeing {
+            let mut result = cached.clone();
+            result
+                .goals
+                .retain(|goal| goal.actions.start >= state.actions.len());
+            result.goals.splice(0..0, boundaries);
+            *best = result;
+        }
+        return Ok(());
+    }
+    let mut continuation = empty_plan();
     for goal in [
         Effect::ReduceHunger,
         Effect::ReduceTiredness,
         Effect::IncreaseWealth,
+        Effect::ReplenishReserves,
+        Effect::Production,
     ] {
         for variant in goals::variants_after(&state, goal)? {
             let mut next = variant;
@@ -285,8 +420,13 @@ fn search_with_goals(
                 actions: state.actions.len()..actions.len(),
             });
             next.actions = actions;
-            search_with_goals(next, horizon_ms, best, goals)?;
+            search_with_goals(next, horizon_ms, &mut continuation, goals, cache)?;
         }
+    }
+    // An identical primitive prefix has the same predicted state and score across goal labels.
+    cache.insert(key, state.actions, continuation.clone());
+    if continuation.average_wellbeing > best.average_wellbeing {
+        *best = continuation;
     }
     Ok(())
 }
@@ -323,6 +463,134 @@ mod tests {
             elapsed_ms: 0,
         });
         citizen
+    }
+
+    #[test]
+    fn cached_continuations_replace_prefix_labels_and_preserve_suffix_boundaries() {
+        let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_berries(300.0)
+            .unwrap();
+        let prefix = goals::variants_after(
+            &Prediction::new(&citizen, Cooldowns::default()),
+            Effect::IncreaseWealth,
+        )
+        .unwrap()
+        .remove(0);
+        let boundary = |goal| {
+            vec![PlanGoal {
+                goal,
+                actions: 0..prefix.actions.len(),
+            }]
+        };
+        let mut cache = Continuations::default();
+        let mut first = empty_plan();
+        search_with_goals(
+            prefix.clone(),
+            HORIZON_MS,
+            &mut first,
+            boundary(Effect::IncreaseWealth),
+            &mut cache,
+        )
+        .unwrap();
+        assert!(
+            cache
+                .get(Continuations::key(&prefix.actions), &prefix.actions)
+                .is_some()
+        );
+        let mut reused = empty_plan();
+        search_with_goals(
+            prefix.clone(),
+            HORIZON_MS,
+            &mut reused,
+            boundary(Effect::ReplenishReserves),
+            &mut cache,
+        )
+        .unwrap();
+        let mut reference = empty_plan();
+        search_with_goals(
+            prefix.clone(),
+            HORIZON_MS,
+            &mut reference,
+            boundary(Effect::ReplenishReserves),
+            &mut Continuations {
+                disabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reused, reference);
+        assert_eq!(reused.actions(), first.actions());
+        assert_eq!(reused.action_durations_ms(), first.action_durations_ms());
+        assert_eq!(reused.average_wellbeing(), first.average_wellbeing());
+        assert_eq!(reused.goals()[0].goal, Effect::ReplenishReserves);
+        assert_eq!(&reused.goals()[1..], &first.goals()[1..]);
+        assert_eq!(reused.goals()[1].actions.start, prefix.actions.len());
+    }
+
+    #[test]
+    fn food_requests_follow_only_the_executing_goal_and_clear_on_replanning() {
+        use crate::{
+            AgentKind, Universe,
+            locations::{Location, Map, Position},
+            marketplace::{Good, ShoppingList},
+        };
+        let map = Map::new(
+            Position::default(),
+            Position::default(),
+            Position { x: 100.0, y: 0.0 },
+        )
+        .unwrap();
+        let travel = CitizenAction::Travel(map.public_place(Location::Market));
+        let purchase = CitizenAction::Buy(ShoppingList::single(Good::Bread, 60.0));
+        let source = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_map(map.clone())
+            .unwrap();
+        let mut buyer = executing(&source, vec![travel, purchase]);
+        let execution = buyer.active_plan.as_mut().unwrap();
+        execution.plan.goals = vec![
+            PlanGoal {
+                goal: Effect::IncreaseWealth,
+                actions: 0..1,
+            },
+            PlanGoal {
+                goal: Effect::ReplenishReserves,
+                actions: 1..2,
+            },
+        ];
+        assert_eq!(execution.travelling_purchase(60_000), None);
+        let (universe, id) = Universe::with_map(map)
+            .with_citizen("Buyer", buyer.clone())
+            .unwrap();
+        assert_eq!(universe.market().requested(id), ShoppingList::default());
+
+        let execution = buyer.active_plan.as_mut().unwrap();
+        execution.plan.goals = vec![PlanGoal {
+            goal: Effect::ReplenishReserves,
+            actions: 0..2,
+        }];
+        let remaining_ms = buyer.active_action().unwrap().remaining_ms();
+        let execution = buyer.active_plan.as_mut().unwrap();
+        for (elapsed_ms, expected) in [
+            (COMMITMENT_MS - remaining_ms - 1, Some(purchase)),
+            (COMMITMENT_MS - remaining_ms, None),
+            (COMMITMENT_MS - remaining_ms + 1, None),
+        ] {
+            execution.elapsed_ms = elapsed_ms;
+            assert_eq!(execution.travelling_purchase(remaining_ms), expected);
+        }
+        let (universe, id) = Universe::with_map(buyer.map())
+            .with_citizen("Buyer", buyer)
+            .unwrap();
+        assert_eq!(universe.market().requested(id), ShoppingList::default());
+        let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
+        let arrived = universe
+            .advance(citizen.active_action().unwrap().remaining_ms())
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &arrived.agents()[&id].kind;
+        assert_eq!(citizen.active_plan().unwrap().elapsed_ms(), 0);
+        assert_eq!(arrived.market().requested(id), ShoppingList::default());
     }
 
     #[test]
@@ -370,7 +638,7 @@ mod tests {
     fn goal_boundaries_cover_actions_and_metadata_survives_execution() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
-            .with_berries(200.0)
+            .with_berries(310.0)
             .unwrap();
         let started = start(&citizen).unwrap();
         let plan = started.active_plan().unwrap().plan();
@@ -391,7 +659,7 @@ mod tests {
         assert_eq!(plan.goals()[0].goal, Effect::ReduceHunger);
         assert_eq!(plan.goals()[0].actions, 0..1);
         assert_eq!(plan.goals()[1].goal, Effect::ReduceTiredness);
-        let advanced = started.advance(100_000).unwrap();
+        let advanced = started.advance(155_000).unwrap();
         assert_eq!(advanced.active_plan().unwrap().action_index(), 1);
         assert_eq!(advanced.active_plan().unwrap().plan(), plan);
         assert_eq!(started.active_plan().unwrap().action_index(), 0);
@@ -489,7 +757,9 @@ mod tests {
         for prices in [Prices::new(2.0).unwrap(), Prices::new(1.0).unwrap()] {
             let citizen = Citizen::with_needs(50.0, -100.0)
                 .unwrap()
-                .with_prices(prices);
+                .with_prices(prices)
+                .with_berries(33.0)
+                .unwrap();
             let snapshot = citizen.clone();
             let chosen = plan(&citizen).unwrap();
             let mut reference = empty_plan();
@@ -502,7 +772,7 @@ mod tests {
             assert_eq!(chosen.actions(), reference.actions());
             assert_eq!(chosen.average_wellbeing(), reference.average_wellbeing());
             let decision = chosen.decision().unwrap();
-            assert_eq!(decision.candidates.len(), 3);
+            assert_eq!(decision.candidates.len(), 4);
             assert_eq!(decision.prices, prices);
             for candidate in &decision.candidates {
                 let expected = goals::variants_after(
@@ -545,9 +815,11 @@ mod tests {
 
     #[test]
     fn full_continuations_can_outscore_the_local_goal_winner() {
-        let citizen = Citizen::with_needs(50.0, -100.0)
+        let citizen = Citizen::with_needs(0.0, -100.0)
             .unwrap()
-            .with_prices(crate::marketplace::Prices::new(2.0).unwrap());
+            .with_prices(crate::marketplace::Prices::new(5.0).unwrap())
+            .with_berries(120.0)
+            .unwrap();
         let local = goals::best_variant(&citizen, Effect::ReduceHunger, Cooldowns::default(), 0)
             .unwrap()
             .unwrap();
@@ -745,7 +1017,7 @@ mod tests {
             buyer.coins(),
             1.0 - boundary
                 .market()
-                .purchase_cost(id, Good::Berries, 100.0)
+                .purchase_cost(id, Good::Berries, 155.0)
                 .unwrap()
         );
         let combined = universe
@@ -756,14 +1028,14 @@ mod tests {
 
     #[test]
     fn replan_check_is_strictly_below_twenty_nutrition_and_only_before_later_meals() {
-        for grams in [0.0, 39.999, 40.0, 50.0] {
+        for grams in [0.0, 61.999, 62.0, 77.5] {
             let citizen = Citizen::with_needs(100.0, -100.0)
                 .unwrap()
                 .with_berries(grams)
                 .unwrap();
             assert!(!replan_check(&citizen, CitizenAction::Eat, 0));
             assert!(!replan_check(&citizen, CitizenAction::Forage, 1));
-            assert_eq!(replan_check(&citizen, CitizenAction::Eat, 1), grams < 40.0);
+            assert_eq!(replan_check(&citizen, CitizenAction::Eat, 1), grams < 62.0);
             let planned = executing(
                 &citizen,
                 vec![
@@ -773,7 +1045,7 @@ mod tests {
                 ],
             );
             let next = planned.advance(30 * MINUTE_MS).unwrap();
-            if grams < 40.0 {
+            if grams < 62.0 {
                 assert_eq!(next.active_plan().unwrap().action_index(), 0);
                 assert_eq!(next.active_plan().unwrap().elapsed_ms(), 0);
             } else {
@@ -788,7 +1060,7 @@ mod tests {
                     (grams * 1000.0) as u64
                 );
                 let partial = next.advance(20_000).unwrap();
-                assert!(partial.berries_grams() < 40.0);
+                assert!(partial.berries_grams() < 62.0);
                 assert_eq!(partial.active_plan().unwrap().action_index(), 1);
                 assert_eq!(
                     partial.active_action().unwrap().action(),

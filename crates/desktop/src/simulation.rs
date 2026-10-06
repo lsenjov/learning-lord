@@ -188,7 +188,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         ("Dara", StartingRole::Baker),
     ] {
         let mut citizen = Citizen::new(0.0)?
-            .with_berries(200.0)?
+            .with_berries(310.0)?
             .with_starting_role(role)
             .with_coins(learning_lord_simulation::production::starting_coins(role))?;
         for (good, grams) in learning_lord_simulation::production::starting_inputs(role).items() {
@@ -402,7 +402,7 @@ mod tests {
             assert_eq!(citizen.hunger(), 0.0);
             assert_eq!(citizen.tiredness(), 0.0);
             assert_eq!(citizen.coins(), 3.0);
-            assert_eq!(citizen.berries_grams(), 200.0);
+            assert_eq!(citizen.berries_grams(), 310.0);
             assert_eq!(citizen.map(), universe.map());
             assert_eq!(citizen.prices(), universe.prices());
             assert_eq!(citizen.position(), universe.map().position(citizen.home()));
@@ -417,6 +417,70 @@ mod tests {
             assert_ne!(agent, &source.agents()[id]);
             assert!(citizen.hunger().is_finite());
         }
+    }
+
+    #[test]
+    fn initial_town_runs_production_and_real_market_transactions() {
+        use learning_lord_simulation::{AgentKind, marketplace::Good};
+        let started = std::time::Instant::now();
+        let source = new_universe().unwrap();
+        let mut universe = source.clone();
+        for step in 0..144 {
+            universe = universe
+                .advance(STEP_MS)
+                .unwrap_or_else(|error| panic!("Town step {step}: {error:?}"));
+            for agent in universe.agents().values() {
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                assert!(citizen.hunger().is_finite() && citizen.tiredness().is_finite());
+                assert!(citizen.coins() >= 0.0);
+            }
+        }
+        println!(
+            "Three-day town: {:?}, {} trades, {} orders",
+            started.elapsed(),
+            universe.market().trades().len(),
+            universe.market().orders().count()
+        );
+        for agent in universe.agents().values() {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            println!(
+                "{} hunger {} coins {} inventory {:?} targets {:?} demand {:?}",
+                agent.name,
+                citizen.hunger(),
+                citizen.coins(),
+                Good::ALL.map(|good| (good, citizen.grams(good))),
+                citizen.production_targets(),
+                universe.market().requested(citizen.id())
+            );
+        }
+        for order in universe.market().orders() {
+            println!(
+                "Order {:?} {} {}",
+                order.good, order.grams, order.coins_per_kg
+            );
+        }
+        assert!(
+            universe
+                .market()
+                .orders()
+                .any(|order| order.good != Good::Berries)
+        );
+        assert!(
+            universe
+                .market()
+                .trades()
+                .iter()
+                .any(|trade| trade.good != Good::Berries)
+        );
+        assert!(
+            universe
+                .market()
+                .trades()
+                .iter()
+                .any(|trade| matches!(trade.good, Good::Bread | Good::BerryPie))
+        );
+        assert!(source.market().orders().next().is_none());
+        assert!(source.market().trades().is_empty());
     }
 
     #[test]
@@ -454,7 +518,7 @@ mod tests {
                 let AgentKind::Citizen(citizen) = &agent.kind;
                 assert_eq!(citizen.id(), *id);
                 assert_eq!(citizen.id().0.get_version_num(), 4);
-                assert_eq!(citizen.berries_grams(), 200.0);
+                assert_eq!(citizen.berries_grams(), 310.0);
                 assert_eq!(
                     citizen.coins(),
                     learning_lord_simulation::production::starting_coins(

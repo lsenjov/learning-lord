@@ -184,10 +184,11 @@ fn mixed_food_meals_consume_and_restore_nutrition_continuously() {
         .unwrap()
         .with_good(Good::BerryPie, 50.0)
         .unwrap();
-    close(source.food_nutrition(), 70.0);
+    let total_nutrition = 40.0 * Good::Berries.nutrition_per_gram().unwrap() + 20.0 + 30.0;
+    close(source.food_nutrition(), total_nutrition);
     let started = source.start_action(CitizenAction::Eat).unwrap();
     let duration = started.active_action().unwrap().duration_ms();
-    assert_eq!(duration, 96_667);
+    assert_eq!(duration, 108_495);
     let partial = started.advance(duration / 2).unwrap();
     let fraction = (duration / 2) as f64 / duration as f64;
     close(partial.berries_grams(), 40.0 * (1.0 - fraction));
@@ -199,7 +200,7 @@ fn mixed_food_meals_consume_and_restore_nutrition_continuously() {
     let complete = started.advance(duration).unwrap();
     assert_eq!(complete.berries_grams(), 0.0);
     assert_eq!(complete.grams(Good::Bread), 0.0);
-    close(complete.food_nutrition(), 20.0);
+    close(complete.food_nutrition(), total_nutrition - 50.0);
     close(
         complete.hunger(),
         80.0 + duration as f64 / 3_600_000.0 * source.hunger_per_hour() - 50.0,
