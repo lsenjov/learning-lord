@@ -7,7 +7,9 @@ use uuid::Uuid;
 pub mod locations;
 pub mod marketplace;
 use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
+mod background;
 pub mod planning;
+pub use background::PlanningRuntime;
 pub mod production;
 
 pub type Quantity = u64;
@@ -1133,20 +1135,72 @@ impl Universe {
     }
 
     pub fn advance(&self, elapsed_ms: u64) -> Result<Self, SimulationError> {
+        Ok(self
+            .advance_internal(elapsed_ms, None, &mut || false)?
+            .unwrap())
+    }
+
+    /// Returns None when interrupted, leaving the source snapshot unchanged.
+    pub fn advance_with_planner(
+        &self,
+        runtime: &mut PlanningRuntime,
+        elapsed_ms: u64,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<Option<Self>, SimulationError> {
+        let result = self.advance_internal(elapsed_ms, Some(runtime), &mut should_cancel);
+        if !matches!(result, Ok(Some(_))) {
+            runtime.reset();
+        }
+        result
+    }
+
+    fn advance_internal(
+        &self,
+        elapsed_ms: u64,
+        mut runtime: Option<&mut PlanningRuntime>,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Self>, SimulationError> {
+        if should_cancel() {
+            return Ok(None);
+        }
         let end = self
             .current_time_ms
             .checked_add(elapsed_ms)
             .ok_or(SimulationError::TimeOverflow)?;
         let mut universe = self.clone();
+        if elapsed_ms == 0
+            && let Some(runtime) = runtime.as_deref_mut()
+        {
+            let mut ids: Vec<_> = universe.agents.keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            for id in ids {
+                let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
+                runtime.planning_event(citizen, universe.current_time_ms)?;
+            }
+        }
         if universe.agents.is_empty() {
             universe.market.update(end)?;
             universe.current_time_ms = end;
-            return Ok(universe);
+            return Ok(Some(universe));
         }
         while universe.current_time_ms < end {
+            if should_cancel() {
+                return Ok(None);
+            }
             let until_update = marketplace::until_update(universe.current_time_ms);
             let mut ids: Vec<_> = universe.agents.keys().copied().collect();
             ids.sort_by_key(|id| id.0);
+            let mut planning_boundary = end - universe.current_time_ms;
+            if let Some(runtime) = runtime.as_deref_mut() {
+                for id in &ids {
+                    let AgentKind::Citizen(citizen) = &universe.agents[id].kind;
+                    if let Some(event) =
+                        runtime.planning_event(citizen, universe.current_time_ms)?
+                    {
+                        planning_boundary = planning_boundary.min(event);
+                    }
+                }
+            }
             let boundary = ids
                 .iter()
                 .filter_map(|id| {
@@ -1157,7 +1211,8 @@ impl Universe {
                 .unwrap_or(end - universe.current_time_ms);
             let step = (end - universe.current_time_ms)
                 .min(until_update)
-                .min(boundary);
+                .min(boundary)
+                .min(planning_boundary);
             let finishing_time = universe.current_time_ms + step;
             for id in &ids {
                 let agent = universe.agents.get_mut(id).unwrap();
@@ -1205,7 +1260,25 @@ impl Universe {
                     && let Some(mut execution) = citizen.active_plan.take()
                 {
                     execution.finish_action();
-                    *citizen = execution.resume(citizen.clone())?;
+                    *citizen = if let Some(runtime) = runtime.as_deref_mut() {
+                        let resumed = execution.resume_committed(citizen.clone())?;
+                        if resumed.active_action().is_none() {
+                            let Some(started) = runtime.at_boundary(
+                                &resumed,
+                                &mut execution,
+                                finishing_time,
+                                should_cancel,
+                            )?
+                            else {
+                                return Ok(None);
+                            };
+                            started
+                        } else {
+                            resumed
+                        }
+                    } else {
+                        execution.resume(citizen.clone())?
+                    };
                     citizen.active_plan = Some(execution);
                     new_actions.push(id);
                 }
@@ -1214,8 +1287,16 @@ impl Universe {
                 universe.register_action_request(id)?;
             }
             universe.refresh_market();
+            if let Some(runtime) = runtime.as_deref_mut() {
+                let mut ids: Vec<_> = universe.agents.keys().copied().collect();
+                ids.sort_by_key(|id| id.0);
+                for id in ids {
+                    let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
+                    runtime.planning_event(citizen, universe.current_time_ms)?;
+                }
+            }
         }
-        Ok(universe)
+        Ok(Some(universe))
     }
 
     fn refresh_market(&mut self) {
@@ -1347,6 +1428,7 @@ pub enum SimulationError {
     BerriesOverflow,
     WellbeingOverflow,
     CitizenBusy,
+    PlanningFailed,
     AgentNotFound,
     AgentAlreadyExists,
 }
@@ -1382,6 +1464,7 @@ impl fmt::Display for SimulationError {
             Self::TirednessOverflow => "advancing time would produce nonfinite tiredness",
             Self::BerriesOverflow => "foraging would overflow berry inventory",
             Self::WellbeingOverflow => "personal wellbeing exceeds the finite score range",
+            Self::PlanningFailed => "planning worker failed",
             Self::CitizenBusy => "citizen is already performing an action",
             Self::AgentAlreadyExists => "citizen already exists in this universe",
             Self::AgentNotFound => "agent does not exist in this universe",

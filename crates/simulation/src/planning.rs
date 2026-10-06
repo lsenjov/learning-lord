@@ -1,7 +1,7 @@
 use crate::{Citizen, CitizenAction, SimulationError};
 pub mod goals;
 use goals::{Cooldowns, Effect, Prediction};
-use rayon::prelude::*;
+mod scheduler;
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
@@ -233,6 +233,71 @@ impl ActivePlan {
         self.start_next_action(citizen)
     }
 
+    pub(crate) fn finishes_commitment(&self, remaining_ms: u64) -> bool {
+        self.elapsed_ms.saturating_add(remaining_ms) >= COMMITMENT_MS
+            || self.action_index + 1 >= self.plan.actions.len()
+    }
+
+    pub(crate) fn needs_replan(&self, citizen: &Citizen) -> bool {
+        self.elapsed_ms >= COMMITMENT_MS
+            || self.action_index >= self.plan.actions.len()
+            || replan_check(
+                citizen,
+                self.plan.actions[self.action_index],
+                self.action_index,
+            )
+    }
+
+    pub(crate) fn prepare_replan(&self, citizen: &mut Citizen) -> Result<(), SimulationError> {
+        let shortage = self
+            .plan
+            .actions
+            .get(self.action_index)
+            .is_some_and(|action| {
+                matches!(action, CitizenAction::Produce(_))
+                    && replan_check(citizen, *action, self.action_index)
+            });
+        citizen.refresh_production_targets(shortage)
+    }
+
+    pub(crate) fn resume_committed(
+        &mut self,
+        mut citizen: Citizen,
+    ) -> Result<Citizen, SimulationError> {
+        while !self.needs_replan(&citizen) {
+            citizen = citizen.start_action(self.plan.actions[self.action_index])?;
+            if citizen.active_action().is_some() {
+                return Ok(citizen);
+            }
+            self.action_index += 1;
+        }
+        Ok(citizen)
+    }
+
+    pub(crate) fn first_action_valid(citizen: &Citizen, plan: &Plan) -> bool {
+        plan.actions
+            .first()
+            .is_some_and(|action| !replan_check(citizen, *action, 1))
+    }
+
+    pub(crate) fn adopt(
+        &mut self,
+        citizen: Citizen,
+        plan: Plan,
+    ) -> Result<Citizen, SimulationError> {
+        let Some(&action) = plan.actions.first() else {
+            return Err(SimulationError::PlanningFailed);
+        };
+        let started = citizen.start_action(action)?;
+        if started.active_action().is_none() {
+            return Err(SimulationError::MissingInputs);
+        }
+        self.plan = plan;
+        self.action_index = 0;
+        self.elapsed_ms = 0;
+        Ok(started)
+    }
+
     fn start_next_action(&mut self, mut citizen: Citizen) -> Result<Citizen, SimulationError> {
         loop {
             if self.elapsed_ms >= COMMITMENT_MS
@@ -284,31 +349,54 @@ fn worker_count(available: Option<usize>) -> usize {
     available.map_or(2, |count| count.saturating_sub(4).max(2))
 }
 
-fn planning_pool() -> Option<&'static rayon::ThreadPool> {
-    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+fn planning_pool() -> Result<&'static scheduler::Scheduler, SimulationError> {
+    static POOL: OnceLock<Result<scheduler::Scheduler, SimulationError>> = OnceLock::new();
     POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_count(
-                std::thread::available_parallelism().ok().map(usize::from),
-            ))
-            .thread_name(|index| format!("citizen-planning-{index}"))
-            .build()
-            .ok()
+        scheduler::Scheduler::new(worker_count(
+            std::thread::available_parallelism().ok().map(usize::from),
+        ))
     })
     .as_ref()
+    .map_err(|error| *error)
+}
+
+type GoalEvaluation = (Plan, GoalDecision, Vec<ProductionDecision>);
+
+pub(crate) struct PlanningRequest {
+    roots: scheduler::Request<GoalEvaluation>,
+    citizen: Arc<Citizen>,
+    production: Vec<ProductionDecision>,
+}
+
+impl PlanningRequest {
+    pub(crate) fn cancel(&self) {
+        self.roots.cancel();
+    }
+
+    pub(crate) fn try_result(&mut self) -> Option<Result<Plan, SimulationError>> {
+        self.roots.try_result().map(|results| {
+            reduce_results(&self.citizen, std::mem::take(&mut self.production), results)
+        })
+    }
+
+    fn wait(self) -> Result<Plan, SimulationError> {
+        let results = self.roots.wait()?;
+        reduce_results(&self.citizen, self.production, results)
+    }
 }
 
 pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
+    request(citizen)?.wait()
+}
+
+pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationError> {
     if citizen.active_action().is_some() || citizen.active_plan().is_some() {
         return Err(SimulationError::CitizenBusy);
     }
-    let mut best = empty_plan();
-    let mut candidates = Vec::new();
-    let mut production: Vec<_> = citizen
+    let production: Vec<_> = citizen
         .available_recipes()
         .map(|recipe| ProductionDecision::new(citizen, recipe))
         .collect();
-    let mut selected_goal = Effect::ReduceTiredness;
     let clothing_choice =
         citizen.units(crate::marketplace::Good::FlaxGarment) > 0 && citizen.clothing_need() > 0.0;
     // Compare wearing an acquired garment with selling it after a commitment expires.
@@ -341,27 +429,43 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
     if clothing_choice && citizen.production_targets().is_some() {
         goals.push(Effect::ListExcess);
     }
-    let results = if let Some(pool) = planning_pool() {
-        pool.install(|| {
-            goals
-                .par_iter()
-                .map(|&goal| {
-                    evaluate_goal(
-                        citizen,
-                        goal,
-                        production.clone(),
-                        &mut Continuations::default(),
-                    )
-                })
-                .collect::<Vec<_>>()
+    let citizen = Arc::new(citizen.clone());
+    let jobs: Vec<scheduler::Job<GoalEvaluation>> = goals
+        .into_iter()
+        .map(|goal| {
+            let citizen = Arc::clone(&citizen);
+            let production = production.clone();
+            Box::new(move || {
+                evaluate_goal(&citizen, goal, production, &mut Continuations::default())
+            }) as scheduler::Job<GoalEvaluation>
         })
-    } else {
-        let mut cache = Continuations::default();
-        goals
-            .iter()
-            .map(|&goal| evaluate_goal(citizen, goal, production.clone(), &mut cache))
-            .collect()
+        .collect();
+    let roots = match planning_pool() {
+        Ok(pool) => pool.submit(jobs),
+        Err(_) => scheduler::Request::completed(
+            jobs.into_iter()
+                .map(|job| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                        .unwrap_or(Err(SimulationError::PlanningFailed))
+                })
+                .collect(),
+        ),
     };
+    Ok(PlanningRequest {
+        roots,
+        citizen,
+        production,
+    })
+}
+
+fn reduce_results(
+    citizen: &Citizen,
+    mut production: Vec<ProductionDecision>,
+    results: Vec<Result<GoalEvaluation, SimulationError>>,
+) -> Result<Plan, SimulationError> {
+    let mut best = empty_plan();
+    let mut candidates = Vec::new();
+    let mut selected_goal = Effect::ReduceTiredness;
     for result in results {
         let (goal_best, candidate, diagnostics) = result?;
         for (combined, diagnostic) in production.iter_mut().zip(diagnostics) {
@@ -761,6 +865,48 @@ pub(crate) fn start(citizen: &Citizen) -> Result<Citizen, SimulationError> {
 }
 
 #[cfg(test)]
+pub(crate) fn gated_request_fixture(
+    citizen: &Citizen,
+    started: std::sync::mpsc::Sender<()>,
+    gate: std::sync::mpsc::Receiver<()>,
+) -> PlanningRequest {
+    let citizen = Arc::new(citizen.clone());
+    let evaluated = Arc::clone(&citizen);
+    let roots = planning_pool().unwrap().submit(vec![Box::new(move || {
+        started.send(()).unwrap();
+        gate.recv().unwrap();
+        evaluate_goal(
+            &evaluated,
+            Effect::ReduceTiredness,
+            Vec::new(),
+            &mut Continuations::default(),
+        )
+    })]);
+    PlanningRequest {
+        roots,
+        citizen,
+        production: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn executing_fixture(citizen: &Citizen, actions: Vec<CitizenAction>) -> Citizen {
+    let mut citizen = citizen.start_action(actions[0]).unwrap();
+    citizen.active_plan = Some(ActivePlan {
+        plan: Plan {
+            action_durations_ms: vec![0; actions.len()],
+            goals: Vec::new(),
+            actions,
+            average_wellbeing: -1.0,
+            decision: None,
+        },
+        action_index: 0,
+        elapsed_ms: 0,
+    });
+    citizen
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rand::{SeedableRng, rngs::SmallRng};
@@ -781,7 +927,7 @@ mod tests {
             assert_eq!(worker_count(available), expected);
         }
         assert_eq!(
-            planning_pool().unwrap().current_num_threads(),
+            planning_pool().unwrap().worker_count(),
             worker_count(std::thread::available_parallelism().ok().map(usize::from))
         );
     }

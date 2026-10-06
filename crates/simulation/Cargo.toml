@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rayon = "1.11"
 imbl = "7.0.2"
 rand = { version = "0.10.3", default-features = false, features = ["sys_rng"] }
 uuid = { version = "1.26.1", features = ["v4"] }

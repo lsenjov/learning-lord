@@ -1,6 +1,7 @@
 use bevy::prelude::Resource;
-use learning_lord_simulation::{Citizen, SimulationError, Universe};
+use learning_lord_simulation::{Citizen, PlanningRuntime, SimulationError, Universe};
 use std::{
+    collections::VecDeque,
     num::NonZeroU32,
     sync::{Arc, Mutex, mpsc},
     thread::{self, JoinHandle},
@@ -225,17 +226,42 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
 
 struct WorkerState {
     universe: Universe,
+    planner: PlanningRuntime,
     pacing: Pacing,
     error: Option<String>,
     generation: u64,
 }
 
 impl WorkerState {
-    fn advance(&mut self, elapsed_ms: u64) {
-        match self.universe.advance(elapsed_ms) {
-            Ok(universe) => self.universe = universe,
-            Err(error) => self.fail(error),
+    fn advance_interruptibly(
+        &mut self,
+        elapsed_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> bool {
+        match self
+            .universe
+            .advance_with_planner(&mut self.planner, elapsed_ms, should_cancel)
+        {
+            Ok(Some(universe)) => {
+                self.universe = universe;
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.fail(error);
+                true
+            }
         }
+    }
+
+    #[cfg(test)]
+    fn advance(&mut self, elapsed_ms: u64) {
+        self.advance_interruptibly(elapsed_ms, || false);
+    }
+
+    #[cfg(test)]
+    fn apply(&mut self, command: Command, at: Duration) -> bool {
+        self.apply_interruptibly(command, at, || false).is_some()
     }
 
     fn fail(&mut self, error: SimulationError) {
@@ -243,11 +269,17 @@ impl WorkerState {
         self.pacing.running = false;
     }
 
-    fn apply(&mut self, command: Command, at: Duration) -> bool {
+    fn apply_interruptibly(
+        &mut self,
+        command: Command,
+        at: Duration,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Option<bool> {
         if matches!(command, Command::Shutdown) {
-            return false;
+            return None;
         }
         if matches!(command, Command::Restart) {
+            self.planner.reset();
             self.generation += 1;
             match new_universe() {
                 Ok(universe) => {
@@ -262,24 +294,26 @@ impl WorkerState {
                 }
                 Err(error) => self.fail(error),
             }
-            return true;
+            return Some(true);
         }
         if self.error.is_some() {
-            return true;
+            return Some(true);
         }
         match command {
             Command::SetRunning(running) => self.pacing.set_running(running, at),
             Command::SetSpeed(speed) => self.pacing.set_speed(speed, at),
-            Command::Step if !self.pacing.running => self.advance(STEP_MS),
+            Command::Step if !self.pacing.running => {
+                return Some(self.advance_interruptibly(STEP_MS, should_cancel));
+            }
             Command::NextDay if !self.pacing.running => {
                 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
                 let time = self.universe.current_time_ms();
                 let elapsed = DAY_MS - time % DAY_MS + 4 * 60 * 60 * 1000;
-                self.advance(elapsed);
+                return Some(self.advance_interruptibly(elapsed, should_cancel));
             }
             Command::Step | Command::NextDay | Command::Shutdown | Command::Restart => {}
         }
-        true
+        Some(true)
     }
 
     fn publish(&self, published: &Mutex<Snapshot>) {
@@ -293,6 +327,31 @@ impl WorkerState {
     }
 }
 
+fn poll_cancellation(
+    commands: &mpsc::Receiver<TimedCommand>,
+    deferred: &mut VecDeque<TimedCommand>,
+) -> bool {
+    if deferred
+        .iter()
+        .any(|command| matches!(command.command, Command::Restart | Command::Shutdown))
+    {
+        return true;
+    }
+    loop {
+        match commands.try_recv() {
+            Ok(command) => {
+                let interrupt = matches!(command.command, Command::Restart | Command::Shutdown);
+                deferred.push_back(command);
+                if interrupt {
+                    return true;
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
 fn run_worker(
     universe: Universe,
     updates_per_second: NonZeroU32,
@@ -303,33 +362,52 @@ fn run_worker(
     let epoch = Instant::now();
     let mut state = WorkerState {
         universe,
+        planner: PlanningRuntime::default(),
         pacing: Pacing::new(updates_per_second),
         error: None,
         generation: 0,
     };
+    let mut deferred = VecDeque::new();
     loop {
-        match commands.try_recv() {
-            Ok(command) => {
-                if !state.apply(command.command, command.at.saturating_duration_since(epoch)) {
-                    break;
-                }
+        let command = match deferred.pop_front() {
+            Some(command) => Some(command),
+            None => match commands.try_recv() {
+                Ok(command) => Some(command),
+                Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => None,
+            },
+        };
+        if let Some(command) = command {
+            let Some(changed) = state.apply_interruptibly(
+                command.command,
+                command.at.saturating_duration_since(epoch),
+                || poll_cancellation(&commands, &mut deferred),
+            ) else {
+                break;
+            };
+            if changed {
                 state.publish(&published);
                 wakeup();
-                continue;
             }
-            Err(mpsc::TryRecvError::Disconnected) => break,
-            Err(mpsc::TryRecvError::Empty) => {}
+            continue;
         }
 
         let now = epoch.elapsed();
         if state.pacing.wait_duration(now) == Some(Duration::ZERO) {
-            match state.pacing.take_update(now) {
-                Ok(Some(elapsed_ms)) => state.advance(elapsed_ms),
-                Err(error) => state.fail(error),
-                Ok(None) => {}
+            let changed = match state.pacing.take_update(now) {
+                Ok(Some(elapsed_ms)) => state.advance_interruptibly(elapsed_ms, || {
+                    poll_cancellation(&commands, &mut deferred)
+                }),
+                Err(error) => {
+                    state.fail(error);
+                    true
+                }
+                Ok(None) => false,
+            };
+            if changed {
+                state.publish(&published);
+                wakeup();
             }
-            state.publish(&published);
-            wakeup();
             continue;
         }
 
@@ -342,11 +420,7 @@ fn run_worker(
             None => commands.recv().ok(),
         };
         let Some(command) = received else { break };
-        if !state.apply(command.command, command.at.saturating_duration_since(epoch)) {
-            break;
-        }
-        state.publish(&published);
-        wakeup();
+        deferred.push_back(command);
     }
 }
 
@@ -359,6 +433,134 @@ mod tests {
         let mut pacing = Pacing::new(NonZeroU32::new(rate).unwrap());
         pacing.set_running(true, Duration::ZERO);
         pacing
+    }
+
+    fn worker_state(universe: Universe) -> WorkerState {
+        WorkerState {
+            universe,
+            planner: PlanningRuntime::default(),
+            pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
+            error: None,
+            generation: 0,
+        }
+    }
+
+    #[test]
+    fn restart_and_shutdown_interrupt_waits_without_publishing_stale_advances() {
+        for interrupt in [Command::Restart, Command::Shutdown] {
+            let (universe, _) =
+                Universe::with_map(learning_lord_simulation::locations::Map::default())
+                    .with_citizen("Ada", Citizen::new(0.0).unwrap())
+                    .unwrap();
+            let source = universe.clone();
+            let (commands, receiver) = mpsc::channel();
+            let (waiting, started) = mpsc::channel();
+            let (release, gate) = mpsc::channel();
+            let thread = thread::spawn(move || {
+                let mut state = worker_state(universe);
+                let mut deferred = VecDeque::new();
+                let changed = state.advance_interruptibly(STEP_MS, || {
+                    waiting.send(()).unwrap();
+                    gate.recv().unwrap();
+                    poll_cancellation(&receiver, &mut deferred)
+                });
+                assert!(!changed);
+                let cancelled = state.universe.clone();
+                let command = deferred.pop_front().unwrap();
+                let outcome = state.apply_interruptibly(command.command, Duration::ZERO, || false);
+                (cancelled, state, outcome)
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            commands
+                .send(TimedCommand {
+                    command: interrupt,
+                    at: Instant::now(),
+                })
+                .unwrap();
+            release.send(()).unwrap();
+            let (cancelled, state, outcome) = thread.join().unwrap();
+            assert_eq!(cancelled, source);
+            assert!(state.error.is_none());
+            match interrupt {
+                Command::Restart => {
+                    assert_eq!(outcome, Some(true));
+                    assert_eq!(state.generation, 1);
+                    assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
+                }
+                Command::Shutdown => assert_eq!(outcome, None),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_defers_commands_in_order_and_skips_obsolete_steps_before_restart() {
+        let (commands, receiver) = mpsc::channel();
+        for command in [
+            Command::SetSpeed(20),
+            Command::Step,
+            Command::NextDay,
+            Command::SetRunning(true),
+            Command::Restart,
+            Command::SetSpeed(3),
+            Command::Step,
+        ] {
+            commands
+                .send(TimedCommand {
+                    command,
+                    at: Instant::now(),
+                })
+                .unwrap();
+        }
+        let mut deferred = VecDeque::new();
+        assert!(poll_cancellation(&receiver, &mut deferred));
+        assert_eq!(deferred.len(), 5);
+        let (universe, _) = Universe::with_map(learning_lord_simulation::locations::Map::default())
+            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let mut state = worker_state(universe.clone());
+        let command = deferred.pop_front().unwrap();
+        assert!(matches!(command.command, Command::SetSpeed(20)));
+        state.apply_interruptibly(command.command, Duration::ZERO, || false);
+        assert_eq!(state.pacing.speed, 20);
+        for expected_next_day in [false, true] {
+            let command = deferred.pop_front().unwrap();
+            assert_eq!(
+                matches!(command.command, Command::NextDay),
+                expected_next_day
+            );
+            assert_eq!(
+                state.apply_interruptibly(command.command, Duration::ZERO, || poll_cancellation(
+                    &receiver,
+                    &mut deferred
+                )),
+                Some(false)
+            );
+            assert_eq!(state.universe, universe);
+        }
+        let command = deferred.pop_front().unwrap();
+        assert!(matches!(command.command, Command::SetRunning(true)));
+        state.apply_interruptibly(command.command, Duration::ZERO, || false);
+        assert!(state.pacing.running);
+        let command = deferred.pop_front().unwrap();
+        assert!(matches!(command.command, Command::Restart));
+        state.apply_interruptibly(command.command, Duration::ZERO, || false);
+        assert!(!state.pacing.running);
+        assert_eq!(state.pacing.speed, 1);
+        assert!(!poll_cancellation(&receiver, &mut deferred));
+        assert_eq!(deferred.len(), 2);
+        let command = deferred.pop_front().unwrap();
+        assert!(matches!(command.command, Command::SetSpeed(3)));
+        state.apply_interruptibly(command.command, Duration::ZERO, || false);
+        assert_eq!(state.pacing.speed, 3);
+        let command = deferred.pop_front().unwrap();
+        assert!(matches!(command.command, Command::Step));
+        assert_eq!(
+            state.apply_interruptibly(command.command, Duration::ZERO, || false),
+            Some(true)
+        );
+        assert_eq!(state.universe.current_time_ms(), START_TIME_MS + STEP_MS);
+        assert!(deferred.is_empty());
     }
 
     #[test]
@@ -597,6 +799,7 @@ mod tests {
         let old_map = universe.map();
         let mut state = WorkerState {
             universe,
+            planner: PlanningRuntime::default(),
             pacing: pacing(30),
             error: Some("old error".into()),
             generation: 0,
@@ -740,6 +943,7 @@ mod tests {
         let original = universe.clone();
         let mut state = WorkerState {
             universe,
+            planner: PlanningRuntime::default(),
             pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
             error: None,
             generation: 0,
@@ -747,7 +951,13 @@ mod tests {
         state.apply(Command::SetSpeed(20), Duration::ZERO);
         state.apply(Command::Step, Duration::from_secs(10));
         assert_eq!(state.universe.current_time_ms(), STEP_MS);
-        assert_eq!(state.universe, original.advance(STEP_MS).unwrap());
+        assert_eq!(
+            state.universe,
+            original
+                .advance_with_planner(&mut PlanningRuntime::default(), STEP_MS, || false)
+                .unwrap()
+                .unwrap()
+        );
         state.apply(Command::SetRunning(true), Duration::from_secs(11));
         state.apply(Command::Step, Duration::from_secs(12));
         assert_eq!(state.universe.current_time_ms(), STEP_MS);
@@ -764,9 +974,17 @@ mod tests {
                     .with_citizen("Ada", Citizen::new(0.0).unwrap())
                     .unwrap();
             let universe = universe.start_planning(id).unwrap().advance(start).unwrap();
-            let expected = universe.advance(DAY_MS + 4 * HOUR_MS - start).unwrap();
+            let expected = universe
+                .advance_with_planner(
+                    &mut PlanningRuntime::default(),
+                    DAY_MS + 4 * HOUR_MS - start,
+                    || false,
+                )
+                .unwrap()
+                .unwrap();
             let mut state = WorkerState {
                 universe,
+                planner: PlanningRuntime::default(),
                 pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
                 error: None,
                 generation: 0,
@@ -848,6 +1066,7 @@ mod tests {
             .unwrap();
         let mut state = WorkerState {
             universe: universe.clone(),
+            planner: PlanningRuntime::default(),
             pacing: pacing(60),
             error: None,
             generation: 0,
