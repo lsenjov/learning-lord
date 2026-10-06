@@ -384,6 +384,7 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
             error: None,
+            planning_history: Default::default(),
             generation: 0,
             revision: 0,
         }))
@@ -460,6 +461,7 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
             error: None,
+            planning_history: Default::default(),
             generation: 0,
             revision: 0,
         }))
@@ -521,6 +523,7 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe: travelling.advance(150_000).unwrap(),
             error: None,
+            planning_history: Default::default(),
             generation: 0,
             revision: 0,
         }))

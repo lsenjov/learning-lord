@@ -170,22 +170,36 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
             DetailScroll,
         ))
         .with_children(|panel| {
-            panel.spawn((text("", 17.0, TEXT), Readout::Citizen));
-            panel.spawn(text(
-                "ACTIVE PLAN  |  durations are planning estimates",
-                14.0,
-                MUTED,
-            ));
-            panel.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(3),
-                    flex_shrink: 0.0,
-                    ..default()
-                },
-                PlanContent,
-            ));
-            panel.spawn((text("", 14.0, MUTED), Readout::Decision));
+            crate::citizen_history::spawn_tabs(panel);
+            panel
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(12),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    crate::citizen_history::ViewPanel(crate::citizen_history::View::Current),
+                ))
+                .with_children(|panel| {
+                    panel.spawn((text("", 17.0, TEXT), Readout::Citizen));
+                    panel.spawn(text(
+                        "ACTIVE PLAN  |  durations are planning estimates",
+                        14.0,
+                        MUTED,
+                    ));
+                    panel.spawn((
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(3),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        PlanContent,
+                    ));
+                    panel.spawn((text("", 14.0, MUTED), Readout::Decision));
+                });
+            crate::citizen_history::spawn(panel);
         });
 }
 
@@ -624,6 +638,7 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
             error: None,
+            planning_history: Default::default(),
             generation: 0,
             revision: 0,
         }))

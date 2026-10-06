@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 pub(super) type Job<T> = Box<dyn FnOnce() -> Result<T, SimulationError> + Send>;
@@ -57,7 +58,9 @@ impl Scheduler {
                     slots: (0..jobs.len()).map(|_| None).collect(),
                     remaining: jobs.len(),
                     consumed: false,
+                    finished: None,
                 }),
+                started: Instant::now(),
                 completed: Condvar::new(),
                 cancelled: Arc::new(AtomicBool::new(false)),
             }),
@@ -74,6 +77,7 @@ impl Scheduler {
                         results.slots[index] = Some(result);
                         results.remaining -= 1;
                         if results.remaining == 0 {
+                            results.finished = Some(Instant::now());
                             shared.completed.notify_all();
                         }
                     }
@@ -126,6 +130,7 @@ struct Results<T> {
     slots: Vec<Option<Result<T, SimulationError>>>,
     remaining: usize,
     consumed: bool,
+    finished: Option<Instant>,
 }
 
 impl<T> Results<T> {
@@ -140,6 +145,7 @@ impl<T> Results<T> {
 
 struct SharedResults<T> {
     results: Mutex<Results<T>>,
+    started: Instant,
     completed: Condvar,
     cancelled: Arc<AtomicBool>,
 }
@@ -156,11 +162,21 @@ impl<T> Request<T> {
                     slots: results.into_iter().map(Some).collect(),
                     remaining: 0,
                     consumed: false,
+                    finished: Some(Instant::now()),
                 }),
+                started: Instant::now(),
                 completed: Condvar::new(),
                 cancelled: Arc::new(AtomicBool::new(false)),
             }),
         }
+    }
+
+    pub(super) fn elapsed(&self) -> Duration {
+        let results = self.shared.results.lock().unwrap();
+        results
+            .finished
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.shared.started)
     }
 
     pub(super) fn cancel(&self) {
@@ -327,6 +343,14 @@ mod tests {
         assert_eq!(later.wait().unwrap(), [Ok(4)]);
         assert_eq!(runs.load(Ordering::SeqCst), 0);
         assert!(cancelled.try_result().is_none());
+    }
+
+    #[test]
+    fn completed_request_elapsed_excludes_time_before_collection() {
+        let request = Request::<()>::completed(vec![Ok(())]);
+        let elapsed = request.elapsed();
+        std::thread::yield_now();
+        assert_eq!(request.elapsed(), elapsed);
     }
 
     #[test]

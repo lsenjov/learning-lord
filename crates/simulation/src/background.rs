@@ -18,14 +18,44 @@ struct Pending {
 #[derive(Default)]
 pub struct PlanningRuntime {
     pending: HashMap<AgentId, Pending>,
+    histories: HashMap<AgentId, crate::history::PlanningHistory>,
+    samples: Vec<(AgentId, u64, f64, f64, u64)>,
 }
 
 impl PlanningRuntime {
     pub fn reset(&mut self) {
+        self.abort_advance();
+        self.histories.clear();
+    }
+
+    pub(crate) fn abort_advance(&mut self) {
         for pending in self.pending.values() {
             pending.request.cancel();
         }
         self.pending.clear();
+        self.samples.clear();
+    }
+
+    pub fn history(&self, id: AgentId) -> Option<&crate::history::PlanningHistory> {
+        self.histories.get(&id)
+    }
+
+    pub(crate) fn finish_advance(&mut self, source: &crate::Universe, now: u64) {
+        for id in source.agents().keys() {
+            self.histories
+                .entry(*id)
+                .or_insert_with(|| crate::history::PlanningHistory::new(source.current_time_ms()));
+        }
+        for (id, time, request_ms, wait_ms, requests) in self.samples.drain(..) {
+            let history = self.histories.get_mut(&id).unwrap();
+            history.advance(time);
+            history.current.request_ms += request_ms;
+            history.current.wait_ms += wait_ms;
+            history.current.requests += requests;
+        }
+        for history in self.histories.values_mut() {
+            history.advance(now);
+        }
     }
 
     pub(crate) fn planning_event(
@@ -91,7 +121,7 @@ impl PlanningRuntime {
         let mut actual = citizen.clone();
         execution.prepare_replan(&mut actual)?;
         let pending = self.pending.remove(&citizen.id());
-        let speculative = pending.as_ref().is_some_and(|pending| {
+        let mut speculative = pending.as_ref().is_some_and(|pending| {
             pending.boundary_ms == now
                 && pending.boundary_action_index == execution.action_index()
                 && pending.plan == *execution.plan()
@@ -110,27 +140,39 @@ impl PlanningRuntime {
             }
             None => planning::request(&actual)?,
         };
+        let mut wait_ms = 0.0;
+        let mut request_ms = 0.0;
+        let mut requests = 0;
         loop {
             if should_cancel() {
                 request.cancel();
-                self.reset();
+                self.abort_advance();
                 return Ok(None);
             }
             if let Some(result) = request.try_result() {
+                request_ms += request.elapsed().as_secs_f64() * 1000.0;
+                requests += 1;
                 if let Ok(plan) = result.as_ref()
                     && (!speculative || ActivePlan::first_action_valid(&actual, plan))
                     && let Ok(started) = execution.adopt(actual.clone(), plan.clone())
                 {
+                    self.samples
+                        .push((citizen.id(), now, request_ms, wait_ms, requests));
                     return Ok(Some(started));
                 }
                 if !speculative {
                     let plan = result?;
-                    return execution.adopt(actual, plan).map(Some);
+                    let started = execution.adopt(actual, plan)?;
+                    self.samples
+                        .push((citizen.id(), now, request_ms, wait_ms, requests));
+                    return Ok(Some(started));
                 }
                 request = planning::request(&actual)?;
-                return wait_actual(request, actual, execution, should_cancel);
+                speculative = false;
             }
+            let waiting = std::time::Instant::now();
             std::thread::park_timeout(std::time::Duration::from_millis(2));
+            wait_ms += waiting.elapsed().as_secs_f64() * 1000.0;
         }
     }
 }
@@ -138,24 +180,6 @@ impl PlanningRuntime {
 impl Drop for PlanningRuntime {
     fn drop(&mut self) {
         self.reset();
-    }
-}
-
-fn wait_actual(
-    mut request: PlanningRequest,
-    actual: Citizen,
-    execution: &mut ActivePlan,
-    should_cancel: &mut impl FnMut() -> bool,
-) -> Result<Option<Citizen>, SimulationError> {
-    loop {
-        if should_cancel() {
-            request.cancel();
-            return Ok(None);
-        }
-        if let Some(result) = request.try_result() {
-            return execution.adopt(actual, result?).map(Some);
-        }
-        std::thread::park_timeout(std::time::Duration::from_millis(2));
     }
 }
 
@@ -489,6 +513,52 @@ mod tests {
         assert_eq!(world, saved);
         assert!(runtime.pending.is_empty());
         release.send(()).unwrap();
+    }
+
+    #[test]
+    fn cancelled_and_failed_advances_preserve_published_telemetry() {
+        let (world, id) = universe(Citizen::new(0.0).unwrap());
+        let mut runtime = PlanningRuntime::default();
+        runtime.samples.push((id, 0, 12.0, 3.0, 1));
+        runtime.finish_advance(&world, 0);
+        let saved = runtime.history(id).unwrap().clone();
+        runtime.samples.push((id, 0, 99.0, 99.0, 1));
+        assert!(
+            world
+                .advance_with_planner(&mut runtime, 1, || true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runtime.history(id), Some(&saved));
+        assert!(runtime.samples.is_empty());
+        let empty = Universe::with_map(Map::default())
+            .advance(u64::MAX)
+            .unwrap();
+        assert_eq!(
+            empty.advance_with_planner(&mut runtime, 1, || false),
+            Err(SimulationError::TimeOverflow)
+        );
+        assert_eq!(runtime.history(id), Some(&saved));
+        runtime.reset();
+        assert!(runtime.history(id).is_none());
+    }
+
+    #[test]
+    fn telemetry_closes_daily_and_attributes_requests_to_adoption_day() {
+        let (world, id) = universe(Citizen::new(0.0).unwrap());
+        let mut runtime = PlanningRuntime::default();
+        let boundary = crate::marketplace::UPDATE_TIME_MS;
+        runtime.samples.push((id, boundary, 12.0, 3.0, 2));
+        runtime.finish_advance(&world, boundary);
+        let history = runtime.history(id).unwrap();
+        assert_eq!(history.completed.len(), 1);
+        assert_eq!(history.completed[0].requests, 0);
+        assert_eq!(history.current.start_ms, boundary);
+        assert_eq!(history.current.requests, 2);
+        assert_eq!(history.current.request_ms, 12.0);
+        assert_eq!(history.current.wait_ms, 3.0);
+        runtime.finish_advance(&world, boundary + 31 * crate::marketplace::DAY_MS);
+        assert_eq!(runtime.history(id).unwrap().completed.len(), 30);
     }
 
     #[test]

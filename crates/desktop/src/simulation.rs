@@ -41,6 +41,10 @@ struct TimedCommand {
 #[derive(Clone)]
 pub struct Snapshot {
     pub universe: Universe,
+    pub planning_history: std::collections::HashMap<
+        learning_lord_simulation::AgentId,
+        learning_lord_simulation::history::PlanningHistory,
+    >,
     pub error: Option<String>,
     pub generation: u64,
     pub revision: u64,
@@ -66,6 +70,7 @@ impl SimulationWorker {
     ) -> Self {
         let snapshot = Arc::new(Mutex::new(Snapshot {
             universe: universe.clone(),
+            planning_history: Default::default(),
             error: None,
             generation: 0,
             revision: 0,
@@ -320,6 +325,17 @@ impl WorkerState {
         let mut published = published.lock().expect("snapshot lock poisoned");
         *published = Snapshot {
             universe: self.universe.clone(),
+            planning_history: self
+                .universe
+                .agents()
+                .keys()
+                .filter_map(|id| {
+                    self.planner
+                        .history(*id)
+                        .cloned()
+                        .map(|history| (*id, history))
+                })
+                .collect(),
             error: self.error.clone(),
             generation: self.generation,
             revision: published.revision + 1,

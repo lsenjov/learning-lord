@@ -1,3 +1,4 @@
+mod citizen_history;
 mod citizens;
 mod debug_export;
 mod map_view;
@@ -100,6 +101,7 @@ fn main() -> Result<(), String> {
     .init_resource::<Controls>()
     .init_resource::<citizens::Selection>()
     .init_resource::<citizens::PlanDisplay>()
+    .init_resource::<citizen_history::Selection>()
     .init_resource::<market::Selection>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
@@ -112,6 +114,8 @@ fn main() -> Result<(), String> {
             poll_worker,
             handle_controls,
             citizens::handle_selection,
+            citizen_history::handle_selection,
+            citizen_history::refresh,
             market::handle_selection,
             refresh_display,
             citizens::refresh_cards,
@@ -843,6 +847,7 @@ mod tests {
             .init_resource::<Controls>()
             .init_resource::<citizens::Selection>()
             .init_resource::<citizens::PlanDisplay>()
+            .init_resource::<citizen_history::Selection>()
             .init_resource::<market::Selection>()
             .init_resource::<market::OrderDisplay>()
             .init_resource::<market_history::ChartDisplay>()
@@ -857,6 +862,8 @@ mod tests {
                     poll_worker,
                     handle_controls,
                     citizens::handle_selection,
+                    citizen_history::handle_selection,
+                    citizen_history::refresh,
                     market::handle_selection,
                     refresh_display,
                     citizens::refresh_cards,

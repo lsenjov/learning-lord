@@ -373,6 +373,10 @@ impl PlanningRequest {
         self.roots.cancel();
     }
 
+    pub(crate) fn elapsed(&self) -> std::time::Duration {
+        self.roots.elapsed()
+    }
+
     pub(crate) fn try_result(&mut self) -> Option<Result<Plan, SimulationError>> {
         self.roots.try_result().map(|results| {
             reduce_results(&self.citizen, std::mem::take(&mut self.production), results)

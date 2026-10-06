@@ -10,6 +10,7 @@ use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
 mod background;
 pub mod planning;
 pub use background::PlanningRuntime;
+pub mod history;
 pub mod production;
 
 pub type Quantity = u64;
@@ -996,6 +997,7 @@ pub struct Universe {
     market: Market,
     map: Map,
     agents: HashMap<AgentId, Agent>,
+    citizen_histories: HashMap<AgentId, history::CitizenHistory>,
 }
 
 impl Default for Universe {
@@ -1005,6 +1007,7 @@ impl Default for Universe {
             market: Market::default(),
             map: Map::random(),
             agents: HashMap::new(),
+            citizen_histories: HashMap::new(),
         }
     }
 }
@@ -1050,6 +1053,10 @@ impl Universe {
         self.current_time_ms
     }
 
+    pub fn citizen_history(&self, id: AgentId) -> Option<&history::CitizenHistory> {
+        self.citizen_histories.get(&id)
+    }
+
     pub fn agents(&self) -> &HashMap<AgentId, Agent> {
         &self.agents
     }
@@ -1090,6 +1097,9 @@ impl Universe {
             let AgentKind::Citizen(existing) = &mut agent.kind;
             existing.map = universe.map.clone();
         }
+        let mut history = history::CitizenHistory::new(universe.current_time_ms, &citizen);
+        history.start_action(&citizen)?;
+        universe.citizen_histories.insert(id, history);
         universe.agents.insert(
             id,
             Agent {
@@ -1143,9 +1153,12 @@ impl Universe {
         elapsed_ms: u64,
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<Option<Self>, SimulationError> {
-        let result = self.advance_internal(elapsed_ms, Some(runtime), &mut should_cancel);
+        let result = self.advance_internal(elapsed_ms, Some(&mut *runtime), &mut should_cancel);
+        if let Ok(Some(universe)) = &result {
+            runtime.finish_advance(self, universe.current_time_ms());
+        }
         if !matches!(result, Ok(Some(_))) {
-            runtime.reset();
+            runtime.abort_advance();
         }
         result
     }
@@ -1210,6 +1223,8 @@ impl Universe {
                 .min(boundary)
                 .min(planning_boundary);
             let finishing_time = universe.current_time_ms + step;
+            let trades_before = universe.market.trades().len();
+            let agents_before = universe.agents.clone();
             for id in &ids {
                 let agent = universe.agents.get_mut(id).unwrap();
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
@@ -1219,6 +1234,14 @@ impl Universe {
                 let execution = citizen.active_plan.take();
                 let (updated, payments) =
                     citizen.advance_action_with_settlement(step, false, true)?;
+                universe.citizen_histories.get_mut(id).unwrap().advance(
+                    match &agents_before[id].kind {
+                        AgentKind::Citizen(before) => before,
+                    },
+                    &updated,
+                    step,
+                    finishing_time,
+                )?;
                 *citizen = updated;
                 if let Some(mut execution) = execution {
                     execution.record_elapsed(step)?;
@@ -1237,7 +1260,24 @@ impl Universe {
                         .ok_or(SimulationError::WealthOverflow)?;
                 }
             }
+            for trade in universe.market.trades().iter().skip(trades_before) {
+                for id in [trade.buyer, trade.seller] {
+                    universe
+                        .citizen_histories
+                        .get_mut(&id)
+                        .unwrap()
+                        .trade(id, trade)?;
+                }
+            }
             universe.current_time_ms = finishing_time;
+            for id in &ids {
+                let AgentKind::Citizen(citizen) = &universe.agents[id].kind;
+                universe
+                    .citizen_histories
+                    .get_mut(id)
+                    .unwrap()
+                    .close_day(finishing_time, citizen);
+            }
             if step == until_update {
                 universe.refresh_market();
                 universe.market.update(finishing_time)?;
@@ -1276,6 +1316,11 @@ impl Universe {
                         execution.resume(citizen.clone())?
                     };
                     citizen.active_plan = Some(execution);
+                    universe
+                        .citizen_histories
+                        .get_mut(&id)
+                        .unwrap()
+                        .start_action(citizen)?;
                     new_actions.push(id);
                 }
             }
@@ -1372,6 +1417,12 @@ impl Universe {
         let agent = self.agents.get(&id).ok_or(SimulationError::AgentNotFound)?;
         let updated = agent.start_action(action)?;
         let mut universe = self.clone();
+        let AgentKind::Citizen(citizen) = &updated.kind;
+        universe
+            .citizen_histories
+            .get_mut(&id)
+            .unwrap()
+            .start_action(citizen)?;
         universe.agents.insert(id, updated);
         universe.register_action_request(id)?;
         universe.refresh_market();
@@ -1388,6 +1439,12 @@ impl Universe {
         citizen.refresh_production_targets(false)?;
         let updated = agent.start_planning()?;
         let mut universe = self.clone();
+        let AgentKind::Citizen(citizen) = &updated.kind;
+        universe
+            .citizen_histories
+            .get_mut(&id)
+            .unwrap()
+            .start_action(citizen)?;
         universe.agents.insert(id, updated);
         universe.register_action_request(id)?;
         universe.refresh_market();
