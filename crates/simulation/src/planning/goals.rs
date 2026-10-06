@@ -1262,6 +1262,9 @@ mod tests {
             .with_good(Good::Berries, 0.0)
             .unwrap();
         source.refresh_production_targets(true).unwrap();
+        let targets = source.production_targets().unwrap();
+        assert!(targets.remaining_batches(Recipe::BakeBerryPie) > 0.0);
+        assert!(targets.remaining_batches(Recipe::BakeBread) > 0.0);
         assert!(
             production_prefixes(Prediction::new(&source, Cooldowns::default()), 0)
                 .unwrap()

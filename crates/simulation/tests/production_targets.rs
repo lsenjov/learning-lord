@@ -151,7 +151,7 @@ fn skill_adjusted_floor_subtracts_adas_existing_listing() {
 }
 
 #[test]
-fn completed_work_reduces_capacity_without_shrinking_the_stock_floor() {
+fn completed_work_counts_as_stock_without_shrinking_the_stock_floor() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Farmer",
@@ -192,7 +192,7 @@ fn in_progress_output_counts_toward_the_floor() {
 }
 
 #[test]
-fn each_profitable_good_has_a_floor_with_a_shared_work_budget() {
+fn each_profitable_good_has_an_independent_twelve_hour_floor() {
     let (universe, baker) = producer(
         Universe::with_map(Map::default()),
         "Baker",
@@ -208,13 +208,18 @@ fn each_profitable_good_has_a_floor_with_a_shared_work_budget() {
     );
     let target = targets(&universe, baker);
     assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 4.0);
-    assert_eq!(target.remaining_batches(Recipe::BakeBread), 6.0);
+    assert_eq!(target.remaining_batches(Recipe::BakeBread), 12.0);
     let worker = citizen(&universe, baker);
     let work: f64 = target
         .batches()
+        .filter(|(recipe, _)| matches!(recipe, Recipe::BakeBread | Recipe::BakeBerryPie))
         .map(|(recipe, count)| count * recipe.duration_ms(worker).unwrap() as f64)
         .sum();
-    assert_eq!(work, DAILY_CAPACITY_MS as f64);
+    assert_eq!(work, (18 * 60 * 60_000) as f64);
+    let unstocked = worker.with_good(Good::BerryPie, 0.0).unwrap();
+    let full = ProductionTargets::calculate(&unstocked, 0).unwrap();
+    assert_eq!(full.remaining_batches(Recipe::BakeBerryPie), 8.0);
+    assert_eq!(full.remaining_batches(Recipe::BakeBread), 12.0);
 }
 
 #[test]
@@ -238,7 +243,7 @@ fn low_positive_demand_keeps_the_daily_floor() {
 }
 
 #[test]
-fn shared_recipe_inputs_and_cash_cannot_fund_each_recipe_independently() {
+fn alternative_recipes_each_use_the_same_inputs_and_cash() {
     for (flour, wood, water, coins) in [(100.0, 25.0, 100.0, 0.0), (0.0, 0.0, 0.0, 0.123)] {
         let (universe, baker) = producer(
             Universe::with_map(Map::default()),
@@ -255,7 +260,8 @@ fn shared_recipe_inputs_and_cash_cannot_fund_each_recipe_independently() {
         let target = targets(&universe, baker);
         let bread = target.remaining_batches(Recipe::BakeBread);
         let pie = target.remaining_batches(Recipe::BakeBerryPie);
-        assert_eq!(bread + pie, 1.0, "shared inputs or coins were spent twice");
+        assert_eq!(bread, 1.0);
+        assert_eq!(pie, 1.0);
     }
 }
 
@@ -425,7 +431,7 @@ fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
 }
 
 #[test]
-fn daily_capacity_subtracts_completed_work_and_active_batch_remaining_time() {
+fn completed_and_active_work_do_not_shrink_alternative_capacity() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Farmer",
@@ -444,29 +450,12 @@ fn daily_capacity_subtracts_completed_work_and_active_batch_remaining_time() {
         .start_action(CitizenAction::Produce(Recipe::GrowWheat))
         .unwrap();
     let partial = second.advance(20 * 60_000).unwrap();
-    let active = partial.active_action().unwrap();
     assert_eq!(partial.production_work_today_ms(), 80 * 60_000);
-    let free_time = DAILY_CAPACITY_MS - partial.production_work_today_ms() - active.remaining_ms();
-    let available_batches = free_time / Recipe::GrowWheat.duration_ms(&partial).unwrap();
+    let daily_batches = DAILY_CAPACITY_MS / Recipe::GrowWheat.duration_ms(&partial).unwrap();
     let target = ProductionTargets::calculate(&partial, 80 * 60_000).unwrap();
     assert_eq!(
         target.remaining_batches(Recipe::GrowWheat),
-        available_batches as f64 + 1.0
-    );
-    let future_time: f64 = target
-        .batches()
-        .map(|(recipe, count)| {
-            let future = if recipe == Recipe::GrowWheat {
-                count - 1.0
-            } else {
-                count
-            };
-            future * recipe.duration_ms(&partial).unwrap() as f64
-        })
-        .sum();
-    assert!(
-        future_time + active.remaining_ms() as f64 + partial.production_work_today_ms() as f64
-            <= DAILY_CAPACITY_MS as f64
+        daily_batches as f64 + 1.0
     );
 }
 
@@ -492,9 +481,9 @@ fn remaining_recipe_inputs_and_personal_food_use_separate_portions_of_inventory(
     assert_eq!(target.remaining_batches(Recipe::BakeBread), 1.0);
     assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 1.0);
     let reserves = worker.reserved_goods().unwrap();
-    assert_eq!(reserves.grams(Good::Flour), 200.0);
-    assert_eq!(reserves.grams(Good::Wood), 50.0);
-    assert_eq!(reserves.grams(Good::Water), 150.0);
+    assert_eq!(reserves.grams(Good::Flour), 100.0);
+    assert_eq!(reserves.grams(Good::Wood), 25.0);
+    assert_eq!(reserves.grams(Good::Water), 100.0);
     assert_eq!(reserves.grams(Good::Berries), 1030.0);
     assert_eq!(worker.excess_goods().unwrap().grams(Good::Berries), 100.0);
     assert_eq!(citizen(&universe, baker).production_targets(), None);

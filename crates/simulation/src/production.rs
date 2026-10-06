@@ -185,20 +185,16 @@ impl ProductionTargets {
         };
         let active = citizen.active_action().and_then(|active| {
             if let crate::CitizenAction::Produce(recipe) = active.action() {
-                Some((recipe, active.remaining_ms()))
+                Some(recipe)
             } else {
                 None
             }
         });
-        let active_time = active.map_or(0, |(_, remaining)| remaining);
-        let mut capacity = DAILY_CAPACITY_MS
-            .saturating_sub(citizen.production_work_today_ms())
-            .saturating_sub(active_time) as f64;
         let mut stocks: [f64; Good::COUNT] = std::array::from_fn(|i| {
             citizen.grams(Good::ALL[i]) + citizen.market().listed_grams(citizen.id(), Good::ALL[i])
         });
-        let mut coins = citizen.coins().max(0.0);
-        if let Some((recipe, _)) = active {
+        let coins = citizen.coins().max(0.0);
+        if let Some(recipe) = active {
             for &(good, grams) in recipe.inputs() {
                 stocks[good as usize] = (stocks[good as usize] - grams).max(0.0);
             }
@@ -247,7 +243,7 @@ impl ProductionTargets {
                 let desired = (sales / observed_days + unmet).max(yield_grams * daily_batches);
                 let owned = citizen.grams(good) + citizen.market().listed_grams(citizen.id(), good);
                 let saleable = (owned - personal_reserve[good as usize]).max(0.0);
-                let progress = active.map_or(0.0, |(active, _)| {
+                let progress = active.map_or(0.0, |active| {
                     active
                         .outputs()
                         .iter()
@@ -258,7 +254,7 @@ impl ProductionTargets {
                 wanted =
                     wanted.max(((desired - saleable - progress).max(0.0) / yield_grams).ceil());
             }
-            let mut count = wanted.min((capacity / duration).floor());
+            let mut count = wanted.min(daily_batches);
             if count <= 0.0 {
                 continue;
             }
@@ -292,14 +288,9 @@ impl ProductionTargets {
             if count <= 0.0 {
                 continue;
             }
-            coins = (coins - cost(count).ok_or(SimulationError::WealthOverflow)?).max(0.0);
-            for &(good, grams) in recipe.inputs() {
-                stocks[good as usize] = (stocks[good as usize] - grams * count).max(0.0);
-            }
             target.remaining_batches[recipe as usize] = count;
-            capacity -= duration * count;
         }
-        if let Some((recipe, _)) = active {
+        if let Some(recipe) = active {
             target.remaining_batches[recipe as usize] += 1.0;
         }
         Ok(target)

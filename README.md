@@ -136,7 +136,7 @@ cargo test -p learning-lord-simulation --locked
 ## Daily production targets
 
 - For each profitable recipe output, the stock target is the greater of estimated daily sales plus unmet demand and twelve hours of output. The minimum uses whole batches at the citizen's current skill, even on days with little demand.
-- Carried and listed saleable stock and output already underway count toward that target. Personal food reserves remain separate. Recipes compete for one twelve-hour daily work budget in profit-per-hour order, subject to available inputs, funds, skills and property.
+- Carried and listed saleable stock and output already underway count toward that target. Personal food reserves remain separate. Each recipe independently considers twelve hours of future production against the same available inputs and funds, subject to skills and property. These targets are alternatives; planning tries recipes in profit-per-hour order and moves on when inputs cannot be supplied within its four-hour window. Completed work does not reduce the stock target. Ingredient reserves and standing purchase demand use the maximum requirement for each good across these alternatives. Inputs committed to an underway batch are added separately after subtracting that batch from its future alternative. Personal food is reserved after production ingredients; purchase shortages subtract carried and owned listed stock.
 
 ## Last planning decision
 

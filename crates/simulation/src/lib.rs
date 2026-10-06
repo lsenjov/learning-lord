@@ -494,15 +494,30 @@ impl Citizen {
         }
     }
 
-    pub fn reserved_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
-        let mut reserve = [0.0; Good::COUNT];
+    fn production_ingredient_reserve(&self) -> [f64; Good::COUNT] {
+        let active = self.active_action.and_then(|active| match active.action {
+            CitizenAction::Produce(recipe) => Some(recipe),
+            _ => None,
+        });
+        let mut reserve = [0.0_f64; Good::COUNT];
         if let Some(targets) = &self.production_targets {
             for (recipe, count) in targets.batches() {
+                let future = (count - f64::from(active == Some(recipe))).max(0.0);
                 for &(good, grams) in recipe.inputs() {
-                    reserve[good as usize] += grams * count;
+                    reserve[good as usize] = reserve[good as usize].max(grams * future);
                 }
             }
         }
+        if let Some(recipe) = active {
+            for &(good, grams) in recipe.inputs() {
+                reserve[good as usize] += grams;
+            }
+        }
+        reserve
+    }
+
+    pub fn reserved_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
+        let mut reserve = self.production_ingredient_reserve();
         let mut nutrition = FOOD_RESERVE_CAP_NUTRITION;
         for good in Good::FOOD {
             let available = (self.grams(good) - reserve[good as usize]).max(0.0);
@@ -518,14 +533,7 @@ impl Citizen {
     }
 
     pub fn purchase_shortages(&self) -> Result<marketplace::ShoppingList, SimulationError> {
-        let mut needed = [0.0; Good::COUNT];
-        if let Some(targets) = &self.production_targets {
-            for (recipe, count) in targets.batches() {
-                for &(good, grams) in recipe.inputs() {
-                    needed[good as usize] += grams * count;
-                }
-            }
-        }
+        let mut needed = self.production_ingredient_reserve();
         for good in Good::ALL {
             let held = self.grams(good) + self.market.listed_grams(self.id, good);
             needed[good as usize] = (needed[good as usize] - held).max(0.0);
@@ -1314,6 +1322,93 @@ impl std::error::Error for SimulationError {}
 mod tests {
     use super::*;
     use rand::SeedableRng;
+
+    fn baker_with_targets() -> Citizen {
+        let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Baker)
+            .with_coins(100.0)
+            .unwrap();
+        let (universe, id) = Universe::with_map(Map::default())
+            .with_citizen("Baker", worker)
+            .unwrap();
+        let (universe, _) = universe
+            .with_property(id, production::Recipe::BakeBread.location())
+            .unwrap();
+        let AgentKind::Citizen(worker) = &universe.agents()[&id].kind;
+        let mut worker = worker.clone();
+        worker.production_targets =
+            Some(production::ProductionTargets::calculate(&worker, 0).unwrap());
+        worker
+    }
+
+    #[test]
+    fn alternative_ingredient_reserves_use_each_goods_maximum_requirement() {
+        let worker = baker_with_targets();
+        let targets = worker.production_targets().unwrap();
+        assert_eq!(
+            targets.remaining_batches(production::Recipe::BakeBread),
+            12.0
+        );
+        assert_eq!(
+            targets.remaining_batches(production::Recipe::BakeBerryPie),
+            8.0
+        );
+        let reserve = worker.reserved_goods().unwrap();
+        assert_eq!(reserve.grams(Good::Flour), 1200.0);
+        assert_eq!(reserve.grams(Good::Wood), 300.0);
+        assert_eq!(reserve.grams(Good::Water), 1200.0);
+        assert_eq!(reserve.grams(Good::Berries), 800.0);
+        assert_eq!(worker.purchase_shortages().unwrap(), reserve);
+    }
+
+    #[test]
+    fn active_ingredients_are_added_after_maximizing_future_alternatives() {
+        let worker = baker_with_targets()
+            .with_good(Good::Flour, 100.0)
+            .unwrap()
+            .with_good(Good::Wood, 25.0)
+            .unwrap()
+            .with_good(Good::Water, 100.0)
+            .unwrap()
+            .with_good(Good::Berries, 100.0)
+            .unwrap();
+        let bread = worker
+            .start_action(CitizenAction::Produce(production::Recipe::BakeBread))
+            .unwrap();
+        assert_eq!(bread.reserved_goods().unwrap().grams(Good::Flour), 1200.0);
+        let pie = worker
+            .start_action(CitizenAction::Produce(production::Recipe::BakeBerryPie))
+            .unwrap();
+        let reserve = pie.reserved_goods().unwrap();
+        assert_eq!(reserve.grams(Good::Flour), 1300.0);
+        assert_eq!(reserve.grams(Good::Wood), 325.0);
+        assert_eq!(reserve.grams(Good::Water), 1250.0);
+        assert_eq!(reserve.grams(Good::Berries), 800.0);
+        let shortages = pie.purchase_shortages().unwrap();
+        assert_eq!(shortages.grams(Good::Flour), 1200.0);
+        assert_eq!(shortages.grams(Good::Berries), 700.0);
+    }
+
+    #[test]
+    fn shortages_deduct_carried_and_listed_stock_from_alternative_reserves() {
+        let worker = baker_with_targets().with_good(Good::Flour, 500.0).unwrap();
+        let worker = worker
+            .start_action(CitizenAction::List(Good::Flour, 200.0))
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        assert_eq!(worker.grams(Good::Flour), 300.0);
+        assert_eq!(
+            worker.market().listed_grams(worker.id(), Good::Flour),
+            200.0
+        );
+        assert_eq!(worker.reserved_goods().unwrap().grams(Good::Flour), 1200.0);
+        assert_eq!(
+            worker.purchase_shortages().unwrap().grams(Good::Flour),
+            700.0
+        );
+    }
 
     #[test]
     fn prediction_uses_average_yield_without_advancing_the_random_stream() {

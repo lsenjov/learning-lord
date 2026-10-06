@@ -1,10 +1,10 @@
 # Daily production stock floor
 
-Replace the one-batch exploratory fallback with a minimum stock target for each profitable output: whole batches producible in twelve hours at current skill. Demand can increase that target. Keep saleable stock and in-progress deductions, personal reserves, profit ordering, and the shared daily work/input/funds constraints.
+Replace the one-batch exploratory fallback with a minimum stock target for each profitable output: whole batches producible in twelve hours at current skill. Demand can increase that target. Keep saleable stock and in-progress deductions, personal reserves, profit ordering, and independent twelve-hour alternatives evaluated against current inputs and funds. Use the maximum ingredient requirement per good across alternatives, plus separately committed underway inputs; reserve personal food afterwards and deduct carried/listed stock from purchase demand.
 
 ## Step
 
-1. Update target calculation, document current policy, and verify no-demand/low-demand floors, skill adjustment, carried/listed/in-progress stock, independent goods sharing work, demand above the floor, and unprofitable recipes. Run simulation checks and a bounded town/performance smoke test; obtain independent Sol-6.1 review and resolve high/medium findings before committing.
+1. Update target calculation, document current policy, and verify no-demand/low-demand floors, skill adjustment, carried/listed/in-progress stock, independent goods without competing for work, inputs or funds, demand above the floor, and unprofitable recipes. Run simulation checks and a bounded town/performance smoke test; obtain independent Sol-6.1 review and resolve high/medium findings before committing.
 
 ## Validation
 
