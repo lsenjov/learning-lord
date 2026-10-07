@@ -952,7 +952,7 @@ mod tests {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert_eq!(citizen.hunger(), -50.0);
             assert_eq!(citizen.tiredness(), -66.6);
-            assert_eq!(citizen.coins(), 300);
+            assert_eq!(citizen.coins(), 3000);
             assert_eq!(citizen.berries_units(), 310);
             assert_eq!(citizen.garment_condition(), Some(0.5));
             assert_eq!(citizen.map(), universe.map());
@@ -1162,7 +1162,7 @@ mod tests {
         assert_eq!(citizen.map(), state.universe.map());
         assert_eq!(citizen.hunger(), -50.0);
         assert_eq!(citizen.tiredness(), -66.6);
-        assert_eq!(citizen.coins(), 300);
+        assert_eq!(citizen.coins(), 3000);
         assert!(citizen.active_plan().is_some());
     }
 

@@ -185,8 +185,8 @@ pub fn starting_inputs(role: crate::StartingRole) -> crate::marketplace::Shoppin
 }
 
 pub fn starting_coins(_role: crate::StartingRole) -> Coins {
-    let base = 100;
-    let purchase_allowance = 200;
+    let base = 1000;
+    let purchase_allowance = 2000;
     base + purchase_allowance
 }
 
