@@ -16,7 +16,7 @@
 ## Steps
 
 1. [x] Implement simulation policy, reserve accounting, tariff pricing and settlement, history and immutable mutation APIs. Full simulation suite passed; independent review approved the backend and settlement regressions.
-2. [ ] Add market controls and effective-price/reserve/revenue displays, update documentation and tests. Complete workspace checks, independent review and commit.
+2. [x] Add market controls and effective-price/reserve/revenue displays, update documentation and tests. Independent review approved; 362 workspace tests passed with two manual benchmarks ignored. After UI signature cleanup, all 84 desktop tests, strict workspace Clippy, formatting and diff checks passed.
 
 ## Validation
 

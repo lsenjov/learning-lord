@@ -121,12 +121,24 @@ pub struct State {
 
 impl State {
     #[cfg(test)]
+    pub fn pending_fixture() -> Self {
+        Self {
+            awaiting_mutation: Some((0, false)),
+            ..default()
+        }
+    }
+
+    #[cfg(test)]
     pub fn focused_fixture() -> Self {
         Self {
             draft: Some(Draft::default()),
             field: Some(Field::Name),
             ..default()
         }
+    }
+
+    pub fn pending(&self) -> bool {
+        self.awaiting_mutation.is_some()
     }
 
     pub fn editing(&self) -> bool {
@@ -687,7 +699,7 @@ fn next_citizen(universe: &Universe, current: Option<AgentId>) -> Option<AgentId
     Some(ids[index])
 }
 
-fn percentage(value: &str) -> Result<TaxRate, String> {
+pub(crate) fn percentage(value: &str) -> Result<TaxRate, String> {
     let value = value.trim();
     let (whole, fractional) = value.split_once('.').unwrap_or((value, ""));
     if fractional.len() > 2 || !fractional.chars().all(|c| c.is_ascii_digit()) {
@@ -770,11 +782,12 @@ fn tax_kind(draft: &Draft, goods: &[Good]) -> Result<TaxKind, String> {
 
 pub fn handle(
     mut state: ResMut<State>,
-    snapshot: Res<DisplaySnapshot>,
-    worker: Res<SimulationWorker>,
+    (snapshot, worker): (Res<DisplaySnapshot>, Res<SimulationWorker>),
     view: Res<market::Selection>,
     buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
     mut keys: MessageReader<KeyboardInput>,
+    caravan: Option<Res<crate::caravan_controls::State>>,
+    controls: Option<Res<crate::Controls>>,
 ) {
     if state.generation != snapshot.0.generation {
         *state = State {
@@ -782,6 +795,11 @@ pub fn handle(
             dirty: true,
             ..default()
         };
+        keys.clear();
+        return;
+    }
+    if controls.is_some_and(|controls| controls.restart_pending) {
+        state.field = None;
         keys.clear();
         return;
     }
@@ -981,6 +999,10 @@ pub fn handle(
             },
         };
         if let Some(mutation) = mutation {
+            if caravan.as_ref().is_some_and(|editor| editor.pending()) {
+                state.error = Some("Another change is saving. Try again when it finishes.".into());
+                continue;
+            }
             state.awaiting_mutation =
                 Some((snapshot.0.mutation_revision, matches!(choice, Choice::Save)));
             if let Err(error) = worker.send(Command::Mutate {

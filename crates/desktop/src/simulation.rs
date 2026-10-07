@@ -36,6 +36,14 @@ pub enum Command {
 
 #[derive(Clone)]
 pub enum Mutation {
+    SaveExportPolicy {
+        good: learning_lord_simulation::marketplace::Good,
+        policy: learning_lord_simulation::marketplace::ExportPolicy,
+    },
+    SaveTariffs {
+        import_basis_points: u16,
+        export_basis_points: u16,
+    },
     SaveTax {
         scope: learning_lord_simulation::taxation::TaxScope,
         id: Option<learning_lord_simulation::taxation::TaxRuleId>,
@@ -55,6 +63,20 @@ pub enum Mutation {
 impl Mutation {
     fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
         match self {
+            Self::SaveExportPolicy { good, policy } => {
+                let mut next = universe.caravan_policy();
+                next.exports[good as usize] = policy;
+                universe.with_caravan_policy(next)
+            }
+            Self::SaveTariffs {
+                import_basis_points,
+                export_basis_points,
+            } => {
+                let mut next = universe.caravan_policy();
+                next.import_tariff_basis_points = import_basis_points;
+                next.export_tariff_basis_points = export_basis_points;
+                universe.with_caravan_policy(next)
+            }
             Self::SaveTax {
                 scope,
                 id,
@@ -576,6 +598,47 @@ mod tests {
             mutation_revision: 0,
             generation: 0,
         }
+    }
+
+    #[test]
+    fn caravan_mutations_update_only_their_fields_and_validate_atomically() {
+        use learning_lord_simulation::marketplace::{ExportPolicy, Good};
+        let original = Universe::default();
+        let export = ExportPolicy {
+            allowed: false,
+            minimum_reserve: 123,
+        };
+        let universe = Mutation::SaveExportPolicy {
+            good: Good::Bread,
+            policy: export,
+        }
+        .apply(&original)
+        .unwrap();
+        let universe = Mutation::SaveTariffs {
+            import_basis_points: 5000,
+            export_basis_points: 2500,
+        }
+        .apply(&universe)
+        .unwrap();
+        assert_eq!(
+            universe.caravan_policy().exports[Good::Bread as usize],
+            export
+        );
+        assert_eq!(universe.caravan_policy().import_tariff_basis_points, 5000);
+        assert!(
+            Mutation::SaveTariffs {
+                import_basis_points: 10_001,
+                export_basis_points: 0
+            }
+            .apply(&universe)
+            .is_err()
+        );
+        assert_eq!(universe.caravan_policy().import_tariff_basis_points, 5000);
+        assert_eq!(
+            original.caravan_policy().exports[Good::Bread as usize].minimum_reserve,
+            0
+        );
+        assert_eq!(original.caravan_policy().import_tariff_basis_points, 0);
     }
 
     #[test]

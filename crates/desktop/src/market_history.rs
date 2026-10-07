@@ -541,9 +541,9 @@ mod tests {
         assert!(label.contains("CLOSED | quantities at close"));
         assert!(label.contains("total traded: 6 loaves"));
         assert!(label.contains("Local trades: 1 loaf | 20 coins"));
-        assert!(label.contains("Exports: 2 loaves | 15 coins entering town"));
+        assert!(label.contains("Exports: 2 loaves | 15 gross coins entering town"));
         assert!(label.contains("Import deliveries: 4 loaves"));
-        assert!(label.contains("Bought from caravans: 3 loaves | 91 coins leaving town"));
+        assert!(label.contains("Bought from caravans: 3 loaves | 91 gross coins spent"));
         assert!(label.contains("caravan: 1 loaf"));
         day.partial = true;
         assert!(hover_label(Good::Bread, &day).contains("PARTIAL | live quantities so far"));

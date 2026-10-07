@@ -1,5 +1,7 @@
 # Core prices and daily caravans
 
+The later [Caravan controls and tariffs](caravan-controls-and-tariffs.md) plan extends this base behaviour with export toggles, reserves and tariff-adjusted thresholds and payments. Production core prices remain unchanged.
+
 ## Agreed behaviour
 
 - Labour baseline: 10 coins per production hour, with a 30% markup at every recipe stage.

@@ -1,3 +1,4 @@
+mod caravan_controls;
 mod citizen_history;
 mod citizens;
 mod debug_export;
@@ -8,6 +9,7 @@ mod market_history;
 mod simulation;
 
 use bevy::{
+    ecs::system::SystemParam,
     input_focus::{FocusCause, InputFocus},
     prelude::*,
     render::pipelined_rendering::PipelinedRenderingPlugin,
@@ -21,6 +23,22 @@ const PANEL: Color = Color::srgb(0.10, 0.13, 0.16);
 const TEXT: Color = Color::srgb(0.92, 0.95, 0.94);
 const MUTED: Color = Color::srgb(0.58, 0.66, 0.69);
 const SELECTED: Color = Color::srgb(0.12, 0.38, 0.30);
+
+#[derive(SystemParam)]
+struct KeyboardShortcuts<'w> {
+    keyboard: Res<'w, ButtonInput<KeyCode>>,
+    locations: Option<Res<'w, locations::State>>,
+    caravan: Option<Res<'w, caravan_controls::State>>,
+}
+
+impl KeyboardShortcuts<'_> {
+    fn editing(&self) -> bool {
+        self.locations
+            .as_ref()
+            .is_some_and(|editor| editor.editing())
+            || self.caravan.as_ref().is_some_and(|editor| editor.editing())
+    }
+}
 
 #[derive(Resource)]
 struct Controls {
@@ -104,6 +122,7 @@ fn main() -> Result<(), String> {
     .init_resource::<citizen_history::Selection>()
     .init_resource::<market::Selection>()
     .init_resource::<locations::State>()
+    .init_resource::<caravan_controls::State>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
     .init_resource::<debug_export::DebugExport>()
@@ -114,6 +133,7 @@ fn main() -> Result<(), String> {
         (
             poll_worker,
             locations::handle,
+            caravan_controls::handle,
             handle_controls,
             citizens::handle_selection,
             citizen_history::handle_selection,
@@ -128,6 +148,7 @@ fn main() -> Result<(), String> {
             market::refresh_choices,
             market::refresh,
             locations::refresh,
+            caravan_controls::refresh,
             market_history::refresh,
             market_history::hover,
         )
@@ -272,7 +293,7 @@ fn apply_control(control: Control, controls: &mut Controls, worker: &SimulationW
 }
 
 fn handle_controls(
-    (keyboard, editor): (Res<ButtonInput<KeyCode>>, Option<Res<locations::State>>),
+    shortcuts: KeyboardShortcuts,
     buttons: Query<(Entity, &Interaction, &Control), Changed<Interaction>>,
     mut focus: ResMut<InputFocus>,
     mut controls: ResMut<Controls>,
@@ -280,7 +301,8 @@ fn handle_controls(
     snapshot: Res<DisplaySnapshot>,
     mut exporter: ResMut<debug_export::DebugExport>,
 ) {
-    let editing = editor.is_some_and(|editor| editor.editing());
+    let editing = shortcuts.editing();
+    let keyboard = &shortcuts.keyboard;
     if !editing && keyboard.just_pressed(KeyCode::Space) {
         apply_control(Control::ToggleRunning, &mut controls, &worker);
     }
@@ -709,6 +731,36 @@ mod tests {
     }
 
     #[test]
+    fn typing_in_caravan_editor_suppresses_simulation_shortcuts() {
+        let worker = SimulationWorker::spawn(Universe::default(), 60.try_into().unwrap());
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(worker.snapshot()))
+            .insert_resource(worker)
+            .init_resource::<Controls>()
+            .init_resource::<InputFocus>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<debug_export::DebugExport>()
+            .insert_resource(caravan_controls::State::focused_fixture())
+            .add_systems(Update, handle_controls);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Space);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowRight);
+        app.update();
+        assert!(!app.world().resource::<Controls>().running);
+        assert_eq!(
+            app.world()
+                .resource::<SimulationWorker>()
+                .snapshot()
+                .universe
+                .current_time_ms(),
+            0
+        );
+    }
+
+    #[test]
     fn decision_panel_shows_reachable_hunger_and_uses_saved_prices() {
         use learning_lord_simulation::marketplace::Prices;
         let prices = Prices::new(2.0).unwrap();
@@ -951,6 +1003,7 @@ mod tests {
             .init_resource::<citizen_history::Selection>()
             .init_resource::<market::Selection>()
             .init_resource::<locations::State>()
+            .init_resource::<caravan_controls::State>()
             .init_resource::<market::OrderDisplay>()
             .init_resource::<market_history::ChartDisplay>()
             .init_resource::<debug_export::DebugExport>()
@@ -964,6 +1017,7 @@ mod tests {
                 (
                     poll_worker,
                     locations::handle,
+                    caravan_controls::handle,
                     handle_controls,
                     citizens::handle_selection,
                     citizen_history::handle_selection,
@@ -978,6 +1032,7 @@ mod tests {
                     market::refresh_choices,
                     market::refresh,
                     locations::refresh,
+                    caravan_controls::refresh,
                     market_history::refresh,
                     market_history::hover,
                 )

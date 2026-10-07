@@ -143,6 +143,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
             details.spawn((text("", 24.0, TEXT), Readout::Title));
             details.spawn((text("", 16.0, TEXT), Readout::PriceNow));
             details.spawn((text("", 14.0, MUTED), Readout::MaterialMargins));
+            crate::caravan_controls::spawn(details);
             crate::market_history::spawn(details);
             details.spawn(Node { column_gap: px(8), row_gap: px(8), flex_wrap: FlexWrap::Wrap, flex_shrink: 0.0, ..default() })
                 .with_children(|row| {
@@ -168,6 +169,7 @@ pub fn handle_selection(
     mut selection: ResMut<Selection>,
     mut focus: ResMut<InputFocus>,
     editor: Option<Res<crate::locations::State>>,
+    caravan: Option<Res<crate::caravan_controls::State>>,
 ) {
     if selection.generation != snapshot.0.generation {
         selection.generation = snapshot.0.generation;
@@ -195,7 +197,9 @@ pub fn handle_selection(
             }
         }
     }
-    if editor.is_some_and(|editor| editor.editing()) {
+    if editor.is_some_and(|editor| editor.editing())
+        || caravan.is_some_and(|editor| editor.editing())
+    {
         return;
     }
     for (key, view) in [
@@ -236,7 +240,13 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
                 groups.push(SellerOrders {
                     id: order.seller,
                     name: match order.seller {
-                        MarketParty::Caravan => "Caravan".into(),
+                        MarketParty::Caravan => {
+                            if universe.caravan_policy().import_tariff_basis_points == 10_000 {
+                                "Caravan (imports disabled)".into()
+                            } else {
+                                "Caravan".into()
+                            }
+                        }
                         MarketParty::Citizen(id) => universe
                             .agents()
                             .get(&id)
@@ -353,30 +363,66 @@ fn buyer_requests(universe: &Universe, good: Good) -> String {
 }
 
 fn price_details(universe: &Universe, good: Good) -> String {
+    let market = universe.market();
+    let policy = universe.caravan_policy();
+    let export =
+        if !policy.exports[good as usize].allowed || policy.export_tariff_basis_points == 10_000 {
+            "Exports disabled".into()
+        } else {
+            format!(
+                "Export below {:.3} coins/{}",
+                market.effective_export_threshold(good).unwrap_or_default(),
+                good.price_unit_name()
+            )
+        };
+    let import = if policy.import_tariff_basis_points == 10_000 {
+        "Imports disabled".into()
+    } else {
+        format!(
+            "Import above {:.3} coins/{}",
+            market.effective_import_threshold(good).unwrap_or_default(),
+            good.price_unit_name()
+        )
+    };
+    let ask = if policy.import_tariff_basis_points == 10_000 {
+        "disabled".into()
+    } else {
+        format!(
+            "{:.3} coins/{}",
+            market.effective_import_threshold(good).unwrap_or_default(),
+            good.price_unit_name()
+        )
+    };
     format!(
-        "Current price: {:.3} coins/{}\nCore price: {:.3} coins/{}\nExport below {:.3} | Import above {:.3} coins/{}\nCaravan asking price: {:.3} coins/{}",
+        "Current price: {:.3} coins/{}\nCore price: {:.3} coins/{}\n{} | {}\nCaravan asking price: {}\nTown stock: {} | Saved minimum reserve: {}",
         universe.prices().price(good).unwrap(),
         good.price_unit_name(),
         good.core_price(),
         good.price_unit_name(),
-        good.export_threshold(),
-        good.import_threshold(),
-        good.price_unit_name(),
-        good.import_threshold(),
-        good.price_unit_name()
+        export,
+        import,
+        ask,
+        crate::quantity_label(good, universe.town_stock(good)),
+        crate::quantity_label(good, policy.exports[good as usize].minimum_reserve)
     )
 }
 
 pub(super) fn trade_breakdown(good: Good, activity: GoodActivity) -> String {
     format!(
-        "Local trades: {} | {} coins\nExports: {} | {} coins entering town\nImport deliveries: {}\nBought from caravans: {} | {} coins leaving town",
+        "Local trades: {} | {} coins\nExports: {} | {} gross coins entering town\nExport seller receipts: {} coins | Export tariff revenue: {} coins\nImport deliveries: {}\nBought from caravans: {} | {} gross coins spent\nImport payments leaving town: {} coins | Import tariff revenue: {} coins",
         crate::quantity_label(good, activity.local_traded_units),
         activity.local_traded_coins,
         crate::quantity_label(good, activity.exported_units),
         activity.exported_coins,
+        activity.exported_receipts,
+        activity.export_tariff_coins,
         crate::quantity_label(good, activity.imported_units),
         crate::quantity_label(good, activity.caravan_purchased_units),
-        activity.caravan_purchased_coins
+        activity.caravan_purchased_coins,
+        activity
+            .caravan_purchased_coins
+            .saturating_sub(activity.import_tariff_coins),
+        activity.import_tariff_coins
     )
 }
 
@@ -558,13 +604,32 @@ mod tests {
     };
 
     #[test]
+    fn effective_thresholds_stock_and_disabled_trade_are_finite_labels() {
+        let mut policy = Universe::default().caravan_policy();
+        policy.import_tariff_basis_points = 5000;
+        policy.export_tariff_basis_points = 5000;
+        policy.exports[Good::Bread as usize].minimum_reserve = 7;
+        let universe = Universe::default().with_caravan_policy(policy).unwrap();
+        let label = price_details(&universe, Good::Bread);
+        assert!(label.contains("Export below 5.014 coins/loaf | Import above 60.166"));
+        assert!(label.contains("Town stock: 0 loaves | Saved minimum reserve: 7 loaves"));
+        policy.import_tariff_basis_points = 10_000;
+        policy.export_tariff_basis_points = 10_000;
+        let label = price_details(&universe.with_caravan_policy(policy).unwrap(), Good::Bread);
+        assert!(label.contains("Exports disabled | Imports disabled"));
+        assert!(label.contains("Caravan asking price: disabled"));
+        assert!(!label.to_lowercase().contains("inf"));
+        assert!(!label.contains("NaN"));
+    }
+
+    #[test]
     fn core_threshold_readout_stays_fixed_when_local_prices_change() {
         let universe = Universe::default()
             .with_prices(Prices::default().with_price(Good::Bread, 1.0).unwrap());
         let label = price_details(&universe, Good::Bread);
         assert!(label.contains("Current price: 1.000 coins/loaf"));
         assert!(label.contains("Core price: 20.055 coins/loaf"));
-        assert!(label.contains("Export below 10.028 | Import above 30.083 coins/loaf"));
+        assert!(label.contains("Export below 10.028 coins/loaf | Import above 30.083 coins/loaf"));
         assert!(label.contains("Caravan asking price: 30.083 coins/loaf"));
     }
 
@@ -612,6 +677,9 @@ mod tests {
                 local_traded_coins: 650,
                 exported_units: 2000,
                 exported_coins: 600,
+                exported_receipts: 300,
+                export_tariff_coins: 300,
+                import_tariff_coins: 975,
                 imported_units: 4000,
                 caravan_purchased_units: 3000,
                 caravan_purchased_coins: 2925,
@@ -620,9 +688,15 @@ mod tests {
         );
         assert!(label.contains("Total traded volume: 6000 g"));
         assert!(label.contains("Local trades: 1000 g | 650 coins"));
-        assert!(label.contains("Exports: 2000 g | 600 coins entering town"));
+        assert!(label.contains("Exports: 2000 g | 600 gross coins entering town"));
+        assert!(
+            label.contains("Export seller receipts: 300 coins | Export tariff revenue: 300 coins")
+        );
+        assert!(label.contains(
+            "Import payments leaving town: 1950 coins | Import tariff revenue: 975 coins"
+        ));
         assert!(label.contains("Import deliveries: 4000 g"));
-        assert!(label.contains("Bought from caravans: 3000 g | 2925 coins leaving town"));
+        assert!(label.contains("Bought from caravans: 3000 g | 2925 gross coins spent"));
     }
 
     #[test]
@@ -931,6 +1005,22 @@ mod tests {
         app.update();
         app.world_mut().entity_mut(entity).insert(Interaction::None);
         app.update();
+    }
+
+    #[test]
+    fn typing_in_caravan_editor_suppresses_market_navigation_shortcuts() {
+        let mut app = app();
+        press(&mut app, Choice::View(View::Market));
+        app.insert_resource(crate::caravan_controls::State::focused_fixture());
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyC);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowDown);
+        app.update();
+        assert_eq!(app.world().resource::<Selection>().view, View::Market);
+        assert_eq!(app.world().resource::<Selection>().good(), Good::Berries);
     }
 
     #[test]
