@@ -248,7 +248,8 @@ fn zero_hunger_rate_preserves_satiation_while_time_advances() {
 fn empty_universe_advances_and_rejects_clock_overflow() {
     let original = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default());
-    let universe = original.advance(u64::MAX).unwrap();
+    assert_eq!(original.advance(123).unwrap().current_time_ms(), 123);
+    let universe = Universe::starting_at(u64::MAX);
 
     assert_eq!(original.current_time_ms(), 0);
     assert_eq!(universe.current_time_ms(), u64::MAX);

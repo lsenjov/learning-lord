@@ -364,7 +364,11 @@ fn stocks(universe: &Universe, place: PlaceId) -> String {
     {
         lines.push(format!(
             "{} | {} | {} sale escrow",
-            name(universe, order.seller),
+            match order.seller {
+                learning_lord_simulation::marketplace::MarketParty::Citizen(id) =>
+                    name(universe, id),
+                learning_lord_simulation::marketplace::MarketParty::Caravan => "Caravan".into(),
+            },
             order.good.name(),
             crate::quantity_label(order.good, order.units)
         ));

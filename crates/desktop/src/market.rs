@@ -5,8 +5,8 @@ use bevy::{
     ui::RelativeCursorPosition,
 };
 use learning_lord_simulation::{
-    AgentId, Universe,
-    marketplace::{Good, GoodActivity, MarketPeriod},
+    Universe,
+    marketplace::{Good, GoodActivity, MarketParty, MarketPeriod},
     production::Recipe,
 };
 
@@ -68,7 +68,7 @@ pub struct OrderDisplay(Vec<SellerOrders>);
 
 #[derive(Clone, Debug, PartialEq)]
 struct SellerOrders {
-    id: AgentId,
+    id: MarketParty,
     name: String,
     location: String,
     orders: Vec<(u64, u64, f64)>,
@@ -235,10 +235,13 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
             .unwrap_or_else(|| {
                 groups.push(SellerOrders {
                     id: order.seller,
-                    name: universe
-                        .agents()
-                        .get(&order.seller)
-                        .map_or_else(|| "Unknown seller".into(), |agent| agent.name.clone()),
+                    name: match order.seller {
+                        MarketParty::Caravan => "Caravan".into(),
+                        MarketParty::Citizen(id) => universe
+                            .agents()
+                            .get(&id)
+                            .map_or_else(|| "Unknown seller".into(), |agent| agent.name.clone()),
+                    },
                     location: universe
                         .map()
                         .place(order.place)
@@ -254,7 +257,13 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
     for group in &mut groups {
         group.orders.sort_by_key(|order| order.0);
     }
-    groups.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.0.cmp(&b.id.0)));
+    groups.sort_by(|a, b| {
+        a.name.cmp(&b.name).then_with(|| {
+            a.id.citizen()
+                .map(|id| id.0)
+                .cmp(&b.id.citizen().map(|id| id.0))
+        })
+    });
     groups
 }
 
@@ -489,17 +498,14 @@ pub fn refresh(
                             .with_children(|seller| {
                                 seller.spawn(text(&group.name, 16.0, TEXT));
                                 seller.spawn(text(&group.location, 14.0, MUTED));
-                                if groups
-                                    .iter()
-                                    .filter(|other| other.name == group.name)
-                                    .count()
-                                    > 1
+                                if let Some(id) = group.id.citizen()
+                                    && groups
+                                        .iter()
+                                        .filter(|other| other.name == group.name)
+                                        .count()
+                                        > 1
                                 {
-                                    seller.spawn(text(
-                                        format!("Seller {}", group.id.0),
-                                        12.0,
-                                        MUTED,
-                                    ));
+                                    seller.spawn(text(format!("Seller {}", id.0), 12.0, MUTED));
                                 }
                                 for &(_, units, price) in &group.orders {
                                     seller.spawn(text(
@@ -577,6 +583,7 @@ mod tests {
                 traded_units: 200,
                 listed_units: 800,
                 affordable_demand_units: 500,
+                ..default()
             },
         );
         assert_eq!(
@@ -604,7 +611,8 @@ mod tests {
                 GoodActivity {
                     traded_units: 1,
                     listed_units: 2,
-                    affordable_demand_units: 3
+                    affordable_demand_units: 3,
+                    ..default()
                 }
             )
             .contains("Buy volume: 4 loaves")
@@ -736,7 +744,10 @@ mod tests {
         let groups = seller_orders(&universe, Good::Berries);
         assert_eq!(groups.len(), 2);
         assert!(groups.iter().all(|group| group.name == "Same"));
-        let first_group = groups.iter().find(|group| group.id == first).unwrap();
+        let first_group = groups
+            .iter()
+            .find(|group| group.id == MarketParty::Citizen(first))
+            .unwrap();
         assert_eq!(first_group.orders.len(), 2);
         assert_eq!(first_group.orders[0].1, 150);
         assert_eq!(first_group.orders[0].2, 1.0);
@@ -745,7 +756,7 @@ mod tests {
         assert_eq!(
             groups
                 .iter()
-                .find(|group| group.id == second)
+                .find(|group| group.id == MarketParty::Citizen(second))
                 .unwrap()
                 .orders[0]
                 .1,

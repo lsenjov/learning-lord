@@ -1396,9 +1396,7 @@ mod tests {
 
     #[test]
     fn overflow_pauses_the_worker_and_preserves_the_last_snapshot() {
-        let universe = Universe::with_map(learning_lord_simulation::locations::Map::default())
-            .advance(u64::MAX)
-            .unwrap();
+        let universe = Universe::starting_at(u64::MAX);
         let mut state = WorkerState {
             universe: universe.clone(),
             planner: PlanningRuntime::default(),

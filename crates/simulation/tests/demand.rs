@@ -226,6 +226,7 @@ fn seller_income_funds_an_existing_request_without_accumulating_retries() {
 #[test]
 fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preserves_history() {
     let (u, seller) = supply(150);
+    let u = u.with_prices(Prices::new(400.0).unwrap());
     let original_order = u.market().orders().next().unwrap().clone();
     let (u, id) = u
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
@@ -249,14 +250,14 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
     assert_eq!(day.traded_units, 100);
     assert_eq!(day.remaining_supply_units, 50);
     assert_eq!(direct.market().trades()[0].time_ms, UPDATE_TIME_MS);
-    close(day.price_after, 98.0);
+    close(day.price_after, 392.0);
     assert_eq!(direct.market().trades()[0].coins, 10);
     let remaining = direct.market().orders().next().unwrap();
     assert_eq!(remaining.id, original_order.id);
-    assert_eq!(remaining.seller, seller);
+    assert_eq!(remaining.seller.citizen(), Some(seller));
     assert_eq!(remaining.good, original_order.good);
     assert_eq!(remaining.units, 50);
-    close(remaining.quoted_price, 98.0);
+    close(remaining.quoted_price, 392.0);
     let after = direct
         .start_action(
             id,
@@ -265,7 +266,7 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(after.market().trades()[1].coins, 5);
+    assert_eq!(after.market().trades()[1].coins, 20);
     assert_eq!(after.market().listed_units(seller, Good::Berries), 0);
 }
 
@@ -298,6 +299,7 @@ fn prediction_does_not_register_demands_or_publish_history() {
 #[test]
 fn purchases_crossing_four_settle_at_updated_live_order_prices() {
     let (source, seller) = supply(150);
+    let source = source.with_prices(Prices::new(400.0).unwrap());
     let (source, buyer) = source
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
         .unwrap();
@@ -312,14 +314,14 @@ fn purchases_crossing_four_settle_at_updated_live_order_prices() {
     let boundary = source.advance(TRADE_DURATION_MS / 2).unwrap();
     close(
         boundary.market().orders().next().unwrap().quoted_price,
-        98.0,
+        392.0,
     );
     assert!(boundary.market().trades().is_empty());
     assert_eq!(boundary.market().listed_units(seller, Good::Berries), 150);
     let completed = boundary.advance(TRADE_DURATION_MS / 2).unwrap();
     assert_eq!(completed.market().trades()[0].units, 100);
-    assert_eq!(completed.market().trades()[0].coins, 10);
-    assert_eq!(citizen(&completed, buyer).coins(), 90);
-    assert_eq!(citizen(&completed, seller).coins(), 10);
+    assert_eq!(completed.market().trades()[0].coins, 40);
+    assert_eq!(citizen(&completed, buyer).coins(), 60);
+    assert_eq!(citizen(&completed, seller).coins(), 40);
     assert_eq!(completed, source.advance(TRADE_DURATION_MS).unwrap());
 }

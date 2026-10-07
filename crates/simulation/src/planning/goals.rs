@@ -1373,11 +1373,16 @@ mod tests {
         let orders: Vec<_> = market.orders().cloned().collect();
         for order in orders {
             market
-                .withdraw(order.seller, order.place, order.good, order.units)
+                .withdraw(
+                    order.seller.citizen().unwrap(),
+                    order.place,
+                    order.good,
+                    order.units,
+                )
                 .unwrap();
             market
                 .list(
-                    order.seller,
+                    order.seller.citizen().unwrap(),
                     citizen
                         .map()
                         .public_place(crate::locations::Location::Market),
@@ -2212,7 +2217,12 @@ mod tests {
             .collect();
         for order in berries {
             market
-                .withdraw(order.seller, order.place, Good::Berries, order.units)
+                .withdraw(
+                    order.seller.citizen().unwrap(),
+                    order.place,
+                    Good::Berries,
+                    order.units,
+                )
                 .unwrap();
         }
         let mut source = source

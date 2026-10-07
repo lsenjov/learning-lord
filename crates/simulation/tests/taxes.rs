@@ -303,11 +303,25 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
     assert_eq!(sold.market().trades().back().unwrap().place, place);
     assert_eq!(citizen(&sold, buyer).units(Good::Bread), 2);
     let weekly = before_sale
+        .with_prices(
+            before_sale
+                .prices()
+                .with_price(Good::Bread, Good::Bread.core_price() * 2.0)
+                .unwrap(),
+        )
         .advance(FIRST_WEEKLY_SETTLEMENT_MS - before_sale.current_time_ms())
         .unwrap();
+    let assessment_price = weekly
+        .market()
+        .history()
+        .iter()
+        .rev()
+        .find(|activity| activity.good == Good::Bread)
+        .unwrap()
+        .price_before;
     assert_eq!(
         weekly.tax_arrears(learning_lord_simulation::taxation::TaxRuleId(2), seller),
-        (weekly.prices().value(Good::Bread, 2).unwrap() * 0.1).floor() as i64
+        (assessment_price * 2.0 * 0.1).floor() as i64
     );
     assert_eq!(weekly.town_treasury(), 0);
 }

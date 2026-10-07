@@ -1449,11 +1449,6 @@ impl Universe {
                 runtime.planning_event(citizen, universe.current_time_ms)?;
             }
         }
-        if universe.agents.is_empty() {
-            universe.market.update(end)?;
-            universe.current_time_ms = end;
-            return Ok(Some(universe));
-        }
         while universe.current_time_ms < end {
             if should_cancel() {
                 return Ok(None);
@@ -1576,7 +1571,10 @@ impl Universe {
                 }
             }
             for trade in universe.market.trades().iter().skip(trades_before) {
-                for id in [trade.buyer, trade.seller] {
+                for id in [trade.buyer, trade.seller]
+                    .into_iter()
+                    .filter_map(|party| party.citizen())
+                {
                     universe
                         .citizen_histories
                         .get_mut(&id)
@@ -1596,6 +1594,46 @@ impl Universe {
             if step == until_update {
                 universe.refresh_market();
                 universe.market.update(finishing_time)?;
+                let trades_before = universe.market.trades().len();
+                let payments = universe
+                    .market
+                    .caravans(universe.map.public_place(Location::Market), finishing_time)?;
+                let mut changed = Vec::new();
+                for (seller, coins) in payments {
+                    let AgentKind::Citizen(citizen) = &mut universe
+                        .agents
+                        .get_mut(&seller)
+                        .ok_or(SimulationError::AgentNotFound)?
+                        .kind;
+                    citizen.coins = citizen
+                        .coins
+                        .checked_add(coins)
+                        .ok_or(SimulationError::WealthOverflow)?;
+                    changed.push(seller);
+                }
+                let trades: Vec<_> = universe
+                    .market
+                    .trades()
+                    .iter()
+                    .skip(trades_before)
+                    .cloned()
+                    .collect();
+                changed.extend(universe.tax_sales(&trades, finishing_time)?);
+                for trade in &trades {
+                    if let Some(seller) = trade.seller.citizen() {
+                        universe
+                            .citizen_histories
+                            .get_mut(&seller)
+                            .unwrap()
+                            .trade(seller, trade)?;
+                    }
+                }
+                if let Some(runtime) = runtime.as_deref_mut() {
+                    for id in changed {
+                        runtime.cancel(id);
+                    }
+                }
+                universe.refresh_market();
             }
             let mut new_actions = Vec::new();
             for id in ids {

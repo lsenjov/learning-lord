@@ -285,7 +285,7 @@ impl ProductionTargets {
                     .trades()
                     .iter()
                     .filter(|trade| {
-                        trade.seller == citizen.id()
+                        trade.seller.citizen() == Some(citizen.id())
                             && trade.good == good
                             && trade.time_ms > start
                             && trade.time_ms <= now_ms

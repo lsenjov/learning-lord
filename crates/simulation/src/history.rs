@@ -183,7 +183,7 @@ impl CitizenHistory {
     }
 
     pub(crate) fn trade(&mut self, id: AgentId, trade: &Trade) -> Result<(), SimulationError> {
-        if trade.buyer == id {
+        if trade.buyer.citizen() == Some(id) {
             self.current.bought[trade.good as usize] = self.current.bought[trade.good as usize]
                 .checked_add(trade.units)
                 .ok_or(SimulationError::InventoryOverflow)?;
@@ -193,7 +193,7 @@ impl CitizenHistory {
                 .checked_add(trade.coins)
                 .ok_or(SimulationError::WealthOverflow)?;
         }
-        if trade.seller == id {
+        if trade.seller.citizen() == Some(id) {
             self.current.sold[trade.good as usize] = self.current.sold[trade.good as usize]
                 .checked_add(trade.units)
                 .ok_or(SimulationError::InventoryOverflow)?;

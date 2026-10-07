@@ -49,6 +49,15 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
                 traded_units: entry.traded_units,
                 listed_units: entry.remaining_supply_units,
                 affordable_demand_units: entry.unmet_demand_units,
+                traded_coins: entry.traded_coins,
+                caravan_listed_units: entry.caravan_remaining_supply_units,
+                local_traded_units: entry.local_traded_units,
+                local_traded_coins: entry.local_traded_coins,
+                exported_units: entry.exported_units,
+                exported_coins: entry.exported_coins,
+                imported_units: entry.imported_units,
+                caravan_purchased_units: entry.caravan_purchased_units,
+                caravan_purchased_coins: entry.caravan_purchased_coins,
             }
         } else {
             GoodActivity::default()
@@ -553,6 +562,7 @@ mod tests {
             traded_units: u64::MAX,
             affordable_demand_units: u64::MAX,
             listed_units: u64::MAX,
+            ..default()
         };
         let scale = Scale::new(&values);
         assert_eq!(scale.y(f64::MAX), HEIGHT / 2.0);

@@ -696,8 +696,11 @@ impl Universe {
         let mut groups =
             std::collections::BTreeMap::<(uuid::Uuid, uuid::Uuid, usize), Coins>::new();
         for trade in trades {
+            let Some(seller) = trade.seller.citizen() else {
+                continue;
+            };
             let revenue = groups
-                .entry((trade.seller.0, trade.place.0, trade.good as usize))
+                .entry((seller.0, trade.place.0, trade.good as usize))
                 .or_default();
             *revenue = revenue
                 .checked_add(trade.coins)
@@ -798,9 +801,10 @@ impl Universe {
                                 .ok_or(SimulationError::InventoryOverflow)?;
                         }
                         for order in self.market.orders().filter(|order| order.place == place) {
-                            let total = stocks
-                                .entry((order.seller.0, order.good as usize))
-                                .or_default();
+                            let Some(seller) = order.seller.citizen() else {
+                                continue;
+                            };
+                            let total = stocks.entry((seller.0, order.good as usize)).or_default();
                             *total = total
                                 .checked_add(order.units)
                                 .ok_or(SimulationError::InventoryOverflow)?;

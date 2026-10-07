@@ -495,9 +495,7 @@ mod tests {
         );
         assert!(runtime.pending.is_empty());
         assert_eq!(world, saved);
-        let world = Universe::with_map(Map::default())
-            .advance(u64::MAX)
-            .unwrap();
+        let world = Universe::starting_at(u64::MAX);
         assert_eq!(
             world.advance_with_planner(&mut runtime, 1, || false),
             Err(SimulationError::TimeOverflow)
@@ -556,9 +554,7 @@ mod tests {
         );
         assert_eq!(runtime.history(id), Some(&saved));
         assert!(runtime.samples.is_empty());
-        let empty = Universe::with_map(Map::default())
-            .advance(u64::MAX)
-            .unwrap();
+        let empty = Universe::starting_at(u64::MAX);
         assert_eq!(
             empty.advance_with_planner(&mut runtime, 1, || false),
             Err(SimulationError::TimeOverflow)
@@ -737,7 +733,10 @@ mod tests {
                 .trades()
                 .iter()
                 .filter(|trade| {
-                    let AgentKind::Citizen(seller) = &world.agents()[&trade.seller].kind;
+                    let Some(id) = trade.seller.citizen() else {
+                        return false;
+                    };
+                    let AgentKind::Citizen(seller) = &world.agents()[&id].kind;
                     world
                         .map()
                         .place(seller.selling_place())

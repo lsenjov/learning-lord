@@ -17,7 +17,7 @@
 ## Implementation steps
 
 1. [x] Add reusable core-price calculation, use it for initial prices, and record reference prices and assumptions. Workspace tests passed across the full sweep and targeted fixture reruns; independent review approved.
-2. [ ] Add external market ownership, daily caravan settlement, fixed import orders, tax/payment integration and separate history counters. Test settlement, boundaries, rounding, immutable predictions and daily progression; commit after independent review.
+2. [x] Add external market ownership, daily caravan settlement, fixed import orders, tax/payment integration and separate history counters. Settlement, boundaries, rounding, immutable predictions, cancellation, overflow and daily progression tests pass; independent review approved.
 3. [ ] Display core prices, thresholds, caravan listings and distinct trade metrics/history. Update documentation, run workspace checks and independent review, then commit.
 
 ## Validation focus

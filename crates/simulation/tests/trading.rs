@@ -305,7 +305,7 @@ fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
     assert_eq!(citizen(&done, expensive).coins(), 12);
     assert_eq!(citizen(&done, buyer).coins(), 84);
     assert_eq!(done.market().listed_units(expensive, Good::Berries), 40);
-    assert_eq!(done.market().trades()[0].seller, cheap);
+    assert_eq!(done.market().trades()[0].seller.citizen(), Some(cheap));
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn earlier_completions_take_stock_before_later_completions_regardless_of_id_orde
     assert_eq!(direct.market(), split.market());
     assert_eq!(citizen(&direct, early).berries_units(), 100);
     assert_eq!(citizen(&direct, late).berries_units(), 0);
-    assert_eq!(direct.market().trades()[0].buyer, early);
+    assert_eq!(direct.market().trades()[0].buyer.citizen(), Some(early));
     assert_eq!(direct.market().trades()[0].time_ms, 2 * TRADE_DURATION_MS);
 }
 
