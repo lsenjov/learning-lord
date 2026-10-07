@@ -152,7 +152,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                 });
             details.spawn((text("", 14.0, MUTED), Readout::Period));
             details.spawn((text("", 17.0, TEXT), Readout::Metrics));
-            details.spawn(text("Buy = traded + affordable unfulfilled demand\nSell = traded + listed stock\nUnfulfilled demand may exist while stock is available.", 13.0, MUTED));
+            details.spawn(text("Buy = total trades + affordable unfulfilled demand\nSell = total trades + listed stock (including caravans)\nTrades include exports; deliveries are separate. Caravans settle at 04:00 after prices update.", 13.0, MUTED));
             details.spawn(text("CURRENT BUY REQUESTS  |  live in either period view", 14.0, MUTED));
             details.spawn((text("", 14.0, TEXT), Node { flex_shrink: 0.0, ..default() }, Readout::Buyers));
             details.spawn(text("CURRENT SELL ORDERS  |  live in either period view", 14.0, MUTED));
@@ -352,9 +352,37 @@ fn buyer_requests(universe: &Universe, good: Good) -> String {
         .join("\n\n")
 }
 
+fn price_details(universe: &Universe, good: Good) -> String {
+    format!(
+        "Current price: {:.3} coins/{}\nCore price: {:.3} coins/{}\nExport below {:.3} | Import above {:.3} coins/{}\nCaravan asking price: {:.3} coins/{}",
+        universe.prices().price(good).unwrap(),
+        good.price_unit_name(),
+        good.core_price(),
+        good.price_unit_name(),
+        good.export_threshold(),
+        good.import_threshold(),
+        good.price_unit_name(),
+        good.import_threshold(),
+        good.price_unit_name()
+    )
+}
+
+pub(super) fn trade_breakdown(good: Good, activity: GoodActivity) -> String {
+    format!(
+        "Local trades: {} | {} coins\nExports: {} | {} coins entering town\nImport deliveries: {}\nBought from caravans: {} | {} coins leaving town",
+        crate::quantity_label(good, activity.local_traded_units),
+        activity.local_traded_coins,
+        crate::quantity_label(good, activity.exported_units),
+        activity.exported_coins,
+        crate::quantity_label(good, activity.imported_units),
+        crate::quantity_label(good, activity.caravan_purchased_units),
+        activity.caravan_purchased_coins
+    )
+}
+
 fn metrics(good: Good, activity: GoodActivity) -> String {
     format!(
-        "Buy volume: {}\nSell volume: {}\nTraded volume: {}\nUnfulfilled demand: {}",
+        "Buy volume: {}\nSell volume: {}\nTotal traded volume: {}\n{}\nListed stock: {} | Caravan stock: {}\nUnfulfilled demand: {}",
         crate::quantity_label(
             good,
             activity
@@ -366,6 +394,9 @@ fn metrics(good: Good, activity: GoodActivity) -> String {
             activity.traded_units.saturating_add(activity.listed_units)
         ),
         crate::quantity_label(good, activity.traded_units),
+        trade_breakdown(good, activity),
+        crate::quantity_label(good, activity.listed_units),
+        crate::quantity_label(good, activity.caravan_listed_units),
         crate::quantity_label(good, activity.affordable_demand_units)
     )
 }
@@ -458,11 +489,7 @@ pub fn refresh(
             }
             Readout::MaterialMargins => material_margins(universe, selection.good(), true),
             Readout::Title => selection.good().name().into(),
-            Readout::PriceNow => format!(
-                "Current price: {:.3} coins/{}",
-                universe.prices().price(selection.good()).unwrap(),
-                selection.good().price_unit_name()
-            ),
+            Readout::PriceNow => price_details(universe, selection.good()),
             Readout::Period => selected_period.as_ref().map_or_else(
                 || "No closed market day yet. The first period closes at Day 0 | 04:00:00.".into(),
                 |period| period_label(period, selection.period, universe.current_time_ms()),
@@ -531,6 +558,74 @@ mod tests {
     };
 
     #[test]
+    fn core_threshold_readout_stays_fixed_when_local_prices_change() {
+        let universe = Universe::default()
+            .with_prices(Prices::default().with_price(Good::Bread, 1.0).unwrap());
+        let label = price_details(&universe, Good::Bread);
+        assert!(label.contains("Current price: 1.000 coins/loaf"));
+        assert!(label.contains("Core price: 20.055 coins/loaf"));
+        assert!(label.contains("Export below 10.028 | Import above 30.083 coins/loaf"));
+        assert!(label.contains("Caravan asking price: 30.083 coins/loaf"));
+    }
+
+    #[test]
+    fn caravan_orders_have_external_identity_and_fixed_asks() {
+        use learning_lord_simulation::marketplace::{ShoppingList, UPDATE_TIME_MS};
+        let (universe, buyer) = Universe::default()
+            .with_prices(
+                Prices::default()
+                    .with_price(Good::Bread, Good::Bread.core_price() * 2.0)
+                    .unwrap(),
+            )
+            .with_citizen(
+                "Caravan",
+                Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+            )
+            .unwrap();
+        let universe = universe
+            .with_purchase_request(buyer, ShoppingList::single(Good::Bread, 6))
+            .unwrap()
+            .advance(UPDATE_TIME_MS)
+            .unwrap();
+        let groups = seller_orders(&universe, Good::Bread);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, MarketParty::Caravan);
+        assert_eq!(groups[0].name, "Caravan");
+        assert_eq!(groups[0].orders[0].1, 3);
+        assert_eq!(groups[0].orders[0].2, Good::Bread.import_threshold());
+        assert_eq!(universe.agents().len(), 1);
+        let current = metrics(
+            Good::Bread,
+            universe.market().current_period().goods[Good::Bread as usize],
+        );
+        assert!(current.contains("Import deliveries: 3 loaves"));
+        assert!(current.contains("Caravan stock: 3 loaves"));
+    }
+
+    #[test]
+    fn trade_metrics_keep_each_external_flow_separate() {
+        let label = metrics(
+            Good::Berries,
+            GoodActivity {
+                traded_units: 6000,
+                local_traded_units: 1000,
+                local_traded_coins: 650,
+                exported_units: 2000,
+                exported_coins: 600,
+                imported_units: 4000,
+                caravan_purchased_units: 3000,
+                caravan_purchased_coins: 2925,
+                ..default()
+            },
+        );
+        assert!(label.contains("Total traded volume: 6000 g"));
+        assert!(label.contains("Local trades: 1000 g | 650 coins"));
+        assert!(label.contains("Exports: 2000 g | 600 coins entering town"));
+        assert!(label.contains("Import deliveries: 4000 g"));
+        assert!(label.contains("Bought from caravans: 3000 g | 2925 coins leaving town"));
+    }
+
+    #[test]
     fn material_margin_uses_reference_quantities_and_keeps_losses() {
         use learning_lord_simulation::marketplace::Prices;
         let prices = Prices::default()
@@ -586,10 +681,10 @@ mod tests {
                 ..default()
             },
         );
-        assert_eq!(
-            value,
-            "Buy volume: 700 g\nSell volume: 1000 g\nTraded volume: 200 g\nUnfulfilled demand: 500 g"
+        assert!(
+            value.contains("Buy volume: 700 g\nSell volume: 1000 g\nTotal traded volume: 200 g")
         );
+        assert!(value.contains("Unfulfilled demand: 500 g"));
         let period = Universe::default().market().current_period();
         assert!(period_label(&period, Period::Current, 1_000).contains("CURRENT MARKET DAY"));
         assert!(period_label(&period, Period::Previous, 1_000).contains("CLOSED MARKET DAY"));

@@ -18,7 +18,7 @@
 
 1. [x] Add reusable core-price calculation, use it for initial prices, and record reference prices and assumptions. Workspace tests passed across the full sweep and targeted fixture reruns; independent review approved.
 2. [x] Add external market ownership, daily caravan settlement, fixed import orders, tax/payment integration and separate history counters. Settlement, boundaries, rounding, immutable predictions, cancellation, overflow and daily progression tests pass; independent review approved.
-3. [ ] Display core prices, thresholds, caravan listings and distinct trade metrics/history. Update documentation, run workspace checks and independent review, then commit.
+3. [x] Display core prices, thresholds, caravan listings and distinct trade metrics/history. Documentation updated and independent review approved. Final workspace validation: 347 tests passed, two manual benchmarks ignored; formatting and strict Clippy passed.
 
 ## Validation focus
 

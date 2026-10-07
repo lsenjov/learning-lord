@@ -163,7 +163,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue step line + body center: price (coins per kg, loaf or pie). Body height: traded quantity.\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Close pressure affects the next 04:00 price.", 13.0, MUTED));
+    parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Close pressure affects the next 04:00 price.", 13.0, MUTED));
     parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
@@ -460,6 +460,26 @@ fn hover_index(position: Option<Vec2>, over: bool, count: usize) -> Option<usize
         .map(|point| (((point.x + 0.5) * count as f32) as usize).min(count - 1))
 }
 
+fn hover_label(good: Good, day: &Day) -> String {
+    format!(
+        "{} to {} | {}\nPrice: {:.6} coins/{} | total traded: {}\n{}\nAffordable unmet demand: {} | unsold stock: {} (caravan: {})",
+        format_clock(day.start),
+        format_clock(day.end),
+        if day.partial {
+            "PARTIAL | live quantities so far"
+        } else {
+            "CLOSED | quantities at close"
+        },
+        day.price,
+        good.price_unit_name(),
+        crate::quantity_label(good, day.activity.traded_units),
+        market::trade_breakdown(good, day.activity),
+        crate::quantity_label(good, day.activity.affordable_demand_units),
+        crate::quantity_label(good, day.activity.listed_units),
+        crate::quantity_label(good, day.activity.caravan_listed_units)
+    )
+}
+
 pub fn hover(
     selection: Res<market::Selection>,
     cached: Res<ChartDisplay>,
@@ -472,11 +492,13 @@ pub fn hover(
     let selected = plots
         .iter()
         .find_map(|cursor| hover_index(cursor.normalized, cursor.cursor_over, cached.days.len()));
-    let value = selected.map_or_else(|| "Hover a market day for exact figures. Cyan body marks the current partial day.".into(), |index| {
-        let day = &cached.days[index];
-        let good = selection.good();
-        format!("{} to {}  |  {}\nPrice: {:.6} coins/{}  |  traded: {}\nAffordable unmet demand: {}  |  unsold stock: {}", format_clock(day.start), format_clock(day.end), if day.partial { "PARTIAL | live quantities so far" } else { "CLOSED | quantities at close" }, day.price, good.price_unit_name(), crate::quantity_label(good, day.activity.traded_units), crate::quantity_label(good, day.activity.affordable_demand_units), crate::quantity_label(good, day.activity.listed_units))
-    });
+    let value = selected.map_or_else(
+        || "Hover a market day for exact figures. Cyan body marks the current partial day.".into(),
+        |index| {
+            let day = &cached.days[index];
+            hover_label(selection.good(), day)
+        },
+    );
     for mut text in &mut readouts {
         if text.0 != value {
             text.0.clone_from(&value);
@@ -491,6 +513,68 @@ mod tests {
         Citizen,
         marketplace::{Prices, ShoppingList},
     };
+
+    #[test]
+    fn hover_distinguishes_trades_from_deliveries_for_closed_and_live_days() {
+        let mut day = Day {
+            start: 0,
+            end: UPDATE_TIME_MS,
+            price: 20.0,
+            partial: false,
+            activity: GoodActivity {
+                traded_units: 6,
+                local_traded_units: 1,
+                local_traded_coins: 20,
+                exported_units: 2,
+                exported_coins: 15,
+                imported_units: 4,
+                caravan_purchased_units: 3,
+                caravan_purchased_coins: 91,
+                caravan_listed_units: 1,
+                ..default()
+            },
+        };
+        let label = hover_label(Good::Bread, &day);
+        assert!(label.contains("CLOSED | quantities at close"));
+        assert!(label.contains("total traded: 6 loaves"));
+        assert!(label.contains("Local trades: 1 loaf | 20 coins"));
+        assert!(label.contains("Exports: 2 loaves | 15 coins entering town"));
+        assert!(label.contains("Import deliveries: 4 loaves"));
+        assert!(label.contains("Bought from caravans: 3 loaves | 91 coins leaving town"));
+        assert!(label.contains("caravan: 1 loaf"));
+        day.partial = true;
+        assert!(hover_label(Good::Bread, &day).contains("PARTIAL | live quantities so far"));
+    }
+
+    #[test]
+    fn closed_history_preserves_caravan_delivery_and_remaining_stock() {
+        let (universe, buyer) = Universe::default()
+            .with_prices(
+                Prices::default()
+                    .with_price(Good::Bread, Good::Bread.core_price() * 2.0)
+                    .unwrap(),
+            )
+            .with_citizen(
+                "Buyer",
+                Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+            )
+            .unwrap();
+        let universe = universe
+            .with_purchase_request(buyer, ShoppingList::single(Good::Bread, 6))
+            .unwrap()
+            .advance(UPDATE_TIME_MS + DAY_MS)
+            .unwrap();
+        let values = days(&universe, Good::Bread);
+        let closed = values
+            .iter()
+            .find(|day| day.start == UPDATE_TIME_MS)
+            .unwrap();
+        assert!(!closed.partial);
+        assert_eq!(closed.activity.imported_units, 3);
+        assert_eq!(closed.activity.caravan_listed_units, 3);
+        assert_eq!(closed.activity.traded_units, 0);
+        assert!(hover_label(Good::Bread, closed).contains("Import deliveries: 3 loaves"));
+    }
 
     #[test]
     fn fills_inactive_days_without_precreation_history_and_carries_prices() {
