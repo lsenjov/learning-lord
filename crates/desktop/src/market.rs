@@ -89,27 +89,6 @@ fn choice(value: Choice) -> impl Bundle {
     )
 }
 
-pub fn spawn_tabs(parent: &mut ChildSpawnerCommands) {
-    parent
-        .spawn(Node {
-            column_gap: px(8),
-            flex_shrink: 0.0,
-            ..default()
-        })
-        .with_children(|row| {
-            for (view, label) in [
-                (View::Citizens, "Citizens"),
-                (View::Market, "Market"),
-                (View::Locations, "Locations"),
-            ] {
-                row.spawn(choice(Choice::View(view)))
-                    .with_children(|button| {
-                        button.spawn(text(label, 16.0, TEXT));
-                    });
-            }
-        });
-}
-
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
     parent.spawn((ViewPanel(View::Market), Visibility::Hidden, Node {
         display: Display::None, width: percent(100), flex_grow: 1.0,
@@ -164,12 +143,11 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
 
 pub fn handle_selection(
     snapshot: Res<DisplaySnapshot>,
-    keyboard: Res<ButtonInput<KeyCode>>,
+    shortcuts: crate::KeyboardShortcuts,
     buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
     mut selection: ResMut<Selection>,
     mut focus: ResMut<InputFocus>,
-    editor: Option<Res<crate::locations::State>>,
-    caravan: Option<Res<crate::caravan_controls::State>>,
+    mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
     if selection.generation != snapshot.0.generation {
         selection.generation = snapshot.0.generation;
@@ -180,11 +158,12 @@ pub fn handle_selection(
             focus.set(entity, FocusCause::Pressed);
             match *choice {
                 Choice::View(view) => {
-                    if selection.view != view {
-                        selection.view = view;
-                    }
+                    selection.view = view;
                 }
                 Choice::Good(good) => {
+                    if let Some(windows) = windows.as_mut() {
+                        windows.open(crate::floating_ui::WindowKind::Good(good));
+                    }
                     if selection.good() != good {
                         selection.good = Some(good);
                     }
@@ -197,9 +176,7 @@ pub fn handle_selection(
             }
         }
     }
-    if editor.is_some_and(|editor| editor.editing())
-        || caravan.is_some_and(|editor| editor.editing())
-    {
+    if shortcuts.editing() {
         return;
     }
     for (key, view) in [
@@ -207,21 +184,31 @@ pub fn handle_selection(
         (KeyCode::KeyM, View::Market),
         (KeyCode::KeyL, View::Locations),
     ] {
-        if keyboard.just_pressed(key) && selection.view != view {
+        if shortcuts.keyboard.just_pressed(key) {
             selection.view = view;
+            if let Some(windows) = windows.as_mut() {
+                windows.open(match view {
+                    View::Citizens => crate::floating_ui::WindowKind::Citizens,
+                    View::Market => crate::floating_ui::WindowKind::Market,
+                    View::Locations => crate::floating_ui::WindowKind::Locations,
+                });
+            }
         }
     }
     if selection.view == View::Market {
         let index = selection.good() as usize;
-        let next = if keyboard.just_pressed(KeyCode::ArrowDown) {
+        let next = if shortcuts.keyboard.just_pressed(KeyCode::ArrowDown) {
             Good::ALL[(index + 1) % Good::COUNT]
-        } else if keyboard.just_pressed(KeyCode::ArrowUp) {
+        } else if shortcuts.keyboard.just_pressed(KeyCode::ArrowUp) {
             Good::ALL[(index + Good::COUNT - 1) % Good::COUNT]
         } else {
             selection.good()
         };
         if next != selection.good() {
             selection.good = Some(next);
+            if let Some(windows) = windows.as_mut() {
+                windows.open(crate::floating_ui::WindowKind::Good(next));
+            }
         }
     }
 }
@@ -294,7 +281,7 @@ fn raw_material_margin(universe: &Universe, recipe: Recipe) -> Option<f64> {
     (output > 0.0).then_some((output - materials) / output * 100.0)
 }
 
-fn material_margins(universe: &Universe, good: Good, detail: bool) -> String {
+pub(crate) fn material_margins(universe: &Universe, good: Good, detail: bool) -> String {
     let rows: Vec<_> = Recipe::ALL
         .into_iter()
         .filter(|recipe| recipe.outputs().iter().any(|&(output, _)| output == good))
@@ -323,7 +310,7 @@ fn order_label(good: Good, units: u64, price: f64) -> String {
     )
 }
 
-fn buyer_requests(universe: &Universe, good: Good) -> String {
+pub(crate) fn buyer_requests(universe: &Universe, good: Good) -> String {
     let market = universe.market();
     let mut buyers: Vec<_> = universe
         .agents()
@@ -362,7 +349,7 @@ fn buyer_requests(universe: &Universe, good: Good) -> String {
         .join("\n\n")
 }
 
-fn price_details(universe: &Universe, good: Good) -> String {
+pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
     let market = universe.market();
     let policy = universe.caravan_policy();
     let export =
@@ -426,7 +413,7 @@ pub(super) fn trade_breakdown(good: Good, activity: GoodActivity) -> String {
     )
 }
 
-fn metrics(good: Good, activity: GoodActivity) -> String {
+pub(crate) fn metrics(good: Good, activity: GoodActivity) -> String {
     format!(
         "Buy volume: {}\nSell volume: {}\nTotal traded volume: {}\n{}\nListed stock: {} | Caravan stock: {}\nUnfulfilled demand: {}",
         crate::quantity_label(
@@ -447,7 +434,7 @@ fn metrics(good: Good, activity: GoodActivity) -> String {
     )
 }
 
-fn period_label(period: &MarketPeriod, selected: Period, now: u64) -> String {
+pub(crate) fn period_label(period: &MarketPeriod, selected: Period, now: u64) -> String {
     match selected {
         Period::Current => format!(
             "CURRENT MARKET DAY  |  {} to now ({})\nCloses at {}",
@@ -491,27 +478,18 @@ pub fn refresh(
     snapshot: Res<DisplaySnapshot>,
     selection: Res<Selection>,
     mut cached: ResMut<OrderDisplay>,
-    mut panels: Query<(&ViewPanel, &mut Node, &mut Visibility)>,
+    mut panels: Query<(Ref<ViewPanel>, &mut Node, &mut Visibility)>,
     mut readouts: Query<(&Readout, &mut Text)>,
     orders: Query<Entity, With<Orders>>,
 ) {
-    if !snapshot.is_changed() && !selection.is_changed() {
+    let added = panels.iter().any(|(panel, _, _)| panel.is_added());
+    if !snapshot.is_changed() && !selection.is_changed() && !added {
         return;
     }
     for (panel, mut node, mut visibility) in &mut panels {
-        let display = if panel.0 == selection.view {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        visibility.set_if_neq(if panel.0 == selection.view {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
-        if node.display != display {
-            node.display = display;
-        }
+        let _view = panel.0;
+        node.display = Display::Flex;
+        *visibility = Visibility::Inherited;
     }
     let universe = &snapshot.0.universe;
     let selected_period = match selection.period {
@@ -551,7 +529,7 @@ pub fn refresh(
         }
     }
     let groups = seller_orders(universe, selection.good());
-    if groups != cached.0 || cached.is_added() {
+    if groups != cached.0 || cached.is_added() || added {
         for entity in &orders {
             commands
                 .entity(entity)
@@ -591,8 +569,61 @@ pub fn refresh(
                     }
                 });
         }
-        cached.0 = groups;
+        if !orders.is_empty() {
+            cached.0 = groups;
+        }
     }
+}
+
+pub(crate) fn select_good(selection: &mut Selection, good: Good) {
+    selection.good = Some(good);
+    selection.view = View::Market;
+}
+
+pub(crate) fn order_text(universe: &Universe, good: Good) -> String {
+    let groups = seller_orders(universe, good);
+    if groups.is_empty() {
+        return "No current sell orders for this good.".into();
+    }
+    groups
+        .into_iter()
+        .map(|group| {
+            format!(
+                "{} · {}\n{}",
+                group.name,
+                group.location,
+                group
+                    .orders
+                    .into_iter()
+                    .map(|(_, units, price)| order_label(good, units, price))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+#[cfg(test)]
+pub fn spawn_tabs(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn(Node {
+            column_gap: px(8),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|row| {
+            for (view, label) in [
+                (View::Citizens, "Citizens"),
+                (View::Market, "Market"),
+                (View::Locations, "Locations"),
+            ] {
+                row.spawn(choice(Choice::View(view)))
+                    .with_children(|button| {
+                        button.spawn(text(label, 16.0, TEXT));
+                    });
+            }
+        });
 }
 
 #[cfg(test)]
@@ -931,6 +962,11 @@ mod tests {
                 .1,
             300
         );
+        let readout = order_text(&universe, Good::Berries);
+        assert!(readout.contains("150 g remaining  |  1.000 coins/kg"));
+        assert!(readout.contains("100 g remaining  |  2.000 coins/kg"));
+        assert!(readout.contains("300 g remaining  |  1.000 coins/kg"));
+        assert!(!readout.contains("reserved"));
         assert!(seller_orders(&universe, Good::Water).is_empty());
         assert_eq!(
             order_label(Good::Berries, 150, 1.0),
@@ -1034,27 +1070,13 @@ mod tests {
             .count();
         assert_eq!(goods, Good::COUNT);
         press(&mut app, Choice::View(View::Market));
-        for (panel, node, visibility) in app
+        for (_, node, visibility) in app
             .world_mut()
             .query::<(&ViewPanel, &Node, &Visibility)>()
             .iter(app.world())
         {
-            assert_eq!(
-                node.display,
-                if panel.0 == View::Market {
-                    Display::Flex
-                } else {
-                    Display::None
-                }
-            );
-            assert_eq!(
-                *visibility,
-                if panel.0 == View::Market {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                }
-            );
+            assert_eq!(node.display, Display::Flex);
+            assert_eq!(*visibility, Visibility::Inherited);
         }
         press(&mut app, Choice::Good(Good::Bread));
         press(&mut app, Choice::Period(Period::Previous));

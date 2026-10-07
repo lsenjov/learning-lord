@@ -109,7 +109,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         });
 }
 
-fn selected_day(selected: Option<u64>, starts: &[u64]) -> Option<usize> {
+pub(crate) fn selected_day(selected: Option<u64>, starts: &[u64]) -> Option<usize> {
     if starts.is_empty() {
         return None;
     }
@@ -118,7 +118,7 @@ fn selected_day(selected: Option<u64>, starts: &[u64]) -> Option<usize> {
     }))
 }
 
-fn navigate(selected: Option<u64>, starts: &[u64], previous: bool) -> Option<u64> {
+pub(crate) fn navigate(selected: Option<u64>, starts: &[u64], previous: bool) -> Option<u64> {
     let index = selected_day(selected, starts)?;
     let next = if previous {
         index.saturating_sub(1)
@@ -200,7 +200,7 @@ fn goods_label(day: &learning_lord_simulation::history::DailyCitizenHistory) -> 
     }
 }
 
-fn day_label(
+pub(crate) fn day_label(
     day: &learning_lord_simulation::history::DailyCitizenHistory,
     partial: bool,
 ) -> String {

@@ -2,6 +2,8 @@ mod caravan_controls;
 mod citizen_history;
 mod citizens;
 mod debug_export;
+mod floating_ui;
+mod inspectors;
 mod locations;
 mod map_view;
 mod market;
@@ -115,6 +117,9 @@ fn main() -> Result<(), String> {
     .insert_resource(ClearColor(BACKGROUND))
     .insert_resource(DisplaySnapshot(worker.snapshot()))
     .insert_resource(worker)
+    .init_resource::<floating_ui::Windows>()
+    .init_resource::<floating_ui::InputCapture>()
+    .init_resource::<map_view::MapViewport>()
     .init_resource::<Controls>()
     .init_resource::<citizens::Selection>()
     .init_resource::<citizens::RosterPage>()
@@ -125,32 +130,45 @@ fn main() -> Result<(), String> {
     .init_resource::<caravan_controls::State>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
+    .init_resource::<market_history::ScopedCharts>()
     .init_resource::<debug_export::DebugExport>()
     .init_resource::<InputFocus>()
     .add_systems(Startup, setup)
     .add_systems(
         Update,
         (
-            poll_worker,
-            locations::handle,
-            caravan_controls::handle,
-            handle_controls,
-            citizens::handle_selection,
-            citizen_history::handle_selection,
-            citizen_history::refresh,
-            market::handle_selection,
-            refresh_display,
-            citizens::refresh_cards,
-            citizens::refresh_page_label,
-            citizens::refresh_plan,
-            citizens::scroll_panels,
-            map_view::refresh,
-            market::refresh_choices,
-            market::refresh,
-            locations::refresh,
-            caravan_controls::refresh,
-            market_history::refresh,
-            market_history::hover,
+            (
+                poll_worker,
+                floating_ui::interact,
+                inspectors::handle,
+                locations::handle,
+                caravan_controls::handle,
+                handle_controls,
+                citizens::handle_selection,
+                citizen_history::handle_selection,
+                market::handle_selection,
+                map_view::interaction,
+                inspectors::open_windows,
+                refresh_display,
+                citizens::refresh_cards,
+                citizens::refresh_page_label,
+                citizens::refresh_plan,
+                citizens::scroll_panels,
+            )
+                .chain(),
+            (
+                citizen_history::refresh,
+                map_view::refresh,
+                inspectors::refresh,
+                market::refresh_choices,
+                market::refresh,
+                locations::refresh,
+                caravan_controls::refresh,
+                market_history::refresh,
+                market_history::hover,
+                market_history::refresh_scoped,
+            )
+                .chain(),
         )
             .chain(),
     )
@@ -188,55 +206,146 @@ fn button(control: Control) -> impl Bundle {
 
 fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
     commands.spawn(Camera2d);
-    commands.spawn(Node {
-        width: percent(100), height: percent(100), padding: UiRect::all(px(16)),
-        flex_direction: FlexDirection::Column, row_gap: px(10), ..default()
-    }).with_children(|root| {
-        root.spawn(Node { align_items: AlignItems::Center, column_gap: px(20), ..default() })
+    map_view::spawn_background(
+        &mut commands,
+        snapshot.0.universe.map().places().len().max(14),
+        snapshot
+            .0
+            .universe
+            .agents()
+            .len()
+            .max(simulation::STARTING_CITIZENS.len()),
+    );
+    commands
+        .spawn((
+            floating_ui::Hud,
+            Interaction::default(),
+            bevy::ui::FocusPolicy::Block,
+            GlobalZIndex(1_000_000),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(16),
+                bottom: px(16),
+                padding: UiRect::all(px(12)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                ..default()
+            },
+            BackgroundColor(PANEL),
+        ))
+        .with_children(|hud| {
+            hud.spawn(Node {
+                align_items: AlignItems::Center,
+                column_gap: px(16),
+                ..default()
+            })
             .with_children(|row| {
-                row.spawn(text("LEARNING LORD", 17.0, MUTED));
-                row.spawn((text("", 26.0, TEXT), Readout::Clock));
-                row.spawn((text("", 16.0, MUTED), Readout::Status));
+                row.spawn((text("", 22.0, TEXT), Readout::Clock));
+                row.spawn((text("", 14.0, MUTED), Readout::Status));
             });
-        root.spawn(Node { column_gap: px(8), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() })
+            hud.spawn(Node {
+                column_gap: px(5),
+                ..default()
+            })
             .with_children(|row| {
-                for (control, label) in [(Control::ToggleRunning, "Run"), (Control::Step, "Advance 30 min"),
-                    (Control::Restart, "Restart universe"), (Control::Export, "Export universe")] {
-                    row.spawn(button(control)).with_children(|button| {
-                        if matches!(control, Control::ToggleRunning) {
-                            button.spawn((text(label, 16.0, TEXT), Readout::RunButton));
-                        } else { button.spawn(text(label, 16.0, TEXT)); }
+                row.spawn(button(Control::ToggleRunning))
+                    .with_children(|b| {
+                        b.spawn((text("Run", 14.0, TEXT), Readout::RunButton));
                     });
-                }
                 for speed in SPEEDS {
-                    row.spawn(button(Control::Speed(speed))).with_children(|button| {
-                        button.spawn(text(format!("{speed}x"), 16.0, TEXT));
+                    row.spawn(button(Control::Speed(speed))).with_children(|b| {
+                        b.spawn(text(format!("{speed}x"), 14.0, TEXT));
                     });
                 }
             });
-        root.spawn((text("", 14.0, MUTED), Readout::Town));
-        root.spawn((text("", 13.0, MUTED), Readout::ExportStatus));
-        market::spawn_tabs(root);
-        root.spawn((market::ViewPanel(market::View::Citizens), Node {
-            width: percent(100), flex_grow: 1.0, min_height: px(0),
-            flex_direction: FlexDirection::Column, row_gap: px(10), ..default()
-        })).with_children(|root| {
-        citizens::spawn_roster(root);
-        root.spawn(Node { width: percent(100), flex_grow: 1.0, min_height: px(0), column_gap: px(14), ..default() })
+            hud.spawn(Node {
+                column_gap: px(6),
+                ..default()
+            })
             .with_children(|row| {
-                row.spawn((Node { width: px(324), flex_shrink: 0.0, flex_direction: FlexDirection::Column,
-                    row_gap: px(12), min_height: px(0), overflow: Overflow::scroll_y(), ..default() }, ScrollPosition::default(), bevy::ui::RelativeCursorPosition::default()))
-                    .with_children(|left| {
-                        map_view::spawn(left, snapshot.0.universe.map().places().len().max(14), snapshot.0.universe.agents().len().max(simulation::STARTING_CITIZENS.len()));
+                for (control, label) in [
+                    (Control::Step, "Advance 30 min"),
+                    (Control::NextDay, "Next day 04:00"),
+                ] {
+                    row.spawn(button(control)).with_children(|b| {
+                        b.spawn(text(label, 14.0, TEXT));
                     });
-                citizens::spawn_details(row);
+                }
             });
+            hud.spawn((text("", 13.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
         });
-        market::spawn(root);
-        locations::spawn(root);
-        root.spawn(text("C/M/L: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-6: select on page   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
-        root.spawn((text("", 14.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
-    });
+    commands
+        .spawn((
+            floating_ui::Hud,
+            Interaction::default(),
+            bevy::ui::FocusPolicy::Block,
+            GlobalZIndex(1_000_000),
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(16),
+                top: px(16),
+                padding: UiRect::all(px(10)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                ..default()
+            },
+            BackgroundColor(PANEL),
+        ))
+        .with_children(|hud| {
+            hud.spawn((text("", 16.0, TEXT), Readout::Town));
+            hud.spawn(Node {
+                column_gap: px(6),
+                ..default()
+            })
+            .with_children(|row| {
+                for (control, label) in [(Control::Export, "Export"), (Control::Restart, "Restart")]
+                {
+                    row.spawn(button(control)).with_children(|b| {
+                        b.spawn(text(label, 14.0, TEXT));
+                    });
+                }
+            });
+            hud.spawn((text("", 13.0, MUTED), Readout::ExportStatus));
+        });
+    commands
+        .spawn((
+            floating_ui::Hud,
+            Interaction::default(),
+            bevy::ui::FocusPolicy::Block,
+            GlobalZIndex(1_000_000),
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(16),
+                bottom: px(16),
+                column_gap: px(8),
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            for (kind, label) in [
+                (floating_ui::WindowKind::Citizens, "Citizens"),
+                (floating_ui::WindowKind::Locations, "Locations"),
+                (floating_ui::WindowKind::Market, "Market"),
+            ] {
+                row.spawn((
+                    Button,
+                    floating_ui::Open(kind),
+                    market::Choice::View(match kind {
+                        floating_ui::WindowKind::Citizens => market::View::Citizens,
+                        floating_ui::WindowKind::Locations => market::View::Locations,
+                        _ => market::View::Market,
+                    }),
+                    Node {
+                        padding: UiRect::all(px(12)),
+                        ..default()
+                    },
+                    BackgroundColor(PANEL),
+                ))
+                .with_children(|b| {
+                    b.spawn(text(label, 16.0, TEXT));
+                });
+            }
+        });
 }
 
 fn poll_worker(
@@ -1006,6 +1115,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
+            .init_resource::<map_view::MapViewport>()
             .init_resource::<Controls>()
             .init_resource::<citizens::Selection>()
             .init_resource::<citizens::RosterPage>()

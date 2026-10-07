@@ -1,4 +1,5 @@
 use crate::{DisplaySnapshot, MUTED, TEXT, format_clock, market, text};
+use bevy::ecs::system::SystemParam;
 use bevy::{prelude::*, ui::RelativeCursorPosition};
 use learning_lord_simulation::{
     Universe,
@@ -161,13 +162,23 @@ pub(super) struct Legend;
 pub(super) struct Hover;
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
+    spawn_scoped(parent, None);
+}
+
+#[derive(Component)]
+pub(crate) struct Scope(pub Good);
+
+pub(crate) fn spawn_scoped(parent: &mut ChildSpawnerCommands, good: Option<Good>) {
     parent.spawn(text(
         "MARKET HISTORY  |  recent 30 market days",
         14.0,
         MUTED,
     ));
     parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Close pressure affects the next 04:00 price.", 13.0, MUTED));
-    parent.spawn((text("", 13.0, TEXT), Legend));
+    let mut legend = parent.spawn((text("", 13.0, TEXT), Legend));
+    if let Some(good) = good {
+        legend.insert(Scope(good));
+    }
     parent
         .spawn(Node {
             width: percent(100),
@@ -176,7 +187,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
             ..default()
         })
         .with_children(|row| {
-            row.spawn((
+            let mut axis = row.spawn((
                 Node {
                     width: px(100),
                     height: px(HEIGHT),
@@ -185,7 +196,10 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                 },
                 Axis,
             ));
-            row.spawn((
+            if let Some(good) = good {
+                axis.insert(Scope(good));
+            }
+            let mut plot = row.spawn((
                 Node {
                     flex_grow: 1.0,
                     min_width: px(0),
@@ -196,8 +210,11 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                 RelativeCursorPosition::default(),
                 Plot,
             ));
+            if let Some(good) = good {
+                plot.insert(Scope(good));
+            }
         });
-    parent.spawn((
+    let mut hover = parent.spawn((
         text(
             "Hover a market day for exact figures. Cyan body marks the current partial day.",
             13.0,
@@ -210,6 +227,9 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         },
         Hover,
     ));
+    if let Some(good) = good {
+        hover.insert(Scope(good));
+    }
 }
 
 fn rect(parent: &mut ChildSpawnerCommands, x: f32, y: f32, width: f32, height: f32, color: Color) {
@@ -265,12 +285,12 @@ pub fn refresh(
     snapshot: Res<DisplaySnapshot>,
     selection: Res<market::Selection>,
     mut cached: ResMut<ChartDisplay>,
-    plots: Query<Entity, With<Plot>>,
-    axes: Query<Entity, With<Axis>>,
-    mut legends: Query<&mut Text, With<Legend>>,
+    plots: Query<(Entity, Ref<Plot>), Without<Scope>>,
+    axes: Query<Entity, (With<Axis>, Without<Scope>)>,
+    mut legends: Query<&mut Text, (With<Legend>, Without<Scope>)>,
 ) {
-    if selection.view != market::View::Market || (!snapshot.is_changed() && !selection.is_changed())
-    {
+    let added = plots.iter().any(|(_, plot)| plot.is_added());
+    if plots.is_empty() || (!snapshot.is_changed() && !selection.is_changed() && !added) {
         return;
     }
     let good = selection.good();
@@ -283,7 +303,7 @@ pub fn refresh(
                 && old.activity == new.activity
                 && old.partial == new.partial
         });
-    if same_geometry {
+    if same_geometry && !added {
         if cached.days != values {
             cached.days = values;
         }
@@ -296,9 +316,108 @@ pub fn refresh(
             chart_quantity_label(good, scale.quantity_max)
         );
     }
-    for entity in &axes {
+    draw_chart(
+        &mut commands,
+        good,
+        &values,
+        &axes.iter().collect::<Vec<_>>(),
+        &plots.iter().map(|(entity, _)| entity).collect::<Vec<_>>(),
+    );
+    cached.days = values;
+    cached.good = Some(good);
+}
+
+fn chart_quantity_label(good: Good, units: f64) -> String {
+    if good.units_per_price_unit() == 1 {
+        let unit = if units == 1.0 {
+            match good {
+                Good::FlaxBlock => "block",
+                Good::FlaxGarment => "garment",
+                _ => good.price_unit_name(),
+            }
+        } else {
+            good.unit_name()
+        };
+        format!("{units:.0} {unit}")
+    } else {
+        format!("{:.3} kg", units / good.units_per_price_unit() as f64)
+    }
+}
+
+fn hover_index(position: Option<Vec2>, over: bool, count: usize) -> Option<usize> {
+    position
+        .filter(|point| {
+            over && count > 0
+                && point.x >= -0.5
+                && point.x <= 0.5
+                && point.y >= -0.5
+                && point.y <= 0.5
+        })
+        .map(|point| (((point.x + 0.5) * count as f32) as usize).min(count - 1))
+}
+
+fn hover_label(good: Good, day: &Day) -> String {
+    format!(
+        "{} to {} | {}\nPrice: {:.6} coins/{} | total traded: {}\n{}\nAffordable unmet demand: {} | unsold stock: {} (caravan: {})",
+        format_clock(day.start),
+        format_clock(day.end),
+        if day.partial {
+            "PARTIAL | live quantities so far"
+        } else {
+            "CLOSED | quantities at close"
+        },
+        day.price,
+        good.price_unit_name(),
+        crate::quantity_label(good, day.activity.traded_units),
+        market::trade_breakdown(good, day.activity),
+        crate::quantity_label(good, day.activity.affordable_demand_units),
+        crate::quantity_label(good, day.activity.listed_units),
+        crate::quantity_label(good, day.activity.caravan_listed_units)
+    )
+}
+
+pub fn hover(
+    selection: Res<market::Selection>,
+    cached: Res<ChartDisplay>,
+    plots: Query<&RelativeCursorPosition, (With<Plot>, Without<Scope>)>,
+    mut readouts: Query<&mut Text, (With<Hover>, Without<Scope>)>,
+    capture: Option<Res<crate::floating_ui::InputCapture>>,
+) {
+    let selected = plots.iter().find_map(|cursor| {
+        hover_index(
+            cursor.normalized,
+            cursor.cursor_over
+                && capture.as_ref().is_none_or(|capture| {
+                    capture.hovered == Some(crate::floating_ui::WindowKind::Market)
+                }),
+            cached.days.len(),
+        )
+    });
+    let value = selected.map_or_else(
+        || "Hover a market day for exact figures. Cyan body marks the current partial day.".into(),
+        |index| {
+            let day = &cached.days[index];
+            hover_label(selection.good(), day)
+        },
+    );
+    for mut text in &mut readouts {
+        if text.0 != value {
+            text.0.clone_from(&value);
+        }
+    }
+}
+
+fn draw_chart(
+    commands: &mut Commands,
+    good: Good,
+    values: &[Day],
+    axes: &[Entity],
+    plots: &[Entity],
+) {
+    let scale = Scale::new(values);
+    for entity in axes {
         commands
-            .entity(entity)
+            .entity(*entity)
             .despawn_children()
             .with_children(|axis| {
                 label(
@@ -348,9 +467,9 @@ pub fn refresh(
                 }
             });
     }
-    for entity in &plots {
+    for entity in plots {
         commands
-            .entity(entity)
+            .entity(*entity)
             .despawn_children()
             .with_children(|plot| {
                 if values.is_empty() {
@@ -430,81 +549,71 @@ pub fn refresh(
                 }
             });
     }
-    cached.days = values;
-    cached.good = Some(good);
 }
 
-fn chart_quantity_label(good: Good, units: f64) -> String {
-    if good.units_per_price_unit() == 1 {
-        let unit = if units == 1.0 {
-            match good {
-                Good::FlaxBlock => "block",
-                Good::FlaxGarment => "garment",
-                _ => good.price_unit_name(),
-            }
-        } else {
-            good.unit_name()
-        };
-        format!("{units:.0} {unit}")
-    } else {
-        format!("{:.3} kg", units / good.units_per_price_unit() as f64)
-    }
+type ScopedLegend = (With<Legend>, Without<Hover>);
+type ScopedHover = (With<Hover>, Without<Legend>);
+
+#[derive(SystemParam)]
+pub(crate) struct ScopedLabels<'w, 's> {
+    legends: Query<'w, 's, (&'static Scope, &'static mut Text), ScopedLegend>,
+    hover: Query<'w, 's, (&'static Scope, &'static mut Text), ScopedHover>,
 }
 
-fn hover_index(position: Option<Vec2>, over: bool, count: usize) -> Option<usize> {
-    position
-        .filter(|point| {
-            over && count > 0
-                && point.x >= -0.5
-                && point.x <= 0.5
-                && point.y >= -0.5
-                && point.y <= 0.5
-        })
-        .map(|point| (((point.x + 0.5) * count as f32) as usize).min(count - 1))
-}
+#[derive(Resource, Default)]
+pub(crate) struct ScopedCharts(std::collections::HashMap<Good, Vec<Day>>);
 
-fn hover_label(good: Good, day: &Day) -> String {
-    format!(
-        "{} to {} | {}\nPrice: {:.6} coins/{} | total traded: {}\n{}\nAffordable unmet demand: {} | unsold stock: {} (caravan: {})",
-        format_clock(day.start),
-        format_clock(day.end),
-        if day.partial {
-            "PARTIAL | live quantities so far"
-        } else {
-            "CLOSED | quantities at close"
-        },
-        day.price,
-        good.price_unit_name(),
-        crate::quantity_label(good, day.activity.traded_units),
-        market::trade_breakdown(good, day.activity),
-        crate::quantity_label(good, day.activity.affordable_demand_units),
-        crate::quantity_label(good, day.activity.listed_units),
-        crate::quantity_label(good, day.activity.caravan_listed_units)
-    )
-}
-
-pub fn hover(
-    selection: Res<market::Selection>,
-    cached: Res<ChartDisplay>,
-    plots: Query<&RelativeCursorPosition, With<Plot>>,
-    mut readouts: Query<&mut Text, With<Hover>>,
+pub(crate) fn refresh_scoped(
+    mut commands: Commands,
+    snapshot: Res<DisplaySnapshot>,
+    mut cached: ResMut<ScopedCharts>,
+    plots: Query<(Entity, &Scope, &RelativeCursorPosition), With<Plot>>,
+    axes: Query<(Entity, &Scope), With<Axis>>,
+    mut labels: ScopedLabels,
+    capture: Res<crate::floating_ui::InputCapture>,
 ) {
-    if selection.view != market::View::Market {
-        return;
-    }
-    let selected = plots
-        .iter()
-        .find_map(|cursor| hover_index(cursor.normalized, cursor.cursor_over, cached.days.len()));
-    let value = selected.map_or_else(
-        || "Hover a market day for exact figures. Cyan body marks the current partial day.".into(),
-        |index| {
-            let day = &cached.days[index];
-            hover_label(selection.good(), day)
-        },
-    );
-    for mut text in &mut readouts {
-        if text.0 != value {
-            text.0.clone_from(&value);
+    for (entity, scope, cursor) in &plots {
+        let good = scope.0;
+        let values = if snapshot.is_changed() || !cached.0.contains_key(&good) {
+            days(&snapshot.0.universe, good)
+        } else {
+            cached.0[&good].clone()
+        };
+        if cached.0.get(&good) != Some(&values) {
+            let axis_entities = axes
+                .iter()
+                .filter(|(_, scope)| scope.0 == good)
+                .map(|(entity, _)| entity)
+                .collect::<Vec<_>>();
+            draw_chart(&mut commands, good, &values, &axis_entities, &[entity]);
+            for (scope, mut legend) in &mut labels.legends {
+                if scope.0 == good {
+                    legend.0 = format!(
+                        "Quantity size key at left: {}  |  one linear scale across these days",
+                        chart_quantity_label(good, Scale::new(&values).quantity_max)
+                    );
+                }
+            }
+            cached.0.insert(good, values);
+        }
+        let values = &cached.0[&good];
+        let selected = hover_index(
+            cursor.normalized,
+            cursor.cursor_over
+                && capture.hovered == Some(crate::floating_ui::WindowKind::Good(good)),
+            values.len(),
+        );
+        let value = selected.map_or_else(
+            || {
+                "Hover a market day for exact figures. Cyan body marks the current partial day."
+                    .into()
+            },
+            |index| hover_label(good, &values[index]),
+        );
+        for (scope, mut text) in &mut labels.hover {
+            if scope.0 == good && text.0 != value {
+                text.0.clone_from(&value);
+            }
         }
     }
 }
@@ -664,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_charts_and_paused_visible_charts_do_not_rebuild() {
+    fn charts_remain_visible_without_market_focus_and_do_not_rebuild_while_paused() {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(crate::simulation::Snapshot {
             universe: Universe::default(),
@@ -682,7 +791,7 @@ mod tests {
         })
         .add_systems(Update, (refresh, hover).chain());
         app.update();
-        assert!(app.world().resource::<ChartDisplay>().days.is_empty());
+        assert_eq!(app.world().resource::<ChartDisplay>().days.len(), 1);
         app.world_mut().resource_mut::<market::Selection>().view = market::View::Market;
         app.update();
         assert_eq!(app.world().resource::<ChartDisplay>().days.len(), 1);

@@ -248,6 +248,7 @@ pub fn handle_selection(
     buttons: Query<(&Interaction, &PageButton), Changed<Interaction>>,
     cards: Query<(&Interaction, &Card), Changed<Interaction>>,
     shortcuts: crate::KeyboardShortcuts,
+    mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
     let agents = sorted_agents(&snapshot.0.universe);
     let pages = agents.len().div_ceil(CARDS_PER_PAGE).max(1);
@@ -283,6 +284,9 @@ pub fn handle_selection(
             if selection.0 != next {
                 selection.0 = next;
             }
+            if let (Some(id), Some(windows)) = (next, windows.as_mut()) {
+                windows.open(crate::floating_ui::WindowKind::Citizen(id));
+            }
         }
     }
     for (slot, key) in [
@@ -302,6 +306,9 @@ pub fn handle_selection(
                 .map(|(id, _)| *id);
             if selection.0 != next {
                 selection.0 = next;
+            }
+            if let (Some(id), Some(windows)) = (next, windows.as_mut()) {
+                windows.open(crate::floating_ui::WindowKind::Citizen(id));
             }
         }
     }
@@ -603,6 +610,9 @@ pub fn refresh_plan(
     content: Query<Entity, With<PlanContent>>,
     mut scroll: Query<&mut ScrollPosition, With<DetailScroll>>,
 ) {
+    if content.is_empty() {
+        return;
+    }
     let rows = selected_agent(&snapshot.0.universe, selection.0).map_or_else(Vec::new, |agent| {
         let AgentKind::Citizen(citizen) = &agent.kind;
         plan_rows(citizen)
@@ -643,33 +653,78 @@ pub fn refresh_plan(
 pub fn scroll_panels(
     mut wheel: MessageReader<MouseWheel>,
     mut panels: Query<(
+        Entity,
+        &Node,
         &RelativeCursorPosition,
         &ComputedNode,
         &mut ScrollPosition,
         &InheritedVisibility,
     )>,
+    capture: Option<Res<crate::floating_ui::InputCapture>>,
+    parents: Query<&ChildOf>,
+    windows: Query<&crate::floating_ui::FloatingWindow>,
+    keyboard: Option<Res<ButtonInput<KeyCode>>>,
 ) {
     for event in wheel.read() {
-        let delta = -event.y
-            * if event.unit == MouseScrollUnit::Line {
-                30.0
-            } else {
-                1.0
-            };
-        for (cursor, computed, mut scroll, visibility) in &mut panels {
+        let multiplier = if event.unit == MouseScrollUnit::Line {
+            30.0
+        } else {
+            1.0
+        };
+        let horizontal = keyboard
+            .as_ref()
+            .is_some_and(|keys| keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]));
+        let delta = Vec2::new(
+            -(event.x + if horizontal { event.y } else { 0.0 }),
+            if horizontal { 0.0 } else { -event.y },
+        ) * multiplier;
+        for (entity, node, cursor, computed, mut scroll, visibility) in &mut panels {
+            if let Some(capture) = capture.as_ref() {
+                let mut ancestor = entity;
+                let mut owner = None;
+                loop {
+                    if let Ok(window) = windows.get(ancestor) {
+                        owner = Some(window.0);
+                        break;
+                    }
+                    let Ok(parent) = parents.get(ancestor) else {
+                        break;
+                    };
+                    ancestor = parent.parent();
+                }
+                if owner != capture.hovered {
+                    continue;
+                }
+            }
             if !visibility.get() {
                 continue;
             }
-            let max = ((computed.content_size().y - computed.size().y)
+            let max = ((computed.content_size() - computed.size())
                 * computed.inverse_scale_factor())
-            .max(0.0);
-            scroll.0.y = if cursor.cursor_over {
-                (scroll.0.y + delta).clamp(0.0, max)
-            } else {
-                scroll.0.y.min(max)
-            };
+            .max(Vec2::ZERO);
+            let mut next = scroll.0;
+            if cursor.cursor_over {
+                if node.overflow.x == bevy::ui::OverflowAxis::Scroll {
+                    next.x += delta.x;
+                }
+                if node.overflow.y == bevy::ui::OverflowAxis::Scroll {
+                    next.y += delta.y;
+                }
+            }
+            next = next.clamp(Vec2::ZERO, max);
+            if scroll.0 != next {
+                scroll.0 = next;
+            }
         }
     }
+}
+
+pub(crate) fn plan_text(citizen: &Citizen) -> String {
+    plan_rows(citizen)
+        .into_iter()
+        .map(|row| row.label)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -677,6 +732,97 @@ mod tests {
     use super::*;
     use crate::simulation::{self, Snapshot};
     use learning_lord_simulation::{CitizenAction, locations::Map};
+
+    #[test]
+    fn wheel_scrolls_only_the_frontmost_window_and_shift_scrolls_horizontally() {
+        use crate::floating_ui::{FloatingWindow, InputCapture, WindowKind};
+        use learning_lord_simulation::marketplace::Good;
+        let mut app = App::new();
+        app.insert_resource(InputCapture {
+            blocked: true,
+            hovered: Some(WindowKind::Good(Good::Bread)),
+        })
+        .init_resource::<ButtonInput<KeyCode>>()
+        .add_message::<MouseWheel>()
+        .add_systems(Update, scroll_panels);
+        let mut panels = Vec::new();
+        for kind in [
+            WindowKind::Good(Good::Berries),
+            WindowKind::Good(Good::Bread),
+        ] {
+            let root = app.world_mut().spawn(FloatingWindow(kind)).id();
+            let panel = app
+                .world_mut()
+                .spawn((
+                    Node {
+                        overflow: Overflow::scroll(),
+                        ..default()
+                    },
+                    ComputedNode {
+                        size: Vec2::splat(100.0),
+                        content_size: Vec2::splat(400.0),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    RelativeCursorPosition {
+                        cursor_over: true,
+                        ..default()
+                    },
+                    InheritedVisibility::VISIBLE,
+                ))
+                .id();
+            app.world_mut().entity_mut(root).add_child(panel);
+            panels.push(panel);
+        }
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: -1.0,
+            window: Entity::PLACEHOLDER,
+            phase: bevy::input::touch::TouchPhase::Moved,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(panels[0]).unwrap().0,
+            Vec2::ZERO
+        );
+        assert_eq!(
+            app.world().get::<ScrollPosition>(panels[1]).unwrap().0,
+            Vec2::new(0.0, 30.0)
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: -1.0,
+            window: Entity::PLACEHOLDER,
+            phase: bevy::input::touch::TouchPhase::Moved,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(panels[0]).unwrap().0,
+            Vec2::ZERO
+        );
+        assert_eq!(
+            app.world().get::<ScrollPosition>(panels[1]).unwrap().0,
+            Vec2::new(30.0, 30.0)
+        );
+        app.world_mut().resource_mut::<InputCapture>().hovered = None;
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: -1.0,
+            window: Entity::PLACEHOLDER,
+            phase: bevy::input::touch::TouchPhase::Moved,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(panels[1]).unwrap().0,
+            Vec2::new(30.0, 30.0)
+        );
+    }
 
     #[test]
     fn clothing_bar_covers_its_full_unsigned_range() {

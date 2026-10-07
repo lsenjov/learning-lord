@@ -1,5 +1,5 @@
 use crate::{
-    DisplaySnapshot, MUTED, PANEL, TEXT,
+    DisplaySnapshot, TEXT,
     citizens::{self, Selection},
     text,
 };
@@ -28,101 +28,232 @@ pub enum MapItem {
     Route(usize),
 }
 
-pub fn spawn(parent: &mut ChildSpawnerCommands, sites: usize, citizens: usize) {
-    parent
+#[derive(Resource)]
+pub struct MapViewport {
+    size: Vec2,
+    pan: Vec2,
+    zoom: f32,
+    drag: Option<Vec2>,
+}
+
+impl Default for MapViewport {
+    fn default() -> Self {
+        Self {
+            size: Vec2::splat(MAP_SIZE),
+            pan: Vec2::ZERO,
+            zoom: 1.0,
+            drag: None,
+        }
+    }
+}
+
+impl MapViewport {
+    fn project(&self, position: Position) -> Vec2 {
+        let scale = self.size.min_element() * 0.5 * self.zoom / MAP_HALF_SIZE_METRES as f32;
+        self.size / 2.0 + self.pan + Vec2::new(position.x as f32, -position.y as f32) * scale
+    }
+
+    fn zoom_at(&mut self, pointer: Vec2, amount: f32) {
+        let zoom = (self.zoom * amount).clamp(0.5, 12.0);
+        self.pan =
+            pointer - self.size / 2.0 - (pointer - self.size / 2.0 - self.pan) * (zoom / self.zoom);
+        self.zoom = zoom;
+    }
+}
+
+pub fn spawn_background(commands: &mut Commands, sites: usize, citizens: usize) {
+    commands
         .spawn((
             Node {
-                width: px(MAP_SIZE + 24.0),
-                flex_shrink: 0.0,
-                padding: UiRect::all(px(12)),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(12),
-                border_radius: BorderRadius::all(px(12)),
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(PANEL),
+            GlobalZIndex(-10),
+            BackgroundColor(Color::srgb(0.055, 0.085, 0.095)),
         ))
-        .with_children(|panel| {
-            panel.spawn(text("Map | 2 km x 2 km", 18.0, TEXT));
-            panel
-                .spawn((
+        .with_children(|map| {
+            // Unrotated dots respect the scroll viewport's clipping rectangle.
+            for slot in 0..ROUTE_DOTS {
+                map.spawn((
                     Node {
-                        width: px(MAP_SIZE),
-                        height: px(MAP_SIZE),
-                        flex_shrink: 0.0,
+                        position_type: PositionType::Absolute,
+                        width: px(2),
+                        height: px(2),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.055, 0.085, 0.095)),
+                    UiTransform::default(),
+                    BackgroundColor(Color::srgb(0.85, 0.66, 0.25)),
+                    MapItem::Route(slot),
+                ));
+            }
+            for slot in 0..sites {
+                let color = Color::srgb(0.85, 0.75, 0.60);
+                map.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: px(10),
+                        height: px(10),
+                        border_radius: BorderRadius::all(px(2)),
+                        ..default()
+                    },
+                    BackgroundColor(color),
+                    UiTransform::default(),
+                    MapItem::Site(slot),
                 ))
-                .with_children(|map| {
-                    // Unrotated dots respect the scroll viewport's clipping rectangle.
-                    for slot in 0..ROUTE_DOTS {
-                        map.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                width: px(2),
-                                height: px(2),
-                                ..default()
-                            },
-                            UiTransform::default(),
-                            BackgroundColor(Color::srgb(0.85, 0.66, 0.25)),
-                            MapItem::Route(slot),
-                        ));
-                    }
-                    for slot in 0..sites {
-                        let color = Color::srgb(0.85, 0.75, 0.60);
-                        map.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                width: px(10),
-                                height: px(10),
-                                border_radius: BorderRadius::all(px(2)),
-                                ..default()
-                            },
-                            BackgroundColor(color),
-                            UiTransform::default(),
-                            MapItem::Site(slot),
-                        ))
-                        .with_children(|marker| {
-                            marker.spawn((
-                                text("", 12.0, TEXT),
-                                SiteLabel(slot),
-                                TextLayout::no_wrap(),
-                                Visibility::Inherited,
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    width: px(SITE_LABEL_WIDTH),
-                                    height: px(SITE_LABEL_HEIGHT),
-                                    ..default()
-                                },
-                            ));
-                        });
-                    }
-                    for slot in 0..citizens {
-                        map.spawn((Node {
-                            position_type: PositionType::Absolute, width: px(10), height: px(10),
-                            border_radius: BorderRadius::MAX, ..default()
-                        }, BackgroundColor(Color::srgb(1.0, 0.75, 0.20)), UiTransform::default(), MapItem::Citizen(slot)))
-                        .with_children(|marker| {
-                            marker.spawn((text("", 12.0, TEXT), MapLabel(slot), Node {
-                                position_type: PositionType::Absolute, left: px(12), top: px(-3),
-                                padding: UiRect::horizontal(px(3)), ..default()
-                            }, BackgroundColor(Color::srgb(0.055, 0.085, 0.095))));
-                        });
-                    }
+                .with_children(|marker| {
+                    marker.spawn((
+                        text("", 12.0, TEXT),
+                        SiteLabel(slot),
+                        TextLayout::no_wrap(),
+                        Visibility::Inherited,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            width: px(SITE_LABEL_WIDTH),
+                            height: px(SITE_LABEL_HEIGHT),
+                            ..default()
+                        },
+                    ));
                 });
-            panel.spawn(text("Walking: 1 km in 10 minutes\nLabels: public + selected properties\n1-6: select citizen on page", 13.0, MUTED));
+            }
+            for slot in 0..citizens {
+                map.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: px(10),
+                        height: px(10),
+                        border_radius: BorderRadius::MAX,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(1.0, 0.75, 0.20)),
+                    UiTransform::default(),
+                    MapItem::Citizen(slot),
+                ))
+                .with_children(|marker| {
+                    marker.spawn((
+                        text("", 12.0, TEXT),
+                        MapLabel(slot),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(12),
+                            top: px(-3),
+                            padding: UiRect::horizontal(px(3)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.055, 0.085, 0.095)),
+                    ));
+                });
+            }
         });
 }
 
-fn project(position: Position) -> Vec2 {
-    Vec2::new(
-        ((position.x / MAP_HALF_SIZE_METRES + 1.0) * 0.5) as f32 * MAP_SIZE,
-        ((1.0 - position.y / MAP_HALF_SIZE_METRES) * 0.5) as f32 * MAP_SIZE,
-    )
+pub fn interaction(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    capture: Res<crate::floating_ui::InputCapture>,
+    state: (Res<DisplaySnapshot>, ResMut<Selection>),
+    mut floating: ResMut<crate::floating_ui::Windows>,
+    mut viewport: ResMut<MapViewport>,
+) {
+    let (snapshot, mut selection) = state;
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let size = Vec2::new(window.width(), window.height());
+    if viewport.size != size {
+        viewport.size = size;
+    }
+    let scroll: f32 = wheel
+        .read()
+        .map(|event| match event.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => event.y * 0.12,
+            bevy::input::mouse::MouseScrollUnit::Pixel => event.y * 0.002,
+        })
+        .sum();
+    let Some(pointer) = window.cursor_position() else {
+        if viewport.drag.is_some() {
+            viewport.drag = None;
+        }
+        return;
+    };
+    if capture.blocked {
+        if viewport.drag.is_some() {
+            viewport.drag = None;
+        }
+        return;
+    }
+    if scroll != 0.0 {
+        viewport.zoom_at(pointer, scroll.exp());
+    }
+    if mouse.just_pressed(MouseButton::Left) {
+        let universe = &snapshot.0.universe;
+        let agents = citizens::sorted_agents(universe);
+        if let Some((id, _)) = agents.iter().find(|(id, agent)| {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            citizen_point(&viewport, &agents, *id, citizen.position()).distance(pointer) <= 10.0
+        }) {
+            selection.0 = Some(*id);
+            floating.open(crate::floating_ui::WindowKind::Citizen(*id));
+            return;
+        }
+        if let Some(place) = universe
+            .map()
+            .places()
+            .values()
+            .find(|place| viewport.project(place.position).distance(pointer) <= 10.0)
+        {
+            floating.open(crate::floating_ui::WindowKind::Location(place.id));
+            return;
+        }
+        viewport.drag = Some(pointer);
+    }
+    if mouse.just_pressed(MouseButton::Middle) {
+        viewport.drag = Some(pointer);
+    }
+    if mouse.pressed(MouseButton::Left) || mouse.pressed(MouseButton::Middle) {
+        if let Some(previous) = viewport.drag
+            && previous != pointer
+        {
+            viewport.pan += pointer - previous;
+            viewport.drag = Some(pointer);
+        }
+    } else if viewport.drag.is_some() {
+        viewport.drag = None;
+    }
 }
 
-fn site_label_position(point: Vec2, occupied: &[Rect]) -> Vec2 {
+fn citizen_point(
+    viewport: &MapViewport,
+    agents: &[(
+        learning_lord_simulation::AgentId,
+        &learning_lord_simulation::Agent,
+    )],
+    id: learning_lord_simulation::AgentId,
+    position: Position,
+) -> Vec2 {
+    let overlapping: Vec<_> = agents
+        .iter()
+        .filter(|(_, agent)| {
+            let AgentKind::Citizen(other) = &agent.kind;
+            viewport
+                .project(other.position())
+                .distance(viewport.project(position))
+                < 16.0
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    let offset = overlapping
+        .iter()
+        .position(|other| *other == id)
+        .unwrap_or(0) as f32;
+    viewport.project(position)
+        + Vec2::new(0.0, (offset - (overlapping.len() - 1) as f32 / 2.0) * 18.0)
+}
+
+fn site_label_position(point: Vec2, occupied: &[Rect], bounds: Vec2) -> Vec2 {
     let size = Vec2::new(SITE_LABEL_WIDTH, SITE_LABEL_HEIGHT);
     let candidates = [
         point + Vec2::new(-size.x / 2.0, 12.0),
@@ -130,7 +261,12 @@ fn site_label_position(point: Vec2, occupied: &[Rect]) -> Vec2 {
         point + Vec2::new(12.0, -size.y / 2.0),
         point + Vec2::new(-size.x - 12.0, -size.y / 2.0),
     ]
-    .map(|position| position.clamp(Vec2::splat(2.0), Vec2::splat(MAP_SIZE - 2.0) - size));
+    .map(|position| {
+        position.clamp(
+            Vec2::splat(2.0),
+            (bounds - Vec2::splat(2.0) - size).max(Vec2::splat(2.0)),
+        )
+    });
     candidates
         .into_iter()
         .find(|position| {
@@ -146,6 +282,7 @@ fn site_label_position(point: Vec2, occupied: &[Rect]) -> Vec2 {
 }
 
 pub fn refresh(
+    viewport: Option<Res<MapViewport>>,
     snapshot: Res<DisplaySnapshot>,
     selection: Res<Selection>,
     mut labels: Query<(&MapLabel, &mut Text), Without<SiteLabel>>,
@@ -157,9 +294,14 @@ pub fn refresh(
         Option<&mut BackgroundColor>,
     )>,
 ) {
-    if !snapshot.is_changed() && !selection.is_changed() {
+    if !snapshot.is_changed()
+        && !selection.is_changed()
+        && !viewport.as_ref().is_some_and(|view| view.is_changed())
+    {
         return;
     }
+    let fallback = MapViewport::default();
+    let viewport = viewport.as_deref().unwrap_or(&fallback);
     let universe = &snapshot.0.universe;
     let map = universe.map();
     let mut sites: Vec<_> = map.places().values().collect();
@@ -197,7 +339,8 @@ pub fn refresh(
             } else {
                 place.kind.name().to_string()
             };
-            let position = site_label_position(project(place.position), &occupied);
+            let position =
+                site_label_position(viewport.project(place.position), &occupied, viewport.size);
             occupied.push(Rect::from_corners(
                 position,
                 position + Vec2::new(SITE_LABEL_WIDTH, SITE_LABEL_HEIGHT),
@@ -223,7 +366,7 @@ pub fn refresh(
         if &value.0 != name {
             value.0.clone_from(name);
         }
-        let marker = project(sites[label.0].position) - Vec2::splat(5.0);
+        let marker = viewport.project(sites[label.0].position) - Vec2::splat(5.0);
         let next = px(position.x - marker.x);
         if node.left != next {
             node.left = next;
@@ -247,7 +390,7 @@ pub fn refresh(
                 if *visibility != next {
                     *visibility = next;
                 }
-                let p = project(place.position);
+                let p = viewport.project(place.position);
                 let next = px(p.x - 5.0);
                 if node.left != next {
                     node.left = next;
@@ -286,25 +429,12 @@ pub fn refresh(
                 }
                 if let Some((id, agent)) = agents.get(*slot) {
                     let AgentKind::Citizen(marker) = &agent.kind;
-                    let overlapping: Vec<_> = agents
-                        .iter()
-                        .filter(|(_, agent)| {
-                            let AgentKind::Citizen(other) = &agent.kind;
-                            project(other.position()).distance(project(marker.position())) < 16.0
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
-                    let offset = overlapping
-                        .iter()
-                        .position(|other| other == id)
-                        .unwrap_or(0) as f32;
-                    let p = project(marker.position());
-                    let shift = (offset - (overlapping.len() - 1) as f32 / 2.0) * 18.0;
+                    let p = citizen_point(viewport, &agents, *id, marker.position());
                     let next = px(p.x - 5.0);
                     if node.left != next {
                         node.left = next;
                     }
-                    let next = px(p.y - 5.0 + shift);
+                    let next = px(p.y - 5.0);
                     if node.top != next {
                         node.top = next;
                     }
@@ -326,11 +456,12 @@ pub fn refresh(
                     && let Some(active) = citizen.active_action()
                     && let CitizenAction::Travel(destination) = active.action()
                 {
-                    let from = project(citizen.position());
-                    let to = project(citizen.map().position(destination));
+                    let from = viewport.project(citizen.position());
+                    let to = viewport.project(citizen.map().position(destination));
                     let delta = to - from;
                     let length = delta.length();
-                    let intervals = (length / ROUTE_DOT_SPACING).ceil().max(1.0) as usize;
+                    let intervals =
+                        ((length / ROUTE_DOT_SPACING).ceil().max(1.0) as usize).min(ROUTE_DOTS - 1);
                     if *slot <= intervals {
                         let point = from + delta * (*slot as f32 / intervals as f32);
                         let next = px(point.x - 1.0);
@@ -357,6 +488,105 @@ mod tests {
     use learning_lord_simulation::{Citizen, Universe, locations::Map};
 
     #[test]
+    fn map_click_opens_mapped_citizen_and_capture_blocks_it() {
+        let universe = crate::simulation::new_universe().unwrap();
+        let agents = citizens::sorted_agents(&universe);
+        let id = agents[0].0;
+        let AgentKind::Citizen(citizen) = &agents[0].1.kind;
+        let mut window = Window::default();
+        let viewport = MapViewport {
+            size: Vec2::new(window.width(), window.height()),
+            ..default()
+        };
+        window.set_cursor_position(Some(citizen_point(
+            &viewport,
+            &agents,
+            id,
+            citizen.position(),
+        )));
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(Snapshot {
+            universe,
+            error: None,
+            mutation_error: None,
+            mutation_revision: 0,
+            planning_history: Default::default(),
+            generation: 0,
+            revision: 0,
+        }))
+        .insert_resource(viewport)
+        .init_resource::<Selection>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .init_resource::<crate::floating_ui::Windows>()
+        .insert_resource(crate::floating_ui::InputCapture {
+            blocked: true,
+            ..default()
+        })
+        .add_message::<bevy::input::mouse::MouseWheel>()
+        .add_systems(Update, interaction);
+        app.world_mut().spawn((window, bevy::window::PrimaryWindow));
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        assert!(
+            app.world_mut()
+                .resource_mut::<crate::floating_ui::Windows>()
+                .take_new()
+                .is_empty()
+        );
+        app.world_mut()
+            .resource_mut::<crate::floating_ui::InputCapture>()
+            .blocked = false;
+        app.update();
+        assert_eq!(app.world().resource::<Selection>().0, Some(id));
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<crate::floating_ui::Windows>()
+                .take_new(),
+            vec![crate::floating_ui::WindowKind::Citizen(id)]
+        );
+    }
+
+    #[test]
+    fn projection_preserves_distances_on_wide_and_tall_windows() {
+        for size in [Vec2::new(1200.0, 600.0), Vec2::new(600.0, 1200.0)] {
+            let viewport = MapViewport { size, ..default() };
+            let origin = viewport.project(Position::default());
+            assert_eq!(origin, size / 2.0);
+            let east = viewport.project(Position { x: 100.0, y: 0.0 });
+            let north = viewport.project(Position { x: 0.0, y: 100.0 });
+            assert_eq!(east.distance(origin), north.distance(origin));
+        }
+    }
+
+    #[test]
+    fn zoom_keeps_pointer_world_position_and_pan_moves_every_point_equally() {
+        let mut viewport = MapViewport {
+            size: Vec2::new(1200.0, 600.0),
+            ..default()
+        };
+        let position = Position {
+            x: 300.0,
+            y: -400.0,
+        };
+        let pointer = viewport.project(position);
+        viewport.zoom_at(pointer, 2.0);
+        assert!(viewport.project(position).distance(pointer) < 0.001);
+        viewport.pan += Vec2::new(80.0, -30.0);
+        assert!(
+            viewport
+                .project(position)
+                .distance(pointer + Vec2::new(80.0, -30.0))
+                < 0.001
+        );
+        viewport.zoom_at(pointer, 1000.0);
+        assert_eq!(viewport.zoom, 12.0);
+        viewport.zoom_at(pointer, 0.0001);
+        assert_eq!(viewport.zoom, 0.5);
+    }
+
+    #[test]
     fn site_labels_stay_bounded_and_show_public_or_selected_properties() {
         for point in [
             Vec2::ZERO,
@@ -364,18 +594,21 @@ mod tests {
             Vec2::new(0.0, MAP_SIZE),
             Vec2::new(MAP_SIZE, 0.0),
         ] {
-            let position = site_label_position(point, &[]);
+            let position = site_label_position(point, &[], Vec2::splat(MAP_SIZE));
             assert!(position.x >= 0.0 && position.y >= 0.0);
             assert!(position.x + SITE_LABEL_WIDTH <= MAP_SIZE);
             assert!(position.y + SITE_LABEL_HEIGHT <= MAP_SIZE);
         }
         let point = Vec2::splat(150.0);
-        let first = site_label_position(point, &[]);
+        let first = site_label_position(point, &[], Vec2::splat(MAP_SIZE));
         let occupied = Rect::from_corners(
             first,
             first + Vec2::new(SITE_LABEL_WIDTH, SITE_LABEL_HEIGHT),
         );
-        assert_ne!(first, site_label_position(point, &[occupied]));
+        assert_ne!(
+            first,
+            site_label_position(point, &[occupied], Vec2::splat(MAP_SIZE))
+        );
 
         let universe = crate::simulation::new_universe().unwrap();
         let place_count = universe.map().places().len();
@@ -481,7 +714,7 @@ mod tests {
                         Node::default(),
                         UiTransform::default(),
                         Visibility::Inherited,
-                        BackgroundColor(PANEL),
+                        BackgroundColor(crate::PANEL),
                     ))
                     .id()
             })

@@ -331,7 +331,10 @@ fn owner_name(universe: &Universe, owner: GoodsOwner) -> String {
     }
 }
 
-fn place_owner(universe: &Universe, place: &learning_lord_simulation::locations::Place) -> String {
+pub(crate) fn place_owner(
+    universe: &Universe,
+    place: &learning_lord_simulation::locations::Place,
+) -> String {
     if place.kind.is_town_owned() {
         "Town".into()
     } else {
@@ -341,7 +344,7 @@ fn place_owner(universe: &Universe, place: &learning_lord_simulation::locations:
     }
 }
 
-fn stocks(universe: &Universe, place: PlaceId) -> String {
+pub(crate) fn stocks(universe: &Universe, place: PlaceId) -> String {
     let mut lines = Vec::new();
     for (key, units) in universe
         .storage()
@@ -393,7 +396,7 @@ fn stocks(universe: &Universe, place: PlaceId) -> String {
     }
 }
 
-fn kind_label(kind: &TaxKind) -> &'static str {
+pub(crate) fn kind_label(kind: &TaxKind) -> &'static str {
     match kind {
         TaxKind::FlatFee { .. } => "Flat fee",
         TaxKind::Socage { .. } => "Socage",
@@ -402,7 +405,7 @@ fn kind_label(kind: &TaxKind) -> &'static str {
     }
 }
 
-fn treasury(universe: &Universe) -> String {
+pub(crate) fn treasury(universe: &Universe) -> String {
     let mut lines = vec![format!("Town treasury: {} coins", universe.town_treasury())];
     for rule in universe.tax_rules().values() {
         for (id, _) in universe.agents() {
@@ -467,7 +470,6 @@ pub fn refresh(
     mut state: ResMut<State>,
     roots: Query<Entity, With<Content>>,
     panels: Query<(&ScrollPanel, &ScrollPosition)>,
-    view: Res<market::Selection>,
 ) {
     if state.generation != snapshot.0.generation {
         *state = State {
@@ -486,9 +488,6 @@ pub fn refresh(
             state.field = None;
         }
         state.dirty = true;
-    }
-    if view.view != market::View::Locations {
-        return;
     }
     if !state.dirty && state.revision == Some(snapshot.0.revision) {
         return;
@@ -783,11 +782,11 @@ fn tax_kind(draft: &Draft, goods: &[Good]) -> Result<TaxKind, String> {
 pub fn handle(
     mut state: ResMut<State>,
     (snapshot, worker): (Res<DisplaySnapshot>, Res<SimulationWorker>),
-    view: Res<market::Selection>,
     buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
     mut keys: MessageReader<KeyboardInput>,
     caravan: Option<Res<crate::caravan_controls::State>>,
     controls: Option<Res<crate::Controls>>,
+    mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
     if state.generation != snapshot.0.generation {
         *state = State {
@@ -799,11 +798,6 @@ pub fn handle(
         return;
     }
     if controls.is_some_and(|controls| controls.restart_pending) {
-        state.field = None;
-        keys.clear();
-        return;
-    }
-    if view.view != market::View::Locations {
         state.field = None;
         keys.clear();
         return;
@@ -827,6 +821,9 @@ pub fn handle(
         }
         let mutation = match *choice {
             Choice::Place(place) => {
+                if let Some(windows) = windows.as_mut() {
+                    windows.open(crate::floating_ui::WindowKind::Location(place));
+                }
                 state.place = Some(place);
                 state.location_type = None;
                 state.draft = None;
@@ -1059,6 +1056,20 @@ pub fn handle(
             }
             _ => {}
         }
+        state.dirty = true;
+    }
+}
+
+pub(crate) fn select_place(state: &mut State, place: PlaceId) {
+    state.place = Some(place);
+    state.location_type = None;
+    state.draft = None;
+    state.field = None;
+    state.dirty = true;
+}
+
+pub(crate) fn stop_editing(state: &mut State) {
+    if state.field.take().is_some() {
         state.dirty = true;
     }
 }

@@ -349,6 +349,10 @@ pub fn refresh(
     }
 }
 
+pub(crate) fn stop_editing(state: &mut State) {
+    state.field = None;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
