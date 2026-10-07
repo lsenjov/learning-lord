@@ -154,11 +154,15 @@ pub fn interaction(
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     capture: Res<crate::floating_ui::InputCapture>,
-    state: (Res<DisplaySnapshot>, ResMut<Selection>),
+    state: (
+        Res<DisplaySnapshot>,
+        ResMut<Selection>,
+        ResMut<crate::locations::State>,
+    ),
     mut floating: ResMut<crate::floating_ui::Windows>,
     mut viewport: ResMut<MapViewport>,
 ) {
-    let (snapshot, mut selection) = state;
+    let (snapshot, mut selection, mut locations) = state;
     let Ok(window) = windows.single() else {
         return;
     };
@@ -196,7 +200,7 @@ pub fn interaction(
             citizen_point(&viewport, &agents, *id, citizen.position()).distance(pointer) <= 10.0
         }) {
             selection.0 = Some(*id);
-            floating.open(crate::floating_ui::WindowKind::Citizen(*id));
+            floating.open(crate::floating_ui::WindowKind::Citizens);
             return;
         }
         if let Some(place) = universe
@@ -205,7 +209,8 @@ pub fn interaction(
             .values()
             .find(|place| viewport.project(place.position).distance(pointer) <= 10.0)
         {
-            floating.open(crate::floating_ui::WindowKind::Location(place.id));
+            crate::locations::select_place(&mut locations, place.id);
+            floating.open(crate::floating_ui::WindowKind::Locations);
             return;
         }
         viewport.drag = Some(pointer);
@@ -518,6 +523,7 @@ mod tests {
         .init_resource::<Selection>()
         .init_resource::<ButtonInput<MouseButton>>()
         .init_resource::<crate::floating_ui::Windows>()
+        .init_resource::<crate::locations::State>()
         .insert_resource(crate::floating_ui::InputCapture {
             blocked: true,
             ..default()
@@ -544,7 +550,7 @@ mod tests {
             app.world_mut()
                 .resource_mut::<crate::floating_ui::Windows>()
                 .take_new(),
-            vec![crate::floating_ui::WindowKind::Citizen(id)]
+            vec![crate::floating_ui::WindowKind::Citizens]
         );
     }
 

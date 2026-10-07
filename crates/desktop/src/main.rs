@@ -122,7 +122,7 @@ fn main() -> Result<(), String> {
     .init_resource::<map_view::MapViewport>()
     .init_resource::<Controls>()
     .init_resource::<citizens::Selection>()
-    .init_resource::<citizens::RosterPage>()
+    .init_resource::<citizens::RosterState>()
     .init_resource::<citizens::PlanDisplay>()
     .init_resource::<citizen_history::Selection>()
     .init_resource::<market::Selection>()
@@ -130,7 +130,6 @@ fn main() -> Result<(), String> {
     .init_resource::<caravan_controls::State>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
-    .init_resource::<market_history::ScopedCharts>()
     .init_resource::<debug_export::DebugExport>()
     .init_resource::<InputFocus>()
     .add_systems(Startup, setup)
@@ -140,7 +139,6 @@ fn main() -> Result<(), String> {
             (
                 poll_worker,
                 floating_ui::interact,
-                inspectors::handle,
                 locations::handle,
                 caravan_controls::handle,
                 handle_controls,
@@ -151,7 +149,6 @@ fn main() -> Result<(), String> {
                 inspectors::open_windows,
                 refresh_display,
                 citizens::refresh_cards,
-                citizens::refresh_page_label,
                 citizens::refresh_plan,
                 citizens::scroll_panels,
             )
@@ -159,14 +156,12 @@ fn main() -> Result<(), String> {
             (
                 citizen_history::refresh,
                 map_view::refresh,
-                inspectors::refresh,
                 market::refresh_choices,
                 market::refresh,
                 locations::refresh,
                 caravan_controls::refresh,
                 market_history::refresh,
                 market_history::hover,
-                market_history::refresh_scoped,
             )
                 .chain(),
         )
@@ -1118,7 +1113,7 @@ mod tests {
             .init_resource::<map_view::MapViewport>()
             .init_resource::<Controls>()
             .init_resource::<citizens::Selection>()
-            .init_resource::<citizens::RosterPage>()
+            .init_resource::<citizens::RosterState>()
             .init_resource::<citizens::PlanDisplay>()
             .init_resource::<citizen_history::Selection>()
             .init_resource::<market::Selection>()
@@ -1145,7 +1140,6 @@ mod tests {
                     market::handle_selection,
                     refresh_display,
                     citizens::refresh_cards,
-                    citizens::refresh_page_label,
                     citizens::refresh_plan,
                     citizens::scroll_panels,
                     map_view::refresh,

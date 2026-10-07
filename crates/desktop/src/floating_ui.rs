@@ -1,6 +1,9 @@
 use crate::{MUTED, PANEL, TEXT, text};
-use bevy::{ecs::system::SystemParam, prelude::*};
-use learning_lord_simulation::{AgentId, locations::PlaceId, marketplace::Good};
+use bevy::{
+    ecs::system::SystemParam,
+    prelude::*,
+    window::{CursorIcon, SystemCursorIcon},
+};
 use std::collections::HashMap;
 
 const TITLE_HEIGHT: f32 = 36.0;
@@ -12,18 +15,11 @@ pub enum WindowKind {
     Citizens,
     Locations,
     Market,
-    Citizen(AgentId),
-    Location(PlaceId),
-    Good(Good),
 }
 
 impl WindowKind {
     pub fn minimum_size(self) -> Vec2 {
-        match self {
-            Self::Citizens => Vec2::new(860.0, 360.0),
-            Self::Locations | Self::Market => Vec2::new(900.0, 360.0),
-            _ => MIN_SIZE,
-        }
+        Vec2::new(420.0, 280.0)
     }
 }
 
@@ -116,10 +112,6 @@ impl Windows {
             },
         );
         self.order
-    }
-
-    pub fn is_open(&self, kind: WindowKind) -> bool {
-        self.entries.get(&kind).is_some_and(|entry| entry.open)
     }
 
     pub fn requested_focus(&self) -> Option<WindowKind> {
@@ -252,7 +244,7 @@ pub fn spawn_window(
                     .spawn(Node {
                         width: percent(100),
                         height: percent(100),
-                        min_width: px(kind.minimum_size().x - 22.0),
+                        min_width: px(720),
                         min_height: px(0),
                         padding: UiRect::all(px(10)),
                         flex_direction: FlexDirection::Column,
@@ -261,8 +253,45 @@ pub fn spawn_window(
                     })
                     .with_children(content);
             });
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(1),
+                    bottom: px(1),
+                    width: px(20),
+                    height: px(20),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.19, 0.27, 0.30)),
+            ))
+            .with_children(|grip| {
+                grip.spawn(text("//", 16.0, TEXT));
+            });
         })
         .id()
+}
+
+fn resize_edges(bounds: Bounds, cursor: Vec2) -> BVec4 {
+    let local = cursor - bounds.position;
+    let corner = local.x >= bounds.size.x - 20.0 && local.y >= bounds.size.y - 20.0;
+    BVec4::new(
+        local.x <= EDGE,
+        local.x >= bounds.size.x - EDGE || corner,
+        local.y <= EDGE,
+        local.y >= bounds.size.y - EDGE || corner,
+    )
+}
+
+fn resize_cursor(edges: BVec4) -> SystemCursorIcon {
+    match (edges.x || edges.y, edges.z || edges.w) {
+        (true, true) if edges.x == edges.z => SystemCursorIcon::NwseResize,
+        (true, true) => SystemCursorIcon::NeswResize,
+        (true, false) => SystemCursorIcon::EwResize,
+        (false, true) => SystemCursorIcon::NsResize,
+        _ => SystemCursorIcon::Default,
+    }
 }
 
 fn resize(original: Bounds, delta: Vec2, edges: BVec4, viewport: Vec2, minimum: Vec2) -> Bounds {
@@ -293,7 +322,6 @@ pub(crate) struct EditorFocus<'w> {
     locations: Option<ResMut<'w, crate::locations::State>>,
     caravan: Option<ResMut<'w, crate::caravan_controls::State>>,
     market: Option<ResMut<'w, crate::market::Selection>>,
-    citizens: Option<ResMut<'w, crate::citizens::Selection>>,
 }
 
 impl EditorFocus<'_> {
@@ -308,19 +336,11 @@ impl EditorFocus<'_> {
         {
             crate::caravan_controls::stop_editing(state);
         }
-        if let WindowKind::Citizen(id) = kind
-            && let Some(selection) = self.citizens.as_mut()
-        {
-            selection.0 = Some(id);
-        }
         if let Some(selection) = self.market.as_mut() {
-            if let WindowKind::Good(good) = kind {
-                crate::market::select_good(selection, good);
-            }
             selection.view = match kind {
-                WindowKind::Citizens | WindowKind::Citizen(_) => crate::market::View::Citizens,
-                WindowKind::Locations | WindowKind::Location(_) => crate::market::View::Locations,
-                WindowKind::Market | WindowKind::Good(_) => crate::market::View::Market,
+                WindowKind::Citizens => crate::market::View::Citizens,
+                WindowKind::Locations => crate::market::View::Locations,
+                WindowKind::Market => crate::market::View::Market,
             };
         }
     }
@@ -344,7 +364,12 @@ impl EditorFocus<'_> {
 
 #[derive(SystemParam)]
 pub(crate) struct WindowInput<'w, 's> {
-    primary: Query<'w, 's, &'static Window, With<bevy::window::PrimaryWindow>>,
+    primary: Query<
+        'w,
+        's,
+        (Entity, &'static Window, Option<&'static CursorIcon>),
+        With<bevy::window::PrimaryWindow>,
+    >,
     mouse: Res<'w, ButtonInput<MouseButton>>,
     buttons: Query<'w, 's, (&'static Interaction, &'static Open), Changed<Interaction>>,
     close: Query<'w, 's, (&'static Interaction, &'static Close), Changed<Interaction>>,
@@ -361,13 +386,14 @@ pub(crate) struct WindowInput<'w, 's> {
 }
 
 pub fn interact(
+    mut commands: Commands,
     mut windows: ResMut<Windows>,
     mut capture: ResMut<InputCapture>,
     input: WindowInput,
     mut editors: EditorFocus,
     mut roots: Query<(&mut Node, &mut GlobalZIndex, &mut Visibility), With<FloatingWindow>>,
 ) {
-    let Ok(window) = input.primary.single() else {
+    let Ok((window_entity, window, cursor_icon)) = input.primary.single() else {
         return;
     };
     let viewport = Vec2::new(window.width(), window.height());
@@ -418,12 +444,7 @@ pub fn interact(
         editors.activate(kind);
         let bounds = windows.entries[&kind].bounds;
         let local = cursor - bounds.position;
-        let edges = BVec4::new(
-            local.x <= EDGE,
-            local.x >= bounds.size.x - EDGE,
-            local.y <= EDGE,
-            local.y >= bounds.size.y - EDGE,
-        );
+        let edges = resize_edges(bounds, cursor);
         if edges.any() || local.y < TITLE_HEIGHT && local.x < bounds.size.x - 44.0 {
             windows.gesture = Some(Gesture {
                 kind,
@@ -456,6 +477,18 @@ pub fn interact(
         if let Some(entry) = windows.entries.get_mut(&gesture.kind) {
             entry.bounds = bounds;
         }
+    }
+    let edges = windows
+        .gesture
+        .map(|gesture| gesture.edges)
+        .or_else(|| {
+            let kind = capture.hovered?;
+            Some(resize_edges(windows.entries[&kind].bounds, cursor?))
+        })
+        .unwrap_or_default();
+    let icon = CursorIcon::System(resize_cursor(edges));
+    if cursor_icon != Some(&icon) {
+        commands.entity(window_entity).insert(icon);
     }
     windows.sync(&mut roots);
 }
@@ -496,6 +529,32 @@ mod tests {
             MIN_SIZE,
         );
         assert_eq!(resized.position + resized.size, viewport);
+    }
+
+    #[test]
+    fn category_windows_shrink_and_corner_grip_matches_resize_cursor() {
+        let original = Bounds {
+            position: Vec2::new(100.0, 100.0),
+            size: Vec2::new(960.0, 600.0),
+        };
+        let cursor = original.position + original.size - Vec2::splat(15.0);
+        let edges = resize_edges(original, cursor);
+        assert_eq!(resize_cursor(edges), SystemCursorIcon::NwseResize);
+        for kind in [
+            WindowKind::Citizens,
+            WindowKind::Locations,
+            WindowKind::Market,
+        ] {
+            let small = resize(
+                original,
+                Vec2::splat(-1000.0),
+                edges,
+                Vec2::new(1280.0, 800.0),
+                kind.minimum_size(),
+            );
+            assert_eq!(small.size, Vec2::new(420.0, 280.0));
+            assert_eq!(small.position, original.position);
+        }
     }
 
     #[test]
@@ -555,7 +614,7 @@ mod interaction_tests {
         let lower = app
             .world_mut()
             .spawn((
-                FloatingWindow(WindowKind::Good(Good::Berries)),
+                FloatingWindow(WindowKind::Citizens),
                 Node::default(),
                 GlobalZIndex(1),
                 Visibility::Inherited,
@@ -564,14 +623,14 @@ mod interaction_tests {
         let upper = app
             .world_mut()
             .spawn((
-                FloatingWindow(WindowKind::Good(Good::Bread)),
+                FloatingWindow(WindowKind::Market),
                 Node::default(),
                 GlobalZIndex(2),
                 Visibility::Inherited,
             ))
             .id();
         app.world_mut().resource_mut::<Windows>().register(
-            WindowKind::Good(Good::Berries),
+            WindowKind::Citizens,
             lower,
             Bounds {
                 position: Vec2::new(100.0, 100.0),
@@ -579,7 +638,7 @@ mod interaction_tests {
             },
         );
         app.world_mut().resource_mut::<Windows>().register(
-            WindowKind::Good(Good::Bread),
+            WindowKind::Market,
             upper,
             Bounds {
                 position: Vec2::new(200.0, 180.0),
@@ -590,7 +649,7 @@ mod interaction_tests {
         frame(&mut app);
         assert_eq!(
             app.world().resource::<InputCapture>().hovered,
-            Some(WindowKind::Good(Good::Bread))
+            Some(WindowKind::Market)
         );
         assert!(app.world().resource::<InputCapture>().blocked);
         pointer(&mut app, Vec2::new(150.0, 300.0));
@@ -614,7 +673,7 @@ mod interaction_tests {
         pointer(&mut app, Vec2::new(250.0, 165.0));
         frame(&mut app);
         assert_eq!(
-            app.world().resource::<Windows>().entries[&WindowKind::Good(Good::Berries)]
+            app.world().resource::<Windows>().entries[&WindowKind::Citizens]
                 .bounds
                 .position,
             Vec2::new(200.0, 150.0)
@@ -630,8 +689,7 @@ mod interaction_tests {
         frame(&mut app);
         pointer(&mut app, Vec2::new(798.0, 648.0));
         frame(&mut app);
-        let remembered =
-            app.world().resource::<Windows>().entries[&WindowKind::Good(Good::Berries)].bounds;
+        let remembered = app.world().resource::<Windows>().entries[&WindowKind::Citizens].bounds;
         assert_eq!(remembered.size, Vec2::new(600.0, 500.0));
         app.world_mut()
             .resource_mut::<ButtonInput<MouseButton>>()
@@ -639,7 +697,7 @@ mod interaction_tests {
         frame(&mut app);
         let close = app
             .world_mut()
-            .spawn((Close(WindowKind::Good(Good::Berries)), Interaction::Pressed))
+            .spawn((Close(WindowKind::Citizens), Interaction::Pressed))
             .id();
         frame(&mut app);
         assert_eq!(
@@ -649,7 +707,7 @@ mod interaction_tests {
         app.world_mut().entity_mut(close).insert(Interaction::None);
         app.world_mut()
             .resource_mut::<Windows>()
-            .open(WindowKind::Good(Good::Berries));
+            .open(WindowKind::Citizens);
         assert!(
             app.world_mut()
                 .resource_mut::<Windows>()
@@ -662,7 +720,7 @@ mod interaction_tests {
             Display::Flex
         );
         assert_eq!(
-            app.world().resource::<Windows>().entries[&WindowKind::Good(Good::Berries)].bounds,
+            app.world().resource::<Windows>().entries[&WindowKind::Citizens].bounds,
             remembered
         );
         pointer(&mut app, Vec2::new(1100.0, 750.0));

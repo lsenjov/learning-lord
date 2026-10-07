@@ -1,5 +1,4 @@
 use crate::{DisplaySnapshot, MUTED, TEXT, format_clock, market, text};
-use bevy::ecs::system::SystemParam;
 use bevy::{prelude::*, ui::RelativeCursorPosition};
 use learning_lord_simulation::{
     Universe,
@@ -162,23 +161,13 @@ pub(super) struct Legend;
 pub(super) struct Hover;
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
-    spawn_scoped(parent, None);
-}
-
-#[derive(Component)]
-pub(crate) struct Scope(pub Good);
-
-pub(crate) fn spawn_scoped(parent: &mut ChildSpawnerCommands, good: Option<Good>) {
     parent.spawn(text(
         "MARKET HISTORY  |  recent 30 market days",
         14.0,
         MUTED,
     ));
     parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Close pressure affects the next 04:00 price.", 13.0, MUTED));
-    let mut legend = parent.spawn((text("", 13.0, TEXT), Legend));
-    if let Some(good) = good {
-        legend.insert(Scope(good));
-    }
+    let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
             width: percent(100),
@@ -187,7 +176,7 @@ pub(crate) fn spawn_scoped(parent: &mut ChildSpawnerCommands, good: Option<Good>
             ..default()
         })
         .with_children(|row| {
-            let mut axis = row.spawn((
+            let _axis = row.spawn((
                 Node {
                     width: px(100),
                     height: px(HEIGHT),
@@ -196,10 +185,7 @@ pub(crate) fn spawn_scoped(parent: &mut ChildSpawnerCommands, good: Option<Good>
                 },
                 Axis,
             ));
-            if let Some(good) = good {
-                axis.insert(Scope(good));
-            }
-            let mut plot = row.spawn((
+            let _plot = row.spawn((
                 Node {
                     flex_grow: 1.0,
                     min_width: px(0),
@@ -210,11 +196,8 @@ pub(crate) fn spawn_scoped(parent: &mut ChildSpawnerCommands, good: Option<Good>
                 RelativeCursorPosition::default(),
                 Plot,
             ));
-            if let Some(good) = good {
-                plot.insert(Scope(good));
-            }
         });
-    let mut hover = parent.spawn((
+    let _hover = parent.spawn((
         text(
             "Hover a market day for exact figures. Cyan body marks the current partial day.",
             13.0,
@@ -227,9 +210,6 @@ pub(crate) fn spawn_scoped(parent: &mut ChildSpawnerCommands, good: Option<Good>
         },
         Hover,
     ));
-    if let Some(good) = good {
-        hover.insert(Scope(good));
-    }
 }
 
 fn rect(parent: &mut ChildSpawnerCommands, x: f32, y: f32, width: f32, height: f32, color: Color) {
@@ -285,9 +265,9 @@ pub fn refresh(
     snapshot: Res<DisplaySnapshot>,
     selection: Res<market::Selection>,
     mut cached: ResMut<ChartDisplay>,
-    plots: Query<(Entity, Ref<Plot>), Without<Scope>>,
-    axes: Query<Entity, (With<Axis>, Without<Scope>)>,
-    mut legends: Query<&mut Text, (With<Legend>, Without<Scope>)>,
+    plots: Query<(Entity, Ref<Plot>)>,
+    axes: Query<Entity, With<Axis>>,
+    mut legends: Query<&mut Text, With<Legend>>,
 ) {
     let added = plots.iter().any(|(_, plot)| plot.is_added());
     if plots.is_empty() || (!snapshot.is_changed() && !selection.is_changed() && !added) {
@@ -379,8 +359,8 @@ fn hover_label(good: Good, day: &Day) -> String {
 pub fn hover(
     selection: Res<market::Selection>,
     cached: Res<ChartDisplay>,
-    plots: Query<&RelativeCursorPosition, (With<Plot>, Without<Scope>)>,
-    mut readouts: Query<&mut Text, (With<Hover>, Without<Scope>)>,
+    plots: Query<&RelativeCursorPosition, With<Plot>>,
+    mut readouts: Query<&mut Text, With<Hover>>,
     capture: Option<Res<crate::floating_ui::InputCapture>>,
 ) {
     let selected = plots.iter().find_map(|cursor| {
@@ -548,73 +528,6 @@ fn draw_chart(
                     }
                 }
             });
-    }
-}
-
-type ScopedLegend = (With<Legend>, Without<Hover>);
-type ScopedHover = (With<Hover>, Without<Legend>);
-
-#[derive(SystemParam)]
-pub(crate) struct ScopedLabels<'w, 's> {
-    legends: Query<'w, 's, (&'static Scope, &'static mut Text), ScopedLegend>,
-    hover: Query<'w, 's, (&'static Scope, &'static mut Text), ScopedHover>,
-}
-
-#[derive(Resource, Default)]
-pub(crate) struct ScopedCharts(std::collections::HashMap<Good, Vec<Day>>);
-
-pub(crate) fn refresh_scoped(
-    mut commands: Commands,
-    snapshot: Res<DisplaySnapshot>,
-    mut cached: ResMut<ScopedCharts>,
-    plots: Query<(Entity, &Scope, &RelativeCursorPosition), With<Plot>>,
-    axes: Query<(Entity, &Scope), With<Axis>>,
-    mut labels: ScopedLabels,
-    capture: Res<crate::floating_ui::InputCapture>,
-) {
-    for (entity, scope, cursor) in &plots {
-        let good = scope.0;
-        let values = if snapshot.is_changed() || !cached.0.contains_key(&good) {
-            days(&snapshot.0.universe, good)
-        } else {
-            cached.0[&good].clone()
-        };
-        if cached.0.get(&good) != Some(&values) {
-            let axis_entities = axes
-                .iter()
-                .filter(|(_, scope)| scope.0 == good)
-                .map(|(entity, _)| entity)
-                .collect::<Vec<_>>();
-            draw_chart(&mut commands, good, &values, &axis_entities, &[entity]);
-            for (scope, mut legend) in &mut labels.legends {
-                if scope.0 == good {
-                    legend.0 = format!(
-                        "Quantity size key at left: {}  |  one linear scale across these days",
-                        chart_quantity_label(good, Scale::new(&values).quantity_max)
-                    );
-                }
-            }
-            cached.0.insert(good, values);
-        }
-        let values = &cached.0[&good];
-        let selected = hover_index(
-            cursor.normalized,
-            cursor.cursor_over
-                && capture.hovered == Some(crate::floating_ui::WindowKind::Good(good)),
-            values.len(),
-        );
-        let value = selected.map_or_else(
-            || {
-                "Hover a market day for exact figures. Cyan body marks the current partial day."
-                    .into()
-            },
-            |index| hover_label(good, &values[index]),
-        );
-        for (scope, mut text) in &mut labels.hover {
-            if scope.0 == good && text.0 != value {
-                text.0.clone_from(&value);
-            }
-        }
     }
 }
 

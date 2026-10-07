@@ -162,7 +162,7 @@ pub fn handle_selection(
                 }
                 Choice::Good(good) => {
                     if let Some(windows) = windows.as_mut() {
-                        windows.open(crate::floating_ui::WindowKind::Good(good));
+                        windows.open(crate::floating_ui::WindowKind::Market);
                     }
                     if selection.good() != good {
                         selection.good = Some(good);
@@ -207,7 +207,7 @@ pub fn handle_selection(
         if next != selection.good() {
             selection.good = Some(next);
             if let Some(windows) = windows.as_mut() {
-                windows.open(crate::floating_ui::WindowKind::Good(next));
+                windows.open(crate::floating_ui::WindowKind::Market);
             }
         }
     }
@@ -575,12 +575,8 @@ pub fn refresh(
     }
 }
 
-pub(crate) fn select_good(selection: &mut Selection, good: Good) {
-    selection.good = Some(good);
-    selection.view = View::Market;
-}
-
-pub(crate) fn order_text(universe: &Universe, good: Good) -> String {
+#[cfg(test)]
+fn order_text(universe: &Universe, good: Good) -> String {
     let groups = seller_orders(universe, good);
     if groups.is_empty() {
         return "No current sell orders for this good.".into();

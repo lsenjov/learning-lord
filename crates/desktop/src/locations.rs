@@ -822,7 +822,7 @@ pub fn handle(
         let mutation = match *choice {
             Choice::Place(place) => {
                 if let Some(windows) = windows.as_mut() {
-                    windows.open(crate::floating_ui::WindowKind::Location(place));
+                    windows.open(crate::floating_ui::WindowKind::Locations);
                 }
                 state.place = Some(place);
                 state.location_type = None;
