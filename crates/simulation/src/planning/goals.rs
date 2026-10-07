@@ -464,6 +464,37 @@ fn replenish(
     let mut stop: Option<ReserveStop> = None;
     while can_buy && state.citizen.available_food_nutrition() < target {
         let mut best: Option<ReservePurchase> = None;
+        let mut nearest_quotes: [Vec<(f64, crate::PlaceId)>; Good::COUNT] =
+            std::array::from_fn(|_| Vec::new());
+        let map = state.citizen.map();
+        let mut places: Vec<_> = map
+            .places()
+            .values()
+            .filter(|place| place.kind != crate::locations::Location::Home)
+            .collect();
+        places.sort_by(|a, b| {
+            state
+                .citizen
+                .position()
+                .distance(a.position)
+                .total_cmp(&state.citizen.position().distance(b.position))
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        });
+        for place in &places {
+            for good in Good::FOOD {
+                if let Some(quote) =
+                    state
+                        .citizen
+                        .market()
+                        .lowest_quote_at(state.citizen.id(), place.id, good)
+                    && !nearest_quotes[good as usize]
+                        .iter()
+                        .any(|(price, _)| *price == quote)
+                {
+                    nearest_quotes[good as usize].push((quote, place.id));
+                }
+            }
+        }
         for place in state.citizen.map().places().values() {
             if place.kind == crate::locations::Location::Home
                 || !Good::FOOD.into_iter().any(|good| {
@@ -496,6 +527,15 @@ fn replenish(
             let citizen = &ready.citizen;
             let missing = target - citizen.available_food_nutrition();
             for good in Good::FOOD {
+                let market = state.citizen.market();
+                let quote = market.lowest_quote_at(state.citizen.id(), place.id, good);
+                let nearest = nearest_quotes[good as usize]
+                    .iter()
+                    .find(|(price, _)| Some(*price) == quote)
+                    .map(|(_, place)| *place);
+                if nearest != Some(place.id) {
+                    continue;
+                }
                 let nutrition = good.nutrition_per_unit().unwrap();
                 let limit = citizen
                     .market()
@@ -659,27 +699,13 @@ fn shopping_trip(
     let mut remaining = list;
     while remaining.items().next().is_some() {
         let citizen = &state.citizen;
-        let place = citizen
-            .map()
-            .places()
-            .values()
-            .filter(|place| place.kind != crate::locations::Location::Home)
-            .filter(|place| {
-                remaining.items().any(|(good, _)| {
-                    citizen
-                        .market()
-                        .available_units_at(citizen.id(), place.id, good)
-                        > 0
-                })
-            })
-            .min_by(|a, b| {
-                citizen
-                    .position()
-                    .distance(a.position)
-                    .total_cmp(&citizen.position().distance(b.position))
-                    .then_with(|| a.id.0.cmp(&b.id.0))
-            })
-            .map(|place| place.id);
+        let place = citizen.market().nearest_purchase_place(
+            citizen.id(),
+            &citizen.map(),
+            citizen.position(),
+            remaining,
+            &[],
+        );
         let Some(place) = place else {
             return Ok(Vec::new());
         };
@@ -2953,6 +2979,31 @@ mod tests {
         assert_eq!(bought.citizen.available_units(Good::BerryPie), 2);
         assert_eq!(bought.citizen.available_units(Good::Bread), 0);
         assert_eq!(bought.citizen.coins(), 75);
+    }
+
+    #[test]
+    fn reserves_fill_nearby_equal_price_stock_before_a_larger_farther_basket() {
+        let (buyer, mill, market_place) = workplace_shopper();
+        let mut market = crate::marketplace::Market::default();
+        market.prices = market.prices.with_price(Good::Bread, 0.4).unwrap();
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        market.list(seller, mill, Good::Bread, 1).unwrap();
+        market.list(seller, market_place, Good::Bread, 10).unwrap();
+        let buyer = buyer.with_market(market);
+        let bought = replenish(&Prediction::new(&buyer, Cooldowns::default()), 100.0, 0)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(bought.actions[0], CitizenAction::Travel(mill));
+        assert_eq!(
+            bought.actions[1],
+            CitizenAction::BuyAt {
+                place: mill,
+                list: crate::marketplace::ShoppingList::single(Good::Bread, 1),
+            }
+        );
+        assert_eq!(bought.citizen.available_food_nutrition(), 100.0);
+        assert_eq!(bought.citizen.coins(), buyer.coins() - 2);
     }
 
     #[test]

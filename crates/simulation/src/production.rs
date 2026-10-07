@@ -317,32 +317,28 @@ impl ProductionTargets {
                 continue;
             }
             let cost = |count: Quantity| -> Option<Coins> {
-                recipe
+                let inputs = recipe
                     .inputs()
                     .iter()
                     .map(|&(good, units)| {
-                        citizen.market().estimated_purchase_cost(
-                            citizen.id(),
+                        Some((
                             good,
                             units
                                 .checked_mul(count)?
                                 .saturating_sub(usable_stocks[good as usize]),
-                        )
+                        ))
                     })
-                    .try_fold(0_i64, |sum, cost| sum.checked_add(cost?))
+                    .collect::<Option<Vec<_>>>()?;
+                citizen.market().estimated_purchase_cost_from(
+                    citizen.id(),
+                    &citizen.map(),
+                    citizen.position(),
+                    crate::marketplace::ShoppingList::new(inputs).ok()?,
+                )
             };
-            if cost(count).is_none_or(|cost| cost > coins) {
-                let mut low = 0u64;
-                let mut high = count;
-                while low < high {
-                    let middle = low + (high - low).div_ceil(2);
-                    if cost(middle).is_some_and(|cost| cost <= coins) {
-                        low = middle;
-                    } else {
-                        high = middle - 1;
-                    }
-                }
-                count = low;
+            // Larger baskets can change the route and reduce rounded costs.
+            while count > 0 && cost(count).is_none_or(|cost| cost > coins) {
+                count -= 1;
             }
             if count == 0 {
                 continue;
@@ -369,16 +365,12 @@ pub fn recipe_profit(recipe: Recipe, citizen: &Citizen) -> Option<f64> {
             })
         })
         .try_fold(0.0, |sum, value| Some(sum + value?))?;
-    let inputs: f64 = recipe
-        .inputs()
-        .iter()
-        .map(|&(good, units)| {
-            citizen
-                .market()
-                .estimated_purchase_cost(citizen.id(), good, units)
-                .map(|coins| coins as f64)
-        })
-        .try_fold(0.0, |sum, value| Some(sum + value?))?;
+    let inputs = citizen.market().estimated_purchase_cost_from(
+        citizen.id(),
+        &citizen.map(),
+        citizen.position(),
+        crate::marketplace::ShoppingList::new(recipe.inputs().iter().copied()).ok()?,
+    )? as f64;
     let profit = outputs - inputs;
     profit.is_finite().then_some(profit)
 }
@@ -403,6 +395,68 @@ pub(crate) fn period_start(period: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_affordability_checks_larger_baskets_after_an_unaffordable_smaller_one() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 10.0, y: 0.0 },
+            Position { x: -11.0, y: 0.0 },
+            Position { x: 20.0, y: 0.0 },
+        )
+        .unwrap();
+        let mut market = crate::marketplace::Market::default();
+        market.prices = market
+            .prices
+            .with_price(Good::Flour, 1.0)
+            .unwrap()
+            .with_price(Good::Wood, 1.0)
+            .unwrap()
+            .with_price(Good::Bread, 100.0)
+            .unwrap();
+        for _ in 0..12 {
+            market
+                .list(
+                    crate::AgentId(uuid::Uuid::new_v4()),
+                    map.public_place(Location::River),
+                    Good::Flour,
+                    50,
+                )
+                .unwrap();
+        }
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        market
+            .list(
+                seller,
+                map.public_place(Location::Market),
+                Good::Flour,
+                1000,
+            )
+            .unwrap();
+        market
+            .list(seller, map.public_place(Location::Forest), Good::Wood, 150)
+            .unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(crate::StartingRole::Baker)
+            .with_map(map.clone())
+            .unwrap()
+            .with_coins(2)
+            .unwrap()
+            .with_good(Good::Wood, 150)
+            .unwrap()
+            .with_good(Good::Water, 1200)
+            .unwrap();
+        let (universe, buyer) = crate::Universe::with_map(map)
+            .with_citizen("Baker", citizen)
+            .unwrap();
+        let (universe, _) = universe.with_property(buyer, Location::Bakery).unwrap();
+        let crate::AgentKind::Citizen(citizen) = &universe.agents()[&buyer].kind;
+        let citizen = citizen.with_market(market);
+        let targets = ProductionTargets::calculate(&citizen, 0).unwrap();
+        assert_eq!(targets.remaining_batches(Recipe::BakeBread), 10);
+    }
+
     use crate::{StartingRole, marketplace::Prices};
 
     #[test]
