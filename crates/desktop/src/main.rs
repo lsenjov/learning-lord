@@ -1,6 +1,7 @@
 mod citizen_history;
 mod citizens;
 mod debug_export;
+mod locations;
 mod map_view;
 mod market;
 mod market_history;
@@ -102,6 +103,7 @@ fn main() -> Result<(), String> {
     .init_resource::<citizens::PlanDisplay>()
     .init_resource::<citizen_history::Selection>()
     .init_resource::<market::Selection>()
+    .init_resource::<locations::State>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
     .init_resource::<debug_export::DebugExport>()
@@ -111,6 +113,7 @@ fn main() -> Result<(), String> {
         Update,
         (
             poll_worker,
+            locations::handle,
             handle_controls,
             citizens::handle_selection,
             citizen_history::handle_selection,
@@ -124,6 +127,7 @@ fn main() -> Result<(), String> {
             map_view::refresh,
             market::refresh_choices,
             market::refresh,
+            locations::refresh,
             market_history::refresh,
             market_history::hover,
         )
@@ -208,7 +212,8 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
             });
         });
         market::spawn(root);
-        root.spawn(text("C/M: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-6: select on page   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
+        locations::spawn(root);
+        root.spawn(text("C/M/L: tabs   |   Up/Down: goods   |   Space: run / pause   |   Right: advance 30 min   |   Shift+Right: next day 04:00   |   1-6: select on page   |   1x = 1 minute / second   |   Scroll panels for more", 13.0, MUTED));
         root.spawn((text("", 14.0, Color::srgb(1.0, 0.55, 0.48)), Readout::Error));
     });
 }
@@ -267,7 +272,7 @@ fn apply_control(control: Control, controls: &mut Controls, worker: &SimulationW
 }
 
 fn handle_controls(
-    keyboard: Res<ButtonInput<KeyCode>>,
+    (keyboard, editor): (Res<ButtonInput<KeyCode>>, Option<Res<locations::State>>),
     buttons: Query<(Entity, &Interaction, &Control), Changed<Interaction>>,
     mut focus: ResMut<InputFocus>,
     mut controls: ResMut<Controls>,
@@ -275,10 +280,11 @@ fn handle_controls(
     snapshot: Res<DisplaySnapshot>,
     mut exporter: ResMut<debug_export::DebugExport>,
 ) {
-    if keyboard.just_pressed(KeyCode::Space) {
+    let editing = editor.is_some_and(|editor| editor.editing());
+    if !editing && keyboard.just_pressed(KeyCode::Space) {
         apply_control(Control::ToggleRunning, &mut controls, &worker);
     }
-    if keyboard.just_pressed(KeyCode::ArrowRight) {
+    if !editing && keyboard.just_pressed(KeyCode::ArrowRight) {
         let control =
             if keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight) {
                 Control::NextDay
@@ -302,8 +308,9 @@ fn handle_controls(
 fn format_clock(time_ms: u64) -> String {
     let seconds = time_ms / 1000;
     format!(
-        "Day {} | {:02}:{:02}:{:02}",
+        "Day {} | {} | {:02}:{:02}:{:02}",
         seconds / 86_400,
+        learning_lord_simulation::calendar::Weekday::at(time_ms).name(),
         seconds / 3600 % 24,
         seconds / 60 % 60,
         seconds % 60
@@ -673,6 +680,36 @@ mod tests {
     use learning_lord_simulation::Citizen;
 
     #[test]
+    fn typing_in_location_editor_suppresses_simulation_shortcuts() {
+        let worker = SimulationWorker::spawn(Universe::default(), 60.try_into().unwrap());
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(worker.snapshot()))
+            .insert_resource(worker)
+            .init_resource::<Controls>()
+            .init_resource::<InputFocus>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<debug_export::DebugExport>()
+            .insert_resource(locations::State::focused_fixture())
+            .add_systems(Update, handle_controls);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Space);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowRight);
+        app.update();
+        assert!(!app.world().resource::<Controls>().running);
+        assert_eq!(
+            app.world()
+                .resource::<SimulationWorker>()
+                .snapshot()
+                .universe
+                .current_time_ms(),
+            0
+        );
+    }
+
+    #[test]
     fn decision_panel_shows_reachable_hunger_and_uses_saved_prices() {
         use learning_lord_simulation::marketplace::Prices;
         let prices = Prices::new(2.0).unwrap();
@@ -858,17 +895,20 @@ mod tests {
             .init_resource::<citizens::PlanDisplay>()
             .init_resource::<citizen_history::Selection>()
             .init_resource::<market::Selection>()
+            .init_resource::<locations::State>()
             .init_resource::<market::OrderDisplay>()
             .init_resource::<market_history::ChartDisplay>()
             .init_resource::<debug_export::DebugExport>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
             .add_message::<bevy::input::mouse::MouseWheel>()
+            .add_message::<bevy::input::keyboard::KeyboardInput>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
                 (
                     poll_worker,
+                    locations::handle,
                     handle_controls,
                     citizens::handle_selection,
                     citizen_history::handle_selection,
@@ -882,6 +922,7 @@ mod tests {
                     map_view::refresh,
                     market::refresh_choices,
                     market::refresh,
+                    locations::refresh,
                     market_history::refresh,
                     market_history::hover,
                 )
@@ -1000,7 +1041,7 @@ mod tests {
             .find(|(readout, _)| matches!(readout, Readout::Clock))
             .unwrap()
             .1;
-        assert_eq!(clock.0, "Day 0 | 00:30:00");
+        assert_eq!(clock.0, "Day 0 | Monday | 00:30:00");
 
         let toggle = buttons
             .iter()
@@ -1107,13 +1148,16 @@ mod tests {
     #[test]
     fn clock_formats_elapsed_days_and_wraps_hours_minutes_and_seconds() {
         for (time_ms, expected) in [
-            (0, "Day 0 | 00:00:00"),
-            (999, "Day 0 | 00:00:00"),
-            (1_000, "Day 0 | 00:00:01"),
-            (60_000, "Day 0 | 00:01:00"),
-            (86_399_999, "Day 0 | 23:59:59"),
-            (86_400_000, "Day 1 | 00:00:00"),
-            (100 * 86_400_000 + 3_723_000, "Day 100 | 01:02:03"),
+            (0, "Day 0 | Monday | 00:00:00"),
+            (999, "Day 0 | Monday | 00:00:00"),
+            (1_000, "Day 0 | Monday | 00:00:01"),
+            (60_000, "Day 0 | Monday | 00:01:00"),
+            (86_399_999, "Day 0 | Monday | 23:59:59"),
+            (86_400_000, "Day 1 | Tuesday | 00:00:00"),
+            (
+                100 * 86_400_000 + 3_723_000,
+                "Day 100 | Wednesday | 01:02:03",
+            ),
         ] {
             assert_eq!(format_clock(time_ms), expected);
         }

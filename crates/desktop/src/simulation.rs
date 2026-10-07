@@ -23,7 +23,7 @@ pub fn update_rate() -> Result<NonZeroU32, String> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Command {
     SetRunning(bool),
     SetSpeed(u32),
@@ -31,6 +31,57 @@ pub enum Command {
     NextDay,
     Restart,
     Shutdown,
+    Mutate { generation: u64, mutation: Mutation },
+}
+
+#[derive(Clone)]
+pub enum Mutation {
+    SaveTax {
+        place: learning_lord_simulation::locations::PlaceId,
+        id: Option<learning_lord_simulation::taxation::TaxRuleId>,
+        name: String,
+        kind: learning_lord_simulation::taxation::TaxKind,
+    },
+    RemoveTax(learning_lord_simulation::taxation::TaxRuleId),
+    Transfer {
+        citizen: learning_lord_simulation::AgentId,
+        place: learning_lord_simulation::locations::PlaceId,
+        good: learning_lord_simulation::marketplace::Good,
+        units: u64,
+        deposit: bool,
+    },
+}
+
+impl Mutation {
+    fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
+        match self {
+            Self::SaveTax {
+                place,
+                id,
+                name,
+                kind,
+            } => match id {
+                Some(id) => universe.edit_tax_rule(id, name, kind),
+                None => universe
+                    .with_tax_rule(place, name, kind)
+                    .map(|(next, _)| next),
+            },
+            Self::RemoveTax(id) => universe.without_tax_rule(id),
+            Self::Transfer {
+                citizen,
+                place,
+                good,
+                units,
+                deposit,
+            } => {
+                if deposit {
+                    universe.deposit_goods(citizen, place, good, units)
+                } else {
+                    universe.withdraw_goods(citizen, place, good, units)
+                }
+            }
+        }
+    }
 }
 
 struct TimedCommand {
@@ -46,6 +97,8 @@ pub struct Snapshot {
         learning_lord_simulation::history::PlanningHistory,
     >,
     pub error: Option<String>,
+    pub mutation_error: Option<String>,
+    pub mutation_revision: u64,
     pub generation: u64,
     pub revision: u64,
 }
@@ -72,6 +125,8 @@ impl SimulationWorker {
             universe: universe.clone(),
             planning_history: Default::default(),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             generation: 0,
             revision: 0,
         }));
@@ -259,6 +314,8 @@ struct WorkerState {
     planner: PlanningRuntime,
     pacing: Pacing,
     error: Option<String>,
+    mutation_error: Option<String>,
+    mutation_revision: u64,
     generation: u64,
 }
 
@@ -315,6 +372,7 @@ impl WorkerState {
                 Ok(universe) => {
                     self.universe = universe;
                     self.error = None;
+                    self.mutation_error = None;
                     let at = at.max(self.pacing.accounted_at);
                     self.pacing.running = false;
                     self.pacing.speed = 1;
@@ -323,6 +381,25 @@ impl WorkerState {
                     self.pacing.pending_simulated_ns = 0;
                 }
                 Err(error) => self.fail(error),
+            }
+            return Some(true);
+        }
+        if let Command::Mutate {
+            generation,
+            mutation,
+        } = &command
+        {
+            if *generation != self.generation {
+                return Some(false);
+            }
+            self.mutation_revision += 1;
+            match mutation.clone().apply(&self.universe) {
+                Ok(universe) => {
+                    self.planner.cancel_pending();
+                    self.universe = universe;
+                    self.mutation_error = None;
+                }
+                Err(error) => self.mutation_error = Some(error.to_string()),
             }
             return Some(true);
         }
@@ -341,7 +418,11 @@ impl WorkerState {
                 let elapsed = DAY_MS - time % DAY_MS + 4 * 60 * 60 * 1000;
                 return Some(self.advance_interruptibly(elapsed, should_cancel));
             }
-            Command::Step | Command::NextDay | Command::Shutdown | Command::Restart => {}
+            Command::Step
+            | Command::NextDay
+            | Command::Shutdown
+            | Command::Restart
+            | Command::Mutate { .. } => {}
         }
         Some(true)
     }
@@ -362,6 +443,8 @@ impl WorkerState {
                 })
                 .collect(),
             error: self.error.clone(),
+            mutation_error: self.mutation_error.clone(),
+            mutation_revision: self.mutation_revision,
             generation: self.generation,
             revision: published.revision + 1,
         };
@@ -372,16 +455,21 @@ fn poll_cancellation(
     commands: &mpsc::Receiver<TimedCommand>,
     deferred: &mut VecDeque<TimedCommand>,
 ) -> bool {
-    if deferred
-        .iter()
-        .any(|command| matches!(command.command, Command::Restart | Command::Shutdown))
-    {
+    if deferred.iter().any(|command| {
+        matches!(
+            command.command,
+            Command::Restart | Command::Shutdown | Command::Mutate { .. }
+        )
+    }) {
         return true;
     }
     loop {
         match commands.try_recv() {
             Ok(command) => {
-                let interrupt = matches!(command.command, Command::Restart | Command::Shutdown);
+                let interrupt = matches!(
+                    command.command,
+                    Command::Restart | Command::Shutdown | Command::Mutate { .. }
+                );
                 deferred.push_back(command);
                 if interrupt {
                     return true;
@@ -406,6 +494,8 @@ fn run_worker(
         planner: PlanningRuntime::default(),
         pacing: Pacing::new(updates_per_second),
         error: None,
+        mutation_error: None,
+        mutation_revision: 0,
         generation: 0,
     };
     let mut deferred = VecDeque::new();
@@ -482,8 +572,162 @@ mod tests {
             planner: PlanningRuntime::default(),
             pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             generation: 0,
         }
+    }
+
+    #[test]
+    fn tax_commands_save_edit_remove_and_reject_invalid_settings_without_stopping() {
+        use learning_lord_simulation::{
+            AgentKind,
+            marketplace::Good,
+            taxation::{TaxKind, TaxRate},
+        };
+        let (universe, citizen) = Universe::default()
+            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let AgentKind::Citizen(agent) = &universe.agents()[&citizen].kind;
+        let place = agent.home();
+        let mut state = worker_state(universe);
+        let kind = TaxKind::Socage {
+            rates: [
+                (Good::Wheat, TaxRate::new(2500).unwrap()),
+                (Good::Berries, TaxRate::new(500).unwrap()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::SaveTax {
+                    place,
+                    id: None,
+                    name: "Harvest".into(),
+                    kind,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_none());
+        let id = *state.universe.tax_rules().keys().next().unwrap();
+        let kind = TaxKind::Socage {
+            rates: [
+                (Good::Wheat, TaxRate::new(3000).unwrap()),
+                (Good::Berries, TaxRate::new(600).unwrap()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::SaveTax {
+                    place,
+                    id: Some(id),
+                    name: "Edited harvest".into(),
+                    kind,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(state.universe.tax_rules()[&id].name, "Edited harvest");
+        let before = state.universe.clone();
+        let kind = TaxKind::Socage {
+            rates: [(Good::Wheat, TaxRate::new(8000).unwrap())]
+                .into_iter()
+                .collect(),
+        };
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::SaveTax {
+                    place,
+                    id: None,
+                    name: "Excessive harvest".into(),
+                    kind,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_some());
+        assert!(state.error.is_none());
+        assert_eq!(state.universe, before);
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::RemoveTax(id),
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_none());
+        assert!(!state.universe.tax_rules()[&id].active);
+    }
+
+    #[test]
+    fn mutations_are_generation_scoped_and_validation_is_nonfatal() {
+        use learning_lord_simulation::{locations::Location, marketplace::Good};
+        let (universe, id) = Universe::default()
+            .with_citizen("Ada", Citizen::new(0.0).unwrap().with_berries(20).unwrap())
+            .unwrap();
+        let place = universe.map().public_place(Location::Forest);
+        let mut state = worker_state(universe.clone());
+        state.pacing.running = true;
+        let mutation = Mutation::Transfer {
+            citizen: id,
+            place,
+            good: Good::Berries,
+            units: 100,
+            deposit: true,
+        };
+        state.apply(
+            Command::Mutate {
+                generation: 1,
+                mutation: mutation.clone(),
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(state.universe, universe);
+        assert_eq!(state.mutation_revision, 0);
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation,
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(state.universe, universe);
+        assert!(state.mutation_error.is_some());
+        assert!(state.error.is_none());
+        assert!(state.pacing.running);
+        let learning_lord_simulation::AgentKind::Citizen(citizen) =
+            &state.universe.agents()[&id].kind;
+        let home = citizen.home();
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::Transfer {
+                    citizen: id,
+                    place: home,
+                    good: Good::Berries,
+                    units: 10,
+                    deposit: true,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_none());
+        assert_eq!(
+            state.universe.storage().units(
+                home,
+                learning_lord_simulation::storage::GoodsOwner::Agent(id),
+                Good::Berries
+            ),
+            10
+        );
+        assert_eq!(universe.storage().stock().len(), 0);
     }
 
     #[test]
@@ -514,7 +758,7 @@ mod tests {
             started.recv_timeout(Duration::from_secs(5)).unwrap();
             commands
                 .send(TimedCommand {
-                    command: interrupt,
+                    command: interrupt.clone(),
                     at: Instant::now(),
                 })
                 .unwrap();
@@ -852,6 +1096,8 @@ mod tests {
             planner: PlanningRuntime::default(),
             pacing: pacing(30),
             error: Some("old error".into()),
+            mutation_error: None,
+            mutation_revision: 0,
             generation: 0,
         };
         state.pacing.speed = 20;
@@ -996,6 +1242,8 @@ mod tests {
             planner: PlanningRuntime::default(),
             pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             generation: 0,
         };
         state.apply(Command::SetSpeed(20), Duration::ZERO);
@@ -1037,6 +1285,8 @@ mod tests {
                 planner: PlanningRuntime::default(),
                 pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
                 error: None,
+                mutation_error: None,
+                mutation_revision: 0,
                 generation: 0,
             };
             state.apply(Command::SetSpeed(20), Duration::ZERO);
@@ -1119,6 +1369,8 @@ mod tests {
             planner: PlanningRuntime::default(),
             pacing: pacing(60),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             generation: 0,
         };
         state.advance(1);

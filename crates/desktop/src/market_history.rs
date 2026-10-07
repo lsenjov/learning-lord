@@ -572,6 +572,8 @@ mod tests {
         app.insert_resource(DisplaySnapshot(crate::simulation::Snapshot {
             universe: Universe::default(),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             planning_history: Default::default(),
             generation: 0,
             revision: 0,

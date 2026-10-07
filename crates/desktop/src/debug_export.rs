@@ -86,6 +86,34 @@ mod tests {
         ));
         let universe = crate::simulation::new_universe().unwrap();
         let universe = universe.advance(1234).unwrap();
+        let (id, _) = universe
+            .agents()
+            .iter()
+            .find(|(_, agent)| agent.name == "Ada")
+            .unwrap();
+        let learning_lord_simulation::AgentKind::Citizen(citizen) = &universe.agents()[id].kind;
+        let universe = universe
+            .with_tax_rule(
+                citizen.home(),
+                "Weekly household fee",
+                learning_lord_simulation::taxation::TaxKind::FlatFee {
+                    payer: *id,
+                    coins: 5,
+                },
+            )
+            .unwrap()
+            .0;
+        let warehouse = universe
+            .map()
+            .public_place(learning_lord_simulation::locations::Location::Warehouse);
+        let universe = universe
+            .with_stored_good(
+                warehouse,
+                learning_lord_simulation::storage::GoodsOwner::Town,
+                learning_lord_simulation::marketplace::Good::Wheat,
+                17,
+            )
+            .unwrap();
         let source = universe.clone();
         let pressed_at = UNIX_EPOCH + Duration::new(1_800_000_000, 123_456_789);
         let first = write_universe(&directory, &universe, pressed_at).unwrap();
@@ -115,6 +143,12 @@ mod tests {
             "Wood",
             "Water",
             "Bread",
+            "Town warehouse",
+            "town_treasury",
+            "storage",
+            "Weekly household fee",
+            "FlatFee",
+            "taxation",
         ] {
             assert!(contents.contains(name), "missing {name}");
         }

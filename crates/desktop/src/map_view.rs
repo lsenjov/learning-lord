@@ -261,6 +261,7 @@ pub fn refresh(
                         Color::srgb(1.0, 0.75, 0.20)
                     } else {
                         match place.kind {
+                            Location::Warehouse => Color::srgb(0.45, 0.75, 0.95),
                             Location::Forest => Color::srgb(0.25, 0.70, 0.40),
                             Location::River => Color::srgb(0.30, 0.65, 0.95),
                             Location::Market => Color::srgb(0.80, 0.50, 0.80),
@@ -385,6 +386,8 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             planning_history: Default::default(),
             generation: 0,
             revision: 0,
@@ -462,6 +465,8 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             planning_history: Default::default(),
             generation: 0,
             revision: 0,
@@ -524,6 +529,8 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe: travelling.advance(150_000).unwrap(),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             planning_history: Default::default(),
             generation: 0,
             revision: 0,

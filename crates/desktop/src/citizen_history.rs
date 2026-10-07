@@ -359,6 +359,8 @@ mod tests {
             universe,
             planning_history: Default::default(),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             generation: 0,
             revision: 0,
         }))

@@ -248,6 +248,7 @@ pub fn handle_selection(
     buttons: Query<(&Interaction, &PageButton), Changed<Interaction>>,
     cards: Query<(&Interaction, &Card), Changed<Interaction>>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    editor: Option<Res<crate::locations::State>>,
 ) {
     let agents = sorted_agents(&snapshot.0.universe);
     let pages = agents.len().div_ceil(CARDS_PER_PAGE).max(1);
@@ -296,7 +297,7 @@ pub fn handle_selection(
     .into_iter()
     .enumerate()
     {
-        if keyboard.just_pressed(key) {
+        if !editor.as_ref().is_some_and(|editor| editor.editing()) && keyboard.just_pressed(key) {
             let next = agents
                 .get(page.index * CARDS_PER_PAGE + slot)
                 .map(|(id, _)| *id);
@@ -718,6 +719,8 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             planning_history: Default::default(),
             generation: 0,
             revision: 0,
@@ -803,6 +806,8 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             planning_history: Default::default(),
             generation: 0,
             revision: 0,

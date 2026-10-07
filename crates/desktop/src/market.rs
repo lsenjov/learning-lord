@@ -14,6 +14,7 @@ pub enum View {
     #[default]
     Citizens,
     Market,
+    Locations,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -94,7 +95,11 @@ pub fn spawn_tabs(parent: &mut ChildSpawnerCommands) {
             ..default()
         })
         .with_children(|row| {
-            for (view, label) in [(View::Citizens, "Citizens"), (View::Market, "Market")] {
+            for (view, label) in [
+                (View::Citizens, "Citizens"),
+                (View::Market, "Market"),
+                (View::Locations, "Locations"),
+            ] {
                 row.spawn(choice(Choice::View(view)))
                     .with_children(|button| {
                         button.spawn(text(label, 16.0, TEXT));
@@ -159,6 +164,7 @@ pub fn handle_selection(
     buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
     mut selection: ResMut<Selection>,
     mut focus: ResMut<InputFocus>,
+    editor: Option<Res<crate::locations::State>>,
 ) {
     if selection.generation != snapshot.0.generation {
         selection.generation = snapshot.0.generation;
@@ -186,9 +192,13 @@ pub fn handle_selection(
             }
         }
     }
+    if editor.is_some_and(|editor| editor.editing()) {
+        return;
+    }
     for (key, view) in [
         (KeyCode::KeyC, View::Citizens),
         (KeyCode::KeyM, View::Market),
+        (KeyCode::KeyL, View::Locations),
     ] {
         if keyboard.just_pressed(key) && selection.view != view {
             selection.view = view;
@@ -679,6 +689,8 @@ mod tests {
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe: simulation::new_universe().unwrap(),
             error: None,
+            mutation_error: None,
+            mutation_revision: 0,
             planning_history: Default::default(),
             generation: 0,
             revision: 0,
