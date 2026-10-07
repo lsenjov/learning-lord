@@ -696,6 +696,10 @@ impl Universe {
         let mut groups =
             std::collections::BTreeMap::<(uuid::Uuid, uuid::Uuid, usize), Coins>::new();
         for trade in trades {
+            self.town_treasury = self
+                .town_treasury
+                .checked_add(trade.tariff_coins)
+                .ok_or(SimulationError::WealthOverflow)?;
             let Some(seller) = trade.seller.citizen() else {
                 continue;
             };
@@ -703,7 +707,7 @@ impl Universe {
                 .entry((seller.0, trade.place.0, trade.good as usize))
                 .or_default();
             *revenue = revenue
-                .checked_add(trade.coins)
+                .checked_add(trade.recipient_coins)
                 .ok_or(SimulationError::WealthOverflow)?;
         }
         let rules: Vec<_> = self

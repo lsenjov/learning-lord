@@ -1141,6 +1141,50 @@ impl Universe {
         universe
     }
 
+    pub fn caravan_policy(&self) -> marketplace::CaravanPolicy {
+        self.market.caravan_policy()
+    }
+
+    pub fn with_caravan_policy(
+        &self,
+        policy: marketplace::CaravanPolicy,
+    ) -> Result<Self, SimulationError> {
+        policy.validate()?;
+        let mut universe = self.clone();
+        universe.market.set_caravan_policy(policy)?;
+        universe.refresh_market();
+        Ok(universe)
+    }
+
+    pub fn town_stock(&self, good: Good) -> Quantity {
+        self.town_stock_total(good).min(u128::from(Quantity::MAX)) as Quantity
+    }
+
+    fn town_stock_total(&self, good: Good) -> u128 {
+        let carried: u128 = self
+            .agents
+            .values()
+            .map(|agent| {
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                u128::from(citizen.units(good)) + u128::from(citizen.town_carried_units(good))
+            })
+            .sum();
+        let stored: u128 = self
+            .storage
+            .stock()
+            .iter()
+            .filter(|(key, _)| key.good == good)
+            .map(|(_, units)| u128::from(*units))
+            .sum();
+        let listed: u128 = self
+            .market
+            .orders()
+            .filter(|order| order.good == good && order.seller.citizen().is_some())
+            .map(|order| u128::from(order.units))
+            .sum();
+        carried + stored + listed
+    }
+
     pub fn current_time_ms(&self) -> u64 {
         self.current_time_ms
     }
@@ -1595,9 +1639,19 @@ impl Universe {
                 universe.refresh_market();
                 universe.market.update(finishing_time)?;
                 let trades_before = universe.market.trades().len();
-                let payments = universe
-                    .market
-                    .caravans(universe.map.public_place(Location::Market), finishing_time)?;
+                let limits = Good::ALL.map(|good| {
+                    universe
+                        .town_stock_total(good)
+                        .saturating_sub(u128::from(
+                            universe.caravan_policy().exports[good as usize].minimum_reserve,
+                        ))
+                        .min(u128::from(Quantity::MAX)) as Quantity
+                });
+                let payments = universe.market.caravans_with_limits(
+                    universe.map.public_place(Location::Market),
+                    finishing_time,
+                    limits,
+                )?;
                 let mut changed = Vec::new();
                 for (seller, coins) in payments {
                     let AgentKind::Citizen(citizen) = &mut universe

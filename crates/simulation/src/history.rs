@@ -200,7 +200,7 @@ impl CitizenHistory {
             self.current.coins_earned = self
                 .current
                 .coins_earned
-                .checked_add(trade.coins)
+                .checked_add(trade.recipient_coins)
                 .ok_or(SimulationError::WealthOverflow)?;
         }
         Ok(())

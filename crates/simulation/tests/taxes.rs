@@ -63,6 +63,7 @@ fn socage_carries_exact_fractions_and_only_authoritative_outputs_are_taxed() {
     for batch in 1..=4 {
         world = produce(world, id, Recipe::MakeClothingBlock);
         assert_eq!(citizen(&world, id).units(Good::FlaxBlock), batch);
+        assert_eq!(world.town_stock(Good::FlaxBlock), batch);
         assert_eq!(
             citizen(&world, id).tax_reserved_units(Good::FlaxBlock),
             u64::from(batch == 4)
@@ -150,6 +151,7 @@ fn stacked_fraction_claims_never_take_more_than_the_current_batch() {
         .unwrap();
     assert_eq!(citizen(&world, id).units(Good::FlaxBlock), 1);
     assert_eq!(citizen(&world, id).town_carried_units(Good::FlaxBlock), 2);
+    assert_eq!(world.town_stock(Good::FlaxBlock), 3);
     assert_eq!(
         world
             .storage()
@@ -897,6 +899,7 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
             .reserved_units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
         1
     );
+    assert_eq!(world.town_stock(Good::FlaxGarment), 2);
     assert_eq!(
         world.with_stored_good(destination, GoodsOwner::Agent(id), Good::FlaxGarment, 0),
         Err(SimulationError::MissingInputs)
