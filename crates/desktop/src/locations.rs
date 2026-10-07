@@ -13,8 +13,9 @@ use bevy::{
 };
 use learning_lord_simulation::{
     AgentId, AgentKind, Universe,
-    locations::PlaceId,
+    locations::{Location, PlaceId},
     marketplace::Good,
+    production::Recipe,
     storage::GoodsOwner,
     taxation::{TaxAmount, TaxKind, TaxRate, TaxRuleId},
 };
@@ -46,6 +47,7 @@ struct Draft {
     payer: Option<AgentId>,
     coins: String,
     rates: Vec<(Good, String)>,
+    all_rate: String,
 }
 
 impl Default for Draft {
@@ -57,6 +59,33 @@ impl Default for Draft {
             payer: None,
             coins: String::new(),
             rates: Vec::new(),
+            all_rate: String::new(),
+        }
+    }
+}
+
+impl Draft {
+    fn remember_common_rate(&mut self) {
+        if let Some((_, rate)) = self.rates.first()
+            && self.rates.iter().all(|(_, value)| value == rate)
+        {
+            self.all_rate = rate.clone();
+        }
+    }
+
+    fn select_all(&mut self) {
+        self.remember_common_rate();
+        self.rates.clear();
+    }
+
+    fn toggle_good(&mut self, good: Good) {
+        if let Some(index) = self.rates.iter().position(|(item, _)| *item == good) {
+            if self.rates.len() == 1 {
+                self.all_rate = self.rates[index].1.clone();
+            }
+            self.rates.remove(index);
+        } else {
+            self.rates.push((good, self.all_rate.clone()));
         }
     }
 }
@@ -66,6 +95,7 @@ pub(crate) enum Field {
     Name,
     Coins,
     Rate(Good),
+    AllRate,
     Quantity,
 }
 
@@ -101,6 +131,7 @@ impl State {
         match field {
             Field::Quantity => Some(&mut self.quantity),
             Field::Name => self.draft.as_mut().map(|draft| &mut draft.name),
+            Field::AllRate => self.draft.as_mut().map(|draft| &mut draft.all_rate),
             Field::Coins => self.draft.as_mut().map(|draft| &mut draft.coins),
             Field::Rate(good) => self
                 .draft
@@ -129,6 +160,7 @@ pub(crate) enum Choice {
     Kind(Kind),
     Field(Field),
     Good(Good),
+    AllGoods,
     Payer,
     Citizen,
     TransferGood,
@@ -481,9 +513,17 @@ fn editor(parent: &mut ChildSpawnerCommands, draft: &Draft, state: &State, unive
             field(row, "Coins per week", &draft.coins, Field::Coins, state);
         });
     } else {
+        let goods = tax_goods(
+            draft.kind,
+            universe.map().place(state.place.unwrap()).unwrap().kind,
+        );
         parent.spawn(text(match draft.kind { Kind::Socage => "Percentage of each selected production output. Stacked total cannot exceed 100%.", Kind::Asset => "Weekly percentage of selected goods' stored and sale escrow value.", _ => "Percentage of gross sale revenue at this location." }, 13.0, MUTED));
         row(parent, |row| {
-            for good in Good::ALL {
+            if !goods.is_empty() {
+                button(row, "All goods", Choice::AllGoods, draft.rates.is_empty());
+            }
+            for good in &goods {
+                let good = *good;
                 button(
                     row,
                     good.name(),
@@ -492,7 +532,18 @@ fn editor(parent: &mut ChildSpawnerCommands, draft: &Draft, state: &State, unive
                 );
             }
         });
-        for (good, rate) in &draft.rates {
+        if goods.is_empty() {
+            parent.spawn(text("This location produces no goods.", 13.0, MUTED));
+        } else if draft.rates.is_empty() {
+            field(
+                parent,
+                "All goods (%)",
+                &draft.all_rate,
+                Field::AllRate,
+                state,
+            );
+        }
+        for (good, rate) in draft.rates.iter().filter(|(good, _)| goods.contains(good)) {
             field(
                 parent,
                 &format!("{} (%)", good.name()),
@@ -549,7 +600,20 @@ fn percentage(value: &str) -> Result<TaxRate, String> {
     TaxRate::new(points).map_err(|error| error.to_string())
 }
 
-fn tax_kind(draft: &Draft) -> Result<TaxKind, String> {
+fn tax_goods(kind: Kind, location: Location) -> Vec<Good> {
+    Good::ALL
+        .into_iter()
+        .filter(|good| {
+            kind != Kind::Socage
+                || Recipe::ALL.into_iter().any(|recipe| {
+                    recipe.location() == location
+                        && recipe.outputs().iter().any(|(output, _)| output == good)
+                })
+        })
+        .collect()
+}
+
+fn tax_kind(draft: &Draft, goods: &[Good]) -> Result<TaxKind, String> {
     if draft.name.trim().is_empty() {
         return Err("Give the tax rule a name.".into());
     }
@@ -566,14 +630,22 @@ fn tax_kind(draft: &Draft) -> Result<TaxKind, String> {
             coins,
         });
     }
-    if draft.rates.is_empty() {
-        return Err("Select at least one good and enter its rate.".into());
+    if goods.is_empty() {
+        return Err("This location produces no goods.".into());
     }
-    let rates = draft
-        .rates
-        .iter()
-        .map(|(good, value)| percentage(value).map(|rate| (*good, rate)))
-        .collect::<Result<_, _>>()?;
+    if draft.rates.iter().any(|(good, _)| !goods.contains(good)) {
+        return Err("This rule contains goods not produced here. Choose All goods to replace them with this location’s production goods.".into());
+    }
+    let rates = if draft.rates.is_empty() {
+        let rate = percentage(&draft.all_rate)?;
+        goods.iter().map(|good| (*good, rate)).collect()
+    } else {
+        draft
+            .rates
+            .iter()
+            .map(|(good, value)| percentage(value).map(|rate| (*good, rate)))
+            .collect::<Result<_, _>>()?
+    };
     Ok(match draft.kind {
         Kind::Socage => TaxKind::Socage { rates },
         Kind::Asset => TaxKind::Asset { rates },
@@ -634,8 +706,15 @@ pub fn handle(
                 None
             }
             Choice::Kind(kind) => {
+                let location = state
+                    .place
+                    .and_then(|id| universe.map().place(id).ok().map(|place| place.kind));
                 if let Some(draft) = &mut state.draft {
                     draft.kind = kind;
+                    if let Some(location) = location {
+                        let goods = tax_goods(kind, location);
+                        draft.rates.retain(|(good, _)| goods.contains(good));
+                    }
                 }
                 None
             }
@@ -645,11 +724,13 @@ pub fn handle(
             }
             Choice::Good(good) => {
                 if let Some(draft) = &mut state.draft {
-                    if draft.rates.iter().any(|(item, _)| *item == good) {
-                        draft.rates.retain(|(item, _)| *item != good);
-                    } else {
-                        draft.rates.push((good, String::new()));
-                    }
+                    draft.toggle_good(good);
+                }
+                None
+            }
+            Choice::AllGoods => {
+                if let Some(draft) = &mut state.draft {
+                    draft.select_all();
                 }
                 None
             }
@@ -677,7 +758,10 @@ pub fn handle(
                 .as_ref()
                 .and_then(|draft| state.place.map(|place| (draft, place)))
             {
-                Some((draft, place)) => match tax_kind(draft) {
+                Some((draft, place)) => match tax_kind(
+                    draft,
+                    &tax_goods(draft.kind, universe.map().place(place).unwrap().kind),
+                ) {
                     Ok(kind) => Some(Mutation::SaveTax {
                         place,
                         id: draft.id,
@@ -722,6 +806,7 @@ pub fn handle(
                                 })
                                 .collect();
                             draft.rates.sort_by_key(|(good, _)| *good as usize);
+                            draft.remember_common_rate();
                         }
                     }
                     state.draft = Some(draft);
@@ -786,7 +871,8 @@ pub fn handle(
                     && (field == Field::Name
                         || value.chars().all(|character| {
                             character.is_ascii_digit()
-                                || (matches!(field, Field::Rate(_)) && character == '.')
+                                || (matches!(field, Field::Rate(_) | Field::AllRate)
+                                    && character == '.')
                         }))
                 {
                     target.push_str(value);
@@ -906,6 +992,163 @@ mod tests {
     }
 
     #[test]
+    fn selecting_and_clearing_goods_restores_the_default_all_rate() {
+        let worker = SimulationWorker::spawn(Universe::default(), 60.try_into().unwrap());
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(worker.snapshot()))
+            .insert_resource(worker)
+            .init_resource::<market::Selection>()
+            .insert_resource(State {
+                draft: Some(Draft {
+                    kind: Kind::Asset,
+                    all_rate: "5".into(),
+                    ..default()
+                }),
+                ..default()
+            })
+            .add_message::<KeyboardInput>()
+            .add_systems(Update, handle);
+        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
+        let button = app
+            .world_mut()
+            .spawn((Choice::Good(Good::Wheat), Interaction::Pressed))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<State>()
+                .draft
+                .as_ref()
+                .unwrap()
+                .rates,
+            vec![(Good::Wheat, "5".into())]
+        );
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::None;
+        app.update();
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Pressed;
+        app.update();
+        let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+        assert!(draft.rates.is_empty());
+        assert_eq!(draft.all_rate, "5");
+    }
+
+    #[test]
+    fn switching_to_socage_removes_goods_the_location_cannot_produce() {
+        let (universe, owner) = Universe::default()
+            .with_citizen("Ada", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (universe, place) = universe.with_property(owner, Location::Field).unwrap();
+        let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(worker.snapshot()))
+            .insert_resource(worker)
+            .init_resource::<market::Selection>()
+            .insert_resource(State {
+                place: Some(place),
+                draft: Some(Draft {
+                    kind: Kind::Asset,
+                    rates: vec![(Good::Wheat, "5".into()), (Good::Berries, "10".into())],
+                    ..default()
+                }),
+                ..default()
+            })
+            .add_message::<KeyboardInput>()
+            .add_systems(Update, handle);
+        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
+        app.world_mut()
+            .spawn((Choice::Kind(Kind::Socage), Interaction::Pressed));
+        app.update();
+        let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+        assert!(draft.kind == Kind::Socage);
+        assert_eq!(draft.rates, vec![(Good::Wheat, "5".into())]);
+    }
+
+    #[test]
+    fn existing_mixed_socage_goods_require_explicit_replacement() {
+        let mut draft = Draft {
+            name: "Renamed harvest".into(),
+            kind: Kind::Socage,
+            rates: vec![(Good::Wheat, "5".into()), (Good::Berries, "5".into())],
+            ..default()
+        };
+        let goods = tax_goods(Kind::Socage, Location::Field);
+        assert!(
+            tax_kind(&draft, &goods)
+                .unwrap_err()
+                .contains("not produced here")
+        );
+        assert_eq!(draft.rates.len(), 2);
+        draft.select_all();
+        let TaxKind::Socage { rates } = tax_kind(&draft, &goods).unwrap() else {
+            panic!("expected socage");
+        };
+        assert_eq!(rates.len(), 2);
+        assert_eq!(rates[&Good::Flax].basis_points(), 500);
+    }
+
+    #[test]
+    fn existing_rates_survive_returning_to_all_goods() {
+        let mut draft = Draft {
+            rates: vec![(Good::Wheat, "5".into())],
+            ..default()
+        };
+        draft.remember_common_rate();
+        assert_eq!(draft.all_rate, "5");
+        draft.rates[0].1 = "7".into();
+        draft.toggle_good(Good::Wheat);
+        assert!(draft.rates.is_empty());
+        assert_eq!(draft.all_rate, "7");
+        draft.rates = vec![(Good::Wheat, "9".into()), (Good::Flax, "9".into())];
+        draft.select_all();
+        assert_eq!(draft.all_rate, "9");
+        draft.rates = vec![(Good::Wheat, "3".into()), (Good::Flax, "4".into())];
+        draft.select_all();
+        assert_eq!(draft.all_rate, "9");
+    }
+
+    #[test]
+    fn all_goods_defaults_to_one_rate_for_the_taxable_catalog() {
+        let draft = Draft {
+            name: "Harvest".into(),
+            kind: Kind::Socage,
+            all_rate: "12.34".into(),
+            ..default()
+        };
+        let goods = tax_goods(Kind::Socage, Location::Field);
+        assert_eq!(goods, vec![Good::Wheat, Good::Flax]);
+        let TaxKind::Socage { rates } = tax_kind(&draft, &goods).unwrap() else {
+            panic!("expected socage");
+        };
+        assert_eq!(rates.len(), 2);
+        assert!(rates.values().all(|rate| rate.basis_points() == 1234));
+        let selected = Draft {
+            rates: vec![(Good::Wheat, "5".into())],
+            ..draft
+        };
+        let TaxKind::Socage { rates } = tax_kind(&selected, &goods).unwrap() else {
+            panic!("expected socage");
+        };
+        assert_eq!(rates.len(), 1);
+        assert_eq!(rates[&Good::Wheat].basis_points(), 500);
+    }
+
+    #[test]
+    fn only_socage_is_limited_to_production_goods() {
+        assert!(tax_goods(Kind::Socage, Location::Home).is_empty());
+        for kind in [Kind::Asset, Kind::Income] {
+            assert_eq!(tax_goods(kind, Location::Field), Good::ALL);
+            assert_eq!(tax_goods(kind, Location::Home), Good::ALL);
+        }
+        let draft = Draft {
+            name: "Harvest".into(),
+            kind: Kind::Socage,
+            all_rate: "5".into(),
+            ..default()
+        };
+        assert!(tax_kind(&draft, &tax_goods(Kind::Socage, Location::Home)).is_err());
+    }
+
+    #[test]
     fn rates_preserve_distinct_goods_and_exact_hundredths() {
         assert_eq!(percentage("12.34").unwrap().basis_points(), 1234);
         assert_eq!(percentage("0.01").unwrap().basis_points(), 1);
@@ -917,7 +1160,7 @@ mod tests {
             rates: vec![(Good::Wheat, "12.34".into()), (Good::Berries, "5".into())],
             ..default()
         };
-        let TaxKind::Socage { rates } = tax_kind(&draft).unwrap() else {
+        let TaxKind::Socage { rates } = tax_kind(&draft, &Good::ALL).unwrap() else {
             panic!("expected socage");
         };
         assert_eq!(rates[&Good::Wheat].basis_points(), 1234);
@@ -928,7 +1171,7 @@ mod tests {
             rates: vec![(Good::Wheat, String::new())],
             ..default()
         };
-        assert!(tax_kind(&blank).is_err());
+        assert!(tax_kind(&blank, &Good::ALL).is_err());
     }
 
     #[test]
