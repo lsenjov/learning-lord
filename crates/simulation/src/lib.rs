@@ -1803,16 +1803,26 @@ impl Universe {
             .transpose()?
             .flatten()
             .unwrap_or(request);
-        let request = if citizen.production_targets.is_some() {
-            let shortages = citizen.purchase_shortages()?;
-            marketplace::ShoppingList::new(
-                Good::ALL
-                    .into_iter()
-                    .map(|good| (good, shortages.units(good).max(request.units(good)))),
-            )?
+        let shortages = if citizen.production_targets.is_some() {
+            citizen.purchase_shortages()?
         } else {
-            request
+            marketplace::ShoppingList::default()
         };
+        let blocked = citizen
+            .active_plan()
+            .and_then(|plan| plan.plan().decision())
+            .map_or_else(marketplace::ShoppingList::default, |decision| {
+                decision.blocked_requests
+            });
+        let request = marketplace::ShoppingList::new(Good::ALL.into_iter().map(|good| {
+            (
+                good,
+                request
+                    .units(good)
+                    .max(shortages.units(good))
+                    .max(blocked.units(good)),
+            )
+        }))?;
         self.market.set_request(id, request)
     }
 

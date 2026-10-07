@@ -95,6 +95,7 @@ pub struct PlanningDecision {
     pub selected_goal: Effect,
     pub production: Vec<ProductionDecision>,
     pub prices: crate::marketplace::Prices,
+    pub blocked_requests: crate::marketplace::ShoppingList,
 }
 
 /// A chosen goal and its primitive actions, including prerequisites.
@@ -369,7 +370,12 @@ fn planning_pool() -> Result<&'static scheduler::Scheduler, SimulationError> {
     .map_err(|error| *error)
 }
 
-type GoalEvaluation = (Plan, GoalDecision, Vec<ProductionDecision>);
+type GoalEvaluation = (
+    Plan,
+    GoalDecision,
+    Vec<ProductionDecision>,
+    crate::marketplace::ShoppingList,
+);
 
 pub(crate) struct PlanningRequest {
     roots: scheduler::Request<GoalEvaluation>,
@@ -473,8 +479,14 @@ fn reduce_results(
     let mut best = empty_plan();
     let mut candidates = Vec::new();
     let mut selected_goal = Effect::ReduceTiredness;
+    let mut blocked_requests = crate::marketplace::ShoppingList::default();
     for result in results {
-        let (goal_best, candidate, diagnostics) = result?;
+        let (goal_best, candidate, diagnostics, blocked) = result?;
+        blocked_requests = crate::marketplace::ShoppingList::new(
+            crate::marketplace::Good::ALL
+                .into_iter()
+                .map(|good| (good, blocked_requests.units(good).max(blocked.units(good)))),
+        )?;
         for (combined, diagnostic) in production.iter_mut().zip(diagnostics) {
             combined.prefix_attempted |= diagnostic.prefix_attempted;
             combined.preparation_limit_observed |= diagnostic.preparation_limit_observed;
@@ -503,6 +515,7 @@ fn reduce_results(
         selected_goal,
         production,
         prices: citizen.prices(),
+        blocked_requests,
     }));
     Ok(best)
 }
@@ -511,10 +524,11 @@ fn evaluate_goal(
     citizen: &Citizen,
     goal: Effect,
     mut production: Vec<ProductionDecision>,
-) -> Result<(Plan, GoalDecision, Vec<ProductionDecision>), SimulationError> {
+) -> Result<GoalEvaluation, SimulationError> {
     let mut forecast = None;
     let mut goal_best = empty_plan();
     let initial = Prediction::new(citizen, Cooldowns::default());
+    let blocked_requests = initial.blocked_requests.clone();
     let variants = if goal == Effect::Production {
         goals::production_prefixes(initial, 0, &mut production)?
     } else {
@@ -562,7 +576,13 @@ fn evaluate_goal(
             goal_best = continuation;
         }
     }
-    Ok((goal_best, GoalDecision { goal, forecast }, production))
+    let blocked_requests = *blocked_requests.borrow();
+    Ok((
+        goal_best,
+        GoalDecision { goal, forecast },
+        production,
+        blocked_requests,
+    ))
 }
 
 #[cfg(test)]
@@ -982,6 +1002,49 @@ mod tests {
             }
             assert_eq!(plan(citizen).unwrap(), first);
         }
+    }
+
+    #[test]
+    fn accepted_blocked_requests_merge_by_maximum_and_replace_on_replanning() {
+        use crate::{
+            AgentKind, Universe,
+            marketplace::{Good, ShoppingList},
+        };
+        let source = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_coins(1000)
+            .unwrap();
+        let forecast = plan(&source).unwrap();
+        assert_eq!(
+            forecast
+                .decision()
+                .unwrap()
+                .blocked_requests
+                .units(Good::FlaxGarment),
+            1
+        );
+        assert_eq!(
+            source.market().requested(source.id()),
+            ShoppingList::default()
+        );
+        let mut buyer = executing(
+            &source,
+            vec![CitizenAction::Buy(ShoppingList::single(Good::Bread, 2))],
+        );
+        let mut decision = forecast.decision().unwrap().clone();
+        decision.blocked_requests =
+            ShoppingList::new([(Good::Bread, 3), (Good::FlaxGarment, 1)]).unwrap();
+        buyer.active_plan.as_mut().unwrap().plan.decision = Some(Arc::new(decision));
+        let (mut universe, id) = Universe::with_map(buyer.map())
+            .with_citizen("Buyer", buyer)
+            .unwrap();
+        assert_eq!(universe.market().requested(id).units(Good::Bread), 3);
+        assert_eq!(universe.market().requested(id).units(Good::FlaxGarment), 1);
+        let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
+        citizen.active_plan.as_mut().unwrap().plan.decision = None;
+        universe.register_action_request(id).unwrap();
+        assert_eq!(universe.market().requested(id).units(Good::Bread), 2);
+        assert_eq!(universe.market().requested(id).units(Good::FlaxGarment), 0);
     }
 
     #[test]
