@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 pub mod calendar;
 pub mod storage;
+pub mod taxation;
 use storage::{GoodsOwner, StockKey, Storage};
 pub mod locations;
 pub mod marketplace;
@@ -1045,6 +1046,7 @@ pub struct Universe {
     citizen_histories: HashMap<AgentId, history::CitizenHistory>,
     storage: Storage,
     town_treasury: Coins,
+    taxation: taxation::Taxation,
 }
 
 impl Default for Universe {
@@ -1057,6 +1059,7 @@ impl Default for Universe {
             citizen_histories: HashMap::new(),
             storage: Storage::default(),
             town_treasury: 0,
+            taxation: taxation::Taxation::default(),
         }
     }
 }
@@ -1373,6 +1376,10 @@ impl Universe {
                 return Ok(None);
             }
             let until_update = marketplace::until_update(universe.current_time_ms);
+            let next_week = calendar::next_weekly_settlement(universe.current_time_ms).ok();
+            let until_week = next_week.map_or(end - universe.current_time_ms, |time| {
+                time - universe.current_time_ms
+            });
             let mut ids: Vec<_> = universe.agents.keys().copied().collect();
             ids.sort_by_key(|id| id.0);
             let mut planning_boundary = end - universe.current_time_ms;
@@ -1396,12 +1403,14 @@ impl Universe {
                 .unwrap_or(end - universe.current_time_ms);
             let step = (end - universe.current_time_ms)
                 .min(until_update)
+                .min(until_week)
                 .min(boundary)
                 .min(planning_boundary);
             let finishing_time = universe.current_time_ms + step;
             let trades_before = universe.market.trades().len();
             let agents_before = universe.agents.clone();
             for id in &ids {
+                let agent_trades_before = universe.market.trades().len();
                 let agent = universe.agents.get_mut(id).unwrap();
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
                 citizen.market = universe.market.clone();
@@ -1435,6 +1444,52 @@ impl Universe {
                         .checked_add(coins)
                         .ok_or(SimulationError::WealthOverflow)?;
                 }
+                let AgentKind::Citizen(before) = &agents_before[id].kind;
+                if let Some(active) = before.active_action()
+                    && active.remaining_ms() == step
+                    && let CitizenAction::Produce(recipe) = active.action()
+                {
+                    let place = before.production_place(recipe)?;
+                    for &(good, _) in recipe.outputs() {
+                        let inputs: Quantity = recipe
+                            .inputs()
+                            .iter()
+                            .filter(|(input, _)| *input == good)
+                            .map(|(_, units)| *units)
+                            .sum();
+                        let AgentKind::Citizen(after) = &universe.agents[id].kind;
+                        let gross = after
+                            .units(good)
+                            .checked_sub(before.units(good) - inputs)
+                            .ok_or(SimulationError::InventoryOverflow)?;
+                        if universe.tax_production(*id, place, good, gross, finishing_time)?
+                            && let Some(runtime) = runtime.as_deref_mut()
+                        {
+                            runtime.cancel(*id);
+                        }
+                    }
+                }
+                let new_trades: Vec<_> = universe
+                    .market
+                    .trades()
+                    .iter()
+                    .skip(agent_trades_before)
+                    .cloned()
+                    .collect();
+                let changed = universe.tax_sales(&new_trades, finishing_time)?;
+                if let Some(runtime) = runtime.as_deref_mut() {
+                    for payer in changed {
+                        runtime.cancel(payer);
+                    }
+                }
+            }
+            if next_week == Some(finishing_time) {
+                let changed = universe.tax_week(finishing_time)?;
+                if let Some(runtime) = runtime.as_deref_mut() {
+                    for payer in changed {
+                        runtime.cancel(payer);
+                    }
+                }
             }
             for trade in universe.market.trades().iter().skip(trades_before) {
                 for id in [trade.buyer, trade.seller] {
@@ -1462,6 +1517,7 @@ impl Universe {
             for id in ids {
                 let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
                 citizen.market = universe.market.clone();
+                citizen.storage = universe.storage.clone();
                 citizen.prices = universe.market.prices;
                 citizen.market_time_ms = finishing_time;
                 citizen.refresh_production_targets(false)?;
@@ -1644,6 +1700,9 @@ impl Universe {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulationError {
     InvalidInventory,
+    InvalidTaxRate,
+    InvalidTaxRule,
+    TaxRuleNotFound,
     InventoryOverflow,
     InvalidSkill,
     MissingSkill,
@@ -1678,6 +1737,11 @@ pub enum SimulationError {
 impl fmt::Display for SimulationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::InvalidTaxRate => "tax rates must be between zero and 100 percent",
+            Self::InvalidTaxRule => {
+                "tax rules require private locations, valid payers and combined socage at most 100 percent"
+            }
+            Self::TaxRuleNotFound => "active tax rule does not exist",
             Self::InvalidInventory => "goods use whole nonnegative units",
             Self::InventoryOverflow => "production exceeds representable inventory quantities",
             Self::InvalidSkill => "skill level must be finite and nonnegative",

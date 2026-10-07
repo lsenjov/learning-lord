@@ -196,6 +196,7 @@ pub struct SellOrder {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trade {
+    pub place: PlaceId,
     pub time_ms: u64,
     pub buyer: AgentId,
     pub seller: AgentId,
@@ -639,6 +640,7 @@ impl Market {
                         request.units[good as usize].saturating_sub(units);
                 }
                 self.trades.push_back(Trade {
+                    place: order.place,
                     time_ms,
                     buyer,
                     seller: order.seller,

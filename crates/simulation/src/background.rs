@@ -28,6 +28,10 @@ impl PlanningRuntime {
         self.histories.clear();
     }
 
+    pub fn cancel_pending(&mut self) {
+        self.abort_advance();
+    }
+
     pub(crate) fn abort_advance(&mut self) {
         for pending in self.pending.values() {
             pending.request.cancel();

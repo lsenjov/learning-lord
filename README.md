@@ -171,6 +171,15 @@ cargo test -p learning-lord-simulation --locked
 - Citizens can own multiple properties. Homes allow only the owner to travel there; fields, workshops and public sites allow customers. Production still requires ownership of private workplaces. Invalid place IDs return `PlaceNotFound`; foreign homes return `PrivateProperty` from action start and duration calculation. `action_duration_ms` is fallible.
 - Inventory is carried or held in owned sell orders at their selling location; there is no general property storage, carrying capacity or spoilage. Berries, bread and berry pie supply food. Production recipes transform wheat, flour, wood, water and berries according to their input and output quantities.
 
+## Location taxes
+
+- New universes have no active taxes (Frankalmoigne). Private locations can have multiple named rules, with separate rates for each selected good: Socage takes production output, Asset tax assesses stored goods weekly, and Income tax takes sales revenue. Flat fees name a citizen responsible for a weekly coin payment. Public-location taxes, employment and treasury spending are deferred.
+- Weekly collection first occurs on day seven, Monday 06:00, then every seven days. Asset assessments use current reference prices for citizen-owned stored goods and sell-order stock at the location. Carried goods, buildings and town-owned stock are excluded. Sales are taxed at the actual sale location, against the seller's revenue.
+- Percentage rates have 0.01-percentage-point precision. Stacked rules use the original taxable amount; combined Socage rates for a good cannot exceed 100%. Fractional goods and coins accumulate per rule, payer and good, rather than rounding up each small transaction. If several goods obligations become due together, collection cannot exceed that batch's output and outstanding quantities carry forward.
+- Socage transfers goods to town ownership at the production site, without hauling them to the warehouse. Coin taxes transfer available coins to the treasury; unpaid amounts become arrears and are retried at weekly settlement. Removing a rule stops new assessments while preserving existing obligations and receipts.
+- Production predictions and targets deliberately remain gross, without subtracting taxes. Authoritative execution collects taxes before the next actions and replanning; affected background predictions are invalidated. The actual retained inventory and balances are used by subsequent plans.
+- Immutable `Universe::with_tax_rule`, `edit_tax_rule` and `without_tax_rule` configure rules. `tax_rules`, `tax_arrears`, `tax_history`, `storage` and `town_treasury` expose their state. Tax history keeps the latest 4,096 receipts; outstanding obligations remain independently recorded. Universe debug exports include this state.
+
 ## Clothing
 
 - Farmers grow 200 g flax per hour. Weavers spin 200 g flax into 200 g thread and weave 200 g thread into 200 g cloth. Tailors turn 25 g cloth into one 25 g flax block and assemble eight blocks into one 200 g garment. Each processing batch takes 30 minutes before skill speed improvements.
