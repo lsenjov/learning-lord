@@ -937,7 +937,7 @@ mod tests {
     fn reserved_worker(good: Good, units: Quantity) -> (Universe, AgentId, PlaceId) {
         let citizen = Citizen::new(0.0)
             .unwrap()
-            .with_skill(crate::production::Skill::Tailoring, 1.0)
+            .with_skill_practice_ms(crate::production::Skill::Tailoring, Some(0))
             .unwrap()
             .with_good(good, units)
             .unwrap();

@@ -426,12 +426,27 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .collect::<Vec<_>>();
     properties.sort();
     let properties = properties.join(", ");
+    let skills = learning_lord_simulation::production::Skill::ALL
+        .into_iter()
+        .filter_map(|skill| {
+            citizen.skill_practice_ms(skill).map(|practice| {
+                format!(
+                    "{}: {:.1} h practiced | {:.2}% less production time",
+                    skill.name(),
+                    practice as f64 / 3_600_000.0,
+                    learning_lord_simulation::production::skill_duration_reduction(practice)
+                        * 100.0
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let garment = citizen.garment_condition().map_or_else(
         || "None".into(),
         |condition| format!("{:.1}%", condition * 100.0),
     );
     format!(
-        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}",
+        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
         agent.name,
         citizen.coins(),
         citizen
@@ -844,7 +859,7 @@ mod tests {
         };
         let citizen = Citizen::new(0.0)
             .unwrap()
-            .with_skill(Skill::Tailoring, 1.0)
+            .with_skill_practice_ms(Skill::Tailoring, Some(0))
             .unwrap()
             .with_good(Good::Cloth, 25)
             .unwrap();

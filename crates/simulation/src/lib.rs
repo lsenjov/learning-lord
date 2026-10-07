@@ -187,7 +187,7 @@ pub struct Citizen {
     id: AgentId,
     home: PlaceId,
     starting_role: Option<StartingRole>,
-    skills: [f64; production::Skill::COUNT],
+    skills: [Option<u64>; production::Skill::COUNT],
     production_targets: Option<production::ProductionTargets>,
     work_period: u64,
     work_ms: u64,
@@ -239,7 +239,7 @@ impl Citizen {
             id,
             home,
             starting_role: None,
-            skills: [0.0; production::Skill::COUNT],
+            skills: [None; production::Skill::COUNT],
             production_targets: None,
             work_period: 0,
             work_ms: 0,
@@ -316,7 +316,7 @@ impl Citizen {
             StartingRole::Weaver => production::Skill::Weaving,
             StartingRole::Tailor => production::Skill::Tailoring,
         };
-        citizen.skills[skill as usize] = 1.0;
+        citizen.skills[skill as usize] = Some(0);
         citizen
     }
 
@@ -561,23 +561,22 @@ impl Citizen {
         (units, total)
     }
 
-    pub fn skill_level(&self, skill: production::Skill) -> f64 {
+    pub fn skill_practice_ms(&self, skill: production::Skill) -> Option<u64> {
         self.skills[skill as usize]
     }
 
-    pub fn with_skill(
+    /// Sets qualification and practice, capped at the maximum duration benefit.
+    pub fn with_skill_practice_ms(
         &self,
         skill: production::Skill,
-        level: f64,
+        practice_ms: Option<u64>,
     ) -> Result<Self, SimulationError> {
-        if !level.is_finite() || level < 0.0 {
-            return Err(SimulationError::InvalidSkill);
-        }
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
         }
         let mut citizen = self.clone();
-        citizen.skills[skill as usize] = level;
+        citizen.skills[skill as usize] =
+            practice_ms.map(|ms| ms.min(production::MAX_SKILL_PRACTICE_MS));
         Ok(citizen)
     }
 
@@ -860,7 +859,15 @@ impl Citizen {
         if let Some(mut active) = citizen.active_action {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
             citizen.advance_needs(action_elapsed_ms, Some(active))?;
-            if matches!(active.action, CitizenAction::Produce(_)) {
+            if let CitizenAction::Produce(recipe) = active.action {
+                if let Some(skill) = recipe.skill() {
+                    let practice = citizen.skills[skill as usize]
+                        .as_mut()
+                        .ok_or(SimulationError::MissingSkill)?;
+                    *practice = practice
+                        .saturating_add(action_elapsed_ms)
+                        .min(production::MAX_SKILL_PRACTICE_MS);
+                }
                 let end = self
                     .market_time_ms
                     .checked_add(action_elapsed_ms)
@@ -1005,12 +1012,6 @@ impl Citizen {
         }
         if let Some(targets) = &mut self.production_targets {
             targets.complete(recipe);
-        }
-        if let Some(skill) = recipe.skill() {
-            self.skills[skill as usize] += production::SKILL_GAIN_PER_BATCH;
-            if !self.skill_level(skill).is_finite() {
-                return Err(SimulationError::InvalidSkill);
-            }
         }
         Ok(())
     }
@@ -1880,7 +1881,6 @@ pub enum SimulationError {
     InvalidTaxRule,
     TaxRuleNotFound,
     InventoryOverflow,
-    InvalidSkill,
     MissingSkill,
     MissingProperty,
     MissingInputs,
@@ -1921,7 +1921,6 @@ impl fmt::Display for SimulationError {
             Self::TaxRuleNotFound => "active tax rule does not exist",
             Self::InvalidInventory => "goods use whole nonnegative units",
             Self::InventoryOverflow => "production exceeds representable inventory quantities",
-            Self::InvalidSkill => "skill level must be finite and nonnegative",
             Self::MissingSkill => "production requires its skill",
             Self::MissingProperty => "production requires an owned property",
             Self::MissingInputs => "production inputs are unavailable",

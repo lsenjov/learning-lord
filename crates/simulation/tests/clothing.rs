@@ -173,9 +173,9 @@ fn clothing_chain_keeps_exact_integer_intermediates_until_garment_completion() {
     let worker = Citizen::new(0.0)
         .unwrap()
         .with_starting_role(StartingRole::Farmer)
-        .with_skill(Skill::Weaving, 1.0)
+        .with_skill_practice_ms(Skill::Weaving, Some(0))
         .unwrap()
-        .with_skill(Skill::Tailoring, 1.0)
+        .with_skill_practice_ms(Skill::Tailoring, Some(0))
         .unwrap();
     let (mut town, id) = Universe::with_map(Map::default())
         .with_citizen("Worker", worker)

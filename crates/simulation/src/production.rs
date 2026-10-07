@@ -1,7 +1,12 @@
 use crate::{Citizen, Coins, Quantity, SimulationError, locations::Location, marketplace::Good};
 
-pub const SKILL_GAIN_PER_BATCH: f64 = 0.1;
-pub const SPEED_GAIN_PER_LEVEL: f64 = 0.05;
+/// Practice is capped after 52 weeks of twelve-hour working days.
+pub const MAX_SKILL_PRACTICE_MS: u64 = 4_368 * 3_600_000;
+
+pub fn skill_duration_reduction(practice_ms: u64) -> f64 {
+    let progress = practice_ms.min(MAX_SKILL_PRACTICE_MS) as f64 / MAX_SKILL_PRACTICE_MS as f64;
+    0.5 * (2.0 * progress - progress * progress)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Skill {
@@ -153,16 +158,15 @@ impl Recipe {
         }
     }
     pub fn duration_ms(self, citizen: &Citizen) -> Result<u64, SimulationError> {
-        let speed = if let Some(skill) = self.skill() {
-            let level = citizen.skill_level(skill);
-            if level <= 0.0 {
-                return Err(SimulationError::MissingSkill);
-            }
-            1.0 + SPEED_GAIN_PER_LEVEL * (level - 1.0).max(0.0)
+        let reduction = if let Some(skill) = self.skill() {
+            let practice = citizen
+                .skill_practice_ms(skill)
+                .ok_or(SimulationError::MissingSkill)?;
+            skill_duration_reduction(practice)
         } else {
-            1.0
+            0.0
         };
-        Ok((self.base_duration_ms() as f64 / speed).ceil().max(1.0) as u64)
+        Ok((self.base_duration_ms() as f64 * (1.0 - reduction)).ceil() as u64)
     }
 }
 

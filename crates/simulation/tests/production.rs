@@ -72,8 +72,12 @@ fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stoc
         assert!(complete.hunger() > source.hunger());
         assert!(complete.tiredness() > source.tiredness());
         if let Some(skill) = recipe.skill() {
-            close(partial.skill_level(skill), 1.0);
-            close(complete.skill_level(skill), 1.1);
+            assert_eq!(partial.skill_practice_ms(skill), Some(duration - 1));
+            assert_eq!(complete.skill_practice_ms(skill), Some(duration));
+            assert_eq!(
+                complete.skill_practice_ms(skill),
+                started.advance(duration).unwrap().skill_practice_ms(skill)
+            );
         }
         let direct = started.advance(duration).unwrap();
         for good in Good::ALL {
@@ -96,7 +100,7 @@ fn all_inputs_skill_and_owned_property_are_required_before_work_starts() {
         );
         assert_eq!(short.active_action(), None);
     }
-    let unskilled = baker.with_skill(Skill::Baking, 0.0).unwrap();
+    let unskilled = baker.with_skill_practice_ms(Skill::Baking, None).unwrap();
     assert_eq!(
         unskilled.start_action(CitizenAction::Produce(Recipe::BakeBread)),
         Err(SimulationError::MissingSkill)
@@ -121,28 +125,27 @@ fn all_inputs_skill_and_owned_property_are_required_before_work_starts() {
 }
 
 #[test]
-fn skill_levels_shorten_work_and_completion_improves_future_batches() {
+fn practice_shortens_future_work_and_caps_at_half_duration() {
     let source = worker(Recipe::ChopWood);
     assert_eq!(Recipe::ChopWood.duration_ms(&source), Ok(3_600_000));
-    let skilled = source.with_skill(Skill::Woodcutting, 11.0).unwrap();
-    assert_eq!(Recipe::ChopWood.duration_ms(&skilled), Ok(2_400_000));
+    let skilled = source
+        .with_skill_practice_ms(
+            Skill::Woodcutting,
+            Some(learning_lord_simulation::production::MAX_SKILL_PRACTICE_MS),
+        )
+        .unwrap();
+    assert_eq!(Recipe::ChopWood.duration_ms(&skilled), Ok(1_800_000));
     let complete = source
         .start_action(CitizenAction::Produce(Recipe::ChopWood))
         .unwrap()
         .advance(3_600_000)
         .unwrap();
     assert!(Recipe::ChopWood.duration_ms(&complete).unwrap() < 3_600_000);
-    for invalid in [-1.0, f64::NAN, f64::INFINITY] {
-        assert_eq!(
-            source.with_skill(Skill::Woodcutting, invalid),
-            Err(SimulationError::InvalidSkill)
-        );
-    }
     assert_eq!(
         source
             .start_action(CitizenAction::Produce(Recipe::ChopWood))
             .unwrap()
-            .with_skill(Skill::Woodcutting, 5.0),
+            .with_skill_practice_ms(Skill::Woodcutting, Some(5)),
         Err(SimulationError::CitizenBusy)
     );
 }
@@ -163,7 +166,7 @@ fn failed_production_does_not_consume_inputs_or_change_progress() {
         assert_eq!(started.units(good), grams);
     }
     assert_eq!(started.active_action().unwrap().remaining_ms(), 3_600_000);
-    assert_eq!(started.skill_level(Skill::Baking), 1.0);
+    assert_eq!(started.skill_practice_ms(Skill::Baking), Some(0));
 }
 
 #[test]
@@ -250,5 +253,82 @@ fn each_food_requires_a_whole_meal_and_nonfood_is_rejected() {
         CitizenAction::BuyFood(Good::Wheat)
             .input_for(&Citizen::new(0.0).unwrap(), 30.0)
             .is_none()
+    );
+}
+
+#[test]
+fn practice_counts_only_elapsed_matching_work_and_keeps_active_duration() {
+    let source = worker(Recipe::ChopWood)
+        .with_skill_practice_ms(Skill::Baking, Some(123))
+        .unwrap();
+    let started = source
+        .start_action(CitizenAction::Produce(Recipe::ChopWood))
+        .unwrap();
+    let partial = started.advance(1_234_567).unwrap();
+    assert_eq!(
+        partial.skill_practice_ms(Skill::Woodcutting),
+        Some(1_234_567)
+    );
+    assert_eq!(partial.skill_practice_ms(Skill::Baking), Some(123));
+    assert_eq!(partial.active_action().unwrap().duration_ms(), 3_600_000);
+    let complete = partial.advance(3_600_000).unwrap();
+    assert_eq!(
+        complete.skill_practice_ms(Skill::Woodcutting),
+        Some(3_600_000)
+    );
+    let waiting = complete.start_action(CitizenAction::Wait).unwrap();
+    let waited = waiting
+        .advance(waiting.active_action().unwrap().duration_ms())
+        .unwrap();
+    assert_eq!(
+        waited.skill_practice_ms(Skill::Woodcutting),
+        Some(3_600_000)
+    );
+    for recipe in [Recipe::Forage, Recipe::FetchWater] {
+        let started = source.start_action(CitizenAction::Produce(recipe)).unwrap();
+        let complete = started
+            .advance(started.active_action().unwrap().duration_ms())
+            .unwrap();
+        for skill in Skill::ALL {
+            assert_eq!(
+                complete.skill_practice_ms(skill),
+                source.skill_practice_ms(skill)
+            );
+        }
+    }
+}
+
+#[test]
+fn duration_curve_has_diminishing_benefits_and_practice_saturates() {
+    use learning_lord_simulation::production::{MAX_SKILL_PRACTICE_MS, skill_duration_reduction};
+    assert_eq!(skill_duration_reduction(0), 0.0);
+    assert_eq!(skill_duration_reduction(MAX_SKILL_PRACTICE_MS / 4), 0.21875);
+    assert_eq!(skill_duration_reduction(MAX_SKILL_PRACTICE_MS / 2), 0.375);
+    assert_eq!(
+        skill_duration_reduction(MAX_SKILL_PRACTICE_MS * 3 / 4),
+        0.46875
+    );
+    assert_eq!(skill_duration_reduction(MAX_SKILL_PRACTICE_MS), 0.5);
+    assert_eq!(skill_duration_reduction(u64::MAX), 0.5);
+    let near_cap = worker(Recipe::ChopWood)
+        .with_skill_practice_ms(Skill::Woodcutting, Some(MAX_SKILL_PRACTICE_MS - 1))
+        .unwrap();
+    let started = near_cap
+        .start_action(CitizenAction::Produce(Recipe::ChopWood))
+        .unwrap();
+    let complete = started
+        .advance(started.active_action().unwrap().duration_ms())
+        .unwrap();
+    assert_eq!(
+        complete.skill_practice_ms(Skill::Woodcutting),
+        Some(MAX_SKILL_PRACTICE_MS)
+    );
+    assert_eq!(Recipe::ChopWood.duration_ms(&complete), Ok(1_800_000));
+    assert_eq!(
+        near_cap
+            .with_skill_practice_ms(Skill::Woodcutting, Some(u64::MAX))
+            .unwrap()
+            .skill_practice_ms(Skill::Woodcutting),
+        Some(MAX_SKILL_PRACTICE_MS)
     );
 }

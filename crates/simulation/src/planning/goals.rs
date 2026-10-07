@@ -1662,7 +1662,14 @@ mod tests {
     #[test]
     fn skilled_production_finishes_the_first_crossing_batch() {
         use crate::production::{Recipe, Skill};
-        let worker = bread_only(baker().with_skill(Skill::Baking, 24.6).unwrap());
+        let worker = bread_only(
+            baker()
+                .with_skill_practice_ms(
+                    Skill::Baking,
+                    Some(crate::production::MAX_SKILL_PRACTICE_MS / 2),
+                )
+                .unwrap(),
+        );
         let initial = Prediction::new(&worker, Cooldowns::default());
         let variants = production_prefixes(initial.clone(), 0, &mut []).unwrap();
         assert_eq!(variants.len(), 1);
@@ -1726,9 +1733,16 @@ mod tests {
     #[test]
     fn production_keeps_short_exhausted_caps_and_supply_paths() {
         use crate::production::{Recipe, Skill};
-        let mut worker = bread_only(baker().with_skill(Skill::Baking, 24.6).unwrap())
-            .with_good(Good::Water, 10_000)
-            .unwrap();
+        let mut worker = bread_only(
+            baker()
+                .with_skill_practice_ms(
+                    Skill::Baking,
+                    Some(crate::production::MAX_SKILL_PRACTICE_MS),
+                )
+                .unwrap(),
+        )
+        .with_good(Good::Water, 10_000)
+        .unwrap();
         let batches =
             crate::production::DAILY_CAPACITY_MS / Recipe::BakeBread.duration_ms(&worker).unwrap();
         worker = worker.with_good(Good::Bread, (batches - 1) * 2).unwrap();
@@ -1745,7 +1759,10 @@ mod tests {
 
         let worker = bread_only(
             buying_baker(100)
-                .with_skill(Skill::Baking, 24.6)
+                .with_skill_practice_ms(
+                    Skill::Baking,
+                    Some(crate::production::MAX_SKILL_PRACTICE_MS),
+                )
                 .unwrap()
                 .with_good(Good::Water, 10_000)
                 .unwrap(),
@@ -2176,12 +2193,23 @@ mod tests {
         assert_eq!(list.units(Good::Water), 200);
         assert_eq!(candidate.citizen.available_units(Good::Bread), 4);
         assert_eq!(candidate.citizen.available_units(Good::Flour), 0);
-        assert!(
-            (candidate.citizen.skill_level(Skill::Baking)
-                - source.skill_level(Skill::Baking)
-                - 0.2)
-                .abs()
-                < 1e-12
+        assert_eq!(
+            candidate.citizen.skill_practice_ms(Skill::Baking).unwrap()
+                - source.skill_practice_ms(Skill::Baking).unwrap(),
+            candidate.action_durations_ms[1] + candidate.action_durations_ms[2]
+        );
+        assert_eq!(source.skill_practice_ms(Skill::Baking), Some(0));
+        let mut actual = source.clone();
+        for (&action, &duration) in candidate.actions.iter().zip(&candidate.action_durations_ms) {
+            actual = actual
+                .start_action(action)
+                .unwrap()
+                .advance(duration)
+                .unwrap();
+        }
+        assert_eq!(
+            actual.skill_practice_ms(Skill::Baking),
+            candidate.citizen.skill_practice_ms(Skill::Baking)
         );
         assert!(candidate.action_durations_ms[2] < candidate.action_durations_ms[1]);
         assert!(

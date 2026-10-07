@@ -224,7 +224,7 @@ fn storage_transfers_preserve_active_production_inputs_and_completion() {
     use learning_lord_simulation::production::{Recipe, Skill};
     let worker = Citizen::new(0.0)
         .unwrap()
-        .with_skill(Skill::Milling, 1.0)
+        .with_skill_practice_ms(Skill::Milling, Some(0))
         .unwrap()
         .with_good(Good::Wheat, 450)
         .unwrap();

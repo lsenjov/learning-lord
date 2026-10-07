@@ -20,7 +20,7 @@ fn rates(good: Good, bp: u16) -> imbl::HashMap<Good, TaxRate> {
 fn block_worker() -> (Universe, AgentId, PlaceId) {
     let worker = Citizen::new(0.0)
         .unwrap()
-        .with_skill(Skill::Tailoring, 1.0)
+        .with_skill_practice_ms(Skill::Tailoring, Some(0))
         .unwrap()
         .with_good(Good::Cloth, 200)
         .unwrap()
@@ -757,7 +757,7 @@ fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
 fn garment_worker() -> (Universe, AgentId, PlaceId) {
     let worker = Citizen::new(0.0)
         .unwrap()
-        .with_skill(Skill::Tailoring, 1.0)
+        .with_skill_practice_ms(Skill::Tailoring, Some(0))
         .unwrap()
         .with_good(Good::FlaxBlock, 8)
         .unwrap()

@@ -141,9 +141,9 @@ fn skill_adjusted_floor_subtracts_adas_existing_listing() {
     );
     let universe = list(universe, farmer, Good::Wheat, 200);
     let worker = citizen(&universe, farmer)
-        .with_skill(Skill::Farming, 1.1)
+        .with_skill_practice_ms(Skill::Farming, Some(3_600_000))
         .unwrap();
-    assert_eq!(Recipe::GrowWheat.duration_ms(&worker).unwrap(), 3_582_090);
+    assert_eq!(Recipe::GrowWheat.duration_ms(&worker).unwrap(), 3_599_176);
     assert_eq!(
         ProductionTargets::calculate(&worker, 0)
             .unwrap()
@@ -298,7 +298,7 @@ fn missing_skill_or_property_prevents_targets_and_faster_skill_increases_capacit
         0,
     );
     let worker = citizen(&universe, farmer);
-    let unskilled = worker.with_skill(Skill::Farming, 0.0).unwrap();
+    let unskilled = worker.with_skill_practice_ms(Skill::Farming, None).unwrap();
     assert_eq!(
         ProductionTargets::calculate(&unskilled, 0)
             .unwrap()
@@ -306,12 +306,17 @@ fn missing_skill_or_property_prevents_targets_and_faster_skill_increases_capacit
         0
     );
     let normal = targets(&universe, farmer).remaining_batches(Recipe::GrowWheat);
-    let skilled = worker.with_skill(Skill::Farming, 11.0).unwrap();
+    let skilled = worker
+        .with_skill_practice_ms(
+            Skill::Farming,
+            Some(learning_lord_simulation::production::MAX_SKILL_PRACTICE_MS),
+        )
+        .unwrap();
     let faster = ProductionTargets::calculate(&skilled, 0)
         .unwrap()
         .remaining_batches(Recipe::GrowWheat);
     assert_eq!(normal, 12);
-    assert_eq!(faster, 18);
+    assert_eq!(faster, 24);
     assert!(faster * Recipe::GrowWheat.duration_ms(&skilled).unwrap() <= DAILY_CAPACITY_MS);
 }
 
