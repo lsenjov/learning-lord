@@ -279,11 +279,7 @@ fn field(parent: &mut ChildSpawnerCommands, label: &str, value: &str, id: Field,
         parent,
         format!(
             "{label}: {}{}",
-            if value.is_empty() {
-                "[click to enter]"
-            } else {
-                value
-            },
+            if value.is_empty() { "—" } else { value },
             if state.field == Some(id) { " |" } else { "" }
         ),
         Choice::Field(id),

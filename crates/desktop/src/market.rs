@@ -1,4 +1,4 @@
-use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, format_clock, text};
+use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, text};
 use bevy::{
     input_focus::{FocusCause, InputFocus},
     prelude::*,
@@ -6,7 +6,7 @@ use bevy::{
 };
 use learning_lord_simulation::{
     Universe,
-    marketplace::{Good, GoodActivity, MarketParty, MarketPeriod},
+    marketplace::{Good, GoodActivity, MarketParty},
     production::Recipe,
 };
 
@@ -18,19 +18,10 @@ pub enum View {
     Locations,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum Period {
-    #[default]
-    Current,
-    Previous,
-}
-
 #[derive(Resource, Default)]
 pub struct Selection {
     pub(super) view: View,
     good: Option<Good>,
-    period: Period,
-    generation: u64,
 }
 
 impl Selection {
@@ -46,7 +37,6 @@ pub struct ViewPanel(pub View);
 pub enum Choice {
     View(View),
     Good(Good),
-    Period(Period),
 }
 
 #[derive(Component)]
@@ -55,8 +45,6 @@ pub enum Readout {
     Title,
     PriceNow,
     MaterialMargins,
-    Period,
-    Metrics,
     Buyers,
 }
 
@@ -74,6 +62,7 @@ struct SellerOrders {
     orders: Vec<(u64, u64, f64)>,
 }
 
+#[cfg(test)]
 fn choice(value: Choice) -> impl Bundle {
     (
         Button,
@@ -90,69 +79,111 @@ fn choice(value: Choice) -> impl Bundle {
 }
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
-    parent.spawn((ViewPanel(View::Market), Visibility::Hidden, Node {
-        display: Display::None, width: percent(100), flex_grow: 1.0,
-        min_height: px(0), column_gap: px(14), ..default()
-    })).with_children(|row| {
-        row.spawn((Node {
-            width: px(240), flex_shrink: 0.0, min_height: px(0),
-            flex_direction: FlexDirection::Column, row_gap: px(8),
-            overflow: Overflow::scroll_y(), ..default()
-        }, ScrollPosition::default(), RelativeCursorPosition::default())).with_children(|list| {
-            list.spawn(text("GOODS  |  current prices", 14.0, MUTED));
-            for good in Good::ALL {
-                list.spawn((Button, Choice::Good(good), BackgroundColor(PANEL), Node {
-                    width: percent(100), flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::FlexStart, padding: UiRect::all(px(12)),
-                    row_gap: px(3), flex_shrink: 0.0,
-                    border_radius: BorderRadius::all(px(8)), ..default()
-                })).with_children(|button| {
-                    button.spawn(text(good.name(), 16.0, TEXT));
-                    button.spawn((text("", 13.0, MUTED), Readout::Price(good)));
-                });
-            }
+    parent
+        .spawn((
+            ViewPanel(View::Market),
+            Visibility::Hidden,
+            Node {
+                display: Display::None,
+                width: percent(100),
+                flex_grow: 1.0,
+                min_height: px(0),
+                column_gap: px(14),
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Node {
+                    width: px(240),
+                    flex_shrink: 0.0,
+                    min_height: px(0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollPosition::default(),
+                RelativeCursorPosition::default(),
+            ))
+            .with_children(|list| {
+                list.spawn(text("GOODS  |  current prices", 14.0, MUTED));
+                for good in Good::ALL {
+                    list.spawn((
+                        Button,
+                        Choice::Good(good),
+                        BackgroundColor(PANEL),
+                        Node {
+                            width: percent(100),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::FlexStart,
+                            padding: UiRect::all(px(12)),
+                            row_gap: px(3),
+                            flex_shrink: 0.0,
+                            border_radius: BorderRadius::all(px(8)),
+                            ..default()
+                        },
+                    ))
+                    .with_children(|button| {
+                        button.spawn(text(good.name(), 16.0, TEXT));
+                        button.spawn((text("", 13.0, MUTED), Readout::Price(good)));
+                    });
+                }
+            });
+            row.spawn((
+                Node {
+                    flex_basis: px(0),
+                    flex_grow: 1.0,
+                    min_width: px(0),
+                    min_height: px(0),
+                    padding: UiRect::all(px(16)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(12),
+                    overflow: Overflow::scroll_y(),
+                    border_radius: BorderRadius::all(px(12)),
+                    ..default()
+                },
+                BackgroundColor(PANEL),
+                ScrollPosition::default(),
+                RelativeCursorPosition::default(),
+            ))
+            .with_children(|details| {
+                details.spawn((text("", 24.0, TEXT), Readout::Title));
+                details.spawn((text("", 16.0, TEXT), Readout::PriceNow));
+                details.spawn((text("", 14.0, MUTED), Readout::MaterialMargins));
+                crate::caravan_controls::spawn(details);
+                crate::market_history::spawn(details);
+            details.spawn(text("Buy volume = total trades + affordable unfulfilled demand. Sell volume = total trades + listed stock (including caravans).\nTrades include exports; deliveries are separate. Caravans settle at 04:00 after prices update.", 13.0, MUTED));
+                details.spawn(text("CURRENT BUY REQUESTS  |  live", 14.0, MUTED));
+                details.spawn((
+                    text("", 14.0, TEXT),
+                    Node {
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    Readout::Buyers,
+                ));
+                details.spawn(text("CURRENT SELL ORDERS  |  live", 14.0, MUTED));
+                details.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(10),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    Orders,
+                ));
+            });
         });
-        row.spawn((Node {
-            flex_basis: px(0), flex_grow: 1.0, min_width: px(0), min_height: px(0),
-            padding: UiRect::all(px(16)), flex_direction: FlexDirection::Column,
-            row_gap: px(12), overflow: Overflow::scroll_y(),
-            border_radius: BorderRadius::all(px(12)), ..default()
-        }, BackgroundColor(PANEL), ScrollPosition::default(), RelativeCursorPosition::default()))
-        .with_children(|details| {
-            details.spawn((text("", 24.0, TEXT), Readout::Title));
-            details.spawn((text("", 16.0, TEXT), Readout::PriceNow));
-            details.spawn((text("", 14.0, MUTED), Readout::MaterialMargins));
-            crate::caravan_controls::spawn(details);
-            crate::market_history::spawn(details);
-            details.spawn(Node { column_gap: px(8), row_gap: px(8), flex_wrap: FlexWrap::Wrap, flex_shrink: 0.0, ..default() })
-                .with_children(|row| {
-                    for (period, label) in [(Period::Current, "Current market day"), (Period::Previous, "Previous market day")] {
-                        row.spawn(choice(Choice::Period(period))).with_children(|button| { button.spawn(text(label, 14.0, TEXT)); });
-                    }
-                });
-            details.spawn((text("", 14.0, MUTED), Readout::Period));
-            details.spawn((text("", 17.0, TEXT), Readout::Metrics));
-            details.spawn(text("Buy = total trades + affordable unfulfilled demand\nSell = total trades + listed stock (including caravans)\nTrades include exports; deliveries are separate. Caravans settle at 04:00 after prices update.", 13.0, MUTED));
-            details.spawn(text("CURRENT BUY REQUESTS  |  live in either period view", 14.0, MUTED));
-            details.spawn((text("", 14.0, TEXT), Node { flex_shrink: 0.0, ..default() }, Readout::Buyers));
-            details.spawn(text("CURRENT SELL ORDERS  |  live in either period view", 14.0, MUTED));
-            details.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(10), flex_shrink: 0.0, ..default() }, Orders));
-        });
-    });
 }
 
 pub fn handle_selection(
-    snapshot: Res<DisplaySnapshot>,
     shortcuts: crate::KeyboardShortcuts,
     buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
     mut selection: ResMut<Selection>,
     mut focus: ResMut<InputFocus>,
     mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
-    if selection.generation != snapshot.0.generation {
-        selection.generation = snapshot.0.generation;
-        selection.period = Period::Current;
-    }
     for (entity, interaction, choice) in &buttons {
         if *interaction == Interaction::Pressed {
             focus.set(entity, FocusCause::Pressed);
@@ -166,11 +197,6 @@ pub fn handle_selection(
                     }
                     if selection.good() != good {
                         selection.good = Some(good);
-                    }
-                }
-                Choice::Period(period) => {
-                    if selection.period != period {
-                        selection.period = period;
                     }
                 }
             }
@@ -434,22 +460,6 @@ pub(crate) fn metrics(good: Good, activity: GoodActivity) -> String {
     )
 }
 
-pub(crate) fn period_label(period: &MarketPeriod, selected: Period, now: u64) -> String {
-    match selected {
-        Period::Current => format!(
-            "CURRENT MARKET DAY  |  {} to now ({})\nCloses at {}",
-            format_clock(period.start_ms),
-            format_clock(now),
-            format_clock(period.end_ms)
-        ),
-        Period::Previous => format!(
-            "CLOSED MARKET DAY  |  {} to {}\nStock and demand are recorded at the close.",
-            format_clock(period.start_ms),
-            format_clock(period.end_ms)
-        ),
-    }
-}
-
 pub fn refresh_choices(
     selection: Res<Selection>,
     mut buttons: Query<(&Choice, &Interaction, &mut BackgroundColor)>,
@@ -458,7 +468,6 @@ pub fn refresh_choices(
         let selected = match *choice {
             Choice::View(view) => selection.view == view,
             Choice::Good(good) => selection.good() == good,
-            Choice::Period(period) => selection.period == period,
         };
         let value = if *interaction == Interaction::Pressed {
             Color::srgb(0.18, 0.48, 0.39)
@@ -492,10 +501,6 @@ pub fn refresh(
         *visibility = Visibility::Inherited;
     }
     let universe = &snapshot.0.universe;
-    let selected_period = match selection.period {
-        Period::Current => Some(universe.market().current_period()),
-        Period::Previous => universe.market().previous_period(),
-    };
     for (readout, mut value) in &mut readouts {
         let next = match *readout {
             Readout::Price(good) => {
@@ -514,14 +519,6 @@ pub fn refresh(
             Readout::MaterialMargins => material_margins(universe, selection.good(), true),
             Readout::Title => selection.good().name().into(),
             Readout::PriceNow => price_details(universe, selection.good()),
-            Readout::Period => selected_period.as_ref().map_or_else(
-                || "No closed market day yet. The first period closes at Day 0 | 04:00:00.".into(),
-                |period| period_label(period, selection.period, universe.current_time_ms()),
-            ),
-            Readout::Metrics => selected_period.as_ref().map_or_else(
-                || "No previous-day figures available.".into(),
-                |period| metrics(selection.good(), period.goods[selection.good() as usize]),
-            ),
             Readout::Buyers => buyer_requests(universe, selection.good()),
         };
         if value.0 != next {
@@ -786,9 +783,6 @@ mod tests {
             value.contains("Buy volume: 700 g\nSell volume: 1000 g\nTotal traded volume: 200 g")
         );
         assert!(value.contains("Unfulfilled demand: 500 g"));
-        let period = Universe::default().market().current_period();
-        assert!(period_label(&period, Period::Current, 1_000).contains("CURRENT MARKET DAY"));
-        assert!(period_label(&period, Period::Previous, 1_000).contains("CLOSED MARKET DAY"));
     }
 
     #[test]
@@ -816,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn buy_requests_include_cashless_buyers_and_stay_live_in_previous_view() {
+    fn buy_requests_include_cashless_buyers_and_stay_live() {
         use learning_lord_simulation::marketplace::ShoppingList;
 
         let (universe, funded) = Universe::with_map(Map::default())
@@ -854,7 +848,7 @@ mod tests {
 
         let mut app = app();
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe.clone();
-        press(&mut app, Choice::Period(Period::Previous));
+        app.update();
         let displayed = |app: &mut App| {
             app.world_mut()
                 .query::<(&Readout, &Text)>()
@@ -874,13 +868,11 @@ mod tests {
             displayed(&mut app),
             "Same\n200 g requested  |  100 g affordable"
         );
-        assert_eq!(app.world().resource::<Selection>().period, Period::Previous);
         press(&mut app, Choice::Good(Good::Water));
         assert_eq!(
             displayed(&mut app),
             "Water buyer\n400 g requested  |  0 g affordable"
         );
-        press(&mut app, Choice::Period(Period::Current));
         assert_eq!(
             displayed(&mut app),
             "Water buyer\n400 g requested  |  0 g affordable"
@@ -974,7 +966,7 @@ mod tests {
         );
         let mut app = app();
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe;
-        press(&mut app, Choice::Period(Period::Previous));
+        app.update();
         assert_eq!(app.world().resource::<OrderDisplay>().0, groups);
         assert!(
             app.world_mut()
@@ -1026,7 +1018,6 @@ mod tests {
             .find(|(_, value)| match (choice, **value) {
                 (Choice::View(a), Choice::View(b)) => a == b,
                 (Choice::Good(a), Choice::Good(b)) => a == b,
-                (Choice::Period(a), Choice::Period(b)) => a == b,
                 _ => false,
             })
             .unwrap()
@@ -1056,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_good_period_keyboard_restart_and_idle_updates() {
+    fn tab_good_keyboard_restart_and_idle_updates() {
         let mut app = app();
         let goods = app
             .world_mut()
@@ -1075,15 +1066,8 @@ mod tests {
             assert_eq!(*visibility, Visibility::Inherited);
         }
         press(&mut app, Choice::Good(Good::Bread));
-        press(&mut app, Choice::Period(Period::Previous));
+        app.update();
         assert_eq!(app.world().resource::<Selection>().good(), Good::Bread);
-        assert!(
-            app.world_mut()
-                .query::<(&Readout, &Text)>()
-                .iter(app.world())
-                .any(|(readout, text)| matches!(readout, Readout::Period)
-                    && text.0.starts_with("No closed market day"))
-        );
         app.world_mut().resource_mut::<DisplaySnapshot>().0.revision += 1;
         app.update();
         assert_eq!(app.world().resource::<Selection>().good(), Good::Bread);
@@ -1092,7 +1076,6 @@ mod tests {
             .0
             .generation += 1;
         app.update();
-        assert_eq!(app.world().resource::<Selection>().period, Period::Current);
         assert_eq!(app.world().resource::<Selection>().good(), Good::Bread);
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()

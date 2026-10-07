@@ -150,6 +150,8 @@ impl Scale {
 pub struct ChartDisplay {
     days: Vec<Day>,
     good: Option<Good>,
+    pinned: Option<u64>,
+    generation: u64,
 }
 #[derive(Component)]
 pub(super) struct Plot;
@@ -158,7 +160,7 @@ pub(super) struct Axis;
 #[derive(Component)]
 pub(super) struct Legend;
 #[derive(Component)]
-pub(super) struct Hover;
+pub(super) struct Detail;
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
     parent.spawn(text(
@@ -166,7 +168,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Close pressure affects the next 04:00 price.", 13.0, MUTED));
+    parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Cyan body: current partial day. Close pressure affects the next 04:00 price.", 13.0, MUTED));
     let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
@@ -197,18 +199,14 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                 Plot,
             ));
         });
-    let _hover = parent.spawn((
-        text(
-            "Hover a market day for exact figures. Cyan body marks the current partial day.",
-            13.0,
-            MUTED,
-        ),
+    parent.spawn((
+        text("", 13.0, TEXT),
         Node {
-            min_height: px(64),
+            width: percent(100),
             flex_shrink: 0.0,
             ..default()
         },
-        Hover,
+        Detail,
     ));
 }
 
@@ -273,8 +271,18 @@ pub fn refresh(
     if plots.is_empty() || (!snapshot.is_changed() && !selection.is_changed() && !added) {
         return;
     }
+    if cached.generation != snapshot.0.generation {
+        cached.generation = snapshot.0.generation;
+        cached.pinned = None;
+    }
     let good = selection.good();
     let values = days(&snapshot.0.universe, good);
+    if cached
+        .pinned
+        .is_some_and(|start| !values.iter().any(|day| day.start == start))
+    {
+        cached.pinned = None;
+    }
     let same_geometry = cached.good == Some(good)
         && cached.days.len() == values.len()
         && cached.days.iter().zip(&values).all(|(old, new)| {
@@ -338,7 +346,7 @@ fn hover_index(position: Option<Vec2>, over: bool, count: usize) -> Option<usize
 
 fn hover_label(good: Good, day: &Day) -> String {
     format!(
-        "{} to {} | {}\nPrice: {:.6} coins/{} | total traded: {}\n{}\nAffordable unmet demand: {} | unsold stock: {} (caravan: {})",
+        "{} to {} | {}\nPrice: {:.6} coins/{}\n{}",
         format_clock(day.start),
         format_clock(day.end),
         if day.partial {
@@ -348,22 +356,19 @@ fn hover_label(good: Good, day: &Day) -> String {
         },
         day.price,
         good.price_unit_name(),
-        crate::quantity_label(good, day.activity.traded_units),
-        market::trade_breakdown(good, day.activity),
-        crate::quantity_label(good, day.activity.affordable_demand_units),
-        crate::quantity_label(good, day.activity.listed_units),
-        crate::quantity_label(good, day.activity.caravan_listed_units)
+        market::metrics(good, day.activity),
     )
 }
 
 pub fn hover(
     selection: Res<market::Selection>,
-    cached: Res<ChartDisplay>,
+    mut cached: ResMut<ChartDisplay>,
     plots: Query<&RelativeCursorPosition, With<Plot>>,
-    mut readouts: Query<&mut Text, With<Hover>>,
+    mut readouts: Query<&mut Text, With<Detail>>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
     capture: Option<Res<crate::floating_ui::InputCapture>>,
 ) {
-    let selected = plots.iter().find_map(|cursor| {
+    let hovered = plots.iter().find_map(|cursor| {
         hover_index(
             cursor.normalized,
             cursor.cursor_over
@@ -373,11 +378,33 @@ pub fn hover(
             cached.days.len(),
         )
     });
+    if let Some(index) = hovered
+        && mouse.is_some_and(|mouse| mouse.just_pressed(MouseButton::Left))
+    {
+        let start = cached.days[index].start;
+        if cached.pinned != Some(start) {
+            cached.pinned = Some(start);
+        }
+    }
+    let selected = hovered
+        .or_else(|| {
+            cached
+                .pinned
+                .and_then(|start| cached.days.iter().position(|day| day.start == start))
+        })
+        .or_else(|| cached.days.len().checked_sub(1));
     let value = selected.map_or_else(
-        || "Hover a market day for exact figures. Cyan body marks the current partial day.".into(),
+        || "No market history yet".into(),
         |index| {
             let day = &cached.days[index];
-            hover_label(selection.good(), day)
+            let status = if hovered.is_some() {
+                "PREVIEW"
+            } else if cached.pinned.is_some() {
+                "PINNED"
+            } else {
+                "CURRENT"
+            };
+            format!("{status} | {}", hover_label(selection.good(), day))
         },
     );
     for mut text in &mut readouts {
@@ -561,12 +588,12 @@ mod tests {
         };
         let label = hover_label(Good::Bread, &day);
         assert!(label.contains("CLOSED | quantities at close"));
-        assert!(label.contains("total traded: 6 loaves"));
+        assert!(label.contains("Total traded volume: 6 loaves"));
         assert!(label.contains("Local trades: 1 loaf | 20 coins"));
         assert!(label.contains("Exports: 2 loaves | 15 gross coins entering town"));
         assert!(label.contains("Import deliveries: 4 loaves"));
         assert!(label.contains("Bought from caravans: 3 loaves | 91 gross coins spent"));
-        assert!(label.contains("caravan: 1 loaf"));
+        assert!(label.contains("Caravan stock: 1 loaf"));
         day.partial = true;
         assert!(hover_label(Good::Bread, &day).contains("PARTIAL | live quantities so far"));
     }
@@ -683,6 +710,149 @@ mod tests {
         assert!(scale.quantity(u64::MAX as f64) * 1.5 <= 80.0);
         assert_eq!(scale.quantity(0.0), 0.0);
         assert!(Scale::new(&[]).y(0.0).is_finite());
+    }
+
+    fn selection_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(crate::simulation::Snapshot {
+            universe: Universe::default()
+                .advance(UPDATE_TIME_MS + DAY_MS)
+                .unwrap(),
+            error: None,
+            mutation_error: None,
+            mutation_revision: 0,
+            planning_history: Default::default(),
+            generation: 0,
+            revision: 0,
+        }))
+        .init_resource::<market::Selection>()
+        .init_resource::<ChartDisplay>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<bevy::input_focus::InputFocus>()
+        .add_systems(Startup, |mut commands: Commands| {
+            commands.spawn(Node::default()).with_children(spawn);
+        })
+        .add_systems(Update, (market::handle_selection, refresh, hover).chain());
+        app.update();
+        app
+    }
+
+    fn pointer(app: &mut App, position: Option<Vec2>, click: bool) {
+        for mut cursor in app
+            .world_mut()
+            .query_filtered::<&mut RelativeCursorPosition, With<Plot>>()
+            .iter_mut(app.world_mut())
+        {
+            cursor.normalized = position;
+            cursor.cursor_over = position.is_some();
+        }
+        let mut mouse = app.world_mut().resource_mut::<ButtonInput<MouseButton>>();
+        mouse.reset_all();
+        if click {
+            mouse.press(MouseButton::Left);
+        }
+        app.update();
+    }
+
+    fn detail(app: &mut App) -> String {
+        app.world_mut()
+            .query_filtered::<&Text, With<Detail>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone()
+    }
+
+    #[test]
+    fn hover_preview_restores_current_or_pin_and_switching_goods_keeps_the_day() {
+        let mut app = selection_app();
+        assert!(detail(&mut app).starts_with("CURRENT | Day 1"));
+        pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), false);
+        assert!(detail(&mut app).starts_with("PREVIEW | Day 0 | Monday | 00:00:00"));
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, None);
+        pointer(&mut app, None, false);
+        assert!(detail(&mut app).starts_with("CURRENT | Day 1"));
+        pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), true);
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, Some(0));
+        pointer(&mut app, Some(Vec2::new(0.49, 0.0)), false);
+        assert!(detail(&mut app).starts_with("PREVIEW | Day 1"));
+        pointer(&mut app, None, false);
+        assert!(detail(&mut app).starts_with("PINNED | Day 0 | Monday | 00:00:00"));
+        let button = app
+            .world_mut()
+            .spawn((market::Choice::Good(Good::Bread), Interaction::Pressed))
+            .id();
+        app.update();
+        app.world_mut().despawn(button);
+        assert_eq!(
+            app.world().resource::<ChartDisplay>().good,
+            Some(Good::Bread)
+        );
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, Some(0));
+        let label = detail(&mut app);
+        assert!(label.starts_with("PINNED | Day 0 | Monday | 00:00:00"));
+        assert!(label.contains("coins/loaf"));
+        assert!(label.contains("Total traded volume: 0 loaves"));
+        pointer(&mut app, Some(Vec2::new(0.0, 0.0)), true);
+        assert_eq!(
+            app.world().resource::<ChartDisplay>().pinned,
+            Some(UPDATE_TIME_MS)
+        );
+        pointer(&mut app, None, false);
+        assert!(detail(&mut app).starts_with("PINNED | Day 0 | Monday | 04:00:00"));
+    }
+
+    #[test]
+    fn current_pin_survives_day_rollover_but_pruned_or_reset_days_return_to_current() {
+        let mut app = selection_app();
+        pointer(&mut app, Some(Vec2::new(0.49, 0.0)), true);
+        let pinned = UPDATE_TIME_MS + DAY_MS;
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, Some(pinned));
+        pointer(&mut app, None, false);
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = Universe::default()
+            .advance(UPDATE_TIME_MS + 2 * DAY_MS)
+            .unwrap();
+        app.update();
+        let label = detail(&mut app);
+        assert!(label.starts_with("PINNED | Day 1"));
+        assert!(label.contains("CLOSED | quantities at close"));
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = Universe::default()
+            .advance(UPDATE_TIME_MS + 40 * DAY_MS)
+            .unwrap();
+        app.update();
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, None);
+        assert!(detail(&mut app).starts_with("CURRENT | Day 40"));
+        pointer(&mut app, Some(Vec2::new(0.49, 0.0)), true);
+        pointer(&mut app, None, false);
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        app.update();
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, None);
+        assert!(detail(&mut app).starts_with("CURRENT | Day 40"));
+        pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), true);
+        pointer(&mut app, None, false);
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = Universe::default();
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        app.update();
+        assert!(detail(&mut app).starts_with("CURRENT | Day 0"));
+    }
+
+    #[test]
+    fn another_window_blocks_hover_and_click_and_empty_history_is_safe() {
+        let mut app = selection_app();
+        app.insert_resource(crate::floating_ui::InputCapture::default());
+        pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), true);
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, None);
+        assert!(detail(&mut app).starts_with("CURRENT | Day 1"));
+        app.world_mut().resource_mut::<ChartDisplay>().days.clear();
+        pointer(&mut app, Some(Vec2::ZERO), true);
+        assert!(detail(&mut app).starts_with("No market history yet"));
     }
 
     #[test]
