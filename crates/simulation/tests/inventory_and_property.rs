@@ -31,6 +31,7 @@ fn every_good_validates_weights_and_inventory_branches_are_independent() {
 fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     let mut stocked = Citizen::new(40.0)
         .unwrap()
+        .with_prices(Prices::new(5.0).unwrap())
         .with_berries(200)
         .unwrap()
         .with_coins(200)
@@ -52,7 +53,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     let expected = stocked.coins() as f64
         + Good::ALL
             .into_iter()
-            .map(|good| Prices::default().value(good, stocked.units(good)).unwrap())
+            .map(|good| stocked.prices().value(good, stocked.units(good)).unwrap())
             .sum::<f64>();
     assert!((stocked.wealth().unwrap() - expected).abs() < 1e-12);
     let eaten = stocked
@@ -88,7 +89,10 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     let bread_meal = bread_only.start_action(CitizenAction::Eat).unwrap();
     assert_eq!(bread_meal.active_action().unwrap().duration_ms(), 100_000);
     assert_eq!(bread_meal.advance(100_000).unwrap().units(Good::Bread), 9);
-    assert_eq!(bread_only.wealth().unwrap(), 150.0);
+    assert_eq!(
+        bread_only.wealth().unwrap(),
+        Good::Bread.core_price() * 10.0
+    );
 }
 
 #[test]

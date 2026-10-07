@@ -76,6 +76,11 @@ fn warehouse_is_town_owned_and_not_a_private_workplace() {
 #[test]
 fn storage_retains_goods_ownership_independently_and_snapshots_are_immutable() {
     let (world, ada) = Universe::with_map(Map::default())
+        .with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(learning_lord_simulation::marketplace::Good::Bread, 15.0)
+                .unwrap(),
+        )
         .with_citizen(
             "Ada",
             Citizen::new(0.0)

@@ -263,6 +263,11 @@ fn buy(world: Universe, buyer: AgentId, place: PlaceId, good: Good, units: u64) 
 #[test]
 fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() {
     let (world, seller, buyer, place) = seller_world();
+    let world = world.with_prices(
+        learning_lord_simulation::marketplace::Prices::default()
+            .with_price(Good::Bread, 15.0)
+            .unwrap(),
+    );
     let (world, _) = world
         .with_tax_rule(
             place,
@@ -310,6 +315,11 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
 #[test]
 fn rule_edits_and_removal_preserve_arrears_and_retired_debts_retry_weekly() {
     let (world, seller, buyer, place) = seller_world();
+    let world = world.with_prices(
+        learning_lord_simulation::marketplace::Prices::default()
+            .with_price(Good::Bread, 15.0)
+            .unwrap(),
+    );
     let (world, rule) = world
         .with_tax_rule(
             place,

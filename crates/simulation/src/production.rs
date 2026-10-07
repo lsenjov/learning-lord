@@ -444,11 +444,11 @@ mod tests {
     fn clothing_goods_use_grams_or_whole_items_without_nutrition() {
         let prices = Prices::default();
         for (good, quoted, units, weight) in [
-            (Good::Flax, 40.0, 1000, 1),
-            (Good::Thread, 80.0, 1000, 1),
-            (Good::Cloth, 120.0, 1000, 1),
-            (Good::FlaxBlock, 11.0, 1, 25),
-            (Good::FlaxGarment, 96.0, 1, 200),
+            (Good::Flax, Good::Flax.core_price(), 1000, 1),
+            (Good::Thread, Good::Thread.core_price(), 1000, 1),
+            (Good::Cloth, Good::Cloth.core_price(), 1000, 1),
+            (Good::FlaxBlock, Good::FlaxBlock.core_price(), 1, 25),
+            (Good::FlaxGarment, Good::FlaxGarment.core_price(), 1, 200),
         ] {
             assert_eq!(prices.price(good), Some(quoted));
             assert_eq!(good.units_per_price_unit(), units);

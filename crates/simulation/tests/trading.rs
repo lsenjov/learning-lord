@@ -468,7 +468,17 @@ fn production_supply() -> (Universe, AgentId) {
         .with_good(Good::Water, 200)
         .unwrap();
     let (mut universe, id) = Universe::with_map(Map::default())
-        .with_prices(Prices::new(100.0).unwrap())
+        .with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(Good::Berries, 100.0)
+                .unwrap()
+                .with_price(Good::Flour, 100.0)
+                .unwrap()
+                .with_price(Good::Wood, 50.0)
+                .unwrap()
+                .with_price(Good::Water, 10.0)
+                .unwrap(),
+        )
         .with_citizen("Supplier", seller)
         .unwrap();
     for (good, grams) in [(Good::Flour, 300), (Good::Wood, 100), (Good::Water, 200)] {
@@ -661,6 +671,11 @@ fn owned_workshop_sells_incidental_goods_and_customers_visit_without_production_
     use learning_lord_simulation::marketplace::ShoppingList;
     use learning_lord_simulation::production::Recipe;
     let (universe, seller) = Universe::with_map(Map::default())
+        .with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
+                .unwrap(),
+        )
         .with_citizen(
             "Miller",
             Citizen::new(0.0).unwrap().with_berries(100).unwrap(),

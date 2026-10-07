@@ -2020,6 +2020,14 @@ mod tests {
     fn complete_meals_choose_one_available_food_by_quoted_value_per_nutrition() {
         let source = Citizen::new(50.0)
             .unwrap()
+            .with_prices(
+                Prices::new(5.0)
+                    .unwrap()
+                    .with_price(Good::Bread, 15.0)
+                    .unwrap()
+                    .with_price(Good::BerryPie, 25.0)
+                    .unwrap(),
+            )
             .with_berries(154)
             .unwrap()
             .with_good(Good::Bread, 1)

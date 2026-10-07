@@ -153,6 +153,17 @@ fn actual_fills_reduce_requests_and_balanced_trades_record_volume_without_price_
 #[test]
 fn one_coin_budget_is_shared_across_goods_and_available_asks_override_reference_prices() {
     let (source, id) = buyer(12);
+    let source = source.with_prices(
+        learning_lord_simulation::marketplace::Prices::default()
+            .with_price(Good::Berries, 100.0)
+            .unwrap()
+            .with_price(Good::Flour, 100.0)
+            .unwrap()
+            .with_price(Good::Wood, 50.0)
+            .unwrap()
+            .with_price(Good::Water, 10.0)
+            .unwrap(),
+    );
     let request =
         ShoppingList::new([(Good::Flour, 100), (Good::Wood, 100), (Good::Water, 100)]).unwrap();
     let u = source.with_purchase_request(id, request).unwrap();
@@ -179,6 +190,17 @@ fn one_coin_budget_is_shared_across_goods_and_available_asks_override_reference_
 #[test]
 fn seller_income_funds_an_existing_request_without_accumulating_retries() {
     let (u, seller) = supply(100);
+    let u = u.with_prices(
+        learning_lord_simulation::marketplace::Prices::default()
+            .with_price(Good::Berries, 100.0)
+            .unwrap()
+            .with_price(Good::Flour, 100.0)
+            .unwrap()
+            .with_price(Good::Wood, 50.0)
+            .unwrap()
+            .with_price(Good::Water, 10.0)
+            .unwrap(),
+    );
     let u = u
         .with_purchase_request(seller, ShoppingList::single(Good::Flour, 100))
         .unwrap();

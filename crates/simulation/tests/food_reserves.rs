@@ -90,7 +90,13 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
     )
     .unwrap();
     let market = map.public_place(Location::Market);
-    let universe = Universe::with_map(map);
+    let universe = Universe::with_map(map).with_prices(
+        learning_lord_simulation::marketplace::Prices::default()
+            .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
+            .unwrap()
+            .with_price(learning_lord_simulation::marketplace::Good::Bread, 15.0)
+            .unwrap(),
+    );
     let (universe, seller) = universe
         .with_citizen(
             "Seller",

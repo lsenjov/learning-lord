@@ -1756,6 +1756,15 @@ mod tests {
             .with_good(Good::FlaxBlock, 7)
             .unwrap();
         let (world, id) = Universe::with_map(citizen.map())
+            .with_prices(
+                crate::marketplace::Prices::default()
+                    .with_price(Good::Cloth, 120.0)
+                    .unwrap()
+                    .with_price(Good::FlaxBlock, 11.0)
+                    .unwrap()
+                    .with_price(Good::FlaxGarment, 96.0)
+                    .unwrap(),
+            )
             .with_citizen("Tailor", citizen)
             .unwrap();
         let world = world

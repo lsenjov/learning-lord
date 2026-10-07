@@ -248,7 +248,19 @@ fn low_positive_demand_keeps_the_daily_floor() {
 fn alternative_recipes_each_use_the_same_inputs_and_cash() {
     for (flour, wood, water, coins) in [(100, 25, 100, 0), (0, 0, 0, 13)] {
         let (universe, baker) = producer(
-            Universe::with_map(Map::default()),
+            Universe::with_map(Map::default()).with_prices(
+                learning_lord_simulation::marketplace::Prices::default()
+                    .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
+                    .unwrap()
+                    .with_price(learning_lord_simulation::marketplace::Good::Flour, 100.0)
+                    .unwrap()
+                    .with_price(learning_lord_simulation::marketplace::Good::Wood, 50.0)
+                    .unwrap()
+                    .with_price(learning_lord_simulation::marketplace::Good::Water, 10.0)
+                    .unwrap()
+                    .with_price(learning_lord_simulation::marketplace::Good::Wheat, 40.0)
+                    .unwrap(),
+            ),
             "Baker",
             StartingRole::Baker,
             &[
@@ -498,7 +510,21 @@ fn remaining_recipe_inputs_and_personal_food_use_separate_portions_of_inventory(
 #[test]
 fn decision_snapshots_inputs_targets_and_observed_production() {
     let (universe, id) = producer(
-        Universe::with_map(Map::default()),
+        Universe::with_map(Map::default()).with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
+                .unwrap()
+                .with_price(learning_lord_simulation::marketplace::Good::Flour, 100.0)
+                .unwrap()
+                .with_price(learning_lord_simulation::marketplace::Good::Wood, 50.0)
+                .unwrap()
+                .with_price(learning_lord_simulation::marketplace::Good::Water, 10.0)
+                .unwrap()
+                .with_price(learning_lord_simulation::marketplace::Good::Wheat, 40.0)
+                .unwrap()
+                .with_price(learning_lord_simulation::marketplace::Good::Flax, 40.0)
+                .unwrap(),
+        ),
         "Farmer",
         StartingRole::Farmer,
         &[(Good::Berries, 930)],

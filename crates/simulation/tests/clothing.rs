@@ -10,7 +10,10 @@ fn worn_garments_are_separate_from_inventory_and_scale_wealth_and_need() {
     assert_eq!(bare.clothing_need(), CLOTHING_MAX_PENALTY);
     assert_eq!(dressed.clothing_need(), 10.0);
     assert_eq!(dressed.units(Good::FlaxGarment), 0);
-    assert_eq!(dressed.wealth().unwrap() - bare.wealth().unwrap(), 48.0);
+    assert_eq!(
+        dressed.wealth().unwrap() - bare.wealth().unwrap(),
+        Good::FlaxGarment.core_price() * 0.5
+    );
     assert_eq!(bare.garment_condition(), None);
     assert_eq!(
         dressed
@@ -115,6 +118,14 @@ fn garments_trade_as_whole_items_without_transferring_worn_condition() {
         AgentKind, TRADE_DURATION_MS, Universe, marketplace::ShoppingList,
     };
     let (town, seller) = Universe::with_map(Map::default())
+        .with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(
+                    learning_lord_simulation::marketplace::Good::FlaxGarment,
+                    96.0,
+                )
+                .unwrap(),
+        )
         .with_citizen(
             "Seller",
             Citizen::new(0.0)

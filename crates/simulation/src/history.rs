@@ -352,6 +352,7 @@ mod tests {
             buyer.id = AgentId(uuid::Uuid::from_u128(if buyer_first { 1 } else { 2 }));
             seller.id = AgentId(uuid::Uuid::from_u128(if buyer_first { 2 } else { 1 }));
             let (world, buyer) = Universe::with_map(crate::locations::Map::default())
+                .with_prices(crate::marketplace::Prices::new(5.0).unwrap())
                 .with_citizen("Buyer", buyer)
                 .unwrap();
             let (world, seller) = world.with_citizen("Seller", seller).unwrap();

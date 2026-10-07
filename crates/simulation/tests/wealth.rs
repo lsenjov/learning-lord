@@ -8,7 +8,7 @@ fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
         .unwrap()
         .with_prices(Prices::new(100.0).unwrap());
     assert_eq!(source.coins(), 0);
-    assert_eq!(Prices::default().price(Good::Berries).unwrap(), 5.0);
+    assert_eq!(Prices::default().price(Good::Berries).unwrap(), 650.0);
     let rich = source.with_berries(500).unwrap().with_coins(250).unwrap();
     assert_eq!(rich.wealth(), Ok(300.0));
     assert_eq!(

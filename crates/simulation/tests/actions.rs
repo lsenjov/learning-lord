@@ -183,7 +183,11 @@ fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
 #[test]
 fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
-        .with_prices(learning_lord_simulation::marketplace::Prices::default())
+        .with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
+                .unwrap(),
+        )
         .with_citizen("Ada", Citizen::new(0.0).unwrap().with_berries(155).unwrap())
         .unwrap();
     let (original, other_id) = original

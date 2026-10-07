@@ -39,6 +39,15 @@ impl Good {
         Self::FlaxGarment,
     ];
     pub const FOOD: [Self; 3] = [Self::Berries, Self::Bread, Self::BerryPie];
+    pub fn core_price(self) -> f64 {
+        Prices::core().price(self).unwrap()
+    }
+    pub fn export_threshold(self) -> f64 {
+        self.core_price() * 0.5
+    }
+    pub fn import_threshold(self) -> f64 {
+        self.core_price() * 1.5
+    }
     pub fn nutrition_per_unit(self) -> Option<f64> {
         match self {
             Self::Berries => Some(crate::BERRY_NUTRITION_PER_GRAM),
@@ -153,14 +162,55 @@ pub struct Prices {
 }
 impl Default for Prices {
     fn default() -> Self {
-        Self {
-            quoted_price: [
-                5.0, 40.0, 100.0, 50.0, 10.0, 15.0, 25.0, 40.0, 80.0, 120.0, 11.0, 96.0,
-            ],
-        }
+        Self::core()
     }
 }
 impl Prices {
+    pub fn core() -> Self {
+        static CORE: std::sync::LazyLock<Prices> = std::sync::LazyLock::new(Prices::calculate_core);
+        *CORE
+    }
+    fn calculate_core() -> Self {
+        fn resolve(
+            good: Good,
+            prices: &mut [Option<f64>; Good::COUNT],
+            visiting: &mut [bool; Good::COUNT],
+        ) -> f64 {
+            let index = good as usize;
+            if let Some(price) = prices[index] {
+                return price;
+            }
+            assert!(!visiting[index], "production recipes must be acyclic");
+            visiting[index] = true;
+            let recipe = crate::production::Recipe::ALL
+                .into_iter()
+                .find(|recipe| recipe.outputs().iter().any(|&(output, _)| output == good))
+                .expect("every good must have a production recipe");
+            let &[(output, quantity)] = recipe.outputs() else {
+                panic!("core prices require single-output recipes");
+            };
+            assert_eq!(output, good);
+            let inputs: f64 = recipe
+                .inputs()
+                .iter()
+                .map(|&(input, units)| {
+                    units as f64 * resolve(input, prices, visiting)
+                        / input.units_per_price_unit() as f64
+                })
+                .sum();
+            let hours = recipe.base_duration_ms() as f64 / 3_600_000.0;
+            let price = (hours * 10.0 + inputs) * 1.3 / quantity as f64
+                * good.units_per_price_unit() as f64;
+            assert!(price.is_finite() && price >= MIN_QUOTED_PRICE);
+            visiting[index] = false;
+            prices[index] = Some(price);
+            price
+        }
+        let mut prices = [None; Good::COUNT];
+        let mut visiting = [false; Good::COUNT];
+        let quoted_price = Good::ALL.map(|good| resolve(good, &mut prices, &mut visiting));
+        Self { quoted_price }
+    }
     pub fn new(berries: f64) -> Result<Self, SimulationError> {
         Self::default().with_price(Good::Berries, berries)
     }
@@ -754,6 +804,7 @@ mod tests {
         let buyer = AgentId(uuid::Uuid::new_v4());
         let remote = PlaceId(uuid::Uuid::new_v4());
         let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::Bread, 15.0).unwrap();
         market.list(seller, PLACE, Good::Bread, 2).unwrap();
         market.list(seller, remote, Good::Bread, 3).unwrap();
         market.list(buyer, PLACE, Good::Bread, 7).unwrap();
@@ -875,6 +926,7 @@ mod tests {
         let buyer = AgentId(uuid::Uuid::new_v4());
         let other = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::Berries, 5.0).unwrap();
         market.list(seller, PLACE, Good::Berries, 100).unwrap();
         market.list(other, PLACE, Good::Berries, 100).unwrap();
         market.list(seller, PLACE, Good::Berries, 100).unwrap();
@@ -970,6 +1022,7 @@ mod tests {
     fn empty_market_keeps_cash_affordable_unmet_demand() {
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::Berries, 5.0).unwrap();
         market
             .set_request(buyer, ShoppingList::single(Good::Berries, 300))
             .unwrap();
