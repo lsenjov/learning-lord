@@ -185,7 +185,7 @@ fn planning_routes_sleep_to_own_home_with_correct_durations_and_goal_metadata() 
         .unwrap();
     let chosen = planning::plan(&away).unwrap();
     assert_eq!(
-        chosen.actions(),
+        &chosen.actions()[chosen.goals()[0].actions.clone()],
         &[CitizenAction::Travel(home), CitizenAction::Sleep]
     );
     assert_eq!(

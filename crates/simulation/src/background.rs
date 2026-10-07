@@ -80,7 +80,7 @@ impl PlanningRuntime {
             return Ok(None);
         };
         let remaining = action.remaining_ms();
-        if !execution.finishes_commitment(remaining) {
+        if !execution.finishes_committed_goal() {
             return Ok(None);
         }
         if remaining > LEAD_MS {
@@ -194,7 +194,7 @@ pub(crate) fn project(
         return Ok(None);
     };
     let remaining = action.remaining_ms();
-    if !execution.finishes_commitment(remaining) {
+    if !execution.finishes_committed_goal() {
         return Ok(None);
     }
     let mut citizen = source.clone();
@@ -283,15 +283,15 @@ mod tests {
         assert!(project(&source, 0).unwrap().is_none());
         assert_eq!(runtime.planning_event(&source, 0).unwrap(), None);
         assert!(runtime.pending.is_empty());
-        let final_action = source.advance(3 * ACTION_DURATION_MS).unwrap();
-        assert_eq!(final_action.active_plan().unwrap().action_index(), 3);
+        let final_action = source.advance(9 * ACTION_DURATION_MS).unwrap();
+        assert_eq!(final_action.active_plan().unwrap().action_index(), 9);
         runtime
-            .planning_event(&final_action, 3 * ACTION_DURATION_MS)
+            .planning_event(&final_action, 9 * ACTION_DURATION_MS)
             .unwrap();
         assert_eq!(runtime.pending.len(), 1);
         assert_eq!(
             runtime.pending[&citizen.id()].boundary_ms,
-            planning::COMMITMENT_MS
+            10 * ACTION_DURATION_MS
         );
     }
 
@@ -334,6 +334,27 @@ mod tests {
         assert!(project(&source, 0).unwrap().is_none());
         runtime.planning_event(&source, 0).unwrap();
         assert!(runtime.pending.is_empty());
+    }
+
+    #[test]
+    fn first_goal_final_action_submits_without_projecting_the_forecast_goal() {
+        let source = Citizen::with_needs(60.0, 100.0)
+            .unwrap()
+            .with_berries(310)
+            .unwrap()
+            .start_planning()
+            .unwrap();
+        let execution = source.active_plan().unwrap();
+        assert_eq!(execution.plan().goals().len(), 2);
+        assert_eq!(execution.committed_actions_end(), 1);
+        let remaining = source.active_action().unwrap().remaining_ms();
+        let (boundary, projected, index) = project(&source, 0).unwrap().unwrap();
+        assert_eq!(boundary, remaining);
+        assert_eq!(index, 1);
+        assert!(projected.active_action().is_none());
+        let mut runtime = PlanningRuntime::default();
+        runtime.planning_event(&source, 0).unwrap();
+        assert_eq!(runtime.pending[&source.id()].boundary_ms, remaining);
     }
 
     #[test]

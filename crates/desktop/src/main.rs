@@ -12,9 +12,7 @@ use bevy::{
     render::pipelined_rendering::PipelinedRenderingPlugin,
     winit::{EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent},
 };
-use learning_lord_simulation::{
-    AgentKind, CitizenAction, Universe, marketplace::Good, planning::COMMITMENT_MS,
-};
+use learning_lord_simulation::{AgentKind, CitizenAction, Universe, marketplace::Good};
 use simulation::{Command as SimulationCommand, SPEEDS, SimulationWorker, Snapshot};
 
 const BACKGROUND: Color = Color::srgb(0.06, 0.08, 0.10);
@@ -364,18 +362,16 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
             )
         })
         .unwrap_or_else(|| "Idle".into());
-    let commitment = citizen
+    let replanning = citizen
         .active_plan()
         .map(|active| {
-            let left = COMMITMENT_MS.saturating_sub(active.elapsed_ms());
-            if left == 0 {
-                "Replan after current action".into()
-            } else {
-                format!(
-                    "Commitment left: {} (then finish action)",
-                    citizens::duration(left)
-                )
-            }
+            let goal = active
+                .plan()
+                .goals()
+                .first()
+                .map(|goal| citizens::goal_label(goal.goal).to_string())
+                .unwrap_or_else(|| "current goal".into());
+            format!("Replan after {goal} completes")
         })
         .unwrap_or_else(|| "No active plan".into());
     let role = citizen
@@ -407,7 +403,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         |condition| format!("{:.1}%", condition * 100.0),
     );
     format!(
-        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{commitment}\nOwns: {properties}",
+        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}",
         agent.name,
         citizen.coins(),
         citizen
@@ -757,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn readout_shows_berries_upcoming_actions_and_commitment() {
+    fn readout_shows_berries_and_goal_completion_replanning() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
             .with_berries(310)
@@ -775,7 +771,7 @@ mod tests {
         let readout = citizen_readout(&universe, None);
         assert!(readout.contains("Eating | 00:01:45 remaining"));
         assert!(readout.contains("Location:"));
-        assert!(readout.contains("Commitment left: 01:59:10"));
+        assert!(readout.contains("Replan after Reduce Hunger completes"));
         assert!(readout.contains("Berries: 155 g"));
         assert!(readout.contains("Clothing need: 20.0 | Garment condition: None"));
         assert!(!readout.contains("Water: 0 g"));
@@ -784,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn sleeping_readout_counts_down_to_completion_even_past_commitment() {
+    fn sleeping_readout_counts_down_to_goal_completion() {
         let citizen = Citizen::with_needs(-50.0, 50.0).unwrap();
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
@@ -794,12 +790,12 @@ mod tests {
         let universe = universe
             .start_planning(id)
             .unwrap()
-            .advance(COMMITMENT_MS)
+            .advance(2 * 60 * 60 * 1000)
             .unwrap();
         let readout = citizen_readout(&universe, None);
         assert!(readout.contains("Sleeping | 06:00:00 remaining"));
         assert!(readout.contains("Location: Ada's home"));
-        assert!(readout.contains("Replan after current action"));
+        assert!(readout.contains("Replan after Reduce Sleep Need completes"));
     }
 
     #[test]

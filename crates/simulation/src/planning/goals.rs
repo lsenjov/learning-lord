@@ -482,7 +482,7 @@ fn order_variants(
             continue;
         }
         let limit = if gathering {
-            gathering_segments(super::HORIZON_MS, action.predicted_duration())
+            gathering_segments(GOAL_HORIZON_MS, action.predicted_duration())
         } else {
             1
         };
@@ -684,15 +684,39 @@ fn production_order_with_evidence(
     prior_actions: usize,
     preparation_limit: &mut bool,
 ) -> Result<Vec<(Vec<CitizenAction>, Prediction)>, SimulationError> {
+    production_order_for_paths(
+        initial,
+        recipes,
+        food_target,
+        reserved_ms,
+        prior_actions,
+        preparation_limit,
+        None,
+    )
+}
+
+fn production_order_for_paths(
+    initial: &Prediction,
+    recipes: &[crate::production::Recipe],
+    food_target: Option<f64>,
+    reserved_ms: u64,
+    prior_actions: usize,
+    preparation_limit: &mut bool,
+    paths: Option<&WorkPaths>,
+) -> Result<Vec<(Vec<CitizenAction>, Prediction)>, SimulationError> {
     let requirements = recipe_requirements(recipes)?;
     let mut variants = Vec::new();
     for mut state in prepare_inputs(initial, &requirements, reserved_ms, prior_actions)? {
         let path = acquisition_path(&state.actions);
+        if paths.is_some_and(|paths| paths.completed(&path)) {
+            continue;
+        }
         let mut complete = requirements
             .items()
             .all(|(good, units)| state.citizen.units(good) >= units);
         for (index, &recipe) in recipes.iter().enumerate() {
             if !complete
+                || index > 0 && paths.is_some() && state.elapsed_ms >= PRODUCTION_DURATION_MS
                 || index > 0
                     && food_target.is_some_and(|target| state.citizen.food_nutrition() >= target)
             {
@@ -952,7 +976,7 @@ pub(super) fn variants_after(
     variants_from(initial, goal, prefix.actions.len())
 }
 
-const WORK_CHECKPOINT_MS: u64 = 60 * 60 * 1000;
+pub(super) const PRODUCTION_DURATION_MS: u64 = 2 * 60 * 60 * 1000;
 
 fn acquisition_path(actions: &[CitizenAction]) -> Vec<CitizenAction> {
     let mut path = Vec::new();
@@ -980,70 +1004,32 @@ fn acquisition_path(actions: &[CitizenAction]) -> Vec<CitizenAction> {
 }
 
 #[derive(Default)]
-struct WorkCheckpoints {
-    paths: Vec<WorkPath>,
+struct WorkPaths {
+    paths: Vec<(Vec<CitizenAction>, Prediction)>,
 }
 
-struct WorkPath {
-    acquisition: Vec<CitizenAction>,
-    checkpoint_ms: u64,
-    selected: Vec<Prediction>,
-    last: Prediction,
-}
+impl WorkPaths {
+    fn completed(&self, acquisition: &[CitizenAction]) -> bool {
+        self.paths.iter().any(|(path, candidate)| {
+            path == acquisition && candidate.elapsed_ms >= PRODUCTION_DURATION_MS
+        })
+    }
 
-impl WorkCheckpoints {
-    fn consider(&mut self, path: Vec<CitizenAction>, candidate: Prediction) {
-        let index = self.paths.iter().position(|old| old.acquisition == path);
-        let entry = match index {
-            Some(index) => &mut self.paths[index],
-            None => {
-                self.paths.push(WorkPath {
-                    acquisition: path,
-                    checkpoint_ms: WORK_CHECKPOINT_MS,
-                    selected: Vec::new(),
-                    last: candidate.clone(),
-                });
-                self.paths.last_mut().unwrap()
+    fn consider(&mut self, acquisition: Vec<CitizenAction>, candidate: Prediction) {
+        if let Some((_, previous)) = self.paths.iter_mut().find(|(path, _)| *path == acquisition) {
+            if previous.elapsed_ms < PRODUCTION_DURATION_MS {
+                *previous = candidate;
             }
-        };
-        let WorkPath {
-            checkpoint_ms: checkpoint,
-            selected,
-            last,
-            ..
-        } = entry;
-        if *checkpoint > super::HORIZON_MS {
-            return;
+        } else {
+            self.paths.push((acquisition, candidate));
         }
-        if candidate.elapsed_ms >= *checkpoint {
-            selected.push(candidate.clone());
-            while *checkpoint <= candidate.elapsed_ms && *checkpoint <= super::HORIZON_MS {
-                *checkpoint += WORK_CHECKPOINT_MS;
-            }
-        }
-        *last = candidate;
     }
 
     fn finish(self) -> Vec<Prediction> {
         let mut variants: Vec<Prediction> = Vec::new();
-        for WorkPath {
-            checkpoint_ms: checkpoint,
-            mut selected,
-            last,
-            ..
-        } in self.paths
-        {
-            if checkpoint <= super::HORIZON_MS
-                && selected
-                    .last()
-                    .is_none_or(|old| old.actions != last.actions)
-            {
-                selected.push(last);
-            }
-            for candidate in selected {
-                if !variants.iter().any(|old| old.actions == candidate.actions) {
-                    variants.push(candidate);
-                }
+        for (_, candidate) in self.paths {
+            if !variants.iter().any(|old| old.actions == candidate.actions) {
+                variants.push(candidate);
             }
         }
         variants
@@ -1080,7 +1066,7 @@ pub(super) fn production_prefixes(
         bp.total_cmp(ap)
             .then_with(|| (*a as usize).cmp(&(*b as usize)))
     });
-    let mut paths = WorkCheckpoints::default();
+    let mut paths = WorkPaths::default();
     let mut pending = vec![(Vec::new(), 0)];
     while let Some((order, mut index)) = pending.pop() {
         while index < recipes.len()
@@ -1095,13 +1081,14 @@ pub(super) fn production_prefixes(
         let mut extended = order.clone();
         extended.push(recipe);
         let mut preparation_limit = false;
-        let next = production_order_with_evidence(
+        let next = production_order_for_paths(
             &initial,
             &extended,
             None,
             0,
             prior_actions,
             &mut preparation_limit,
+            Some(&paths),
         )?;
         if let Some(diagnostic) = diagnostics.iter_mut().find(|d| d.recipe == recipe) {
             diagnostic.prefix_attempted = true;
@@ -1112,7 +1099,7 @@ pub(super) fn production_prefixes(
         } else {
             let can_extend = next
                 .iter()
-                .any(|(_, candidate)| candidate.elapsed_ms < super::HORIZON_MS);
+                .any(|(_, candidate)| candidate.elapsed_ms < PRODUCTION_DURATION_MS);
             for (path, candidate) in next {
                 paths.consider(path, candidate);
             }
@@ -1410,9 +1397,9 @@ mod tests {
     }
 
     #[test]
-    fn forage_production_checkpoints_include_travel_and_keep_half_hour_primitives() {
+    fn forage_production_includes_travel_and_keeps_half_hour_primitives() {
         use crate::locations::{Map, Position};
-        for (travel_ms, counts) in [(0, vec![2, 4, 6, 8]), (5 * 60_000, vec![2, 4, 6, 8])] {
+        for (travel_ms, counts) in [(0, vec![4]), (5 * 60_000, vec![4])] {
             let map = Map::new(
                 Position {
                     x: travel_ms as f64 / crate::locations::WALK_MS_PER_METRE,
@@ -1430,7 +1417,7 @@ mod tests {
                 .unwrap();
             let initial = Prediction::new(&citizen, Cooldowns::default());
             let variants = variants_from(initial.clone(), Effect::Production, 0).unwrap();
-            assert_eq!(variants.len(), 4);
+            assert_eq!(variants.len(), 1);
             for (candidate, count) in variants.iter().zip(counts) {
                 assert_eq!(
                     candidate
@@ -1478,14 +1465,30 @@ mod tests {
     }
 
     #[test]
-    fn skilled_production_checkpoints_finish_the_first_crossing_batch() {
+    fn production_after_an_earlier_goal_keeps_the_full_work_duration() {
+        let worker = bread_only(baker());
+        let initial = Prediction::new(&worker, Cooldowns::default());
+        let direct = variants_after(&initial, Effect::Production).unwrap();
+        let mut prefix = initial;
+        prefix.elapsed_ms = 90 * 60_000;
+        let later = variants_after(&prefix, Effect::Production).unwrap();
+        assert_eq!(direct.len(), later.len());
+        for (direct, later) in direct.iter().zip(&later) {
+            assert_eq!(direct.actions, later.actions);
+            assert_eq!(direct.elapsed_ms, later.elapsed_ms);
+            assert!(later.elapsed_ms >= PRODUCTION_DURATION_MS);
+        }
+    }
+
+    #[test]
+    fn skilled_production_finishes_the_first_crossing_batch() {
         use crate::production::{Recipe, Skill};
         let worker = bread_only(baker().with_skill(Skill::Baking, 24.6).unwrap());
         let initial = Prediction::new(&worker, Cooldowns::default());
         let variants = production_prefixes(initial.clone(), 0, &mut []).unwrap();
-        assert_eq!(variants.len(), 4);
-        for (index, candidate) in variants.iter().enumerate() {
-            let checkpoint = (index as u64 + 1) * WORK_CHECKPOINT_MS;
+        assert_eq!(variants.len(), 1);
+        for candidate in &variants {
+            let checkpoint = PRODUCTION_DURATION_MS;
             let last_duration = *candidate.action_durations_ms.last().unwrap();
             assert!(candidate.elapsed_ms >= checkpoint);
             assert!(candidate.elapsed_ms - last_duration < checkpoint);
@@ -1519,33 +1522,26 @@ mod tests {
     }
 
     #[test]
-    fn long_production_jobs_deduplicate_checkpoints_and_finish_after_the_horizon() {
+    fn long_production_jobs_finish_the_first_crossing_batch() {
         use crate::production::Recipe;
         let mut worker = baker().with_good(Good::Bread, 10_000).unwrap();
         worker.refresh_production_targets(true).unwrap();
         let variants =
             production_prefixes(Prediction::new(&worker, Cooldowns::default()), 0, &mut [])
                 .unwrap();
-        assert_eq!(variants.len(), 3);
-        assert_eq!(
-            variants.iter().map(|p| p.actions.len()).collect::<Vec<_>>(),
-            [1, 2, 3]
-        );
-        assert!(variants.iter().all(|p| {
-            p.actions
+        assert_eq!(variants.len(), 1);
+        let candidate = &variants[0];
+        assert!(
+            candidate
+                .actions
                 .iter()
                 .all(|a| *a == CitizenAction::Produce(Recipe::BakeBerryPie))
-        }));
-        let candidate = variants.last().unwrap();
-        assert!(candidate.elapsed_ms > super::super::HORIZON_MS);
+        );
+        assert!(candidate.elapsed_ms >= PRODUCTION_DURATION_MS);
         assert!(
             candidate.elapsed_ms - candidate.action_durations_ms.last().unwrap()
-                < 3 * WORK_CHECKPOINT_MS
+                < PRODUCTION_DURATION_MS
         );
-        let expected = candidate.actions.clone();
-        let mut plan = super::super::empty_plan();
-        super::super::search(candidate.clone(), super::super::HORIZON_MS, &mut plan).unwrap();
-        assert_eq!(plan.actions, expected);
     }
 
     #[test]
@@ -1566,7 +1562,7 @@ mod tests {
             variants[0].actions,
             [CitizenAction::Produce(Recipe::BakeBread)]
         );
-        assert!(variants[0].elapsed_ms < WORK_CHECKPOINT_MS);
+        assert!(variants[0].elapsed_ms < PRODUCTION_DURATION_MS);
 
         let worker = bread_only(
             buying_baker(100)
@@ -1582,7 +1578,7 @@ mod tests {
         assert!(
             variants
                 .iter()
-                .any(|candidate| candidate.elapsed_ms < WORK_CHECKPOINT_MS)
+                .any(|candidate| candidate.elapsed_ms < PRODUCTION_DURATION_MS)
         );
         assert!(variants.iter().all(|candidate| {
             candidate
@@ -1852,7 +1848,7 @@ mod tests {
             Effect::Production,
         )
         .unwrap();
-        assert!(variants.len() >= 3);
+        assert!(!variants.is_empty());
         assert_eq!(
             variants[0].actions.last(),
             Some(&CitizenAction::Produce(first))
@@ -1873,12 +1869,17 @@ mod tests {
             })
             .collect();
         assert_eq!(&produced[..2], &[first, first]);
-        assert_ne!(produced[2], first);
-        assert!(longest.elapsed_ms >= GOAL_HORIZON_MS);
-        assert!(longest.elapsed_ms - longest.action_durations_ms.last().unwrap() < GOAL_HORIZON_MS);
+        if produced.len() > 2 {
+            assert_ne!(produced[2], first);
+        }
+        assert!(longest.elapsed_ms >= PRODUCTION_DURATION_MS);
+        assert!(
+            longest.elapsed_ms - longest.action_durations_ms.last().unwrap()
+                < PRODUCTION_DURATION_MS
+        );
         assert!(variants.iter().all(|variant| variant.elapsed_ms
             - variant.action_durations_ms.last().unwrap()
-            < GOAL_HORIZON_MS));
+            < PRODUCTION_DURATION_MS));
     }
 
     #[test]
@@ -1899,8 +1900,11 @@ mod tests {
             .unwrap();
         assert!(matches!(longest.actions[0], CitizenAction::Travel(_)));
         assert_eq!(longest.action_durations_ms[0], 600_000);
-        assert!(longest.elapsed_ms >= GOAL_HORIZON_MS);
-        assert!(longest.elapsed_ms - longest.action_durations_ms.last().unwrap() < GOAL_HORIZON_MS);
+        assert!(longest.elapsed_ms >= PRODUCTION_DURATION_MS);
+        assert!(
+            longest.elapsed_ms - longest.action_durations_ms.last().unwrap()
+                < PRODUCTION_DURATION_MS
+        );
         let short = baker().with_good(Good::Water, 0).unwrap();
         let supplied = variants_after(
             &Prediction::new(&short, Cooldowns::default()),
@@ -1916,7 +1920,7 @@ mod tests {
         );
         assert!(supplied.iter().all(|variant| variant.elapsed_ms
             - variant.action_durations_ms.last().unwrap()
-            < GOAL_HORIZON_MS));
+            < PRODUCTION_DURATION_MS));
     }
 
     fn buying_baker(flour_stock: u64) -> Citizen {
@@ -2194,8 +2198,8 @@ mod tests {
 
     #[test]
     fn gathering_order_bounds_follow_the_primitive_duration() {
-        assert_eq!(gathering_segments(super::super::HORIZON_MS, 30 * 60_000), 8);
-        assert_eq!(gathering_segments(super::super::HORIZON_MS, 60 * 60_000), 4);
+        assert_eq!(gathering_segments(GOAL_HORIZON_MS, 30 * 60_000), 8);
+        assert_eq!(gathering_segments(GOAL_HORIZON_MS, 60 * 60_000), 4);
     }
 
     #[test]
@@ -2211,7 +2215,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             orders.len(),
-            gathering_segments(super::super::HORIZON_MS, ACTION_DURATION_MS) as usize
+            gathering_segments(GOAL_HORIZON_MS, ACTION_DURATION_MS) as usize
         );
         let gathered = &orders[1];
         assert_eq!(
@@ -2494,7 +2498,7 @@ mod tests {
     }
 
     #[test]
-    fn final_goal_is_completed_after_the_outer_horizon() {
+    fn needs_after_an_earlier_goal_keep_their_full_duration() {
         let citizen = Citizen::with_needs(50.0, -100.0)
             .unwrap()
             .with_berries(75)
@@ -2514,12 +2518,9 @@ mod tests {
         let mut actions = prefix.actions;
         actions.append(&mut goal.actions);
         goal.actions = actions;
-        let expected = goal.actions.clone();
-        let expected_score = goal.average().unwrap();
-        let mut best = super::super::empty_plan();
-        super::super::search(goal, super::super::HORIZON_MS, &mut best).unwrap();
-        assert_eq!(best.actions, expected);
-        assert_eq!(best.average_wellbeing, expected_score);
+        assert_eq!(goal.actions.last(), Some(&CitizenAction::Eat));
+        assert!(goal.elapsed_ms > GOAL_HORIZON_MS);
+        assert!(goal.average().unwrap().is_finite());
     }
 
     #[test]
@@ -2942,7 +2943,7 @@ mod tests {
             let chosen = best_variant(&source, Effect::Production, Cooldowns::default(), 0)
                 .unwrap()
                 .unwrap();
-            let segments = gathering_segments(super::super::HORIZON_MS, ACTION_DURATION_MS);
+            let segments = gathering_segments(PRODUCTION_DURATION_MS, ACTION_DURATION_MS);
             assert_eq!(
                 chosen.actions,
                 vec![CitizenAction::Produce(crate::production::Recipe::Forage); segments as usize]

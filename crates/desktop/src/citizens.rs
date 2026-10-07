@@ -375,7 +375,7 @@ fn need_geometry(value: f64) -> (f32, f32) {
     (50.0 + value.min(0.0) / 2.0, value.abs() / 2.0)
 }
 
-fn goal_label(goal: Effect) -> &'static str {
+pub(crate) fn goal_label(goal: Effect) -> &'static str {
     match goal {
         Effect::ReduceHunger => "Reduce Hunger",
         Effect::ReduceTiredness => "Reduce Sleep Need",
@@ -396,12 +396,21 @@ fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
     };
     let plan = active.plan();
     let mut rows = Vec::new();
-    for boundary in plan.goals() {
+    for (goal_index, boundary) in plan.goals().iter().enumerate() {
         let total: u64 = plan.action_durations_ms()[boundary.actions.clone()]
             .iter()
             .sum();
         rows.push(PlanRow {
-            label: format!("{}  |  {}", goal_label(boundary.goal), duration(total)),
+            label: format!(
+                "{}{}  |  {}",
+                if goal_index == 0 {
+                    ""
+                } else {
+                    "Forecast after replanning: "
+                },
+                goal_label(boundary.goal),
+                duration(total)
+            ),
             state: RowState::Heading,
         });
         for index in boundary.actions.clone() {
@@ -415,6 +424,7 @@ fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
             let status = match state {
                 RowState::Complete => "done",
                 RowState::Current => "NOW",
+                _ if goal_index > 0 => "forecast",
                 _ => "next",
             };
             let timing = if state == RowState::Current {
@@ -839,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn details_show_selected_citizen_and_full_plan_with_completed_actions() {
+    fn details_distinguish_current_goal_from_forecast() {
         let (universe, ada) = Universe::with_map(Map::default())
             .with_citizen(
                 "Ada",
@@ -853,11 +863,11 @@ mod tests {
             .with_citizen("Bram", Citizen::new(-10.0).unwrap())
             .unwrap();
         let started = universe.start_planning(ada).unwrap();
-        let progressed = started.advance(155_000).unwrap();
+        let progressed = started.advance(50_000).unwrap();
         let AgentKind::Citizen(citizen) = &progressed.agents()[&ada].kind;
         assert_eq!(
             citizen.active_action().unwrap().action(),
-            CitizenAction::Sleep
+            CitizenAction::Eat
         );
         let rows = plan_rows(citizen);
         assert_eq!(
@@ -870,7 +880,7 @@ mod tests {
             rows.iter()
                 .filter(|row| row.state == RowState::Complete)
                 .count(),
-            1
+            0
         );
         assert_eq!(
             rows.iter()
@@ -881,11 +891,15 @@ mod tests {
         assert!(rows.iter().any(|row| row.label.contains("Reduce Hunger")));
         assert!(
             rows.iter()
+                .any(|row| row.label.contains("Forecast after replanning"))
+        );
+        assert!(
+            rows.iter()
                 .any(|row| row.label.contains("Reduce Sleep Need"))
         );
         let details = crate::citizen_readout(&progressed, Some(bram));
         assert!(details.starts_with("Bram"));
-        assert!(details.contains("Hunger: -9.8"));
+        assert!(details.contains("Hunger: -9.9"));
         assert!(details.contains("Location: Bram's home"));
         assert!(!details.contains("Berries: 0 g"));
     }

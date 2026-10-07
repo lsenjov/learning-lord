@@ -107,7 +107,7 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .unwrap();
     let source = citizen(&universe, id);
     let chosen = learning_lord_simulation::planning::plan(source).unwrap();
-    assert_eq!(chosen.actions(), &[CitizenAction::Sleep]);
+    assert_eq!(chosen.actions()[0], CitizenAction::Sleep);
     let predicted = source
         .start_action(CitizenAction::Sleep)
         .unwrap()
@@ -115,7 +115,23 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .unwrap();
     let expected =
         (source.personal_wellbeing().unwrap() + predicted.personal_wellbeing().unwrap()) * 0.5;
-    assert!((chosen.average_wellbeing() - expected).abs() < 1e-10);
+    assert!(
+        (chosen
+            .decision()
+            .unwrap()
+            .candidates
+            .iter()
+            .find(|candidate| candidate.goal
+                == learning_lord_simulation::planning::goals::Effect::ReduceTiredness)
+            .unwrap()
+            .forecast
+            .as_ref()
+            .unwrap()
+            .average_wellbeing
+            - expected)
+            .abs()
+            < 1e-10
+    );
     assert_eq!(predicted.prices(), universe.prices());
     let actual = universe
         .start_planning(id)
