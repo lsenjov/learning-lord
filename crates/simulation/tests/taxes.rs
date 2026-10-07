@@ -62,23 +62,24 @@ fn socage_carries_exact_fractions_and_only_authoritative_outputs_are_taxed() {
     assert_eq!(predicted.units(Good::FlaxBlock), 1);
     for batch in 1..=4 {
         world = produce(world, id, Recipe::MakeClothingBlock);
+        assert_eq!(citizen(&world, id).units(Good::FlaxBlock), batch);
         assert_eq!(
-            citizen(&world, id).units(Good::FlaxBlock),
-            if batch < 4 { batch } else { 3 }
+            citizen(&world, id).tax_reserved_units(Good::FlaxBlock),
+            u64::from(batch == 4)
         );
     }
     assert_eq!(
         world
             .storage()
             .units(place, GoodsOwner::Town, Good::FlaxBlock),
-        1
+        0
     );
     assert_eq!(world.tax_history().back().unwrap().rule, rule);
     assert_eq!(
         world.tax_history().back().unwrap().amount,
-        TaxAmount::Goods {
+        TaxAmount::Reservation {
             assessed: 1,
-            collected: 1,
+            reserved: 1,
             outstanding: 0
         }
     );
@@ -121,37 +122,44 @@ fn stacked_fraction_claims_never_take_more_than_the_current_batch() {
         id,
         Recipe::MakeClothingBlock,
     );
-    assert_eq!(citizen(&world, id).units(Good::FlaxBlock), 1);
+    assert_eq!(citizen(&world, id).units(Good::FlaxBlock), 2);
+    assert_eq!(citizen(&world, id).tax_reserved_units(Good::FlaxBlock), 1);
     assert_eq!(
         world
             .storage()
             .units(place, GoodsOwner::Town, Good::FlaxBlock),
-        1
+        0
     );
     let receipts: Vec<_> = world.tax_history().iter().rev().take(2).collect();
     assert_eq!(receipts[0].rule, second);
     assert_eq!(
         receipts[0].amount,
-        TaxAmount::Goods {
+        TaxAmount::Reservation {
             assessed: 1,
-            collected: 0,
+            reserved: 0,
             outstanding: 1
         }
     );
     assert_eq!(receipts[1].rule, first);
     let world = world.without_tax_rule(second).unwrap();
     let world = produce(world, id, Recipe::MakeClothingBlock);
+    assert_eq!(citizen(&world, id).units(Good::FlaxBlock), 3);
+    assert_eq!(citizen(&world, id).tax_reserved_units(Good::FlaxBlock), 2);
+    let world = world
+        .advance(FIRST_WEEKLY_SETTLEMENT_MS - world.current_time_ms())
+        .unwrap();
+    assert_eq!(citizen(&world, id).units(Good::FlaxBlock), 1);
+    assert_eq!(citizen(&world, id).town_carried_units(Good::FlaxBlock), 2);
     assert_eq!(
         world
             .storage()
             .units(place, GoodsOwner::Town, Good::FlaxBlock),
-        2
+        0
     );
-    assert_eq!(citizen(&world, id).units(Good::FlaxBlock), 1);
 }
 
 #[test]
-fn weekly_flat_fees_start_next_monday_and_multiweek_steps_assess_every_boundary() {
+fn weekly_flat_fees_start_sunday_four_and_multiweek_steps_assess_every_boundary() {
     let (world, id, place) = block_worker();
     let (world, rule) = world
         .with_tax_rule(
@@ -718,4 +726,205 @@ fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
     let retired = world.without_tax_rule(rule).unwrap();
     assert_eq!(retired.tax_arrears(rule, ada), 20);
     assert_eq!(retired.tax_arrears(rule, ben), 50);
+}
+
+fn garment_worker() -> (Universe, AgentId, PlaceId) {
+    let worker = Citizen::new(0.0)
+        .unwrap()
+        .with_skill(Skill::Tailoring, 1.0)
+        .unwrap()
+        .with_good(Good::FlaxBlock, 8)
+        .unwrap()
+        .with_coins(100)
+        .unwrap();
+    let (world, id) = Universe::with_map(Map::default())
+        .with_citizen("Ada", worker)
+        .unwrap();
+    let (world, place) = world.with_property(id, Location::Tailory).unwrap();
+    (world, id, place)
+}
+
+#[test]
+fn whole_garment_is_private_wealth_but_unusable_until_sunday_changes_owner() {
+    let (world, id, place) = garment_worker();
+    let (world, _) = world
+        .with_tax_rule(
+            place,
+            "All garments",
+            TaxKind::Socage {
+                rates: rates(Good::FlaxGarment, 10_000),
+            },
+        )
+        .unwrap();
+    let source = world.clone();
+    let predicted = citizen(&world, id)
+        .start_action(CitizenAction::Produce(Recipe::AssembleGarment))
+        .unwrap();
+    let predicted = predicted
+        .advance(predicted.active_action().unwrap().remaining_ms())
+        .unwrap();
+    assert_eq!(predicted.available_units(Good::FlaxGarment), 1);
+    assert_eq!(predicted.tax_reserved_units(Good::FlaxGarment), 0);
+    assert!(
+        learning_lord_simulation::production::recipe_profit(
+            Recipe::AssembleGarment,
+            citizen(&world, id)
+        )
+        .unwrap()
+            < 0.0
+    );
+    assert_eq!(
+        learning_lord_simulation::production::ProductionTargets::calculate(citizen(&world, id), 0)
+            .unwrap()
+            .remaining_batches(Recipe::AssembleGarment),
+        0
+    );
+    let world = produce(world, id, Recipe::AssembleGarment);
+    let worker = citizen(&world, id);
+    assert_eq!(worker.units(Good::FlaxGarment), 1);
+    assert_eq!(worker.tax_reserved_units(Good::FlaxGarment), 1);
+    assert_eq!(worker.available_units(Good::FlaxGarment), 0);
+    assert_eq!(worker.wealth(), predicted.wealth());
+    assert_eq!(worker.personal_wellbeing(), predicted.personal_wellbeing());
+    assert_eq!(
+        world.start_action(id, CitizenAction::EquipClothing),
+        Err(SimulationError::MissingInputs)
+    );
+    assert_eq!(
+        worker.with_good(Good::FlaxGarment, 0),
+        Err(SimulationError::MissingInputs)
+    );
+    let listed = world
+        .start_action(id, CitizenAction::List(Good::FlaxGarment, 1))
+        .unwrap();
+    let listed = listed
+        .advance(citizen(&listed, id).active_action().unwrap().remaining_ms())
+        .unwrap();
+    assert_eq!(listed.market().listed_units(id, Good::FlaxGarment), 0);
+    let almost = listed
+        .advance(FIRST_WEEKLY_SETTLEMENT_MS - listed.current_time_ms() - 1)
+        .unwrap();
+    assert_eq!(citizen(&almost, id).units(Good::FlaxGarment), 1);
+    let settled = almost.advance(1).unwrap();
+    assert_eq!(citizen(&settled, id).units(Good::FlaxGarment), 0);
+    assert_eq!(
+        citizen(&settled, id).town_carried_units(Good::FlaxGarment),
+        1
+    );
+    assert_eq!(
+        citizen(&settled, id).tax_reserved_units(Good::FlaxGarment),
+        0
+    );
+    assert_eq!(citizen(&settled, id).wealth().unwrap(), 100.0);
+    assert_eq!(
+        settled
+            .storage()
+            .units(place, GoodsOwner::Town, Good::FlaxGarment),
+        0
+    );
+    assert_eq!(citizen(&source, id).units(Good::FlaxGarment), 0);
+    assert_eq!(
+        settled.citizen_history(id).unwrap().current.produced[Good::FlaxGarment as usize],
+        0
+    );
+}
+
+#[test]
+fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax() {
+    let (world, id, origin) = garment_worker();
+    let destination = citizen(&world, id).home();
+    let (world, socage) = world
+        .with_tax_rule(
+            origin,
+            "Half",
+            TaxKind::Socage {
+                rates: rates(Good::FlaxGarment, 5000),
+            },
+        )
+        .unwrap();
+    let (world, id2) = world
+        .with_citizen("Ben", Citizen::new(0.0).unwrap())
+        .unwrap();
+    let world = world
+        .with_stored_good(destination, GoodsOwner::Agent(id), Good::FlaxBlock, 8)
+        .unwrap();
+    let world = produce(world, id, Recipe::AssembleGarment);
+    let world = world
+        .withdraw_goods(id, destination, Good::FlaxBlock, 8)
+        .unwrap();
+    let world = produce(world, id, Recipe::AssembleGarment);
+    assert_eq!(citizen(&world, id).units(Good::FlaxGarment), 2);
+    let world = world
+        .deposit_goods(id, destination, Good::FlaxGarment, 1)
+        .unwrap();
+    assert_eq!(citizen(&world, id).tax_reserved_units(Good::FlaxGarment), 1);
+    assert_eq!(
+        world
+            .storage()
+            .reserved_units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        0
+    );
+    let world = world
+        .deposit_goods(id, destination, Good::FlaxGarment, 1)
+        .unwrap();
+    assert_eq!(
+        world
+            .storage()
+            .reserved_units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        1
+    );
+    assert_eq!(
+        world.with_stored_good(destination, GoodsOwner::Agent(id), Good::FlaxGarment, 0),
+        Err(SimulationError::MissingInputs)
+    );
+    let world = world
+        .withdraw_goods(id, destination, Good::FlaxGarment, 2)
+        .unwrap();
+    assert_eq!(citizen(&world, id).tax_reserved_units(Good::FlaxGarment), 1);
+    let world = world
+        .deposit_goods(id, destination, Good::FlaxGarment, 2)
+        .unwrap();
+    let (world, asset) = world
+        .with_tax_rule(
+            destination,
+            "Assets",
+            TaxKind::Asset {
+                rates: rates(Good::FlaxGarment, 10_000),
+            },
+        )
+        .unwrap();
+    let expected = world.prices().value(Good::FlaxGarment, 1).unwrap().floor() as i64;
+    let settled = world
+        .advance(FIRST_WEEKLY_SETTLEMENT_MS - world.current_time_ms())
+        .unwrap();
+    assert_eq!(
+        settled
+            .storage()
+            .units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        1
+    );
+    assert_eq!(
+        settled
+            .storage()
+            .units(destination, GoodsOwner::Town, Good::FlaxGarment),
+        1
+    );
+    assert_eq!(
+        settled
+            .storage()
+            .reserved_units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        0
+    );
+    let receipt = settled
+        .tax_history()
+        .iter()
+        .find(|receipt| receipt.rule == socage && matches!(receipt.amount, TaxAmount::Goods { .. }))
+        .unwrap();
+    assert_eq!(receipt.place, origin);
+    assert_eq!(receipt.payer, id);
+    assert!(settled.tax_history().iter().any(|receipt| receipt.rule == asset && matches!(receipt.amount, TaxAmount::Coins { assessed, .. } if assessed == expected)));
+    assert_eq!(
+        citizen(&settled, id2).town_carried_units(Good::FlaxGarment),
+        0
+    );
 }

@@ -344,6 +344,14 @@ fn treasury(universe: &Universe) -> String {
                 paid,
                 arrears,
             } => format!("{assessed} coins assessed, {paid} paid, {arrears} owed"),
+            TaxAmount::Reservation {
+                assessed,
+                reserved,
+                outstanding,
+            } => format!(
+                "{}: {assessed} units assessed, {reserved} reserved, {outstanding} outstanding",
+                receipt.good.map_or("Goods", |good| good.name())
+            ),
             TaxAmount::Goods {
                 assessed,
                 collected,

@@ -234,7 +234,12 @@ impl ProductionTargets {
             }
         });
         let mut stocks = [0; Good::COUNT];
+        let mut usable_stocks = [0; Good::COUNT];
         for good in Good::ALL {
+            usable_stocks[good as usize] = citizen
+                .available_units(good)
+                .checked_add(citizen.market().listed_units(citizen.id(), good))
+                .ok_or(SimulationError::InventoryOverflow)?;
             stocks[good as usize] = citizen
                 .units(good)
                 .checked_add(citizen.market().listed_units(citizen.id(), good))
@@ -244,6 +249,7 @@ impl ProductionTargets {
         if let Some(recipe) = active {
             for &(good, units) in recipe.inputs() {
                 stocks[good as usize] = stocks[good as usize].saturating_sub(units);
+                usable_stocks[good as usize] = usable_stocks[good as usize].saturating_sub(units);
             }
         }
         let mut food_left = PERSONAL_FOOD_RESERVE;
@@ -316,7 +322,7 @@ impl ProductionTargets {
                             good,
                             units
                                 .checked_mul(count)?
-                                .saturating_sub(stocks[good as usize]),
+                                .saturating_sub(usable_stocks[good as usize]),
                         )
                     })
                     .try_fold(0_i64, |sum, cost| sum.checked_add(cost?))
@@ -350,7 +356,14 @@ pub fn recipe_profit(recipe: Recipe, citizen: &Citizen) -> Option<f64> {
     let outputs: f64 = recipe
         .outputs()
         .iter()
-        .map(|&(good, units)| citizen.prices().value(good, units))
+        .map(|&(good, units)| {
+            citizen.prices().value(good, units).map(|value| {
+                value
+                    * (1.0
+                        - f64::from(citizen.production_socage_rate(recipe, good).basis_points())
+                            / 10_000.0)
+            })
+        })
         .try_fold(0.0, |sum, value| Some(sum + value?))?;
     let inputs: f64 = recipe
         .inputs()

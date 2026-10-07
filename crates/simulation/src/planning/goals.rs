@@ -79,8 +79,9 @@ impl CitizenAction {
             Self::BuyFood(good) => citizen.market().purchase_cost(
                 citizen.id(),
                 good,
-                ((amount - citizen.food_nutrition()).max(0.0) / good.nutrition_per_unit()?).ceil()
-                    as crate::Quantity,
+                ((amount - citizen.available_food_nutrition()).max(0.0)
+                    / good.nutrition_per_unit()?)
+                .ceil() as crate::Quantity,
             ),
             Self::Buy(list) => list.items().try_fold(0_i64, |sum, (good, units)| {
                 sum.checked_add(citizen.market().purchase_cost(citizen.id(), good, units)?)
@@ -219,7 +220,7 @@ impl Prediction {
             action,
             CitizenAction::BuyFood(_) | CitizenAction::Buy(_) | CitizenAction::BuyAt { .. }
         ) && action.effects().contains(&Effect::Food)
-            && citizen.food_nutrition() <= self.citizen.food_nutrition()
+            && citizen.available_food_nutrition() <= self.citizen.available_food_nutrition()
         {
             return Ok(None);
         }
@@ -276,7 +277,7 @@ impl WeightedWellbeing {
 
 fn quantity(citizen: &Citizen, resource: Effect) -> f64 {
     match resource {
-        Effect::Food => citizen.food_nutrition(),
+        Effect::Food => citizen.available_food_nutrition(),
         Effect::Coins => citizen.coins() as f64,
         _ => unreachable!("only inventory resources are prerequisites"),
     }
@@ -293,7 +294,7 @@ fn suppliers(
             CitizenAction::BuyFood(good) if requirement.amount > MEAL_NOURISHMENT => {
                 CitizenAction::Buy(crate::marketplace::ShoppingList::single(
                     good,
-                    ((requirement.amount - state.citizen.food_nutrition()).max(0.0)
+                    ((requirement.amount - state.citizen.available_food_nutrition()).max(0.0)
                         / good.nutrition_per_unit().unwrap())
                     .ceil() as crate::Quantity,
                 ))
@@ -313,7 +314,8 @@ fn suppliers(
         [c, a, b],
         [c, b, a],
     ] {
-        let mut remaining = (requirement.amount - state.citizen.food_nutrition()).max(0.0);
+        let mut remaining =
+            (requirement.amount - state.citizen.available_food_nutrition()).max(0.0);
         let mut items = Vec::new();
         for good in order {
             let nutrition = good.nutrition_per_unit().unwrap();
@@ -355,7 +357,7 @@ fn suppliers(
             actions.push(CitizenAction::Withdraw(
                 good,
                 units.min(
-                    ((requirement.amount - state.citizen.food_nutrition()).max(0.0)
+                    ((requirement.amount - state.citizen.available_food_nutrition()).max(0.0)
                         / good.nutrition_per_unit().unwrap())
                     .ceil() as crate::Quantity,
                 ),
@@ -423,8 +425,8 @@ fn replenish(
     let mut variants = Vec::new();
     for action in suppliers(state, requirement)? {
         for next in order_variants(state, action, target, 0, prior_actions)? {
-            let available = next.citizen.food_nutrition();
-            if available <= state.citizen.food_nutrition() {
+            let available = next.citizen.available_food_nutrition();
+            if available <= state.citizen.available_food_nutrition() {
                 continue;
             }
             let tolerance = 32.0 * f64::EPSILON * available.abs().max(target);
@@ -453,7 +455,7 @@ fn order_variants(
         CitizenAction::Buy(list) => Some(list),
         CitizenAction::BuyFood(good) => Some(crate::marketplace::ShoppingList::single(
             good,
-            ((amount.max(MEAL_NOURISHMENT) - state.citizen.food_nutrition()).max(0.0)
+            ((amount.max(MEAL_NOURISHMENT) - state.citizen.available_food_nutrition()).max(0.0)
                 / good.nutrition_per_unit().unwrap())
             .ceil() as crate::Quantity,
         )),
@@ -464,7 +466,7 @@ fn order_variants(
     }
     if let CitizenAction::Produce(recipe) = action
         && recipe != crate::production::Recipe::Forage
-        && amount > state.citizen.food_nutrition()
+        && amount > state.citizen.available_food_nutrition()
     {
         return food_production_variants(state, recipe, amount, reserved_ms, prior_actions);
     }
@@ -579,14 +581,14 @@ fn shopping_trip(
                     units.saturating_sub(
                         bought
                             .citizen
-                            .units(good)
-                            .saturating_sub(inventory.units(good)),
+                            .available_units(good)
+                            .saturating_sub(inventory.available_units(good)),
                     ),
                 )
             }))?;
         if !basket
             .items()
-            .any(|(good, _)| bought.citizen.units(good) > inventory.units(good))
+            .any(|(good, _)| bought.citizen.available_units(good) > inventory.available_units(good))
         {
             return Ok(Vec::new());
         }
@@ -713,12 +715,13 @@ fn production_order_for_paths(
         }
         let mut complete = requirements
             .items()
-            .all(|(good, units)| state.citizen.units(good) >= units);
+            .all(|(good, units)| state.citizen.available_units(good) >= units);
         for (index, &recipe) in recipes.iter().enumerate() {
             if !complete
                 || index > 0 && paths.is_some() && state.elapsed_ms >= PRODUCTION_DURATION_MS
                 || index > 0
-                    && food_target.is_some_and(|target| state.citizen.food_nutrition() >= target)
+                    && food_target
+                        .is_some_and(|target| state.citizen.available_food_nutrition() >= target)
             {
                 complete = false;
                 break;
@@ -791,7 +794,7 @@ fn food_production_variants(
     if gain <= 0.0 {
         return Ok(Vec::new());
     }
-    let count = ((target - state.citizen.food_nutrition()) / gain).ceil() as usize;
+    let count = ((target - state.citizen.available_food_nutrition()) / gain).ceil() as usize;
     let mut recipes = Vec::new();
     let mut variants = Vec::new();
     for _ in 0..count {
@@ -801,7 +804,8 @@ fn food_production_variants(
             break;
         }
         let can_extend = next.iter().any(|candidate| {
-            candidate.elapsed_ms < GOAL_HORIZON_MS && candidate.citizen.food_nutrition() < target
+            candidate.elapsed_ms < GOAL_HORIZON_MS
+                && candidate.citizen.available_food_nutrition() < target
         });
         variants.extend(next);
         if !can_extend {
@@ -824,7 +828,7 @@ fn prepare_inputs(
             if current.elapsed_ms + reserved_ms > GOAL_HORIZON_MS {
                 continue;
             }
-            let missing = units.saturating_sub(current.citizen.units(good));
+            let missing = units.saturating_sub(current.citizen.available_units(good));
             if missing == 0 {
                 next_states.push(current);
                 continue;
@@ -846,7 +850,7 @@ fn prepare_inputs(
                 }
             }
             next_states.push(current.clone());
-            if current.citizen.units(good) < units {
+            if current.citizen.available_units(good) < units {
                 let suppliers: Vec<_> = current
                     .citizen
                     .available_recipes()
@@ -869,11 +873,13 @@ fn prepare_inputs(
     }
     let mut ready = Vec::new();
     for state in states {
-        let list = crate::marketplace::ShoppingList::new(
-            requirements
-                .items()
-                .map(|(good, units)| (good, units.saturating_sub(state.citizen.units(good)))),
-        )?;
+        let list =
+            crate::marketplace::ShoppingList::new(requirements.items().map(|(good, units)| {
+                (
+                    good,
+                    units.saturating_sub(state.citizen.available_units(good)),
+                )
+            }))?;
         if list.items().next().is_none() {
             ready.push(state);
             continue;
@@ -887,7 +893,7 @@ fn prepare_inputs(
         )? {
             if requirements
                 .items()
-                .all(|(good, units)| bought.citizen.units(good) >= units)
+                .all(|(good, units)| bought.citizen.available_units(good) >= units)
             {
                 ready.push(bought);
             }
@@ -910,11 +916,11 @@ fn gather_input(
     let mut result = Vec::new();
     for next in order_variants(state, action, 0.0, reserved_ms, prior_actions)? {
         if next.elapsed_ms + reserved_ms > GOAL_HORIZON_MS
-            || next.citizen.units(good) <= state.citizen.units(good)
+            || next.citizen.available_units(good) <= state.citizen.available_units(good)
         {
             continue;
         }
-        if next.citizen.units(good) >= units {
+        if next.citizen.available_units(good) >= units {
             result.push(next);
         } else {
             result.extend(gather_input(
@@ -1147,7 +1153,7 @@ fn variants_from(
             200.0,
             crate::FOOD_RESERVE_CAP_NUTRITION,
         ] {
-            if citizen.food_nutrition() >= target {
+            if citizen.available_food_nutrition() >= target {
                 continue;
             }
             for candidate in replenish(&initial, target, prior_actions)? {
@@ -1171,8 +1177,8 @@ fn variants_from(
         }
         // Existing small meals remain useful when acquiring a full meal would delay relief.
         if action == CitizenAction::Eat
-            && citizen.food_nutrition() < MEAL_NOURISHMENT
-            && (prior_actions == 0 || citizen.food_nutrition() >= REPLAN_MIN_NUTRITION)
+            && citizen.available_food_nutrition() < MEAL_NOURISHMENT
+            && (prior_actions == 0 || citizen.available_food_nutrition() >= REPLAN_MIN_NUTRITION)
             && let Some(candidate) = initial.perform(action, prior_actions)?
         {
             consider(candidate);
@@ -1262,6 +1268,27 @@ mod tests {
     }
 
     #[test]
+    fn shopping_trip_counts_small_purchases_above_reserved_inventory() {
+        let (mut buyer, _, _) = workplace_shopper();
+        buyer.inventory.insert(Good::Flour, 300);
+        buyer.tax_reserved.insert(Good::Flour, 300);
+        let initial = Prediction::new(&buyer, Cooldowns::default());
+        let variants = shopping_trip(
+            &initial,
+            crate::marketplace::ShoppingList::single(Good::Flour, 100),
+            0,
+            0,
+        )
+        .unwrap();
+        let trip = variants
+            .first()
+            .expect("usable purchase is smaller than reserved stock");
+        assert_eq!(trip.citizen.available_units(Good::Flour), 100);
+        assert_eq!(trip.citizen.units(Good::Flour), 400);
+        assert_eq!(trip.citizen.tax_reserved_units(Good::Flour), 300);
+    }
+
+    #[test]
     fn shopping_trip_food_suppliers_fill_mixed_meals_from_multiple_places() {
         let (buyer, mill, market) = workplace_shopper();
         let initial = Prediction::new(&buyer, Cooldowns::default());
@@ -1279,13 +1306,13 @@ mod tests {
         let trip = variants
             .iter()
             .find(|trip| {
-                trip.citizen.units(Good::Bread) == 1
-                    && trip.citizen.units(Good::BerryPie) == 1
+                trip.citizen.available_units(Good::Bread) == 1
+                    && trip.citizen.available_units(Good::BerryPie) == 1
                     && trip.actions.len() == 4
             })
             .unwrap();
         assert_eq!(
-            trip.citizen.food_nutrition(),
+            trip.citizen.available_food_nutrition(),
             Good::Bread.nutrition_per_unit().unwrap()
                 + Good::BerryPie.nutrition_per_unit().unwrap()
         );
@@ -1334,7 +1361,7 @@ mod tests {
                 .public_place(crate::locations::Location::Market),
             list: crate::marketplace::ShoppingList::single(
                 good,
-                ((MEAL_NOURISHMENT - citizen.food_nutrition()).max(0.0)
+                ((MEAL_NOURISHMENT - citizen.available_food_nutrition()).max(0.0)
                     / good.nutrition_per_unit().unwrap())
                 .ceil() as crate::Quantity,
             ),
@@ -1514,8 +1541,8 @@ mod tests {
             .unwrap();
             assert_eq!(candidate.action_durations_ms, replay[0].action_durations_ms);
             assert_eq!(
-                candidate.citizen.units(Good::Bread),
-                replay[0].citizen.units(Good::Bread)
+                candidate.citizen.available_units(Good::Bread),
+                replay[0].citizen.available_units(Good::Bread)
             );
             assert_eq!(candidate.average().unwrap(), replay[0].average().unwrap());
         }
@@ -1681,7 +1708,7 @@ mod tests {
             for variant in variants {
                 assert_eq!(variant.actions.last(), Some(&CitizenAction::EquipClothing));
                 assert_eq!(variant.citizen.garment_condition(), Some(1.0));
-                assert_eq!(variant.citizen.units(Good::FlaxGarment), 0);
+                assert_eq!(variant.citizen.available_units(Good::FlaxGarment), 0);
                 assert!(variant.citizen.clothing_need() < citizen.clothing_need());
             }
             assert_eq!(citizen, snapshot);
@@ -1744,7 +1771,7 @@ mod tests {
             .iter()
             .find(|variant| {
                 variant.actions.last() == Some(&CitizenAction::Produce(Recipe::MakeClothingBlock))
-                    && variant.citizen.units(Good::FlaxBlock) >= 8
+                    && variant.citizen.available_units(Good::FlaxBlock) >= 8
             })
             .unwrap();
         let clothing = variants_after(
@@ -1986,8 +2013,8 @@ mod tests {
         assert_eq!(list.units(Good::Flour), 200);
         assert_eq!(list.units(Good::Wood), 50);
         assert_eq!(list.units(Good::Water), 200);
-        assert_eq!(candidate.citizen.units(Good::Bread), 4);
-        assert_eq!(candidate.citizen.units(Good::Flour), 0);
+        assert_eq!(candidate.citizen.available_units(Good::Bread), 4);
+        assert_eq!(candidate.citizen.available_units(Good::Flour), 0);
         assert!(
             (candidate.citizen.skill_level(Skill::Baking)
                 - source.skill_level(Skill::Baking)
@@ -2042,10 +2069,10 @@ mod tests {
         assert_eq!(list.units(Good::Wood), 50);
         assert_eq!(list.units(Good::Water), 150);
         assert_eq!(list.units(Good::Berries), 100);
-        assert_eq!(candidate.citizen.units(Good::Bread), 2);
+        assert_eq!(candidate.citizen.available_units(Good::Bread), 2);
         assert_eq!(
-            candidate.citizen.units(Good::BerryPie),
-            initial.citizen.units(Good::BerryPie) + 2
+            candidate.citizen.available_units(Good::BerryPie),
+            initial.citizen.available_units(Good::BerryPie) + 2
         );
     }
 
@@ -2057,7 +2084,7 @@ mod tests {
             Cooldowns::default(),
         );
         let variants = replenish(&initial, 200.0, 0).unwrap();
-        assert!(variants.iter().any(|candidate| matches!(candidate.actions.as_slice(), [CitizenAction::BuyAt { list, .. }, CitizenAction::Produce(Recipe::BakeBread), CitizenAction::Produce(Recipe::BakeBread)] if list.units(Good::Flour) == 200) && candidate.citizen.food_nutrition() >= 200.0));
+        assert!(variants.iter().any(|candidate| matches!(candidate.actions.as_slice(), [CitizenAction::BuyAt { list, .. }, CitizenAction::Produce(Recipe::BakeBread), CitizenAction::Produce(Recipe::BakeBread)] if list.units(Good::Flour) == 200) && candidate.citizen.available_food_nutrition() >= 200.0));
         let source = buying_baker(2000)
             .with_good(Good::BerryPie, 0)
             .unwrap()
@@ -2078,7 +2105,8 @@ mod tests {
                 CitizenAction::Produce(Recipe::BakeBerryPie),
                 CitizenAction::Produce(Recipe::BakeBerryPie)
             ]
-        ) && candidate.citizen.food_nutrition() >= 200.0));
+        ) && candidate.citizen.available_food_nutrition()
+            >= 200.0));
         assert!(
             variants
                 .iter()
@@ -2088,7 +2116,7 @@ mod tests {
                     .filter(|action| **action == CitizenAction::Produce(Recipe::BakeBerryPie))
                     .count()
                     == 1)
-                .all(|candidate| candidate.citizen.food_nutrition() < 200.0)
+                .all(|candidate| candidate.citizen.available_food_nutrition() < 200.0)
         );
     }
 
@@ -2396,7 +2424,7 @@ mod tests {
         foraged.push(CitizenAction::Eat);
         assert!(variants.iter().any(|v| v.actions == foraged));
         for variant in variants {
-            assert!(variant.citizen.food_nutrition().is_finite());
+            assert!(variant.citizen.available_food_nutrition().is_finite());
             assert_eq!(variant.actions.last(), Some(&CitizenAction::Eat));
             assert!(variant.citizen.hunger() < source.hunger());
         }
@@ -2715,7 +2743,7 @@ mod tests {
             let variant = variants
                 .iter()
                 .find(|variant| {
-                    (variant.citizen.food_nutrition() - target).abs() < 1e-9
+                    (variant.citizen.available_food_nutrition() - target).abs() < 1e-9
                         && matches!(
                             variant.actions.as_slice(),
                             [CitizenAction::Travel(_), CitizenAction::BuyAt { .. }]

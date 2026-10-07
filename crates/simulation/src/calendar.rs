@@ -1,8 +1,8 @@
 use crate::{SimulationError, marketplace::DAY_MS};
 
 pub const WEEK_MS: u64 = 7 * DAY_MS;
-pub const MONDAY_SETTLEMENT_MS: u64 = 6 * 60 * 60 * 1000;
-pub const FIRST_WEEKLY_SETTLEMENT_MS: u64 = WEEK_MS + MONDAY_SETTLEMENT_MS;
+pub const SUNDAY_SETTLEMENT_MS: u64 = 4 * 60 * 60 * 1000;
+pub const FIRST_WEEKLY_SETTLEMENT_MS: u64 = 6 * DAY_MS + SUNDAY_SETTLEMENT_MS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Weekday {

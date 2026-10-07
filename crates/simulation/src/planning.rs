@@ -64,7 +64,7 @@ impl ProductionDecision {
                 .inputs()
                 .iter()
                 .map(|&(good, required_units)| {
-                    let carried_units = citizen.units(good);
+                    let carried_units = citizen.available_units(good);
                     let obtainable = carried_units
                         .saturating_add(citizen.market().listed_units(citizen.id(), good))
                         .saturating_add(citizen.market().available_units(citizen.id(), good));
@@ -342,14 +342,14 @@ impl ActivePlan {
 fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -> bool {
     action_index > 0
         && match action {
-            CitizenAction::Eat => citizen.food_nutrition() < REPLAN_MIN_NUTRITION,
+            CitizenAction::Eat => citizen.available_food_nutrition() < REPLAN_MIN_NUTRITION,
             CitizenAction::EquipClothing => {
-                citizen.units(crate::marketplace::Good::FlaxGarment) == 0
+                citizen.available_units(crate::marketplace::Good::FlaxGarment) == 0
             }
             CitizenAction::Produce(recipe) => recipe
                 .inputs()
                 .iter()
-                .any(|&(good, units)| citizen.units(good) < units),
+                .any(|&(good, units)| citizen.available_units(good) < units),
             _ => false,
         }
 }
@@ -440,8 +440,8 @@ pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationEr
 }
 
 fn root_goals(citizen: &Citizen) -> Result<Vec<Effect>, SimulationError> {
-    let clothing_choice =
-        citizen.units(crate::marketplace::Good::FlaxGarment) > 0 && citizen.clothing_need() > 0.0;
+    let clothing_choice = citizen.available_units(crate::marketplace::Good::FlaxGarment) > 0
+        && citizen.clothing_need() > 0.0;
     let standing_listing = !clothing_choice
         && citizen.production_targets().is_some()
         && citizen.hunger() < crate::production::URGENT_HUNGER

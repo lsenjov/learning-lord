@@ -18,6 +18,7 @@ pub struct StockKey {
 pub struct Storage {
     stock: HashMap<StockKey, Quantity>,
     totals: HashMap<(GoodsOwner, Good), Quantity>,
+    reserved: HashMap<StockKey, Quantity>,
 }
 
 impl Storage {
@@ -36,11 +37,29 @@ impl Storage {
         self.totals.get(&(owner, good)).copied().unwrap_or(0)
     }
 
+    pub fn reserved_units(&self, place: PlaceId, owner: GoodsOwner, good: Good) -> Quantity {
+        self.reserved
+            .get(&StockKey { place, owner, good })
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn set_reserved(&mut self, key: StockKey, units: Quantity) {
+        if units == 0 {
+            self.reserved.remove(&key);
+        } else {
+            self.reserved.insert(key, units);
+        }
+    }
+
     pub(crate) fn set_units(
         &mut self,
         key: StockKey,
         units: Quantity,
     ) -> Result<(), SimulationError> {
+        if units < self.reserved_units(key.place, key.owner, key.good) {
+            return Err(SimulationError::MissingInputs);
+        }
         let previous = self.units(key.place, key.owner, key.good);
         let total = self
             .owned_units(key.owner, key.good)

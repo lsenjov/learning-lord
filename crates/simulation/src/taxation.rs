@@ -58,6 +58,11 @@ pub struct TaxRule {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaxAmount {
+    Reservation {
+        assessed: Quantity,
+        reserved: Quantity,
+        outstanding: Quantity,
+    },
     Goods {
         assessed: Quantity,
         collected: Quantity,
@@ -143,9 +148,17 @@ impl TaxAccount {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ReservationStock {
+    Carried(AgentId, Good),
+    Stored(StockKey),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Taxation {
     pub rules: OrdMap<TaxRuleId, TaxRule>,
+    pub reservations: HashMap<ReservationStock, HashMap<AccountKey, Quantity>>,
+    pub reserved_accounts: HashMap<AccountKey, Quantity>,
     pub accounts: HashMap<AccountKey, TaxAccount>,
     pub history: Vector<TaxReceipt>,
     pub next_rule_id: u64,
@@ -220,6 +233,7 @@ impl Universe {
             },
         );
         universe.validate_tax_rule(id)?;
+        universe.refresh_tax_rates();
         Ok((universe, id))
     }
 
@@ -239,6 +253,7 @@ impl Universe {
         rule.name = name.into();
         rule.kind = kind;
         universe.validate_tax_rule(id)?;
+        universe.refresh_tax_rates();
         Ok(universe)
     }
 
@@ -251,6 +266,7 @@ impl Universe {
             .filter(|rule| rule.active)
             .ok_or(SimulationError::TaxRuleNotFound)?
             .active = false;
+        universe.refresh_tax_rates();
         Ok(universe)
     }
 
@@ -345,6 +361,190 @@ impl Universe {
         Ok(())
     }
 
+    pub(crate) fn refresh_tax_rates(&mut self) {
+        let mut rates = HashMap::new();
+        for place in self.map.places().values() {
+            for good in Good::ALL {
+                let rate = self.socage_rate(place.id, good);
+                if rate.basis_points() > 0 {
+                    rates.insert((place.id, good), rate);
+                }
+            }
+        }
+        for (_, agent) in self.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            let mut snapshot = HashMap::new();
+            for recipe in crate::production::Recipe::ALL {
+                if let Ok(place) = citizen.production_place(recipe) {
+                    for good in Good::ALL {
+                        if let Some(&rate) = rates.get(&(place, good)) {
+                            snapshot.insert((recipe, good), rate);
+                        }
+                    }
+                }
+            }
+            citizen.socage_rates = snapshot;
+        }
+    }
+
+    pub(crate) fn move_tax_reservations(
+        &mut self,
+        from: ReservationStock,
+        to: ReservationStock,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        let mut claims: Vec<_> = self
+            .taxation
+            .reservations
+            .get(&from)
+            .into_iter()
+            .flat_map(|claims| claims.iter())
+            .map(|(key, units)| (*key, *units))
+            .collect();
+        claims.sort_by_key(|(key, _)| (key.rule, key.place.0, key.payer.0));
+        let mut remaining = units;
+        for (key, held) in claims {
+            let moved = held.min(remaining);
+            if moved == 0 {
+                break;
+            }
+            let source = self.taxation.reservations.get_mut(&from).unwrap();
+            if held == moved {
+                source.remove(&key);
+            } else {
+                source.insert(key, held - moved);
+            }
+            let destination = self.taxation.reservations.entry(to).or_default();
+            let total = destination
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(moved)
+                .ok_or(SimulationError::InventoryOverflow)?;
+            destination.insert(key, total);
+            remaining -= moved;
+        }
+        if remaining > 0 {
+            return Err(SimulationError::MissingInputs);
+        }
+        if self
+            .taxation
+            .reservations
+            .get(&from)
+            .is_some_and(HashMap::is_empty)
+        {
+            self.taxation.reservations.remove(&from);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn settle_tax_reservations(
+        &mut self,
+        time_ms: u64,
+    ) -> Result<Vec<AgentId>, SimulationError> {
+        let mut stocks: Vec<_> = self
+            .taxation
+            .reservations
+            .iter()
+            .map(|(stock, claims)| (*stock, claims.clone()))
+            .collect();
+        stocks.sort_by_key(|(stock, _)| match stock {
+            ReservationStock::Carried(id, good) => (0, id.0, *good as usize, id.0),
+            ReservationStock::Stored(key) => (
+                1,
+                key.place.0,
+                key.good as usize,
+                match key.owner {
+                    GoodsOwner::Agent(id) => id.0,
+                    GoodsOwner::Town => uuid::Uuid::nil(),
+                },
+            ),
+        });
+        let mut changed = Vec::new();
+        for (stock, claims) in stocks {
+            let mut claims: Vec<_> = claims.into_iter().collect();
+            claims.sort_by_key(|(key, _)| (key.rule, key.place.0, key.payer.0));
+            for (key, units) in claims {
+                let good = key.good.expect("goods reservation");
+                match stock {
+                    ReservationStock::Carried(carrier, _) => {
+                        let AgentKind::Citizen(citizen) =
+                            &mut self.agents.get_mut(&carrier).unwrap().kind;
+                        let owned = citizen
+                            .units(good)
+                            .checked_sub(units)
+                            .ok_or(SimulationError::MissingInputs)?;
+                        let reserved = citizen
+                            .tax_reserved_units(good)
+                            .checked_sub(units)
+                            .ok_or(SimulationError::MissingInputs)?;
+                        let town = citizen
+                            .town_carried_units(good)
+                            .checked_add(units)
+                            .ok_or(SimulationError::InventoryOverflow)?;
+                        citizen.inventory.insert(good, owned);
+                        citizen.tax_reserved.insert(good, reserved);
+                        citizen.town_inventory.insert(good, town);
+                    }
+                    ReservationStock::Stored(stock) => {
+                        let reserved = self
+                            .storage
+                            .reserved_units(stock.place, stock.owner, good)
+                            .checked_sub(units)
+                            .ok_or(SimulationError::MissingInputs)?;
+                        self.storage.set_reserved(stock, reserved);
+                        let owned = self
+                            .storage
+                            .units(stock.place, stock.owner, good)
+                            .checked_sub(units)
+                            .ok_or(SimulationError::MissingInputs)?;
+                        self.storage.set_units(stock, owned)?;
+                        let town = self
+                            .storage
+                            .units(stock.place, GoodsOwner::Town, good)
+                            .checked_add(units)
+                            .ok_or(SimulationError::InventoryOverflow)?;
+                        self.storage.set_units(
+                            StockKey {
+                                owner: GoodsOwner::Town,
+                                ..stock
+                            },
+                            town,
+                        )?;
+                    }
+                }
+                self.taxation
+                    .accounts
+                    .get_mut(&key)
+                    .unwrap()
+                    .collect_goods(units);
+                let reserved = self.taxation.reserved_accounts[&key] - units;
+                if reserved == 0 {
+                    self.taxation.reserved_accounts.remove(&key);
+                } else {
+                    self.taxation.reserved_accounts.insert(key, reserved);
+                }
+                let outstanding = self.taxation.accounts[&key].goods_owed()?;
+                self.taxation.record(TaxReceipt {
+                    time_ms,
+                    rule: key.rule,
+                    place: key.place,
+                    payer: key.payer,
+                    good: Some(good),
+                    amount: TaxAmount::Goods {
+                        assessed: 0,
+                        collected: units,
+                        outstanding,
+                    },
+                });
+                changed.push(key.payer);
+            }
+        }
+        self.taxation.reservations.clear();
+        self.refresh_market();
+        Ok(changed)
+    }
+
     fn collect_coin_account(
         &mut self,
         key: AccountKey,
@@ -431,30 +631,43 @@ impl Universe {
                 .transpose()?
                 .unwrap_or(0);
             let owed = account.goods_owed()?;
-            let collected = owed.min(remaining);
-            account.collect_goods(collected);
-            let outstanding = account.goods_owed()?;
-            remaining -= collected;
-            if collected > 0 {
-                let stored = self
-                    .storage
-                    .units(place, GoodsOwner::Town, good)
-                    .checked_add(collected)
+            let existing = self
+                .taxation
+                .reserved_accounts
+                .get(&key)
+                .copied()
+                .unwrap_or(0);
+            let reserved = owed
+                .checked_sub(existing)
+                .ok_or(SimulationError::InventoryOverflow)?
+                .min(remaining);
+            let outstanding = owed - existing - reserved;
+            remaining -= reserved;
+            if reserved > 0 {
+                let stock = ReservationStock::Carried(payer, good);
+                let claims = self.taxation.reservations.entry(stock).or_default();
+                let held = claims
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(reserved)
                     .ok_or(SimulationError::InventoryOverflow)?;
-                self.storage.set_units(
-                    StockKey {
-                        place,
-                        owner: GoodsOwner::Town,
-                        good,
-                    },
-                    stored,
-                )?;
+                claims.insert(key, held);
+                self.taxation.reserved_accounts.insert(
+                    key,
+                    existing
+                        .checked_add(reserved)
+                        .ok_or(SimulationError::InventoryOverflow)?,
+                );
                 let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&payer).unwrap().kind;
-                let retained = citizen
-                    .units(good)
-                    .checked_sub(collected)
+                let total = citizen
+                    .tax_reserved_units(good)
+                    .checked_add(reserved)
                     .ok_or(SimulationError::InventoryOverflow)?;
-                citizen.inventory.insert(good, retained);
+                if total > citizen.units(good) {
+                    return Err(SimulationError::MissingInputs);
+                }
+                citizen.tax_reserved.insert(good, total);
                 changed = true;
             }
             if rate.is_some() || owed > 0 {
@@ -464,9 +677,9 @@ impl Universe {
                     place,
                     payer,
                     good: Some(good),
-                    amount: TaxAmount::Goods {
+                    amount: TaxAmount::Reservation {
                         assessed,
-                        collected,
+                        reserved,
                         outstanding,
                     },
                 });
@@ -690,7 +903,15 @@ mod tests {
         world
             .tax_production(payer, first, Good::Wheat, 1, 0)
             .unwrap();
-        assert_eq!(world.storage.units(first, GoodsOwner::Town, Good::Wheat), 1);
+        assert_eq!(
+            world.taxation.reserved_accounts[&AccountKey {
+                rule,
+                place: first,
+                payer,
+                good: Some(Good::Wheat)
+            }],
+            1
+        );
         assert_eq!(
             world.storage.units(second, GoodsOwner::Town, Good::Wheat),
             0
@@ -704,5 +925,226 @@ mod tests {
         assert_eq!(world.taxation.accounts[&key].goods_due_scaled, 5000);
         let retired = world.without_tax_rule(rule).unwrap();
         assert_eq!(retired.taxation.accounts[&key].goods_due_scaled, 5000);
+    }
+    fn reserved_worker(good: Good, units: Quantity) -> (Universe, AgentId, PlaceId) {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_skill(crate::production::Skill::Tailoring, 1.0)
+            .unwrap()
+            .with_good(good, units)
+            .unwrap();
+        let (world, id) = Universe::with_map(Map::default())
+            .with_citizen("Ada", citizen)
+            .unwrap();
+        let (world, place) = world.with_property(id, Location::Tailory).unwrap();
+        let (mut world, _) = world
+            .with_tax_rule(
+                place,
+                "Half",
+                TaxKind::Socage {
+                    rates: [(good, TaxRate::new(5000).unwrap())].into_iter().collect(),
+                },
+            )
+            .unwrap();
+        world.tax_production(id, place, good, units, 0).unwrap();
+        (world, id, place)
+    }
+
+    #[test]
+    fn transfers_keep_active_inputs_and_move_reservations_instead() {
+        let (world, id, place) = reserved_worker(Good::Cloth, 50);
+        let busy = world
+            .start_action(
+                id,
+                crate::CitizenAction::Produce(crate::production::Recipe::MakeClothingBlock),
+            )
+            .unwrap();
+        let moved = busy.deposit_goods(id, place, Good::Cloth, 25).unwrap();
+        let AgentKind::Citizen(worker) = &moved.agents[&id].kind;
+        assert_eq!(worker.available_units(Good::Cloth), 25);
+        assert_eq!(worker.tax_reserved_units(Good::Cloth), 0);
+        assert_eq!(
+            moved
+                .storage
+                .reserved_units(place, GoodsOwner::Agent(id), Good::Cloth),
+            25
+        );
+        let done = moved
+            .advance(worker.active_action().unwrap().remaining_ms())
+            .unwrap();
+        let AgentKind::Citizen(worker) = &done.agents[&id].kind;
+        assert_eq!(worker.units(Good::Cloth), 0);
+        assert_eq!(worker.units(Good::FlaxBlock), 1);
+
+        let (world, id, place) = reserved_worker(Good::FlaxGarment, 2);
+        let busy = world
+            .start_action(id, crate::CitizenAction::EquipClothing)
+            .unwrap();
+        let moved = busy.deposit_goods(id, place, Good::FlaxGarment, 1).unwrap();
+        let AgentKind::Citizen(worker) = &moved.agents[&id].kind;
+        assert_eq!(worker.available_units(Good::FlaxGarment), 1);
+        let done = moved
+            .advance(worker.active_action().unwrap().remaining_ms())
+            .unwrap();
+        let AgentKind::Citizen(worker) = &done.agents[&id].kind;
+        assert_eq!(worker.garment_condition(), Some(1.0));
+        assert_eq!(
+            done.storage
+                .reserved_units(place, GoodsOwner::Agent(id), Good::FlaxGarment),
+            1
+        );
+    }
+
+    #[test]
+    fn reserved_food_keeps_wellbeing_credit_but_cannot_be_eaten() {
+        let (world, id, _) = reserved_worker(Good::Bread, 2);
+        let AgentKind::Citizen(worker) = &world.agents[&id].kind;
+        assert_eq!(worker.food_nutrition(), 100.0);
+        assert_eq!(worker.available_food_nutrition(), 50.0);
+        assert_eq!(worker.food_reserve_wellbeing(), 10.0);
+        let busy = world.start_action(id, crate::CitizenAction::Eat).unwrap();
+        let AgentKind::Citizen(worker) = &busy.agents[&id].kind;
+        assert_eq!(worker.units(Good::Bread), 1);
+        assert_eq!(worker.tax_reserved_units(Good::Bread), 1);
+        assert_eq!(worker.available_units(Good::Bread), 0);
+        let done = busy
+            .advance(worker.active_action().unwrap().remaining_ms())
+            .unwrap();
+        let AgentKind::Citizen(worker) = &done.agents[&id].kind;
+        assert_eq!(worker.units(Good::Bread), 1);
+    }
+
+    #[test]
+    fn stored_settlement_receipts_have_stable_owner_order_and_overflow_rolls_back() {
+        let (world, first, origin) = reserved_worker(Good::FlaxGarment, 2);
+        let (world, second) = world
+            .with_citizen(
+                "Ben",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_good(Good::FlaxGarment, 2)
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut world = world;
+        world
+            .tax_production(second, origin, Good::FlaxGarment, 2, 0)
+            .unwrap();
+        let destination = world.map.public_place(Location::Market);
+        let world = world
+            .deposit_goods(first, destination, Good::FlaxGarment, 2)
+            .unwrap()
+            .deposit_goods(second, destination, Good::FlaxGarment, 2)
+            .unwrap();
+        let settled = world
+            .advance(crate::calendar::FIRST_WEEKLY_SETTLEMENT_MS)
+            .unwrap();
+        let collected: Vec<_> = settled
+            .tax_history()
+            .iter()
+            .filter(|receipt| matches!(receipt.amount, TaxAmount::Goods { .. }))
+            .collect();
+        assert_eq!(collected.len(), 2);
+        assert!(collected[0].payer.0 < collected[1].payer.0);
+        assert_eq!(
+            settled
+                .storage
+                .units(destination, GoodsOwner::Town, Good::FlaxGarment),
+            2
+        );
+        let full = world
+            .with_stored_good(
+                destination,
+                GoodsOwner::Town,
+                Good::FlaxGarment,
+                Quantity::MAX,
+            )
+            .unwrap();
+        assert_eq!(
+            full.advance(crate::calendar::FIRST_WEEKLY_SETTLEMENT_MS),
+            Err(SimulationError::InventoryOverflow)
+        );
+        assert_eq!(
+            full.storage
+                .reserved_units(destination, GoodsOwner::Agent(first), Good::FlaxGarment),
+            1
+        );
+        assert_eq!(
+            full.storage
+                .units(destination, GoodsOwner::Agent(first), Good::FlaxGarment),
+            2
+        );
+    }
+    #[test]
+    fn importing_reserved_citizen_requires_its_universe_ledger() {
+        let (world, id, _) = reserved_worker(Good::FlaxGarment, 2);
+        let AgentKind::Citizen(worker) = &world.agents[&id].kind;
+        let source = Universe::with_map(Map::default());
+        assert_eq!(
+            source.with_citizen("Imported", worker.clone()),
+            Err(SimulationError::ReservedCitizenImport)
+        );
+        assert!(source.agents.is_empty());
+    }
+
+    #[test]
+    fn carried_town_goods_stay_with_the_carrier_and_overflow_is_atomic() {
+        let (world, id, _) = reserved_worker(Good::FlaxGarment, 2);
+        let mut full = world.clone();
+        let AgentKind::Citizen(worker) = &mut full.agents.get_mut(&id).unwrap().kind;
+        worker
+            .town_inventory
+            .insert(Good::FlaxGarment, Quantity::MAX);
+        assert_eq!(
+            full.advance(crate::calendar::FIRST_WEEKLY_SETTLEMENT_MS),
+            Err(SimulationError::InventoryOverflow)
+        );
+        let AgentKind::Citizen(worker) = &full.agents[&id].kind;
+        assert_eq!(worker.units(Good::FlaxGarment), 2);
+        assert_eq!(worker.tax_reserved_units(Good::FlaxGarment), 1);
+
+        let mut settled = world
+            .advance(crate::calendar::FIRST_WEEKLY_SETTLEMENT_MS)
+            .unwrap();
+        let forest = settled.map.public_place(Location::Forest);
+        let AgentKind::Citizen(worker) = &mut settled.agents.get_mut(&id).unwrap().kind;
+        worker.position = crate::locations::Position { x: 10.0, y: 0.0 };
+        let moved = settled
+            .start_action(id, crate::CitizenAction::Travel(forest))
+            .unwrap()
+            .advance(6000)
+            .unwrap();
+        let AgentKind::Citizen(worker) = &moved.agents[&id].kind;
+        assert_eq!(worker.position, moved.map.position(forest));
+        assert_eq!(worker.town_carried_units(Good::FlaxGarment), 1);
+        assert_eq!(worker.units(Good::FlaxGarment), 1);
+    }
+    #[test]
+    fn sunday_settlement_is_partition_independent_and_cancellation_preserves_claims() {
+        let (world, id, _) = reserved_worker(Good::FlaxGarment, 2);
+        let near = world
+            .advance(crate::calendar::FIRST_WEEKLY_SETTLEMENT_MS - 1)
+            .unwrap();
+        let once = near.advance(2).unwrap();
+        let split = near.advance(1).unwrap().advance(1).unwrap();
+        assert_eq!(once.taxation, split.taxation);
+        assert_eq!(once.storage, split.storage);
+        let AgentKind::Citizen(once_worker) = &once.agents[&id].kind;
+        let AgentKind::Citizen(split_worker) = &split.agents[&id].kind;
+        assert_eq!(once_worker.inventory, split_worker.inventory);
+        assert_eq!(once_worker.town_inventory, split_worker.town_inventory);
+        let saved = near.clone();
+        let mut checks = 0;
+        let cancelled = near
+            .advance_with_planner(&mut crate::PlanningRuntime::default(), 2, || {
+                checks += 1;
+                checks > 2
+            })
+            .unwrap();
+        assert_eq!(cancelled, None);
+        assert_eq!(near, saved);
+        let AgentKind::Citizen(worker) = &near.agents[&id].kind;
+        assert_eq!(worker.tax_reserved_units(Good::FlaxGarment), 1);
+        assert_eq!(worker.town_carried_units(Good::FlaxGarment), 0);
     }
 }

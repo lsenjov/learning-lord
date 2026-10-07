@@ -180,6 +180,9 @@ pub struct Citizen {
     hunger_per_hour: f64,
     tiredness: f64,
     inventory: HashMap<Good, Quantity>,
+    tax_reserved: HashMap<Good, Quantity>,
+    town_inventory: HashMap<Good, Quantity>,
+    socage_rates: HashMap<(production::Recipe, Good), taxation::TaxRate>,
     storage: Storage,
     id: AgentId,
     home: PlaceId,
@@ -229,6 +232,9 @@ impl Citizen {
             hunger_per_hour,
             tiredness: 0.0,
             inventory: Good::ALL.into_iter().map(|good| (good, 0)).collect(),
+            tax_reserved: HashMap::new(),
+            town_inventory: HashMap::new(),
+            socage_rates: HashMap::new(),
             storage: Storage::default(),
             id,
             home,
@@ -329,9 +335,31 @@ impl Citizen {
     pub fn units(&self, good: Good) -> Quantity {
         self.inventory.get(&good).copied().unwrap_or(0)
     }
+    pub fn tax_reserved_units(&self, good: Good) -> Quantity {
+        self.tax_reserved.get(&good).copied().unwrap_or(0)
+    }
+    pub fn town_carried_units(&self, good: Good) -> Quantity {
+        self.town_inventory.get(&good).copied().unwrap_or(0)
+    }
+    pub fn available_units(&self, good: Good) -> Quantity {
+        self.units(good) - self.tax_reserved_units(good)
+    }
+    pub fn production_socage_rate(
+        &self,
+        recipe: production::Recipe,
+        good: Good,
+    ) -> taxation::TaxRate {
+        self.socage_rates
+            .get(&(recipe, good))
+            .copied()
+            .unwrap_or_else(|| taxation::TaxRate::new(0).unwrap())
+    }
     pub fn with_good(&self, good: Good, units: Quantity) -> Result<Self, SimulationError> {
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
+        }
+        if units < self.tax_reserved_units(good) {
+            return Err(SimulationError::MissingInputs);
         }
         let mut citizen = self.clone();
         citizen.inventory.insert(good, units);
@@ -483,9 +511,16 @@ impl Citizen {
             .sum()
     }
 
+    pub fn available_food_nutrition(&self) -> f64 {
+        Good::FOOD
+            .into_iter()
+            .map(|good| self.available_units(good) as f64 * good.nutrition_per_unit().unwrap())
+            .sum()
+    }
+
     pub fn has_complete_meal(&self) -> bool {
         Good::FOOD.into_iter().any(|good| {
-            self.units(good)
+            self.available_units(good)
                 >= (MEAL_NOURISHMENT / good.nutrition_per_unit().unwrap()).ceil() as Quantity
         })
     }
@@ -496,7 +531,7 @@ impl Citizen {
             .filter_map(|good| {
                 let nutrition = good.nutrition_per_unit()?;
                 let needed = (MEAL_NOURISHMENT / nutrition).ceil() as Quantity;
-                if self.units(good) < needed {
+                if self.available_units(good) < needed {
                     return None;
                 }
                 let cost_per_nutrition =
@@ -517,7 +552,7 @@ impl Citizen {
         for good in Good::FOOD {
             let nutrition = good.nutrition_per_unit().unwrap();
             let portion = self
-                .units(good)
+                .available_units(good)
                 .min((remaining / nutrition).ceil() as Quantity);
             units[good as usize] = portion;
             total += portion as f64 * nutrition;
@@ -616,7 +651,9 @@ impl Citizen {
         let mut reserve = self.production_ingredient_reserve()?;
         let mut nutrition = FOOD_RESERVE_CAP_NUTRITION;
         for good in Good::FOOD {
-            let available = self.units(good).saturating_sub(reserve[good as usize]);
+            let available = self
+                .available_units(good)
+                .saturating_sub(reserve[good as usize]);
             let kept =
                 available.min((nutrition / good.nutrition_per_unit().unwrap()).ceil() as Quantity);
             reserve[good as usize] += kept;
@@ -633,7 +670,7 @@ impl Citizen {
         let mut needed = self.production_ingredient_reserve()?;
         for good in Good::ALL {
             let held = self
-                .units(good)
+                .available_units(good)
                 .checked_add(self.market.listed_units(self.id, good))
                 .ok_or(SimulationError::InventoryOverflow)?;
             needed[good as usize] = needed[good as usize].saturating_sub(held);
@@ -647,11 +684,13 @@ impl Citizen {
 
     pub fn excess_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
         let reserve = self.reserved_goods()?;
-        marketplace::ShoppingList::new(
-            Good::ALL
-                .into_iter()
-                .map(|good| (good, self.units(good).saturating_sub(reserve.units(good)))),
-        )
+        marketplace::ShoppingList::new(Good::ALL.into_iter().map(|good| {
+            (
+                good,
+                self.available_units(good)
+                    .saturating_sub(reserve.units(good)),
+            )
+        }))
     }
 
     pub fn excess_value(&self) -> Result<f64, SimulationError> {
@@ -725,7 +764,7 @@ impl Citizen {
             && recipe
                 .inputs()
                 .iter()
-                .any(|&(good, units)| self.units(good) < units)
+                .any(|&(good, units)| self.available_units(good) < units)
         {
             return Err(SimulationError::MissingInputs);
         }
@@ -734,7 +773,7 @@ impl Citizen {
         {
             return Err(SimulationError::NotFood);
         }
-        if action == CitizenAction::EquipClothing && self.units(Good::FlaxGarment) == 0 {
+        if action == CitizenAction::EquipClothing && self.available_units(Good::FlaxGarment) == 0 {
             return Err(SimulationError::MissingInputs);
         }
         let (meal_units, meal_nutrition) = if action == CitizenAction::Eat {
@@ -856,7 +895,8 @@ impl Citizen {
             if active.remaining_ms == 0 {
                 match active.action {
                     CitizenAction::BuyFood(good) => {
-                        let units = ((MEAL_NOURISHMENT - citizen.food_nutrition()).max(0.0)
+                        let units = ((MEAL_NOURISHMENT - citizen.available_food_nutrition())
+                            .max(0.0)
                             / good.nutrition_per_unit().ok_or(SimulationError::NotFood)?)
                         .ceil() as Quantity;
                         payments.extend(citizen.complete_purchase(
@@ -902,7 +942,7 @@ impl Citizen {
                         }
                     }
                     CitizenAction::List(good, requested) => {
-                        let units = requested.min(citizen.units(good));
+                        let units = requested.min(citizen.available_units(good));
                         citizen
                             .market
                             .list(citizen.id, citizen.selling_place(), good, units)?;
@@ -945,7 +985,7 @@ impl Citizen {
     ) -> Result<(), SimulationError> {
         for &(good, units) in recipe.inputs() {
             let stock = self.units(good);
-            if stock < units {
+            if self.available_units(good) < units {
                 return Err(SimulationError::MissingInputs);
             }
             self.inventory.insert(good, stock - units);
@@ -1221,8 +1261,46 @@ impl Universe {
                     .ok_or(SimulationError::MissingInputs)?,
             )
         };
+        let tax_reserved = if deposit {
+            citizen.tax_reserved_units(good)
+        } else {
+            self.storage.reserved_units(place, owner, good)
+        };
+        let source = if deposit { carried } else { stored };
+        let movable_available =
+            (source - tax_reserved).saturating_sub(if deposit { reserved } else { 0 });
+        let moved_reserved = units.saturating_sub(movable_available);
         let mut universe = self.clone();
+        let carried_reserved = citizen.tax_reserved_units(good);
+        let stored_reserved = self.storage.reserved_units(place, owner, good);
+        let stock_key = StockKey { place, owner, good };
+        let carried_stock = taxation::ReservationStock::Carried(id, good);
+        let stored_stock = taxation::ReservationStock::Stored(stock_key);
+        if moved_reserved > 0 {
+            let (from, to) = if deposit {
+                (carried_stock, stored_stock)
+            } else {
+                (stored_stock, carried_stock)
+            };
+            universe.move_tax_reservations(from, to, moved_reserved)?;
+        }
         let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
+        citizen.tax_reserved.insert(
+            good,
+            if deposit {
+                carried_reserved - moved_reserved
+            } else {
+                carried_reserved + moved_reserved
+            },
+        );
+        universe.storage.set_reserved(
+            stock_key,
+            if deposit {
+                stored_reserved + moved_reserved
+            } else {
+                stored_reserved - moved_reserved
+            },
+        );
         citizen.inventory.insert(good, next_carried);
         universe
             .storage
@@ -1248,6 +1326,9 @@ impl Universe {
         let id = citizen.id;
         if self.agents.contains_key(&id) {
             return Err(SimulationError::AgentAlreadyExists);
+        }
+        if citizen.tax_reserved.values().any(|units| *units > 0) {
+            return Err(SimulationError::ReservedCitizenImport);
         }
         let mut universe = self.clone();
         let mut citizen = citizen.with_prices(self.prices());
@@ -1287,6 +1368,7 @@ impl Universe {
             },
         );
         universe.register_action_request(id)?;
+        universe.refresh_tax_rates();
         universe.refresh_market();
         Ok((universe, id))
     }
@@ -1312,6 +1394,7 @@ impl Universe {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
             citizen.map = universe.map.clone();
         }
+        universe.refresh_tax_rates();
         Ok((universe, id))
     }
 
@@ -1484,7 +1567,8 @@ impl Universe {
                 }
             }
             if next_week == Some(finishing_time) {
-                let changed = universe.tax_week(finishing_time)?;
+                let mut changed = universe.settle_tax_reservations(finishing_time)?;
+                changed.extend(universe.tax_week(finishing_time)?);
                 if let Some(runtime) = runtime.as_deref_mut() {
                     for payer in changed {
                         runtime.cancel(payer);
@@ -1608,7 +1692,7 @@ impl Universe {
             Some(CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. }) => list,
             Some(CitizenAction::BuyFood(good)) => marketplace::ShoppingList::single(
                 good,
-                ((MEAL_NOURISHMENT - citizen.food_nutrition()).max(0.0)
+                ((MEAL_NOURISHMENT - citizen.available_food_nutrition()).max(0.0)
                     / good.nutrition_per_unit().ok_or(SimulationError::NotFood)?)
                 .ceil() as Quantity,
             ),
@@ -1732,6 +1816,7 @@ pub enum SimulationError {
     PlanningFailed,
     AgentNotFound,
     AgentAlreadyExists,
+    ReservedCitizenImport,
 }
 
 impl fmt::Display for SimulationError {
@@ -1773,6 +1858,9 @@ impl fmt::Display for SimulationError {
             Self::PlanningFailed => "planning worker failed",
             Self::CitizenBusy => "citizen is already performing an action",
             Self::AgentAlreadyExists => "citizen already exists in this universe",
+            Self::ReservedCitizenImport => {
+                "cannot import a citizen with tax reservations from another universe"
+            }
             Self::AgentNotFound => "agent does not exist in this universe",
         };
         formatter.write_str(message)
