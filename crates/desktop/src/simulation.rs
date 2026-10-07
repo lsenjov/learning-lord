@@ -37,7 +37,7 @@ pub enum Command {
 #[derive(Clone)]
 pub enum Mutation {
     SaveTax {
-        place: learning_lord_simulation::locations::PlaceId,
+        scope: learning_lord_simulation::taxation::TaxScope,
         id: Option<learning_lord_simulation::taxation::TaxRuleId>,
         name: String,
         kind: learning_lord_simulation::taxation::TaxKind,
@@ -56,14 +56,14 @@ impl Mutation {
     fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
         match self {
             Self::SaveTax {
-                place,
+                scope,
                 id,
                 name,
                 kind,
             } => match id {
                 Some(id) => universe.edit_tax_rule(id, name, kind),
                 None => universe
-                    .with_tax_rule(place, name, kind)
+                    .with_scoped_tax_rule(scope, name, kind)
                     .map(|(next, _)| next),
             },
             Self::RemoveTax(id) => universe.without_tax_rule(id),
@@ -603,7 +603,7 @@ mod tests {
             Command::Mutate {
                 generation: 0,
                 mutation: Mutation::SaveTax {
-                    place,
+                    scope: learning_lord_simulation::taxation::TaxScope::Location(place),
                     id: None,
                     name: "Harvest".into(),
                     kind,
@@ -625,7 +625,7 @@ mod tests {
             Command::Mutate {
                 generation: 0,
                 mutation: Mutation::SaveTax {
-                    place,
+                    scope: learning_lord_simulation::taxation::TaxScope::Location(place),
                     id: Some(id),
                     name: "Edited harvest".into(),
                     kind,
@@ -644,7 +644,7 @@ mod tests {
             Command::Mutate {
                 generation: 0,
                 mutation: Mutation::SaveTax {
-                    place,
+                    scope: learning_lord_simulation::taxation::TaxScope::Location(place),
                     id: None,
                     name: "Excessive harvest".into(),
                     kind,
@@ -664,6 +664,41 @@ mod tests {
         );
         assert!(state.mutation_error.is_none());
         assert!(!state.universe.tax_rules()[&id].active);
+    }
+
+    #[test]
+    fn shared_tax_commands_create_edit_and_remove_one_rule() {
+        use learning_lord_simulation::{
+            locations::Location,
+            taxation::{TaxKind, TaxPayer, TaxScope},
+        };
+        let scope = TaxScope::LocationType(Location::Field);
+        let kind = TaxKind::FlatFee {
+            payer: TaxPayer::LocationOwner,
+            coins: 5,
+        };
+        let universe = Mutation::SaveTax {
+            scope,
+            id: None,
+            name: "All fields fee".into(),
+            kind: kind.clone(),
+        }
+        .apply(&Universe::default())
+        .unwrap();
+        let id = *universe.tax_rules().keys().next().unwrap();
+        assert_eq!(universe.tax_rules()[&id].scope, scope);
+        let universe = Mutation::SaveTax {
+            scope,
+            id: Some(id),
+            name: "Renamed fee".into(),
+            kind,
+        }
+        .apply(&universe)
+        .unwrap();
+        assert_eq!(universe.tax_rules().len(), 1);
+        assert_eq!(universe.tax_rules()[&id].name, "Renamed fee");
+        let universe = Mutation::RemoveTax(id).apply(&universe).unwrap();
+        assert!(!universe.tax_rules()[&id].active);
     }
 
     #[test]

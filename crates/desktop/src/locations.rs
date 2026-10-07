@@ -17,7 +17,7 @@ use learning_lord_simulation::{
     marketplace::Good,
     production::Recipe,
     storage::GoodsOwner,
-    taxation::{TaxAmount, TaxKind, TaxPayer, TaxRate, TaxRuleId},
+    taxation::{TaxAmount, TaxKind, TaxPayer, TaxRate, TaxRuleId, TaxScope},
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -45,6 +45,8 @@ struct Draft {
     name: String,
     kind: Kind,
     payer: Option<AgentId>,
+    owner_payer: bool,
+    automatic_name: bool,
     coins: String,
     rates: Vec<(Good, String)>,
     all_rate: String,
@@ -57,6 +59,8 @@ impl Default for Draft {
             name: String::new(),
             kind: Kind::FlatFee,
             payer: None,
+            owner_payer: false,
+            automatic_name: true,
             coins: String::new(),
             rates: Vec::new(),
             all_rate: String::new(),
@@ -102,6 +106,7 @@ pub(crate) enum Field {
 #[derive(Resource, Default)]
 pub struct State {
     place: Option<PlaceId>,
+    location_type: Option<Location>,
     draft: Option<Draft>,
     field: Option<Field>,
     citizen: Option<AgentId>,
@@ -144,6 +149,52 @@ impl State {
     }
 }
 
+const PRIVATE_TYPES: [Location; 6] = [
+    Location::Home,
+    Location::Field,
+    Location::Mill,
+    Location::Bakery,
+    Location::Weavery,
+    Location::Tailory,
+];
+const WEEKLY_TAX_TIME: &str = "Weekly taxes: Sunday at 04:00 | first collection Day 6";
+
+fn type_name(location: Location) -> String {
+    let plural = match location {
+        Location::Bakery => "bakeries".into(),
+        Location::Weavery => "weaveries".into(),
+        Location::Tailory => "tailories".into(),
+        _ => format!("{}s", location.name()),
+    };
+    format!("All {plural}")
+}
+
+impl State {
+    fn scope(&self) -> Option<TaxScope> {
+        self.location_type
+            .map(TaxScope::LocationType)
+            .or_else(|| self.place.map(TaxScope::Location))
+    }
+
+    fn location_kind(&self, universe: &Universe) -> Option<Location> {
+        self.location_type.or_else(|| {
+            self.place
+                .and_then(|id| universe.map().place(id).ok().map(|place| place.kind))
+        })
+    }
+}
+
+fn default_tax_name(universe: &Universe, scope: TaxScope, kind: Kind) -> String {
+    let scope = match scope {
+        TaxScope::Location(id) => universe
+            .map()
+            .place(id)
+            .map_or_else(|_| "Location".into(), |place| place.name.clone()),
+        TaxScope::LocationType(location) => type_name(location),
+    };
+    format!("{scope} {}", kind.label())
+}
+
 #[derive(Component)]
 pub(crate) struct Content;
 
@@ -156,6 +207,9 @@ pub(crate) enum ScrollPanel {
 #[derive(Component, Clone, Copy)]
 pub(crate) enum Choice {
     Place(PlaceId),
+    IndividualPlaces,
+    LocationTypes,
+    LocationType(Location),
     New,
     Kind(Kind),
     Field(Field),
@@ -284,10 +338,23 @@ fn stocks(universe: &Universe, place: PlaceId) -> String {
         .filter(|(key, _)| key.place == place)
     {
         lines.push(format!(
-            "{} | {} | {} stored",
+            "{} | {} | {} available | {} tax reserved",
             owner_name(universe, key.owner),
             key.good.name(),
-            crate::quantity_label(key.good, *units)
+            crate::quantity_label(
+                key.good,
+                units.saturating_sub(
+                    universe
+                        .storage()
+                        .reserved_units(place, key.owner, key.good)
+                )
+            ),
+            crate::quantity_label(
+                key.good,
+                universe
+                    .storage()
+                    .reserved_units(place, key.owner, key.good)
+            )
         ));
     }
     for order in universe
@@ -417,12 +484,10 @@ pub fn refresh(
     if state.place.is_none() {
         state.place = places.first().map(|place| place.id);
     }
-    let Some(place_id) = state.place else {
+    let place = state.place.and_then(|id| map.place(id).ok());
+    if state.location_type.is_none() && place.is_none() {
         return;
-    };
-    let Ok(place) = map.place(place_id) else {
-        return;
-    };
+    }
     let citizens = citizen_ids(universe);
     if state.citizen.is_none() {
         state.citizen = citizens.first().copied();
@@ -442,11 +507,25 @@ pub fn refresh(
     commands.entity(root).with_children(|parent| {
         parent.spawn((Node { width: px(250), flex_shrink: 0.0, min_height: px(0), flex_direction: FlexDirection::Column, row_gap: px(7), overflow: Overflow::scroll_y(), ..default() }, ScrollPanel::List, ScrollPosition(list_scroll), RelativeCursorPosition::default()))
             .with_children(|list| {
+                row(list, |row| {
+                    button(row, "Individual places", Choice::IndividualPlaces, state.location_type.is_none());
+                    button(row, "Location types", Choice::LocationTypes, state.location_type.is_some());
+                });
                 list.spawn(text("LOCATIONS", 16.0, MUTED));
+                if state.location_type.is_some() {
+                    for kind in PRIVATE_TYPES { button(list, type_name(kind), Choice::LocationType(kind), state.location_type == Some(kind)); }
+                } else {
                 for place in &places { button(list, format!("{}\n{}", place.name, place_owner(universe, place)), Choice::Place(place.id), state.place == Some(place.id)); }
+                }
             });
         parent.spawn((Node { flex_basis: px(0), flex_grow: 1.0, min_width: px(0), min_height: px(0), padding: UiRect::all(px(16)), flex_direction: FlexDirection::Column, row_gap: px(12), overflow: Overflow::scroll_y(), border_radius: BorderRadius::all(px(12)), ..default() }, BackgroundColor(PANEL), ScrollPanel::Details, ScrollPosition(details_scroll), RelativeCursorPosition::default()))
             .with_children(|details| {
+                if let Some(location) = state.location_type {
+                    details.spawn(text(type_name(location), 23.0, TEXT));
+                    details.spawn(text("One shared rule applies to every private location of this type, including future locations.", 14.0, MUTED));
+                }
+                if state.location_type.is_none() && let Some(place) = place {
+                let place_id = place.id;
                 details.spawn(text(&place.name, 23.0, TEXT));
                 details.spawn(text(format!("Owner: {}", place_owner(universe, place)), 15.0, MUTED));
                 details.spawn(text("STOCK BY OWNER", 15.0, MUTED));
@@ -462,23 +541,37 @@ pub fn refresh(
                     field(row, "Quantity (whole units)", &state.quantity, Field::Quantity, &state);
                     button(row, "Deposit", Choice::Deposit, false); button(row, "Withdraw", Choice::Withdraw, false);
                 });
+                }
                 details.spawn(text("LOCATION TAXES", 15.0, MUTED));
-                let rules: Vec<_> = universe.tax_rules().values().filter(|rule| universe.tax_scope_matches(rule.scope, place_id) && rule.active).collect();
-                if place.owner.is_none() { details.spawn(text(if place.kind.is_town_owned() { "Town location - no location taxes." } else { "Public location - no location taxes." }, 15.0, TEXT)); }
-                else {
+                details.spawn(text(WEEKLY_TAX_TIME, 13.0, MUTED));
+                let scope = state.scope().unwrap();
+                let taxable = state.location_type.is_some() || place.is_some_and(|place| place.owner.is_some());
+                if taxable {
+                    let mut rules: Vec<_> = universe.tax_rules().values().filter(|rule| rule.active && match scope {
+                        TaxScope::Location(id) => universe.tax_scope_matches(rule.scope, id),
+                        TaxScope::LocationType(_) => rule.scope == scope,
+                    }).collect();
+                    rules.sort_by(|a, b| a.name.cmp(&b.name));
                     if rules.is_empty() { details.spawn(text("Frankalmoigne - no active tax rules.", 15.0, TEXT)); }
                     for rule in rules {
-                        details.spawn(text(format!("{} | {}", rule.name, kind_label(&rule.kind)), 16.0, TEXT));
+                        let inherited = rule.scope != scope;
+                        details.spawn(text(format!("{} | {} | {}", rule.name, kind_label(&rule.kind), if inherited { "Inherited from location type" } else if state.location_type.is_some() { "Shared type rule" } else { "Individual rule" }), 16.0, TEXT));
                         details.spawn(text(match &rule.kind {
                             TaxKind::FlatFee { payer, coins } => format!("{} coins weekly · {}", coins, match payer { TaxPayer::Agent(id) => name(universe, *id), TaxPayer::LocationOwner => "Property owner".into() }),
                             TaxKind::Socage { rates } | TaxKind::Asset { rates } | TaxKind::Income { rates } => {
                                 let mut rates: Vec<_> = rates.iter().map(|(good, rate)| format!("{}: {:.2}%", good.name(), f64::from(rate.basis_points()) / 100.0)).collect(); rates.sort(); rates.join(" · ")
                             }
                         }, 14.0, MUTED));
-                        row(details, |row| { button(row, "Edit", Choice::Edit(rule.id), false); button(row, "Remove", Choice::Remove(rule.id), false); });
+                        row(details, |row| {
+                            if inherited {
+                                if let TaxScope::LocationType(kind) = rule.scope { button(row, "View type to edit", Choice::LocationType(kind), false); }
+                            } else { button(row, "Edit", Choice::Edit(rule.id), false); button(row, "Remove", Choice::Remove(rule.id), false); }
+                        });
                     }
                     if let Some(draft) = &state.draft { editor(details, draft, &state, universe); }
                     else { button(details, "Add tax rule", Choice::New, false); }
+                } else {
+                    details.spawn(text("Public and town locations have no location taxes.", 15.0, TEXT));
                 }
                 if let Some(error) = state.error.as_ref().or(snapshot.0.mutation_error.as_ref()) { details.spawn(text(error, 14.0, Color::srgb(1.0, 0.55, 0.48))); }
                 details.spawn(text("TREASURY & COLLECTIONS", 15.0, MUTED));
@@ -506,25 +599,31 @@ fn editor(parent: &mut ChildSpawnerCommands, draft: &Draft, state: &State, unive
     });
     field(parent, "Name", &draft.name, Field::Name, state);
     if draft.kind == Kind::FlatFee {
-        row(parent, |row| {
-            button(
-                row,
-                format!(
-                    "Payer: {}",
-                    draft
-                        .payer
-                        .map_or_else(|| "Select citizen".into(), |id| name(universe, id))
-                ),
-                Choice::Payer,
-                false,
-            );
-            field(row, "Coins per week", &draft.coins, Field::Coins, state);
-        });
+        if draft.owner_payer {
+            parent.spawn(text(
+                "Payer: property owner at each matching location",
+                14.0,
+                MUTED,
+            ));
+            field(parent, "Coins per week", &draft.coins, Field::Coins, state);
+        } else {
+            row(parent, |row| {
+                button(
+                    row,
+                    format!(
+                        "Payer: {}",
+                        draft
+                            .payer
+                            .map_or_else(|| "Select citizen".into(), |id| name(universe, id))
+                    ),
+                    Choice::Payer,
+                    false,
+                );
+                field(row, "Coins per week", &draft.coins, Field::Coins, state);
+            });
+        }
     } else {
-        let goods = tax_goods(
-            draft.kind,
-            universe.map().place(state.place.unwrap()).unwrap().kind,
-        );
+        let goods = tax_goods(draft.kind, state.location_kind(universe).unwrap());
         parent.spawn(text(match draft.kind { Kind::Socage => "Percentage of each selected production output. Stacked total cannot exceed 100%.", Kind::Asset => "Weekly percentage of selected goods' stored and sale escrow value.", _ => "Percentage of gross sale revenue at this location." }, 13.0, MUTED));
         row(parent, |row| {
             if !goods.is_empty() {
@@ -634,7 +733,11 @@ fn tax_kind(draft: &Draft, goods: &[Good]) -> Result<TaxKind, String> {
             return Err("Flat fee must be positive.".into());
         }
         return Ok(TaxKind::FlatFee {
-            payer: TaxPayer::Agent(draft.payer.ok_or("Select a payer.")?),
+            payer: if draft.owner_payer {
+                TaxPayer::LocationOwner
+            } else {
+                TaxPayer::Agent(draft.payer.ok_or("Select a payer.")?)
+            },
             coins,
         });
     }
@@ -703,22 +806,49 @@ pub fn handle(
         let mutation = match *choice {
             Choice::Place(place) => {
                 state.place = Some(place);
+                state.location_type = None;
+                state.draft = None;
+                None
+            }
+            Choice::IndividualPlaces => {
+                state.location_type = None;
+                state.draft = None;
+                None
+            }
+            Choice::LocationTypes | Choice::LocationType(_) => {
+                state.location_type = Some(match *choice {
+                    Choice::LocationType(kind) => kind,
+                    _ => Location::Home,
+                });
                 state.draft = None;
                 None
             }
             Choice::New => {
+                let name = state
+                    .scope()
+                    .map(|scope| default_tax_name(universe, scope, Kind::FlatFee))
+                    .unwrap_or_default();
                 state.draft = Some(Draft {
+                    name,
                     payer: state.citizen,
+                    owner_payer: state.location_type.is_some(),
                     ..default()
                 });
                 None
             }
             Choice::Kind(kind) => {
-                let location = state
-                    .place
-                    .and_then(|id| universe.map().place(id).ok().map(|place| place.kind));
+                let location = state.location_kind(universe);
+                let name = state
+                    .scope()
+                    .map(|scope| default_tax_name(universe, scope, kind));
                 if let Some(draft) = &mut state.draft {
                     draft.kind = kind;
+                    if draft.id.is_none()
+                        && draft.automatic_name
+                        && let Some(name) = name
+                    {
+                        draft.name = name;
+                    }
                     if let Some(location) = location {
                         let goods = tax_goods(kind, location);
                         draft.rates.retain(|(good, _)| goods.contains(good));
@@ -764,14 +894,14 @@ pub fn handle(
             Choice::Save => match state
                 .draft
                 .as_ref()
-                .and_then(|draft| state.place.map(|place| (draft, place)))
+                .and_then(|draft| state.scope().map(|scope| (draft, scope)))
             {
-                Some((draft, place)) => match tax_kind(
+                Some((draft, scope)) => match tax_kind(
                     draft,
-                    &tax_goods(draft.kind, universe.map().place(place).unwrap().kind),
+                    &tax_goods(draft.kind, state.location_kind(universe).unwrap()),
                 ) {
                     Ok(kind) => Some(Mutation::SaveTax {
-                        place,
+                        scope,
                         id: draft.id,
                         name: draft.name.trim().into(),
                         kind,
@@ -789,17 +919,16 @@ pub fn handle(
                     let mut draft = Draft {
                         id: Some(id),
                         name: rule.name.clone(),
+                        automatic_name: false,
+                        owner_payer: matches!(rule.scope, TaxScope::LocationType(_)),
                         ..default()
                     };
                     match &rule.kind {
                         TaxKind::FlatFee { payer, coins } => {
+                            draft.owner_payer = *payer == TaxPayer::LocationOwner;
                             draft.payer = match payer {
                                 TaxPayer::Agent(id) => Some(*id),
-                                TaxPayer::LocationOwner => universe
-                                    .map()
-                                    .place(state.place.unwrap())
-                                    .ok()
-                                    .and_then(|place| place.owner),
+                                TaxPayer::LocationOwner => None,
                             };
                             draft.coins = coins.to_string();
                         }
@@ -866,6 +995,15 @@ pub fn handle(
         let Some(field) = state.field else {
             continue;
         };
+        if field == Field::Name
+            && matches!(
+                &key.logical_key,
+                Key::Space | Key::Backspace | Key::Character(_)
+            )
+            && let Some(draft) = &mut state.draft
+        {
+            draft.automatic_name = false;
+        }
         match &key.logical_key {
             Key::Escape | Key::Enter | Key::Tab => state.field = None,
             Key::Space if field == Field::Name => {
@@ -902,6 +1040,207 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ui_app(universe: Universe, state: State) -> App {
+        let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(worker.snapshot()))
+            .insert_resource(worker)
+            .insert_resource(state)
+            .init_resource::<market::Selection>()
+            .add_message::<KeyboardInput>()
+            .add_systems(Update, handle);
+        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
+        app
+    }
+
+    fn press(app: &mut App, choice: Choice) {
+        let entity = app.world_mut().spawn((choice, Interaction::Pressed)).id();
+        app.update();
+        app.world_mut().despawn(entity);
+    }
+
+    #[test]
+    fn new_scope_names_follow_kind_until_customized() {
+        let mut app = ui_app(
+            Universe::default(),
+            State {
+                location_type: Some(Location::Field),
+                ..default()
+            },
+        );
+        press(&mut app, Choice::New);
+        assert_eq!(
+            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            "All fields Flat fee"
+        );
+        press(&mut app, Choice::Kind(Kind::Income));
+        assert_eq!(
+            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            "All fields Income"
+        );
+        {
+            let mut state = app.world_mut().resource_mut::<State>();
+            let draft = state.draft.as_mut().unwrap();
+            draft.name = "Custom charge".into();
+            draft.automatic_name = false;
+        }
+        press(&mut app, Choice::Kind(Kind::Asset));
+        assert_eq!(
+            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            "Custom charge"
+        );
+    }
+
+    #[test]
+    fn type_flat_fees_use_property_owner_and_existing_names_stay() {
+        let (universe, id) = Universe::default()
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Field),
+                "Original",
+                TaxKind::FlatFee {
+                    payer: TaxPayer::LocationOwner,
+                    coins: 5,
+                },
+            )
+            .unwrap();
+        let mut app = ui_app(
+            universe,
+            State {
+                location_type: Some(Location::Field),
+                ..default()
+            },
+        );
+        press(&mut app, Choice::Edit(id));
+        let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+        assert_eq!(
+            tax_kind(draft, &Good::ALL).unwrap(),
+            TaxKind::FlatFee {
+                payer: TaxPayer::LocationOwner,
+                coins: 5
+            }
+        );
+        press(&mut app, Choice::Kind(Kind::Income));
+        assert_eq!(
+            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            "Original"
+        );
+        assert!(WEEKLY_TAX_TIME.contains("Sunday at 04:00"));
+        assert!(WEEKLY_TAX_TIME.contains("Day 6"));
+    }
+
+    #[test]
+    fn existing_type_rate_rules_switch_to_owner_flat_fees() {
+        for kind in [
+            TaxKind::Socage {
+                rates: Default::default(),
+            },
+            TaxKind::Asset {
+                rates: Default::default(),
+            },
+            TaxKind::Income {
+                rates: Default::default(),
+            },
+        ] {
+            let (universe, id) = Universe::default()
+                .with_scoped_tax_rule(TaxScope::LocationType(Location::Field), "Original", kind)
+                .unwrap();
+            let mut app = ui_app(
+                universe,
+                State {
+                    location_type: Some(Location::Field),
+                    ..default()
+                },
+            );
+            press(&mut app, Choice::Edit(id));
+            press(&mut app, Choice::Kind(Kind::FlatFee));
+            app.world_mut()
+                .resource_mut::<State>()
+                .draft
+                .as_mut()
+                .unwrap()
+                .coins = "1".into();
+            let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+            assert_eq!(
+                tax_kind(draft, &Good::ALL).unwrap(),
+                TaxKind::FlatFee {
+                    payer: TaxPayer::LocationOwner,
+                    coins: 1
+                }
+            );
+            assert_eq!(draft.name, "Original");
+        }
+    }
+
+    #[test]
+    fn individual_view_distinguishes_shared_and_local_rules() {
+        let (universe, owner) = Universe::default()
+            .with_citizen("Ada", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (universe, place) = universe.with_property(owner, Location::Field).unwrap();
+        let fee = TaxKind::FlatFee {
+            payer: TaxPayer::LocationOwner,
+            coins: 5,
+        };
+        let (universe, _) = universe
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Field),
+                "Shared fee",
+                fee.clone(),
+            )
+            .unwrap();
+        let (universe, _) = universe
+            .with_tax_rule(
+                place,
+                "Local fee",
+                TaxKind::FlatFee {
+                    payer: TaxPayer::Agent(owner),
+                    coins: 5,
+                },
+            )
+            .unwrap();
+        let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(worker.snapshot()))
+            .insert_resource(State {
+                place: Some(place),
+                ..default()
+            })
+            .init_resource::<market::Selection>()
+            .add_systems(Update, refresh);
+        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
+        app.world_mut().spawn((Content, Node::default()));
+        app.update();
+        let labels: Vec<_> = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.clone())
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|text| text.contains("Shared fee | Flat fee | Inherited"))
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|text| text.contains("Local fee | Flat fee | Individual"))
+        );
+        assert!(labels.iter().any(|text| text == "View type to edit"));
+    }
+
+    #[test]
+    fn individual_default_name_uses_actual_property_name() {
+        let (universe, owner) = Universe::default()
+            .with_citizen("Ada", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (universe, place) = universe.with_property(owner, Location::Field).unwrap();
+        assert_eq!(
+            default_tax_name(&universe, TaxScope::Location(place), Kind::Socage),
+            format!("{} Socage", universe.map().place(place).unwrap().name)
+        );
+    }
 
     #[test]
     fn dirty_refresh_preserves_both_scroll_offsets() {
@@ -1203,8 +1542,8 @@ mod tests {
             .with_stored_good(place, GoodsOwner::Town, Good::Wheat, 20)
             .unwrap();
         let readout = stocks(&universe, place);
-        assert!(readout.contains("Ada | Wheat | 10 g stored"));
-        assert!(readout.contains("Town | Wheat | 20 g stored"));
+        assert!(readout.contains("Ada | Wheat | 10 g available"));
+        assert!(readout.contains("Town | Wheat | 20 g available"));
     }
 
     #[test]

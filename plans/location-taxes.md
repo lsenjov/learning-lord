@@ -1,5 +1,7 @@
 # Location taxes and town storage
 
+This records the initial implementation. Tax scopes, collection timing and Socage ownership were subsequently revised in [tax-scopes-and-reservations.md](tax-scopes-and-reservations.md).
+
 Implement the agreed first tranche: weekdays, a zero-balance town treasury, independently owned goods stored at locations, and player-configurable private-location taxes. Employment, public-location taxation and warehouse hauling are deferred.
 
 ## Steps

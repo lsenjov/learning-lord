@@ -149,6 +149,10 @@ mod tests {
             "Weekly household fee",
             "FlatFee",
             "taxation",
+            "scope",
+            "reservations",
+            "town_inventory",
+            "tax_reserved",
         ] {
             assert!(contents.contains(name), "missing {name}");
         }

@@ -7,6 +7,7 @@ use bevy::{
 use learning_lord_simulation::{
     AgentId, Universe,
     marketplace::{Good, GoodActivity, MarketPeriod},
+    production::Recipe,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -53,6 +54,7 @@ pub enum Readout {
     Price(Good),
     Title,
     PriceNow,
+    MaterialMargins,
     Period,
     Metrics,
     Buyers,
@@ -140,6 +142,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         .with_children(|details| {
             details.spawn((text("", 24.0, TEXT), Readout::Title));
             details.spawn((text("", 16.0, TEXT), Readout::PriceNow));
+            details.spawn((text("", 14.0, MUTED), Readout::MaterialMargins));
             crate::market_history::spawn(details);
             details.spawn(Node { column_gap: px(8), row_gap: px(8), flex_wrap: FlexWrap::Wrap, flex_shrink: 0.0, ..default() })
                 .with_children(|row| {
@@ -253,6 +256,43 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
     }
     groups.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.0.cmp(&b.id.0)));
     groups
+}
+
+fn raw_material_margin(universe: &Universe, recipe: Recipe) -> Option<f64> {
+    if recipe.inputs().is_empty() {
+        return None;
+    }
+    let output: f64 = recipe
+        .outputs()
+        .iter()
+        .map(|&(good, units)| universe.prices().value(good, units).unwrap())
+        .sum();
+    let materials: f64 = recipe
+        .inputs()
+        .iter()
+        .map(|&(good, units)| universe.prices().value(good, units).unwrap())
+        .sum();
+    (output > 0.0).then_some((output - materials) / output * 100.0)
+}
+
+fn material_margins(universe: &Universe, good: Good, detail: bool) -> String {
+    let rows: Vec<_> = Recipe::ALL
+        .into_iter()
+        .filter(|recipe| recipe.outputs().iter().any(|&(output, _)| output == good))
+        .filter_map(|recipe| {
+            raw_material_margin(universe, recipe)
+                .map(|margin| format!("{}: {margin:.1}%", recipe.name()))
+        })
+        .collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let prefix = if detail {
+        "RAW MATERIAL MARGIN\n"
+    } else {
+        "Raw material margin\n"
+    };
+    format!("{prefix}{}", rows.join("\n"))
 }
 
 fn order_label(good: Good, units: u64, price: f64) -> String {
@@ -394,11 +434,20 @@ pub fn refresh(
     };
     for (readout, mut value) in &mut readouts {
         let next = match *readout {
-            Readout::Price(good) => format!(
-                "{:.3} coins/{}",
-                universe.prices().price(good).unwrap(),
-                good.price_unit_name()
-            ),
+            Readout::Price(good) => {
+                let price = format!(
+                    "{:.3} coins/{}",
+                    universe.prices().price(good).unwrap(),
+                    good.price_unit_name()
+                );
+                let margins = material_margins(universe, good, false);
+                if margins.is_empty() {
+                    price
+                } else {
+                    format!("{price}\n{margins}")
+                }
+            }
+            Readout::MaterialMargins => material_margins(universe, selection.good(), true),
             Readout::Title => selection.good().name().into(),
             Readout::PriceNow => format!(
                 "Current price: {:.3} coins/{}",
@@ -474,6 +523,51 @@ mod tests {
     use learning_lord_simulation::{
         Citizen, CitizenAction, TRADE_DURATION_MS, locations::Map, marketplace::Prices,
     };
+
+    #[test]
+    fn material_margin_uses_reference_quantities_and_keeps_losses() {
+        use learning_lord_simulation::marketplace::Prices;
+        let prices = Prices::default()
+            .with_price(Good::Wheat, 40.0)
+            .unwrap()
+            .with_price(Good::Flour, 100.0)
+            .unwrap();
+        let universe = Universe::default().with_prices(prices);
+        assert_eq!(
+            raw_material_margin(&universe, Recipe::MillFlour),
+            Some(50.0)
+        );
+        assert_eq!(raw_material_margin(&universe, Recipe::GrowWheat), None);
+        assert!(material_margins(&universe, Good::Wheat, true).is_empty());
+        assert!(material_margins(&universe, Good::Flour, true).contains("Mill flour: 50.0%"));
+        let universe = universe.with_prices(prices.with_price(Good::Wheat, 120.0).unwrap());
+        assert_eq!(
+            raw_material_margin(&universe, Recipe::MillFlour),
+            Some(-50.0)
+        );
+    }
+
+    #[test]
+    fn material_margin_ignores_socage_rules() {
+        use learning_lord_simulation::{
+            locations::Location,
+            taxation::{TaxKind, TaxRate, TaxScope},
+        };
+        let universe = Universe::default();
+        let before = raw_material_margin(&universe, Recipe::MillFlour);
+        let (universe, _) = universe
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Mill),
+                "Socage",
+                TaxKind::Socage {
+                    rates: [(Good::Flour, TaxRate::new(9000).unwrap())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .unwrap();
+        assert_eq!(raw_material_margin(&universe, Recipe::MillFlour), before);
+    }
 
     #[test]
     fn quantities_include_transactions_once_and_label_periods() {

@@ -386,17 +386,16 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .map_or_else(String::new, |role| format!(" | {}", role.name()));
     let inventory = Good::ALL
         .into_iter()
-        .filter(|good| citizen.units(*good) != 0)
+        .filter(|good| citizen.units(*good) != 0 || citizen.town_carried_units(*good) != 0)
         .map(|good| {
             format!(
-                "{}: {}",
+                "{}: {} available | {} tax reserved | {} town-owned",
                 good.name(),
-                quantity_label(good, citizen.units(good))
+                quantity_label(good, citizen.available_units(good)),
+                quantity_label(good, citizen.tax_reserved_units(good)),
+                quantity_label(good, citizen.town_carried_units(good))
             )
         })
-        .collect::<Vec<_>>()
-        .chunks(3)
-        .map(|row| row.join(" | "))
         .collect::<Vec<_>>()
         .join("\n");
     let mut properties = citizen
@@ -787,6 +786,62 @@ mod tests {
         assert!(text.contains("100 g missing"));
         let later = universe.advance(1).unwrap();
         assert_eq!(text, decision_readout(&later, Some(id)));
+    }
+
+    #[test]
+    fn carried_readout_separates_reserved_and_town_owned_goods() {
+        use learning_lord_simulation::{
+            locations::Location,
+            production::{Recipe, Skill},
+            taxation::{TaxKind, TaxRate},
+        };
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_skill(Skill::Tailoring, 1.0)
+            .unwrap()
+            .with_good(Good::Cloth, 25)
+            .unwrap();
+        let (universe, id) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_citizen("Ada", citizen)
+                .unwrap();
+        let (universe, place) = universe.with_property(id, Location::Tailory).unwrap();
+        let (universe, _) = universe
+            .with_tax_rule(
+                place,
+                "Socage",
+                TaxKind::Socage {
+                    rates: [(Good::FlaxBlock, TaxRate::new(10000).unwrap())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .unwrap();
+        let universe = universe
+            .start_action(id, CitizenAction::Produce(Recipe::MakeClothingBlock))
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
+        let universe = universe
+            .advance(citizen.active_action().unwrap().remaining_ms())
+            .unwrap();
+        let readout = citizen_readout(&universe, Some(id));
+        assert!(
+            readout.contains(
+                "Flax block: 0 blocks available | 1 block tax reserved | 0 blocks town-owned"
+            ),
+            "{readout}"
+        );
+        let universe = universe
+            .advance(
+                learning_lord_simulation::calendar::FIRST_WEEKLY_SETTLEMENT_MS
+                    - universe.current_time_ms(),
+            )
+            .unwrap();
+        let readout = citizen_readout(&universe, Some(id));
+        assert!(
+            readout.contains("0 blocks tax reserved | 1 block town-owned"),
+            "{readout}"
+        );
     }
 
     #[test]
