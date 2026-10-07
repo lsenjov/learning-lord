@@ -158,7 +158,7 @@ fn weekly_flat_fees_start_next_monday_and_multiweek_steps_assess_every_boundary(
             place,
             "Weekly",
             TaxKind::FlatFee {
-                payer: id,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(id),
                 coins: 7,
             },
         )
@@ -307,7 +307,7 @@ fn rule_edits_and_removal_preserve_arrears_and_retired_debts_retry_weekly() {
             place,
             "Fee",
             TaxKind::FlatFee {
-                payer: seller,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(seller),
                 coins: 20,
             },
         )
@@ -320,7 +320,7 @@ fn rule_edits_and_removal_preserve_arrears_and_retired_debts_retry_weekly() {
             rule,
             "Smaller",
             TaxKind::FlatFee {
-                payer: buyer,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(buyer),
                 coins: 0,
             },
         )
@@ -372,7 +372,7 @@ fn invalid_rules_and_references_preserve_configuration_snapshots() {
             warehouse,
             "Town",
             TaxKind::FlatFee {
-                payer: id,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(id),
                 coins: 1
             }
         ),
@@ -383,7 +383,7 @@ fn invalid_rules_and_references_preserve_configuration_snapshots() {
             PlaceId(uuid::Uuid::new_v4()),
             "Missing",
             TaxKind::FlatFee {
-                payer: id,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(id),
                 coins: 1
             }
         ),
@@ -394,7 +394,9 @@ fn invalid_rules_and_references_preserve_configuration_snapshots() {
             place,
             "Missing",
             TaxKind::FlatFee {
-                payer: AgentId(uuid::Uuid::new_v4()),
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(AgentId(
+                    uuid::Uuid::new_v4()
+                )),
                 coins: 1
             }
         ),
@@ -552,7 +554,7 @@ fn cancellation_after_collection_and_treasury_overflow_roll_back_all_tax_state()
             place,
             "Maximum",
             TaxKind::FlatFee {
-                payer: rich,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(rich),
                 coins: i64::MAX,
             },
         )
@@ -562,7 +564,7 @@ fn cancellation_after_collection_and_treasury_overflow_roll_back_all_tax_state()
             place,
             "Overflow",
             TaxKind::FlatFee {
-                payer: id,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(id),
                 coins: 1,
             },
         )
@@ -576,4 +578,144 @@ fn cancellation_after_collection_and_treasury_overflow_roll_back_all_tax_state()
     assert_eq!(world.town_treasury(), 0);
     assert_eq!(citizen(&world, rich).coins(), i64::MAX);
     assert!(world.tax_history().is_empty());
+}
+
+#[test]
+fn shared_socage_validates_empty_types_and_stacks_with_local_rules() {
+    use learning_lord_simulation::taxation::TaxScope;
+    let (source, id, place) = block_worker();
+    let (shared, _) = source
+        .with_scoped_tax_rule(
+            TaxScope::LocationType(Location::Field),
+            "Fields",
+            TaxKind::Socage {
+                rates: rates(Good::Wheat, 7000),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        shared.with_scoped_tax_rule(
+            TaxScope::LocationType(Location::Field),
+            "Too much",
+            TaxKind::Socage {
+                rates: rates(Good::Wheat, 3001)
+            }
+        ),
+        Err(SimulationError::InvalidTaxRule)
+    ));
+    let (future, field) = shared.with_property(id, Location::Field).unwrap();
+    assert_eq!(future.socage_rate(field, Good::Wheat).basis_points(), 7000);
+    let (local, _) = future
+        .with_tax_rule(
+            field,
+            "Local",
+            TaxKind::Socage {
+                rates: rates(Good::Wheat, 3000),
+            },
+        )
+        .unwrap();
+    assert_eq!(local.socage_rate(field, Good::Wheat).basis_points(), 10_000);
+    assert_eq!(local.socage_rate(place, Good::Wheat).basis_points(), 0);
+    assert!(matches!(
+        local.with_scoped_tax_rule(
+            TaxScope::LocationType(Location::Field),
+            "Extra",
+            TaxKind::Socage {
+                rates: rates(Good::Wheat, 1)
+            }
+        ),
+        Err(SimulationError::InvalidTaxRule)
+    ));
+    for kind in [
+        Location::Forest,
+        Location::River,
+        Location::Market,
+        Location::Warehouse,
+    ] {
+        assert!(matches!(
+            source.with_scoped_tax_rule(
+                TaxScope::LocationType(kind),
+                "Public",
+                TaxKind::Socage {
+                    rates: rates(Good::Wheat, 100)
+                }
+            ),
+            Err(SimulationError::InvalidTaxRule)
+        ));
+    }
+    assert!(source.tax_rules().is_empty());
+}
+
+#[test]
+fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
+    use learning_lord_simulation::taxation::{TaxPayer, TaxScope};
+    let (world, ada, first) = block_worker();
+    let (world, second) = world.with_property(ada, Location::Tailory).unwrap();
+    let (world, ben) = world
+        .with_citizen("Ben", Citizen::new(0.0).unwrap().with_coins(10).unwrap())
+        .unwrap();
+    let (world, third) = world.with_property(ben, Location::Tailory).unwrap();
+    let (world, rule) = world
+        .with_scoped_tax_rule(
+            TaxScope::LocationType(Location::Tailory),
+            "Owners",
+            TaxKind::FlatFee {
+                payer: TaxPayer::LocationOwner,
+                coins: 60,
+            },
+        )
+        .unwrap();
+    let world = world.advance(FIRST_WEEKLY_SETTLEMENT_MS).unwrap();
+    assert_eq!(world.tax_arrears(rule, ada), 20);
+    assert_eq!(world.tax_arrears(rule, ben), 50);
+    assert_eq!(world.town_treasury(), 110);
+    let receipts: Vec<_> = world
+        .tax_history()
+        .iter()
+        .filter(|receipt| receipt.rule == rule)
+        .collect();
+    assert_eq!(receipts.len(), 3);
+    assert!(
+        receipts
+            .windows(2)
+            .all(|pair| pair[0].place.0 < pair[1].place.0)
+    );
+    let ada_receipts: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.payer == ada)
+        .collect();
+    assert!(matches!(
+        ada_receipts[0].amount,
+        TaxAmount::Coins {
+            paid: 60,
+            arrears: 0,
+            ..
+        }
+    ));
+    assert!(matches!(
+        ada_receipts[1].amount,
+        TaxAmount::Coins {
+            paid: 40,
+            arrears: 20,
+            ..
+        }
+    ));
+    assert!(
+        receipts
+            .iter()
+            .any(|receipt| receipt.place == first && receipt.payer == ada)
+    );
+    assert!(
+        receipts
+            .iter()
+            .any(|receipt| receipt.place == second && receipt.payer == ada)
+    );
+    assert!(
+        receipts
+            .iter()
+            .any(|receipt| receipt.place == third && receipt.payer == ben)
+    );
+    let retired = world.without_tax_rule(rule).unwrap();
+    assert_eq!(retired.tax_arrears(rule, ada), 20);
+    assert_eq!(retired.tax_arrears(rule, ben), 50);
 }

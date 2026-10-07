@@ -1,4 +1,8 @@
-use crate::{AgentId, Coins, Quantity, SimulationError, locations::PlaceId, marketplace::Good};
+use crate::{
+    AgentId, Coins, Quantity, SimulationError,
+    locations::{Location, PlaceId},
+    marketplace::Good,
+};
 use imbl::{HashMap, OrdMap, Vector};
 
 pub const TAX_HISTORY_LIMIT: usize = 4096;
@@ -23,18 +27,30 @@ impl TaxRate {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaxScope {
+    Location(PlaceId),
+    LocationType(Location),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaxPayer {
+    Agent(AgentId),
+    LocationOwner,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaxKind {
     Socage { rates: HashMap<Good, TaxRate> },
     Asset { rates: HashMap<Good, TaxRate> },
     Income { rates: HashMap<Good, TaxRate> },
-    FlatFee { payer: AgentId, coins: Coins },
+    FlatFee { payer: TaxPayer, coins: Coins },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaxRule {
     pub id: TaxRuleId,
-    pub place: PlaceId,
+    pub scope: TaxScope,
     pub name: String,
     pub kind: TaxKind,
     pub active: bool,
@@ -66,6 +82,7 @@ pub struct TaxReceipt {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct AccountKey {
+    pub place: PlaceId,
     pub rule: TaxRuleId,
     pub payer: AgentId,
     pub good: Option<Good>,
@@ -179,6 +196,15 @@ impl Universe {
         name: impl Into<String>,
         kind: TaxKind,
     ) -> Result<(Self, TaxRuleId), SimulationError> {
+        self.with_scoped_tax_rule(TaxScope::Location(place), name, kind)
+    }
+
+    pub fn with_scoped_tax_rule(
+        &self,
+        scope: TaxScope,
+        name: impl Into<String>,
+        kind: TaxKind,
+    ) -> Result<(Self, TaxRuleId), SimulationError> {
         let id = TaxRuleId(self.taxation.next_rule_id);
         let mut universe = self.clone();
         universe.taxation.next_rule_id =
@@ -187,7 +213,7 @@ impl Universe {
             id,
             TaxRule {
                 id,
-                place,
+                scope,
                 name: name.into(),
                 kind,
                 active: true,
@@ -228,35 +254,92 @@ impl Universe {
         Ok(universe)
     }
 
+    pub fn tax_scope_matches(&self, scope: TaxScope, place: PlaceId) -> bool {
+        let Ok(location) = self.map.place(place) else {
+            return false;
+        };
+        if location.kind.is_public() || location.kind.is_town_owned() {
+            return false;
+        }
+        match scope {
+            TaxScope::Location(id) => id == place,
+            TaxScope::LocationType(kind) => kind == location.kind,
+        }
+    }
+
+    pub fn socage_rate(&self, place: PlaceId, good: Good) -> TaxRate {
+        let total = self
+            .taxation
+            .rules
+            .values()
+            .filter(|rule| rule.active && self.tax_scope_matches(rule.scope, place))
+            .filter_map(|rule| match &rule.kind {
+                TaxKind::Socage { rates } => rates.get(&good),
+                _ => None,
+            })
+            .map(|rate| u32::from(rate.0))
+            .sum::<u32>();
+        TaxRate(total as u16)
+    }
+
     fn validate_tax_rule(&self, id: TaxRuleId) -> Result<(), SimulationError> {
         let rule = &self.taxation.rules[&id];
-        let place = self.map.place(rule.place)?;
-        if place.kind.is_public() || place.kind.is_town_owned() || rule.name.trim().is_empty() {
+        let kind = match rule.scope {
+            TaxScope::Location(place) => self.map.place(place)?.kind,
+            TaxScope::LocationType(kind) => kind,
+        };
+        if kind.is_public() || kind.is_town_owned() || rule.name.trim().is_empty() {
             return Err(SimulationError::InvalidTaxRule);
         }
         if let TaxKind::FlatFee { payer, coins } = rule.kind {
-            if !self.agents.contains_key(&payer) {
-                return Err(SimulationError::AgentNotFound);
+            match (rule.scope, payer) {
+                (TaxScope::Location(_), TaxPayer::Agent(payer)) => {
+                    if !self.agents.contains_key(&payer) {
+                        return Err(SimulationError::AgentNotFound);
+                    }
+                }
+                (TaxScope::LocationType(_), TaxPayer::LocationOwner) => {}
+                _ => return Err(SimulationError::InvalidTaxRule),
             }
             if coins < 0 {
                 return Err(SimulationError::InvalidCoins);
             }
         }
         for good in Good::ALL {
-            let total: u64 = self
+            let inherited: u64 = self
                 .taxation
                 .rules
                 .values()
-                .filter(|other| other.active && other.place == rule.place)
+                .filter(|other| other.active && other.scope == TaxScope::LocationType(kind))
                 .filter_map(|other| match &other.kind {
                     TaxKind::Socage { rates } => rates.get(&good),
                     _ => None,
                 })
                 .map(|rate| u64::from(rate.0))
-                .try_fold(0_u64, u64::checked_add)
-                .ok_or(SimulationError::InvalidTaxRule)?;
-            if total > RATE_SCALE as u64 {
+                .sum();
+            if inherited > RATE_SCALE as u64 {
                 return Err(SimulationError::InvalidTaxRule);
+            }
+            for place in self
+                .map
+                .places()
+                .values()
+                .filter(|place| place.kind == kind)
+            {
+                let total: u64 = self
+                    .taxation
+                    .rules
+                    .values()
+                    .filter(|other| other.active && self.tax_scope_matches(other.scope, place.id))
+                    .filter_map(|other| match &other.kind {
+                        TaxKind::Socage { rates } => rates.get(&good),
+                        _ => None,
+                    })
+                    .map(|rate| u64::from(rate.0))
+                    .sum();
+                if total > RATE_SCALE as u64 {
+                    return Err(SimulationError::InvalidTaxRule);
+                }
             }
         }
         Ok(())
@@ -294,7 +377,7 @@ impl Universe {
             self.taxation.record(TaxReceipt {
                 time_ms,
                 rule: key.rule,
-                place: self.taxation.rules[&key.rule].place,
+                place: key.place,
                 payer: key.payer,
                 good: key.good,
                 amount: TaxAmount::Coins {
@@ -319,13 +402,14 @@ impl Universe {
             .taxation
             .rules
             .values()
-            .filter(|rule| rule.place == place)
+            .filter(|rule| self.tax_scope_matches(rule.scope, place))
             .cloned()
             .collect();
         let mut remaining = gross;
         let mut changed = false;
         for rule in rules {
             let key = AccountKey {
+                place,
                 rule: rule.id,
                 payer,
                 good: Some(good),
@@ -418,7 +502,7 @@ impl Universe {
             let payer = AgentId(seller);
             let good = Good::ALL[good];
             for rule in &rules {
-                if rule.place.0 != place {
+                if !self.tax_scope_matches(rule.scope, PlaceId(place)) {
                     continue;
                 }
                 let TaxKind::Income { rates } = &rule.kind else {
@@ -428,6 +512,7 @@ impl Universe {
                     continue;
                 };
                 let key = AccountKey {
+                    place: PlaceId(place),
                     rule: rule.id,
                     payer,
                     good: Some(good),
@@ -457,72 +542,85 @@ impl Universe {
             .collect();
         let mut assessed_keys = std::collections::HashSet::new();
         for rule in rules {
-            match rule.kind {
-                TaxKind::FlatFee { payer, coins } => {
-                    let key = AccountKey {
-                        rule: rule.id,
-                        payer,
-                        good: None,
-                    };
-                    assessed_keys.insert(key);
-                    if self.collect_coin_account(key, coins, time_ms)? {
-                        changed.push(payer);
-                    }
-                }
-                TaxKind::Asset { rates } => {
-                    let mut stocks =
-                        std::collections::BTreeMap::<(uuid::Uuid, usize), Quantity>::new();
-                    for (key, units) in self.storage.stock() {
-                        if key.place != rule.place {
-                            continue;
-                        }
-                        let GoodsOwner::Agent(payer) = key.owner else {
-                            continue;
+            let mut places: Vec<_> = self
+                .map
+                .places()
+                .values()
+                .filter(|place| self.tax_scope_matches(rule.scope, place.id))
+                .map(|place| (place.id, place.owner))
+                .collect();
+            places.sort_by_key(|(place, _)| place.0);
+            for (place, owner) in places {
+                match &rule.kind {
+                    TaxKind::FlatFee { payer, coins } => {
+                        let payer = match payer {
+                            TaxPayer::Agent(id) => *id,
+                            TaxPayer::LocationOwner => owner.expect("private location owner"),
                         };
-                        let total = stocks.entry((payer.0, key.good as usize)).or_default();
-                        *total = total
-                            .checked_add(*units)
-                            .ok_or(SimulationError::InventoryOverflow)?;
-                    }
-                    for order in self
-                        .market
-                        .orders()
-                        .filter(|order| order.place == rule.place)
-                    {
-                        let total = stocks
-                            .entry((order.seller.0, order.good as usize))
-                            .or_default();
-                        *total = total
-                            .checked_add(order.units)
-                            .ok_or(SimulationError::InventoryOverflow)?;
-                    }
-                    for ((payer, good), units) in stocks {
-                        let good = Good::ALL[good];
-                        let Some(&rate) = rates.get(&good) else {
-                            continue;
-                        };
+                        let coins = *coins;
                         let key = AccountKey {
+                            place,
                             rule: rule.id,
-                            payer: AgentId(payer),
-                            good: Some(good),
+                            payer,
+                            good: None,
                         };
-                        let value = self
-                            .prices()
-                            .value(good, units)
-                            .ok_or(SimulationError::InvalidPrices)?;
-                        let assessed = self
-                            .taxation
-                            .accounts
-                            .entry(key)
-                            .or_default()
-                            .assess_asset(value, rate)?;
                         assessed_keys.insert(key);
-                        if self.collect_coin_account(key, assessed, time_ms)? {
-                            changed.push(key.payer);
+                        if self.collect_coin_account(key, coins, time_ms)? {
+                            changed.push(payer);
                         }
                     }
+                    TaxKind::Asset { rates } => {
+                        let mut stocks =
+                            std::collections::BTreeMap::<(uuid::Uuid, usize), Quantity>::new();
+                        for (key, units) in self.storage.stock() {
+                            if key.place != place {
+                                continue;
+                            }
+                            let GoodsOwner::Agent(payer) = key.owner else {
+                                continue;
+                            };
+                            let total = stocks.entry((payer.0, key.good as usize)).or_default();
+                            *total = total
+                                .checked_add(*units)
+                                .ok_or(SimulationError::InventoryOverflow)?;
+                        }
+                        for order in self.market.orders().filter(|order| order.place == place) {
+                            let total = stocks
+                                .entry((order.seller.0, order.good as usize))
+                                .or_default();
+                            *total = total
+                                .checked_add(order.units)
+                                .ok_or(SimulationError::InventoryOverflow)?;
+                        }
+                        for ((payer, good), units) in stocks {
+                            let good = Good::ALL[good];
+                            let Some(&rate) = rates.get(&good) else {
+                                continue;
+                            };
+                            let key = AccountKey {
+                                place,
+                                rule: rule.id,
+                                payer: AgentId(payer),
+                                good: Some(good),
+                            };
+                            let value = self
+                                .prices()
+                                .value(good, units)
+                                .ok_or(SimulationError::InvalidPrices)?;
+                            let assessed = self
+                                .taxation
+                                .accounts
+                                .entry(key)
+                                .or_default()
+                                .assess_asset(value, rate)?;
+                            assessed_keys.insert(key);
+                            if self.collect_coin_account(key, assessed, time_ms)? {
+                                changed.push(key.payer);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         let mut debts: Vec<_> = self
@@ -532,12 +630,79 @@ impl Universe {
             .filter(|(_, account)| account.arrears > 0)
             .map(|(key, _)| *key)
             .collect();
-        debts.sort_by_key(|key| (key.rule, key.payer.0, key.good.map(|good| good as usize)));
+        debts.sort_by_key(|key| {
+            (
+                key.rule,
+                key.place.0,
+                key.payer.0,
+                key.good.map(|good| good as usize),
+            )
+        });
         for key in debts {
             if !assessed_keys.contains(&key) && self.collect_coin_account(key, 0, time_ms)? {
                 changed.push(key.payer);
             }
         }
         Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Citizen, locations::Map};
+
+    #[test]
+    fn shared_fractional_claims_stay_with_the_origin_property() {
+        let (world, payer) = Universe::with_map(Map::default())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_good(Good::Wheat, 10)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (world, first) = world.with_property(payer, Location::Field).unwrap();
+        let (world, second) = world.with_property(payer, Location::Field).unwrap();
+        let (mut world, rule) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Field),
+                "Half",
+                TaxKind::Socage {
+                    rates: [(Good::Wheat, TaxRate::new(5000).unwrap())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .unwrap();
+        world
+            .tax_production(payer, first, Good::Wheat, 1, 0)
+            .unwrap();
+        world
+            .tax_production(payer, second, Good::Wheat, 1, 0)
+            .unwrap();
+        assert_eq!(world.storage.units(first, GoodsOwner::Town, Good::Wheat), 0);
+        assert_eq!(
+            world.storage.units(second, GoodsOwner::Town, Good::Wheat),
+            0
+        );
+        world
+            .tax_production(payer, first, Good::Wheat, 1, 0)
+            .unwrap();
+        assert_eq!(world.storage.units(first, GoodsOwner::Town, Good::Wheat), 1);
+        assert_eq!(
+            world.storage.units(second, GoodsOwner::Town, Good::Wheat),
+            0
+        );
+        let key = AccountKey {
+            rule,
+            place: second,
+            payer,
+            good: Some(Good::Wheat),
+        };
+        assert_eq!(world.taxation.accounts[&key].goods_due_scaled, 5000);
+        let retired = world.without_tax_rule(rule).unwrap();
+        assert_eq!(retired.taxation.accounts[&key].goods_due_scaled, 5000);
     }
 }

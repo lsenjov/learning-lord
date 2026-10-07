@@ -97,7 +97,7 @@ mod tests {
                 citizen.home(),
                 "Weekly household fee",
                 learning_lord_simulation::taxation::TaxKind::FlatFee {
-                    payer: *id,
+                    payer: learning_lord_simulation::taxation::TaxPayer::Agent(*id),
                     coins: 5,
                 },
             )

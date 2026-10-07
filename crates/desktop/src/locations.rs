@@ -17,7 +17,7 @@ use learning_lord_simulation::{
     marketplace::Good,
     production::Recipe,
     storage::GoodsOwner,
-    taxation::{TaxAmount, TaxKind, TaxRate, TaxRuleId},
+    taxation::{TaxAmount, TaxKind, TaxPayer, TaxRate, TaxRuleId},
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -455,14 +455,14 @@ pub fn refresh(
                     button(row, "Deposit", Choice::Deposit, false); button(row, "Withdraw", Choice::Withdraw, false);
                 });
                 details.spawn(text("LOCATION TAXES", 15.0, MUTED));
-                let rules: Vec<_> = universe.tax_rules().values().filter(|rule| rule.place == place_id && rule.active).collect();
+                let rules: Vec<_> = universe.tax_rules().values().filter(|rule| universe.tax_scope_matches(rule.scope, place_id) && rule.active).collect();
                 if place.owner.is_none() { details.spawn(text(if place.kind.is_town_owned() { "Town location - no location taxes." } else { "Public location - no location taxes." }, 15.0, TEXT)); }
                 else {
                     if rules.is_empty() { details.spawn(text("Frankalmoigne - no active tax rules.", 15.0, TEXT)); }
                     for rule in rules {
                         details.spawn(text(format!("{} | {}", rule.name, kind_label(&rule.kind)), 16.0, TEXT));
                         details.spawn(text(match &rule.kind {
-                            TaxKind::FlatFee { payer, coins } => format!("{} coins weekly · {}", coins, name(universe, *payer)),
+                            TaxKind::FlatFee { payer, coins } => format!("{} coins weekly · {}", coins, match payer { TaxPayer::Agent(id) => name(universe, *id), TaxPayer::LocationOwner => "Property owner".into() }),
                             TaxKind::Socage { rates } | TaxKind::Asset { rates } | TaxKind::Income { rates } => {
                                 let mut rates: Vec<_> = rates.iter().map(|(good, rate)| format!("{}: {:.2}%", good.name(), f64::from(rate.basis_points()) / 100.0)).collect(); rates.sort(); rates.join(" · ")
                             }
@@ -626,7 +626,7 @@ fn tax_kind(draft: &Draft, goods: &[Good]) -> Result<TaxKind, String> {
             return Err("Flat fee must be positive.".into());
         }
         return Ok(TaxKind::FlatFee {
-            payer: draft.payer.ok_or("Select a payer.")?,
+            payer: TaxPayer::Agent(draft.payer.ok_or("Select a payer.")?),
             coins,
         });
     }
@@ -785,7 +785,14 @@ pub fn handle(
                     };
                     match &rule.kind {
                         TaxKind::FlatFee { payer, coins } => {
-                            draft.payer = Some(*payer);
+                            draft.payer = match payer {
+                                TaxPayer::Agent(id) => Some(*id),
+                                TaxPayer::LocationOwner => universe
+                                    .map()
+                                    .place(state.place.unwrap())
+                                    .ok()
+                                    .and_then(|place| place.owner),
+                            };
                             draft.coins = coins.to_string();
                         }
                         TaxKind::Socage { rates }
