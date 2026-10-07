@@ -611,7 +611,10 @@ mod tests {
             x: -750.0 + (slot % 7) as f64 * 250.0,
             y: -750.0 + (slot / 7) as f64 * 250.0,
         };
-        let mut map = Map::new(position(0), position(1), position(2)).unwrap();
+        let mut map = Map::new(position(0), position(1), position(2))
+            .unwrap()
+            .with_warehouse_position(position(3))
+            .unwrap();
         let roles = [
             StartingRole::Farmer,
             StartingRole::Miller,
@@ -629,7 +632,7 @@ mod tests {
             Some(Location::Tailory),
         ];
         let mut citizens = Vec::new();
-        let mut slot = 3;
+        let mut slot = 4;
         for index in 0..count {
             let role = roles[index % 6];
             let mut citizen = Citizen::with_needs(-50.0, -66.6)
@@ -686,8 +689,8 @@ mod tests {
         for id in ids {
             world = world.start_planning(id).unwrap();
         }
-        assert_eq!(world.map().places().len(), 3 + count + count / 6 * 5);
-        let mut home_slot = 3;
+        assert_eq!(world.map().places().len(), 4 + count + count / 6 * 5);
+        let mut home_slot = 4;
         for index in 0..count {
             let id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
             let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;

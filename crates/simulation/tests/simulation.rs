@@ -32,7 +32,7 @@ fn creation_assigns_v4_ids_and_preserves_existing_agents_and_time() {
         citizen(&second, first_id),
         &citizen(&first, first_id).with_map(second.map()).unwrap()
     );
-    assert_eq!(citizen(&first, first_id).map().places().len(), 4);
+    assert_eq!(citizen(&first, first_id).map().places().len(), 5);
     assert_eq!(second.agents()[&first_id].name, "Ada");
     assert_eq!(second.agents()[&second_id].name, "Bea");
     assert_eq!(citizen(&second, second_id).hunger(), 0.0);

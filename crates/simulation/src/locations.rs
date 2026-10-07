@@ -38,6 +38,7 @@ pub enum Location {
     Forest,
     River,
     Market,
+    Warehouse,
 }
 
 impl Location {
@@ -52,7 +53,11 @@ impl Location {
             Self::Forest => "Forest",
             Self::River => "River",
             Self::Market => "Market",
+            Self::Warehouse => "Warehouse",
         }
+    }
+    pub fn is_town_owned(self) -> bool {
+        self == Self::Warehouse
     }
     pub fn is_public(self) -> bool {
         matches!(self, Self::Forest | Self::River | Self::Market)
@@ -102,6 +107,9 @@ impl Map {
         ] {
             map = map.with_place(kind, position, None, kind.name())?.0;
         }
+        map = map
+            .with_place(Location::Warehouse, market, None, "Town warehouse")?
+            .0;
         Ok(map)
     }
     pub fn random() -> Self {
@@ -115,8 +123,32 @@ impl Map {
                 .unwrap()
                 .0;
         }
+        map = map
+            .with_place(
+                Location::Warehouse,
+                map.next_position(),
+                None,
+                "Town warehouse",
+            )
+            .unwrap()
+            .0;
         map
     }
+    pub fn with_warehouse_position(&self, position: Position) -> Result<Self, SimulationError> {
+        if !position.valid() {
+            return Err(SimulationError::InvalidPosition);
+        }
+        let mut map = self.clone();
+        let warehouse = map
+            .places
+            .iter_mut()
+            .map(|(_, place)| place)
+            .find(|place| place.kind.is_town_owned())
+            .expect("town warehouse exists");
+        warehouse.position = position;
+        Ok(map)
+    }
+
     pub fn places(&self) -> &HashMap<PlaceId, Place> {
         &self.places
     }
@@ -175,7 +207,7 @@ impl Map {
         if !position.valid() {
             return Err(SimulationError::InvalidPosition);
         }
-        if kind.is_public() != owner.is_none() {
+        if (kind.is_public() || kind.is_town_owned()) != owner.is_none() {
             return Err(SimulationError::InvalidOwnership);
         }
         let id = PlaceId(Uuid::new_v4());

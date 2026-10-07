@@ -759,13 +759,13 @@ mod tests {
     }
 
     #[test]
-    fn initial_town_has_forty_seven_separated_identified_places_and_agreed_starting_roles() {
+    fn initial_town_has_forty_eight_separated_identified_places_and_agreed_starting_roles() {
         use learning_lord_simulation::{AgentKind, locations::Location, marketplace::Good};
         for _ in 0..3 {
             let universe = new_universe().unwrap();
             let map = universe.map();
             let places: Vec<_> = map.places().values().collect();
-            assert_eq!(places.len(), 47);
+            assert_eq!(places.len(), 48);
             assert_eq!(
                 places
                     .iter()
@@ -775,7 +775,7 @@ mod tests {
             );
             assert_eq!(
                 places.iter().filter(|place| place.owner.is_none()).count(),
-                3
+                4
             );
             for (index, place) in places.iter().enumerate() {
                 assert_eq!(place.id.0.get_version_num(), 4);

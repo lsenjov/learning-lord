@@ -4,6 +4,9 @@ use rand::{RngExt, rngs::SmallRng};
 use std::fmt;
 use uuid::Uuid;
 
+pub mod calendar;
+pub mod storage;
+use storage::{GoodsOwner, StockKey, Storage};
 pub mod locations;
 pub mod marketplace;
 use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
@@ -176,6 +179,7 @@ pub struct Citizen {
     hunger_per_hour: f64,
     tiredness: f64,
     inventory: HashMap<Good, Quantity>,
+    storage: Storage,
     id: AgentId,
     home: PlaceId,
     starting_role: Option<StartingRole>,
@@ -224,6 +228,7 @@ impl Citizen {
             hunger_per_hour,
             tiredness: 0.0,
             inventory: Good::ALL.into_iter().map(|good| (good, 0)).collect(),
+            storage: Storage::default(),
             id,
             home,
             starting_role: None,
@@ -398,6 +403,10 @@ impl Citizen {
         Ok(citizen)
     }
 
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
     pub fn wealth(&self) -> Result<f64, SimulationError> {
         let mut wealth = self.coins as f64
             + self.prices.value(Good::FlaxGarment, 1).unwrap_or(0.0)
@@ -406,6 +415,9 @@ impl Citizen {
             let units = self
                 .units(good)
                 .checked_add(self.market.listed_units(self.id, good))
+                .and_then(|units| {
+                    units.checked_add(self.storage.owned_units(GoodsOwner::Agent(self.id), good))
+                })
                 .ok_or(SimulationError::WealthOverflow)?;
             wealth += self.prices.value(good, units).unwrap_or(0.0);
         }
@@ -1031,6 +1043,8 @@ pub struct Universe {
     map: Map,
     agents: HashMap<AgentId, Agent>,
     citizen_histories: HashMap<AgentId, history::CitizenHistory>,
+    storage: Storage,
+    town_treasury: Coins,
 }
 
 impl Default for Universe {
@@ -1041,6 +1055,8 @@ impl Default for Universe {
             map: Map::random(),
             agents: HashMap::new(),
             citizen_histories: HashMap::new(),
+            storage: Storage::default(),
+            town_treasury: 0,
         }
     }
 }
@@ -1086,6 +1102,132 @@ impl Universe {
         self.current_time_ms
     }
 
+    pub fn weekday(&self) -> calendar::Weekday {
+        calendar::Weekday::at(self.current_time_ms)
+    }
+
+    pub fn town_treasury(&self) -> Coins {
+        self.town_treasury
+    }
+
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
+    /// Sets starting stock without taking it from carried inventory.
+    pub fn with_stored_good(
+        &self,
+        place: PlaceId,
+        owner: GoodsOwner,
+        good: Good,
+        units: Quantity,
+    ) -> Result<Self, SimulationError> {
+        self.map.place(place)?;
+        if let GoodsOwner::Agent(id) = owner
+            && !self.agents.contains_key(&id)
+        {
+            return Err(SimulationError::AgentNotFound);
+        }
+        let mut universe = self.clone();
+        universe
+            .storage
+            .set_units(StockKey { place, owner, good }, units)?;
+        universe.refresh_market();
+        if let GoodsOwner::Agent(id) = owner {
+            let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
+            citizen.wealth()?;
+        }
+        Ok(universe)
+    }
+
+    pub fn deposit_goods(
+        &self,
+        id: AgentId,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+    ) -> Result<Self, SimulationError> {
+        self.transfer_storage(id, place, good, units, true)
+    }
+
+    pub fn withdraw_goods(
+        &self,
+        id: AgentId,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+    ) -> Result<Self, SimulationError> {
+        self.transfer_storage(id, place, good, units, false)
+    }
+
+    fn transfer_storage(
+        &self,
+        id: AgentId,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+        deposit: bool,
+    ) -> Result<Self, SimulationError> {
+        let AgentKind::Citizen(citizen) = &self
+            .agents
+            .get(&id)
+            .ok_or(SimulationError::AgentNotFound)?
+            .kind;
+        let location = citizen.accessible_place(place)?;
+        if matches!(
+            citizen.active_action.map(|active| active.action),
+            Some(CitizenAction::Travel(_))
+        ) {
+            return Err(SimulationError::CitizenBusy);
+        }
+        if citizen.position.distance(location.position) > 0.001 {
+            return Err(SimulationError::WrongLocation);
+        }
+        let owner = GoodsOwner::Agent(id);
+        let stored = self.storage.units(place, owner, good);
+        let carried = citizen.units(good);
+        let reserved = match citizen.active_action.map(|active| active.action) {
+            Some(CitizenAction::Produce(recipe)) => recipe
+                .inputs()
+                .iter()
+                .filter(|(input, _)| *input == good)
+                .map(|(_, units)| *units)
+                .sum(),
+            Some(CitizenAction::EquipClothing) if good == Good::FlaxGarment => 1,
+            _ => 0,
+        };
+        if deposit && units > carried.saturating_sub(reserved) {
+            return Err(SimulationError::MissingInputs);
+        }
+        let (next_carried, next_stored) = if deposit {
+            (
+                carried
+                    .checked_sub(units)
+                    .ok_or(SimulationError::MissingInputs)?,
+                stored
+                    .checked_add(units)
+                    .ok_or(SimulationError::InventoryOverflow)?,
+            )
+        } else {
+            (
+                carried
+                    .checked_add(units)
+                    .ok_or(SimulationError::InventoryOverflow)?,
+                stored
+                    .checked_sub(units)
+                    .ok_or(SimulationError::MissingInputs)?,
+            )
+        };
+        let mut universe = self.clone();
+        let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
+        citizen.inventory.insert(good, next_carried);
+        universe
+            .storage
+            .set_units(StockKey { place, owner, good }, next_stored)?;
+        universe.refresh_market();
+        Ok(universe)
+    }
+
     pub fn citizen_history(&self, id: AgentId) -> Option<&history::CitizenHistory> {
         self.citizen_histories.get(&id)
     }
@@ -1124,6 +1266,7 @@ impl Universe {
             .with_place_name(citizen.home, format!("{name}'s home"))?;
         citizen.map = universe.map.clone();
         citizen.market = universe.market.clone();
+        citizen.storage = universe.storage.clone();
         citizen.market_time_ms = universe.current_time_ms;
         citizen.work_period = production::work_period(universe.current_time_ms);
         for (_, agent) in universe.agents.iter_mut() {
@@ -1386,6 +1529,7 @@ impl Universe {
         for (_, agent) in self.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
             citizen.market = self.market.clone();
+            citizen.storage = self.storage.clone();
             citizen.prices = self.market.prices;
         }
     }
