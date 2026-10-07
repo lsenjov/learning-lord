@@ -77,7 +77,7 @@ enum Control {
 #[derive(Component)]
 enum Readout {
     Clock,
-    Market,
+    Town,
     Decision,
     Status,
     Citizen,
@@ -214,7 +214,7 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
                     });
                 }
             });
-        root.spawn((text("", 14.0, MUTED), Readout::Market));
+        root.spawn((text("", 14.0, MUTED), Readout::Town));
         root.spawn((text("", 13.0, MUTED), Readout::ExportStatus));
         market::spawn_tabs(root);
         root.spawn((market::ViewPanel(market::View::Citizens), Node {
@@ -648,12 +648,7 @@ fn refresh_display(
 ) {
     for (readout, mut text) in &mut readouts {
         let value = match readout {
-            Readout::Market => format!(
-                "Market: {} goods | {} sell orders | {} trades",
-                Good::COUNT,
-                snapshot.0.universe.market().orders().count(),
-                snapshot.0.universe.market().trades().len()
-            ),
+            Readout::Town => format!("Town: {} coins", snapshot.0.universe.town_treasury()),
             Readout::Clock => format_clock(snapshot.0.universe.current_time_ms()),
             Readout::Status => format!(
                 "{} | {}x",
@@ -1201,14 +1196,14 @@ mod tests {
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);
         assert!(!controls.restart_pending);
-        let market_text = app
+        let town_text = app
             .world_mut()
             .query::<(&Readout, &Text)>()
             .iter(app.world())
-            .find(|(readout, _)| matches!(readout, Readout::Market))
+            .find(|(readout, _)| matches!(readout, Readout::Town))
             .unwrap()
             .1;
-        assert!(market_text.0.contains("12 goods"));
+        assert_eq!(town_text.0, "Town: 0 coins");
 
         let directory = std::env::temp_dir().join(format!(
             "learning-lord-export-ui-{}-{}",
