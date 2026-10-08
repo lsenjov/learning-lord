@@ -1,6 +1,7 @@
 use bevy::prelude::Resource;
 use learning_lord_simulation::{
-    Citizen, PlanningRuntime, SimulationError, Universe, marketplace::Good,
+    Citizen, PlanningRuntime, SimulationError, Universe,
+    marketplace::{Good, Prices},
 };
 use std::{
     collections::VecDeque,
@@ -295,7 +296,8 @@ pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 24
 };
 
 pub fn new_universe() -> Result<Universe, SimulationError> {
-    let mut universe = Universe::starting_at(START_TIME_MS);
+    let initial_prices = Prices::core().with_price(Good::Berries, 65.0)?;
+    let mut universe = Universe::starting_at(START_TIME_MS).with_prices(initial_prices);
     let mut ids = Vec::new();
     for (name, role) in STARTING_CITIZENS {
         let mut citizen = Citizen::with_needs(-50.0, -66.6)?
@@ -1003,6 +1005,17 @@ mod tests {
         let source = universe.clone();
         assert_eq!(universe.agents().len(), 24);
         assert_eq!(universe.current_time_ms(), START_TIME_MS);
+        for good in Good::ALL {
+            let expected = if good == Good::Berries {
+                65.0
+            } else {
+                good.core_price()
+            };
+            assert_eq!(universe.prices().price(good), Some(expected));
+        }
+        assert_eq!(Good::Berries.core_price(), 650.0);
+        assert_eq!(Good::Berries.export_threshold(), 325.0);
+        assert_eq!(Good::Berries.import_threshold(), 975.0);
         assert!(universe.market().previous_period().is_none());
         assert_eq!(
             universe.market().current_period().start_ms,
@@ -1216,10 +1229,12 @@ mod tests {
         assert!(state.apply(Command::Restart, Duration::from_secs(10)));
         assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
         assert_eq!(state.universe.agents().len(), 24);
+        assert_eq!(state.universe.prices().price(Good::Berries), Some(65.0));
         for agent in state.universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert_eq!(citizen.units(Good::Bread), 14);
             assert_eq!(citizen.berries_units(), 0);
+            assert_eq!(citizen.prices(), state.universe.prices());
         }
         assert!(!state.universe.agents().contains_key(&old_ids[0]));
         assert_eq!(state.universe.prices(), old_prices);
