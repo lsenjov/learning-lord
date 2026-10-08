@@ -1,5 +1,7 @@
 use bevy::prelude::Resource;
-use learning_lord_simulation::{Citizen, PlanningRuntime, SimulationError, Universe};
+use learning_lord_simulation::{
+    Citizen, PlanningRuntime, SimulationError, Universe, marketplace::Good,
+};
 use std::{
     collections::VecDeque,
     num::NonZeroU32,
@@ -297,7 +299,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
     let mut ids = Vec::new();
     for (name, role) in STARTING_CITIZENS {
         let mut citizen = Citizen::with_needs(-50.0, -66.6)?
-            .with_berries(310)?
+            .with_good(Good::Bread, 4)?
             .with_garment_condition(Some(0.5))?
             .with_starting_role(role)
             .with_coins(learning_lord_simulation::production::starting_coins(role))?;
@@ -1016,7 +1018,8 @@ mod tests {
             assert_eq!(citizen.hunger(), -50.0);
             assert_eq!(citizen.tiredness(), -66.6);
             assert_eq!(citizen.coins(), 3000);
-            assert_eq!(citizen.berries_units(), 310);
+            assert_eq!(citizen.berries_units(), 0);
+            assert_eq!(citizen.units(Good::Bread), 4);
             assert_eq!(citizen.garment_condition(), Some(0.5));
             assert_eq!(citizen.map(), universe.map());
             assert_eq!(citizen.prices(), universe.prices());
@@ -1133,20 +1136,21 @@ mod tests {
                 let AgentKind::Citizen(citizen) = &agent.kind;
                 assert_eq!(citizen.id(), *id);
                 assert_eq!(citizen.id().0.get_version_num(), 4);
-                assert_eq!(citizen.berries_units(), 310);
+                assert_eq!(citizen.berries_units(), 0);
                 assert_eq!(
                     citizen.coins(),
                     learning_lord_simulation::production::starting_coins(
                         citizen.starting_role().unwrap()
                     )
                 );
-                for good in Good::ALL.into_iter().filter(|good| *good != Good::Berries) {
+                for good in Good::ALL {
                     let expected = learning_lord_simulation::production::starting_inputs(
                         citizen.starting_role().unwrap(),
                     )
                     .items()
                     .find(|(g, _)| *g == good)
-                    .map_or(0, |(_, units)| units);
+                    .map_or(0, |(_, units)| units)
+                        + if good == Good::Bread { 4 } else { 0 };
                     assert_eq!(citizen.units(good), expected);
                 }
                 assert_eq!(map.place(citizen.home()).unwrap().owner, Some(*id));
@@ -1203,6 +1207,11 @@ mod tests {
         assert!(state.apply(Command::Restart, Duration::from_secs(10)));
         assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
         assert_eq!(state.universe.agents().len(), 24);
+        for agent in state.universe.agents().values() {
+            let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
+            assert_eq!(citizen.units(Good::Bread), 4);
+            assert_eq!(citizen.berries_units(), 0);
+        }
         assert!(!state.universe.agents().contains_key(&old_ids[0]));
         assert_eq!(state.universe.prices(), old_prices);
         assert_ne!(state.universe.map(), old_map);
