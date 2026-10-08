@@ -231,6 +231,35 @@ mod tests {
             .unwrap()
     }
     #[test]
+    fn cabbage_demand_and_whole_head_stock_drive_crop_allocation() {
+        use crate::marketplace::ShoppingList;
+        let (mut citizen, field) = farmer();
+        citizen
+            .market
+            .set_request(citizen.id, ShoppingList::single(Good::Cabbage, 8))
+            .unwrap();
+        citizen.market.refresh_affordability(&[(citizen.id, 1000)]);
+        assert_eq!(citizen.next_crop_kind(), Some(CropKind::Cabbage));
+        assert_eq!(citizen.crop_demand()[0], 0.0);
+        assert_eq!(citizen.crop_demand()[1], 0.0);
+        assert!(citizen.crop_demand()[2] > 0.0);
+        citizen = perform(
+            citizen,
+            CitizenAction::Plant {
+                field,
+                plot: 0,
+                crop: CropKind::Cabbage,
+            },
+        );
+        assert_eq!(
+            citizen.crop(field, 0).unwrap().unwrap().kind,
+            CropKind::Cabbage
+        );
+        citizen.inventory.insert(Good::Cabbage, 88);
+        assert_eq!(citizen.next_crop_kind(), None);
+    }
+
+    #[test]
     fn planning_candidates_commit_crop_work_and_respect_future_capacity() {
         let (citizen, field) = farmer();
         let citizen = citizen

@@ -149,6 +149,7 @@ fn main() -> Result<(), String> {
                 inspectors::open_windows,
                 refresh_display,
                 citizens::refresh_cards,
+                citizens::refresh_diet,
                 citizens::refresh_plan,
                 citizens::scroll_panels,
             )
@@ -556,7 +557,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         |condition| format!("{:.1}%", condition * 100.0),
     );
     format!(
-        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nDrinking reserves: {:.0} g | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
+        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nDrinking reserves: {:.0} g | Reserve wellbeing: +{:.2}\nDiet wellbeing: +{:.2} | Each category decays 50/day; +5 at 50, +7 at 100\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
         agent.name,
         citizen.coins(),
         citizen
@@ -570,6 +571,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         citizen.food_reserve_wellbeing(),
         citizen.drinking_water_reserve(),
         citizen.water_reserve_wellbeing(),
+        citizen.dietary_wellbeing(),
         citizens::location_label(citizen)
     )
 }
@@ -579,6 +581,8 @@ fn quantity_label(good: Good, units: u64) -> String {
         match good {
             Good::FlaxBlock => "block",
             Good::FlaxGarment => "garment",
+            Good::Fish => "fish",
+            Good::Cabbage => "cabbage",
             _ => good.price_unit_name(),
         }
     } else {
@@ -1152,6 +1156,8 @@ mod tests {
         let universe = universe.start_action(id, CitizenAction::Eat).unwrap();
         let readout = citizen_readout(&universe, Some(id));
         assert!(readout.contains("Thirst: 25.0"));
+        assert!(readout.contains("Diet wellbeing: +0.00"));
+        assert!(readout.contains("Each category decays 50/day; +5 at 50, +7 at 100"));
         assert!(readout.contains("Eating & drinking | 00:01:40 remaining"));
         assert_eq!(
             action_label(CitizenAction::Drink, &Citizen::new(0.0).unwrap()),
@@ -1268,6 +1274,7 @@ mod tests {
                     market::handle_selection,
                     refresh_display,
                     citizens::refresh_cards,
+                    citizens::refresh_diet,
                     citizens::refresh_plan,
                     citizens::scroll_panels,
                     map_view::refresh,
@@ -1437,7 +1444,7 @@ mod tests {
                 .with_price(Good::Berries, 65.0)
                 .unwrap()
         );
-        assert_eq!(snapshot.universe.agents().len(), 24);
+        assert_eq!(snapshot.universe.agents().len(), 7);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);

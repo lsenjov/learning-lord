@@ -3811,8 +3811,17 @@ mod tests {
             .public_place(crate::locations::Location::Market);
         market.list(seller, place, Good::Bread, 1).unwrap();
         market.list(seller, place, Good::BerryPie, 1).unwrap();
+        market.list(seller, place, Good::Fish, 2).unwrap();
+        market.list(seller, place, Good::Cabbage, 2).unwrap();
         let source = source.with_coins(100).unwrap().with_market(market.clone());
         let variants = full_meals(&source);
+        for good in [Good::Fish, Good::Cabbage] {
+            assert!(variants.iter().any(|variant| {
+                matches!(variant.actions.as_slice(), [CitizenAction::BuyAt { list, .. }, CitizenAction::Eat]
+                    if list.units(good) == 2 && list.items().count() == 1)
+            }), "missing complete-meal purchase alternative for {}", good.name());
+        }
+
         let basket = variants
             .iter()
             .find(|variant| {

@@ -54,6 +54,11 @@ impl Need {
 }
 
 #[derive(Component)]
+pub struct DietLabel(learning_lord_simulation::diet::DietCategory);
+#[derive(Component)]
+pub struct DietFill(learning_lord_simulation::diet::DietCategory);
+
+#[derive(Component)]
 pub struct NeedLabel(usize, Need);
 #[derive(Component)]
 pub struct NeedFill(usize, Need);
@@ -191,6 +196,40 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
                 ))
                 .with_children(|panel| {
                     panel.spawn((text("", 17.0, TEXT), Readout::Citizen));
+                    for category in learning_lord_simulation::diet::DietCategory::ALL {
+                        panel.spawn((text("", 12.0, TEXT), DietLabel(category)));
+                        panel
+                            .spawn((
+                                Node {
+                                    width: percent(100),
+                                    height: px(7),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgb(0.04, 0.06, 0.08)),
+                            ))
+                            .with_children(|bar| {
+                                bar.spawn((
+                                    Node {
+                                        width: percent(0),
+                                        height: percent(100),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.24, 0.67, 0.53)),
+                                    DietFill(category),
+                                ));
+                                bar.spawn((
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: percent(50),
+                                        width: px(1),
+                                        height: percent(100),
+                                        ..default()
+                                    },
+                                    BackgroundColor(MUTED),
+                                ));
+                            });
+                    }
                     panel.spawn(text(
                         "ACTIVE PLAN  |  durations are planning estimates",
                         14.0,
@@ -553,6 +592,40 @@ pub fn refresh_cards(
     }
 }
 
+pub fn refresh_diet(
+    snapshot: Res<DisplaySnapshot>,
+    selection: Res<Selection>,
+    mut labels: Query<(&DietLabel, &mut Text)>,
+    mut fills: Query<(&DietFill, &mut Node)>,
+) {
+    let citizen = selected_agent(&snapshot.0.universe, selection.0).map(|agent| {
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        citizen
+    });
+    for (label, mut text) in &mut labels {
+        let next = citizen.map_or_else(
+            || "No citizen".into(),
+            |citizen| {
+                let value = citizen.diet(label.0);
+                format!(
+                    "{}: {value:.1}/100 | +{:.2} wellbeing",
+                    label.0.name(),
+                    learning_lord_simulation::diet::category_bonus(value)
+                )
+            },
+        );
+        if text.0 != next {
+            text.0 = next;
+        }
+    }
+    for (fill, mut node) in &mut fills {
+        let width = percent(citizen.map_or(0.0, |citizen| citizen.diet(fill.0) as f32));
+        if node.width != width {
+            node.width = width;
+        }
+    }
+}
+
 pub fn refresh_plan(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
@@ -675,6 +748,60 @@ mod tests {
     use super::*;
     use crate::simulation::{self, Snapshot};
     use learning_lord_simulation::{CitizenAction, locations::Map};
+
+    #[test]
+    fn selected_diet_bars_follow_consumption_and_selection() {
+        use learning_lord_simulation::diet::DietCategory;
+        let eater = Citizen::new(50.0)
+            .unwrap()
+            .with_good(learning_lord_simulation::marketplace::Good::Fish, 2)
+            .unwrap();
+        let (universe, eater_id) = Universe::with_map(Map::default())
+            .with_citizen("Eater", eater)
+            .unwrap();
+        let (universe, empty_id) = universe
+            .with_citizen("Empty", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let universe = universe
+            .start_action(eater_id, CitizenAction::Eat)
+            .unwrap()
+            .advance(500_000)
+            .unwrap();
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(Snapshot {
+            universe,
+            error: None,
+            mutation_error: None,
+            mutation_revision: 0,
+            planning_history: Default::default(),
+            generation: 0,
+            revision: 0,
+        }))
+        .insert_resource(Selection(Some(eater_id)))
+        .add_systems(Update, refresh_diet);
+        let label = app
+            .world_mut()
+            .spawn((DietLabel(DietCategory::Meat), Text::new("")))
+            .id();
+        let fill = app
+            .world_mut()
+            .spawn((DietFill(DietCategory::Meat), Node::default()))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Text>(label).unwrap().0,
+            "Meat: 49.7/100 | +4.97 wellbeing"
+        );
+        let width = app.world().get::<Node>(fill).unwrap().width;
+        assert!(matches!(width, Val::Percent(value) if (value - 49.71065).abs() < 0.001));
+        app.world_mut().resource_mut::<Selection>().0 = Some(empty_id);
+        app.update();
+        assert_eq!(app.world().get::<Node>(fill).unwrap().width, percent(0));
+        assert_eq!(
+            app.world().get::<Text>(label).unwrap().0,
+            "Meat: 0.0/100 | +0.00 wellbeing"
+        );
+    }
 
     #[test]
     fn wheel_scrolls_only_the_frontmost_window_and_shift_scrolls_horizontally() {
@@ -813,7 +940,7 @@ mod tests {
     fn every_citizen_is_reachable_and_restart_resets_selection() {
         let universe = simulation::new_universe().unwrap();
         let ids: Vec<_> = sorted_agents(&universe).iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids.len(), 24);
+        assert_eq!(ids.len(), 7);
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,

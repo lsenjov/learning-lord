@@ -321,6 +321,8 @@ fn chart_quantity_label(good: Good, units: f64) -> String {
             match good {
                 Good::FlaxBlock => "block",
                 Good::FlaxGarment => "garment",
+                Good::Fish => "fish",
+                Good::Cabbage => "cabbage",
                 _ => good.price_unit_name(),
             }
         } else {
@@ -910,6 +912,10 @@ mod tests {
     #[test]
     fn chart_quantities_distinguish_bulk_and_counted_goods() {
         assert_eq!(chart_quantity_label(Good::Berries, 1500.0), "1.500 kg");
+        assert_eq!(chart_quantity_label(Good::Fish, 1.0), "1 fish");
+        assert_eq!(chart_quantity_label(Good::Fish, 2.0), "2 fish");
+        assert_eq!(chart_quantity_label(Good::Cabbage, 1.0), "1 cabbage");
+        assert_eq!(chart_quantity_label(Good::Cabbage, 2.0), "2 cabbages");
         assert_eq!(chart_quantity_label(Good::Bread, 1.0), "1 loaf");
         assert_eq!(chart_quantity_label(Good::Bread, 2.0), "2 loaves");
         assert_eq!(chart_quantity_label(Good::BerryPie, 1.0), "1 pie");

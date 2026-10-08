@@ -832,4 +832,97 @@ mod tests {
         }
         assert_eq!(world, saved);
     }
+    #[test]
+    #[ignore = "manual fixed-input seven-profession ten-day performance probe"]
+    fn seven_profession_diet_town_probe() {
+        use crate::{StartingRole, diet::DietCategory, locations::Location, marketplace::Good};
+        use rand::SeedableRng;
+        let roles = [
+            (StartingRole::Farmer, Some(Location::Field)),
+            (StartingRole::Miller, Some(Location::Mill)),
+            (StartingRole::Woodcutter, None),
+            (StartingRole::Baker, Some(Location::Bakery)),
+            (StartingRole::Weaver, Some(Location::Weavery)),
+            (StartingRole::Tailor, Some(Location::Tailory)),
+            (StartingRole::Fisher, None),
+        ];
+        let mut world = Universe::with_map(Map::default())
+            .advance(6 * HOUR)
+            .unwrap()
+            .with_prices(
+                crate::marketplace::Prices::core()
+                    .with_price(Good::Berries, 65.0)
+                    .unwrap(),
+            );
+        let mut ids = Vec::new();
+        for (index, (role, property)) in roles.into_iter().enumerate() {
+            let mut citizen = Citizen::with_needs(-50.0, -66.6)
+                .unwrap()
+                .with_thirst(-50.0)
+                .unwrap()
+                .with_good(Good::Bread, 14)
+                .unwrap()
+                .with_garment_condition(Some(0.5))
+                .unwrap()
+                .with_starting_role(role)
+                .with_coins(crate::production::starting_coins(role))
+                .unwrap();
+            citizen.id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
+            citizen.forage_rng = rand::rngs::SmallRng::seed_from_u64(42 + index as u64);
+            for (good, units) in crate::production::starting_inputs(role).items() {
+                citizen = citizen.with_good(good, units).unwrap();
+            }
+            let (next, id) = world.with_citizen(role.name(), citizen).unwrap();
+            world = next;
+            if let Some(property) = property {
+                world = world.with_property(id, property).unwrap().0;
+            }
+            ids.push(id);
+        }
+        for id in &ids {
+            world = world.start_planning(*id).unwrap();
+        }
+        let mut runtime = PlanningRuntime::default();
+        let started = std::time::Instant::now();
+        for day in 1..=10 {
+            world = world
+                .advance_with_planner(&mut runtime, 24 * HOUR, || false)
+                .unwrap()
+                .unwrap();
+            let mut produced = [0; Good::COUNT];
+            let mut consumed = [0; Good::COUNT];
+            let mut diet = [0.0; 4];
+            let mut hunger = f64::NEG_INFINITY;
+            for id in &ids {
+                let history = world.citizen_history(*id).unwrap();
+                for period in history
+                    .completed
+                    .iter()
+                    .chain(std::iter::once(&history.current))
+                {
+                    for good in Good::ALL {
+                        produced[good as usize] += period.produced[good as usize];
+                        consumed[good as usize] += period.consumed[good as usize];
+                    }
+                }
+                let AgentKind::Citizen(citizen) = &world.agents()[id].kind;
+                for category in DietCategory::ALL {
+                    diet[category as usize] += citizen.diet(category);
+                }
+                hunger = hunger.max(citizen.hunger());
+            }
+            eprintln!(
+                "DIET TOWN day={day} wall_ms={:.1} produced_fish={} cabbage={} consumed_fish={} cabbage={} bread={} pie={} berries={} mean_diet={:?} max_hunger={hunger:.2}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                produced[Good::Fish as usize],
+                produced[Good::Cabbage as usize],
+                consumed[Good::Fish as usize],
+                consumed[Good::Cabbage as usize],
+                consumed[Good::Bread as usize],
+                consumed[Good::BerryPie as usize],
+                consumed[Good::Berries as usize],
+                diet.map(|value| value / 7.0)
+            );
+        }
+    }
 }

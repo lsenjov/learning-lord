@@ -373,11 +373,12 @@ pub(crate) fn plot_readout(plot: usize, crop: Option<Crop>, now: u64) -> String 
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Plot {} | {} | {} | Expected {} g\n{}\nReady: {}",
+        "Plot {} | {} | {} | Expected {} {}\n{}\nReady: {}",
         plot + 1,
         crop.kind.name(),
         status,
         crop.expected_yield(now),
+        crop.kind.good().unit_name(),
         tending,
         crate::format_clock(crop.ready_at_ms())
     )
@@ -1124,6 +1125,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cabbage_plot_yields_are_labelled_as_whole_heads() {
+        use learning_lord_simulation::farming::{CropKind, HOUR_MS};
+        for (tended, expected) in [([true, true], 8), ([true, false], 5)] {
+            let crop = Crop {
+                kind: CropKind::Cabbage,
+                planted_at_ms: 0,
+                tended,
+            };
+            let readout = plot_readout(0, Some(crop), 96 * HOUR_MS);
+            assert!(readout.contains(&format!("Cabbage | Ready | Expected {expected} cabbages")));
+        }
+    }
+
+    #[test]
     fn plots_show_empty_growing_ready_and_dead_crops_with_tending_windows() {
         use learning_lord_simulation::farming::{CropKind, HOUR_MS};
         assert_eq!(plot_readout(0, None, 0), "Plot 1 | Empty");
@@ -1541,7 +1556,7 @@ mod tests {
         let TaxKind::Socage { rates } = tax_kind(&draft, &goods).unwrap() else {
             panic!("expected socage");
         };
-        assert_eq!(rates.len(), 2);
+        assert_eq!(rates.len(), 3);
         assert_eq!(rates[&Good::Flax].basis_points(), 500);
     }
 
@@ -1574,11 +1589,11 @@ mod tests {
             ..default()
         };
         let goods = tax_goods(Kind::Socage, Location::Field);
-        assert_eq!(goods, vec![Good::Wheat, Good::Flax]);
+        assert_eq!(goods, vec![Good::Wheat, Good::Flax, Good::Cabbage]);
         let TaxKind::Socage { rates } = tax_kind(&draft, &goods).unwrap() else {
             panic!("expected socage");
         };
-        assert_eq!(rates.len(), 2);
+        assert_eq!(rates.len(), 3);
         assert!(rates.values().all(|rate| rate.basis_points() == 1234));
         let selected = Draft {
             rates: vec![(Good::Wheat, "5".into())],
