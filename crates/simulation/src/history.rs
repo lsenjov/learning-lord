@@ -295,9 +295,16 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
             &[0.0],
         );
     }
+    let diet_rates = start.diet_rates(start.active_action);
+    for (value, rate) in start.diet.into_iter().zip(diet_rates) {
+        split(value, value + rate * elapsed as f64, &[0.0, 50.0, 100.0]);
+    }
     fractions.sort_by(f64::total_cmp);
     let wellbeing = |fraction: f64| -> Result<f64, SimulationError> {
         let mut citizen = start.clone();
+        for ((value, initial), rate) in citizen.diet.iter_mut().zip(start.diet).zip(diet_rates) {
+            *value = (initial + rate * elapsed as f64 * fraction).clamp(0.0, 100.0);
+        }
         citizen.thirst = start.thirst + (end.thirst - start.thirst) * fraction;
         citizen.hunger = start.hunger + (end.hunger - start.hunger) * fraction;
         citizen.tiredness = start.tiredness + (end.tiredness - start.tiredness) * fraction;
@@ -408,6 +415,59 @@ impl PlanningHistory {
 mod tests {
     use super::*;
     use crate::{AgentKind, TRADE_DURATION_MS, Universe, marketplace::ShoppingList};
+
+    #[test]
+    fn diet_history_integrates_decay_clamps_and_bonus_thresholds_exactly() {
+        use crate::marketplace::DAY_MS;
+        for (initial, expected) in [(25.0, 0.625), (75.0, 4.625), (100.0, 6.0)] {
+            let baseline = Citizen::new(-100.0).unwrap();
+            let mut dietary = baseline.clone();
+            dietary.diet[0] = initial;
+            let end = dietary.advance(DAY_MS).unwrap();
+            let empty_end = baseline.advance(DAY_MS).unwrap();
+            let actual = wellbeing_average(&dietary, &end, DAY_MS).unwrap()
+                - wellbeing_average(&baseline, &empty_end, DAY_MS).unwrap();
+            assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn diet_history_is_chunk_invariant_at_meal_caps_and_drink_completion() {
+        let mut citizen = Citizen::new(-50.0)
+            .unwrap()
+            .with_good(Good::Berries, 1)
+            .unwrap()
+            .with_good(Good::Water, 200)
+            .unwrap();
+        citizen.diet = [0.01, 50.01, 100.0, 99.9];
+        let (world, id) = Universe::with_map(crate::locations::Map::default())
+            .with_citizen("Diet", citizen)
+            .unwrap();
+        let started = world.start_action(id, CitizenAction::Eat).unwrap();
+        let whole = started.advance(60_000).unwrap();
+        let chunks = started
+            .advance(500)
+            .unwrap()
+            .advance(500)
+            .unwrap()
+            .advance(20_000)
+            .unwrap()
+            .advance(39_000)
+            .unwrap();
+        let actual = whole
+            .citizen_history(id)
+            .unwrap()
+            .current
+            .average_wellbeing()
+            .unwrap();
+        let split = chunks
+            .citizen_history(id)
+            .unwrap()
+            .current
+            .average_wellbeing()
+            .unwrap();
+        assert!((actual - split).abs() < 1e-9, "{actual} != {split}");
+    }
 
     #[test]
     fn seller_rounding_gain_is_not_applied_before_the_sale_or_by_id_order() {

@@ -11,3 +11,7 @@ Food supplier search uses one order beginning with each food, followed by catalo
 ## Step 1 completed
 
 Added whole Fish/Cabbage goods, qualified time-based fishing, cabbage care/harvest and per-crop demand normalization, and seven starting citizens. Independent review found missing exhaustive integration fixture cases, which were fixed; subsequent review reported no high/medium issues. Validation: workspace check, all simulation integration tests compile, 31 focused simulation integration tests plus 8 farming units, and desktop starting resources and seven-role/sixteen-place tests pass.
+
+## Step 2 completed
+
+Added Meat/Carbs/Fibre/Sweets dietary values starting at zero, gradual actual food intake, 50/day bounded decay, and category bonuses of +5 at 50 and +7 at 100. Complete meals compare predicted final wellbeing including duration, diet, hunger and consumed food value/reserves; mixed partial meals remain available. Daily history integrates diet net rates exactly across zero/cap/bonus thresholds. Validation: full simulation library and integration suite pass, including food choice/cost, each food's proportional intake, analytical history averages, and meal/drink chunk invariance.

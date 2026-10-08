@@ -215,20 +215,20 @@ fn meals_choose_one_available_food_and_keep_other_inventory() {
         .with_good(Good::BerryPie, 1)
         .unwrap();
     let started = source.start_action(CitizenAction::Eat).unwrap();
-    assert_eq!(started.units(Good::Bread), 0);
-    assert_eq!(started.units(Good::BerryPie), 1);
+    assert_eq!(started.units(Good::Bread), 1);
+    assert_eq!(started.units(Good::BerryPie), 0);
     assert_eq!(started.berries_units(), 40);
     let duration = started.active_action().unwrap().duration_ms();
-    assert_eq!(duration, 100_000);
+    assert_eq!(duration, 125_000);
     let partial = started.advance(duration / 2).unwrap();
     close(
         partial.hunger(),
-        80.0 + duration as f64 / 7_200_000.0 * source.hunger_per_hour() - 25.0,
+        80.0 + duration as f64 / 7_200_000.0 * source.hunger_per_hour() - 30.0,
     );
     let complete = started.advance(duration).unwrap();
     close(
         complete.hunger(),
-        80.0 + duration as f64 / 3_600_000.0 * source.hunger_per_hour() - 50.0,
+        80.0 + duration as f64 / 3_600_000.0 * source.hunger_per_hour() - 60.0,
     );
 }
 
@@ -238,6 +238,8 @@ fn each_food_requires_a_whole_meal_and_nonfood_is_rejected() {
         (Good::Berries, 155, 50.0),
         (Good::Bread, 1, 50.0),
         (Good::BerryPie, 1, 60.0),
+        (Good::Fish, 2, 50.0),
+        (Good::Cabbage, 2, 50.0),
     ] {
         let source = Citizen::new(40.0).unwrap().with_good(good, units).unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();

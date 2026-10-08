@@ -14,6 +14,7 @@ use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
 mod background;
 pub mod planning;
 pub use background::PlanningRuntime;
+pub mod diet;
 pub mod farming;
 pub mod history;
 pub mod production;
@@ -233,6 +234,7 @@ impl StartingRole {
 pub struct Citizen {
     hunger: f64,
     thirst: f64,
+    diet: [f64; 4],
     garment_condition: Option<f64>,
     hunger_per_hour: f64,
     tiredness: f64,
@@ -286,6 +288,7 @@ impl Citizen {
         Ok(Self {
             hunger,
             thirst: 0.0,
+            diet: [0.0; 4],
             garment_condition: None,
             hunger_per_hour,
             tiredness: 0.0,
@@ -654,24 +657,9 @@ impl Citizen {
     }
 
     fn meal(&self) -> ([Quantity; Good::COUNT], f64) {
-        let complete = Good::FOOD
-            .into_iter()
-            .filter_map(|good| {
-                let nutrition = good.nutrition_per_unit()?;
-                let needed = (MEAL_NOURISHMENT / nutrition).ceil() as Quantity;
-                if self.available_units(good) < needed {
-                    return None;
-                }
-                let cost_per_nutrition =
-                    self.prices.value(good, needed)? / (needed as f64 * nutrition);
-                Some((good, needed, cost_per_nutrition))
-            })
-            .min_by(|a, b| {
-                a.2.total_cmp(&b.2)
-                    .then_with(|| (a.0 as usize).cmp(&(b.0 as usize)))
-            });
+        let complete = self.preferred_complete_meal();
         let mut units = [0; Good::COUNT];
-        if let Some((good, needed, _)) = complete {
+        if let Some((good, needed)) = complete {
             units[good as usize] = needed;
             return (units, needed as f64 * good.nutrition_per_unit().unwrap());
         }
@@ -992,7 +980,8 @@ impl Citizen {
             - self.tiredness.max(0.0)
             + self.wealth()? * WEALTH_WELLBEING_PER_COIN
             + self.food_reserve_wellbeing()
-            + self.water_reserve_wellbeing();
+            + self.water_reserve_wellbeing()
+            + self.dietary_wellbeing();
         if !wellbeing.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
@@ -1242,6 +1231,7 @@ impl Citizen {
         elapsed_ms: u64,
         active: Option<ActiveAction>,
     ) -> Result<(), SimulationError> {
+        self.advance_diet(elapsed_ms, active);
         self.garment_condition = self.garment_condition.map(|condition| {
             (condition - elapsed_ms as f64 / GARMENT_LIFETIME_MS as f64).clamp(0.0, 1.0)
         });
