@@ -265,6 +265,8 @@ impl ProductionTargets {
             personal_reserve[good as usize] = kept;
             food_left = (food_left - kept as f64 * nutrition).max(0.0);
         }
+        personal_reserve[Good::Water as usize] =
+            stocks[Good::Water as usize].min(crate::WATER_RESERVE_GRAMS);
         let mut recipes: Vec<_> = citizen
             .available_recipes()
             .filter_map(|recipe| {

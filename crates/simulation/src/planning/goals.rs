@@ -39,6 +39,18 @@ impl CitizenAction {
                 &[Food, ReplenishReserves]
             }
             Self::BuyFood(_) => &[],
+            Self::Produce(crate::production::Recipe::FetchWater) => {
+                &[ReplenishReserves, Production]
+            }
+            Self::Withdraw(Good::Water, _) => &[ReplenishReserves],
+            Self::Buy(list) | Self::BuyAt { list, .. }
+                if list.units(Good::Water) > 0
+                    && !list
+                        .items()
+                        .any(|(good, _)| good.nutrition_per_unit().is_some()) =>
+            {
+                &[ReplenishReserves]
+            }
             Self::Produce(recipe)
                 if recipe
                     .outputs()
@@ -1470,6 +1482,15 @@ fn variants_from(
         return production_prefixes(initial, prior_actions, &mut []);
     }
     if goal == Effect::ReplenishReserves {
+        if citizen.available_units(Good::Water) < crate::WATER_RESERVE_GRAMS {
+            let water =
+                crate::marketplace::ShoppingList::single(Good::Water, crate::WATER_RESERVE_GRAMS);
+            for candidate in prepare_inputs(&initial, &water, 0, prior_actions)? {
+                if candidate.actions.len() > initial.actions.len() {
+                    consider(candidate);
+                }
+            }
+        }
         for target in [
             crate::FOOD_RESERVE_FULL_BONUS_NUTRITION,
             200.0,
@@ -3267,6 +3288,76 @@ mod tests {
         assert_eq!(next.goal_average().unwrap(), local.average().unwrap());
     }
 
+    #[test]
+    fn water_reserves_withdraw_own_stock_before_obtaining_the_remainder() {
+        let buyer = Citizen::new(-50.0)
+            .unwrap()
+            .with_good(Good::Bread, 6)
+            .unwrap()
+            .with_good(Good::Water, 200)
+            .unwrap();
+        let listed = buyer
+            .start_action(CitizenAction::List(Good::Water, 200))
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        let variants = variants_after(
+            &Prediction::new(&listed, Cooldowns::default()),
+            Effect::ReplenishReserves,
+        )
+        .unwrap();
+        assert!(!variants.is_empty());
+        assert!(
+            variants
+                .iter()
+                .all(|p| p.actions.first() == Some(&CitizenAction::Withdraw(Good::Water, 200)))
+        );
+        assert!(
+            variants
+                .iter()
+                .all(|p| p.citizen.available_units(Good::Water) == 400)
+        );
+        assert_eq!(listed.market().listed_units(listed.id(), Good::Water), 200);
+    }
+
+    #[test]
+    fn water_reserves_compare_fetching_and_purchases_and_stop_when_stocked() {
+        let buyer = reserve_shopper(100, &[(Good::Water, 1000, 1.0)])
+            .with_good(Good::Bread, 6)
+            .unwrap();
+        let variants = variants_after(
+            &Prediction::new(&buyer, Cooldowns::default()),
+            Effect::ReplenishReserves,
+        )
+        .unwrap();
+        assert!(variants.iter().any(|p| p.actions.iter().any(|a| matches!(
+            a,
+            CitizenAction::Produce(crate::production::Recipe::FetchWater)
+        ))));
+        assert!(variants.iter().any(|p| {
+            p.actions
+                .iter()
+                .any(|a| matches!(a, CitizenAction::BuyAt { .. }))
+        }));
+        assert!(
+            variants
+                .iter()
+                .all(|p| p.citizen.available_units(Good::Water) >= crate::WATER_RESERVE_GRAMS)
+        );
+        let stocked = buyer
+            .with_good(Good::Water, crate::WATER_RESERVE_GRAMS)
+            .unwrap();
+        assert!(
+            variants_after(
+                &Prediction::new(&stocked, Cooldowns::default()),
+                Effect::ReplenishReserves
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(buyer.units(Good::Water), 0);
+    }
+
     fn reserve_shopper(coins: crate::Coins, listings: &[(Good, u64, f64)]) -> Citizen {
         let buyer = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
@@ -3518,7 +3609,11 @@ mod tests {
                 .iter()
                 .any(|variant| variant.actions == [CitizenAction::Withdraw(Good::Bread, 4)])
         );
-        let stocked = buyer.with_good(Good::Bread, 6).unwrap();
+        let stocked = buyer
+            .with_good(Good::Bread, 6)
+            .unwrap()
+            .with_good(Good::Water, crate::WATER_RESERVE_GRAMS)
+            .unwrap();
         assert!(
             variants_after(
                 &Prediction::new(&stocked, Cooldowns::default()),

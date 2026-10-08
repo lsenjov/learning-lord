@@ -105,6 +105,8 @@ fn execution_keeps_its_plan_for_two_hours_then_replans() {
     let original = Citizen::with_needs(-50.0, -100.0)
         .unwrap()
         .with_thirst(-100.0)
+        .unwrap()
+        .with_good(learning_lord_simulation::marketplace::Good::Water, 400)
         .unwrap();
     let mut executing = original.start_planning().unwrap();
     let initial_plan = executing.active_plan().unwrap().plan().clone();
@@ -324,6 +326,8 @@ fn planning_sleeps_when_tired_and_eats_before_sleep_when_hungry() {
     let tired = Citizen::with_needs(-50.0, 50.0)
         .unwrap()
         .with_thirst(-100.0)
+        .unwrap()
+        .with_good(learning_lord_simulation::marketplace::Good::Water, 400)
         .unwrap();
     assert_eq!(plan(&tired).unwrap().actions()[0], CitizenAction::Sleep);
     let hungry = Citizen::with_needs(60.0, 100.0)
@@ -341,6 +345,8 @@ fn sleep_replanning_waits_for_whole_goal_completion() {
     let original = Citizen::with_needs(-50.0, 50.0)
         .unwrap()
         .with_thirst(-100.0)
+        .unwrap()
+        .with_good(learning_lord_simulation::marketplace::Good::Water, 400)
         .unwrap()
         .start_planning()
         .unwrap();

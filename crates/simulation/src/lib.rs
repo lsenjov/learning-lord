@@ -24,6 +24,13 @@ pub type Coins = i64;
 pub const WEALTH_WELLBEING_PER_COIN: f64 = 0.1;
 pub const FOOD_RESERVE_FULL_BONUS_NUTRITION: f64 = 100.0;
 pub const FOOD_RESERVE_CAP_NUTRITION: f64 = 300.0;
+pub const WATER_RESERVE_GRAMS: Quantity = 400;
+pub const WATER_RESERVE_CAP_GRAMS: Quantity = 1_200;
+
+pub(crate) fn water_reserve_bonus(grams: f64) -> f64 {
+    0.025 * grams.min(WATER_RESERVE_GRAMS as f64)
+        + 0.005 * (grams.min(WATER_RESERVE_CAP_GRAMS as f64) - WATER_RESERVE_GRAMS as f64).max(0.0)
+}
 
 pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
 pub const THIRST_PER_HOUR: f64 = 100.0 / 24.0;
@@ -778,6 +785,9 @@ impl Citizen {
             reserve[good as usize] += kept;
             nutrition = (nutrition - kept as f64 * good.nutrition_per_unit().unwrap()).max(0.0);
         }
+        reserve[Good::Water as usize] = reserve[Good::Water as usize]
+            .checked_add(WATER_RESERVE_GRAMS)
+            .ok_or(SimulationError::InventoryOverflow)?;
         marketplace::ShoppingList::new(
             Good::ALL
                 .into_iter()
@@ -951,6 +961,20 @@ impl Citizen {
                     .max(0.0)
     }
 
+    pub fn drinking_water_reserve(&self) -> f64 {
+        self.available_units(Good::Water) as f64
+            + self.active_action.map_or(0.0, |active| {
+                let duration = active.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS;
+                active.drink_units as f64
+                    * duration.saturating_sub(active.duration_ms - active.remaining_ms) as f64
+                    / duration.max(1) as f64
+            })
+    }
+
+    pub fn water_reserve_wellbeing(&self) -> f64 {
+        water_reserve_bonus(self.drinking_water_reserve())
+    }
+
     pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
         let wellbeing = -self.clothing_need()
             - self.thirst.max(0.0)
@@ -960,7 +984,8 @@ impl Citizen {
             - (-self.hunger - 100.0).max(0.0)
             - self.tiredness.max(0.0)
             + self.wealth()? * WEALTH_WELLBEING_PER_COIN
-            + self.food_reserve_wellbeing();
+            + self.food_reserve_wellbeing()
+            + self.water_reserve_wellbeing();
         if !wellbeing.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
@@ -2232,6 +2257,34 @@ mod tests {
     }
 
     #[test]
+    fn water_reserves_diminish_and_follow_unconsumed_drinks() {
+        let source = Citizen::new(0.0)
+            .unwrap()
+            .with_good(Good::Water, 400)
+            .unwrap();
+        assert_eq!(source.water_reserve_wellbeing(), 10.0);
+        assert_eq!(
+            source
+                .with_good(Good::Water, 1200)
+                .unwrap()
+                .water_reserve_wellbeing(),
+            14.0
+        );
+        let drinking = source.start_action(CitizenAction::Drink).unwrap();
+        assert_eq!(drinking.water_reserve_wellbeing(), 10.0);
+        assert_eq!(
+            drinking.advance(30_000).unwrap().water_reserve_wellbeing(),
+            7.5
+        );
+        assert_eq!(source.units(Good::Water), 400);
+        let mut taxed = source.clone();
+        taxed.tax_reserved.insert(Good::Water, 400);
+        assert_eq!(taxed.water_reserve_wellbeing(), 0.0);
+        taxed.town_inventory.insert(Good::Water, 500);
+        assert_eq!(taxed.water_reserve_wellbeing(), 0.0);
+    }
+
+    #[test]
     fn alternative_ingredient_reserves_use_each_goods_maximum_requirement() {
         let worker = baker_with_targets();
         let targets = worker.production_targets().unwrap();
@@ -2243,9 +2296,20 @@ mod tests {
         let reserve = worker.reserved_goods().unwrap();
         assert_eq!(reserve.units(Good::Flour), 1200);
         assert_eq!(reserve.units(Good::Wood), 300);
-        assert_eq!(reserve.units(Good::Water), 1200);
+        assert_eq!(reserve.units(Good::Water), 1600);
         assert_eq!(reserve.units(Good::Berries), 800);
-        assert_eq!(worker.purchase_shortages().unwrap(), reserve);
+        let expected = marketplace::ShoppingList::new(reserve.items().map(|(good, units)| {
+            (
+                good,
+                if good == Good::Water {
+                    units - WATER_RESERVE_GRAMS
+                } else {
+                    units
+                },
+            )
+        }))
+        .unwrap();
+        assert_eq!(worker.purchase_shortages().unwrap(), expected);
     }
 
     #[test]
@@ -2269,7 +2333,7 @@ mod tests {
         let reserve = pie.reserved_goods().unwrap();
         assert_eq!(reserve.units(Good::Flour), 1300);
         assert_eq!(reserve.units(Good::Wood), 325);
-        assert_eq!(reserve.units(Good::Water), 1250);
+        assert_eq!(reserve.units(Good::Water), 1650);
         assert_eq!(reserve.units(Good::Berries), 800);
         let shortages = pie.purchase_shortages().unwrap();
         assert_eq!(shortages.units(Good::Flour), 1200);

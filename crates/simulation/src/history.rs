@@ -280,6 +280,14 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
             crate::FOOD_RESERVE_CAP_NUTRITION,
         ],
     );
+    split(
+        start.drinking_water_reserve(),
+        end.drinking_water_reserve(),
+        &[
+            crate::WATER_RESERVE_GRAMS as f64,
+            crate::WATER_RESERVE_CAP_GRAMS as f64,
+        ],
+    );
     if let Some(condition) = start.garment_condition {
         split(
             condition,
@@ -312,6 +320,10 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                     .max(0.0)
                     / duration as f64;
                 let initial_water_ratio = duration.saturating_sub(passed) as f64 / duration as f64;
+                value += crate::water_reserve_bonus(
+                    citizen.available_units(Good::Water) as f64
+                        + active.drink_units as f64 * water_ratio,
+                ) - citizen.water_reserve_wellbeing();
                 value += citizen
                     .prices
                     .value(Good::Water, active.drink_units)
@@ -438,6 +450,54 @@ mod tests {
                 whole.citizen_history(seller).unwrap().current.coins_earned,
                 1
             );
+        }
+    }
+
+    #[test]
+    fn drinking_reserve_clamps_have_chunk_independent_history() {
+        let citizen = Citizen::new(-50.0)
+            .unwrap()
+            .with_good(Good::Water, 1300)
+            .unwrap();
+        let (world, id) = Universe::with_map(citizen.map())
+            .with_citizen("Drinker", citizen)
+            .unwrap();
+        let started = world.start_action(id, CitizenAction::Drink).unwrap();
+        let whole = started.advance(crate::DRINK_DURATION_MS).unwrap();
+        let split = started.advance(20_000).unwrap().advance(40_000).unwrap();
+        let average = |u: &Universe| {
+            u.citizen_history(id)
+                .unwrap()
+                .current
+                .average_wellbeing()
+                .unwrap()
+        };
+        assert!((average(&whole) - average(&split)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn concurrent_drink_reserve_history_stops_at_its_component_completion() {
+        for water in [500, 1300] {
+            let citizen = Citizen::new(-50.0)
+                .unwrap()
+                .with_berries(155)
+                .unwrap()
+                .with_good(Good::Water, water)
+                .unwrap();
+            let (world, id) = Universe::with_map(citizen.map())
+                .with_citizen("Diner", citizen)
+                .unwrap();
+            let started = world.start_action(id, CitizenAction::Eat).unwrap();
+            let whole = started.advance(155_000).unwrap();
+            let split = started.advance(60_000).unwrap().advance(95_000).unwrap();
+            let average = |u: &Universe| {
+                u.citizen_history(id)
+                    .unwrap()
+                    .current
+                    .average_wellbeing()
+                    .unwrap()
+            };
+            assert!((average(&whole) - average(&split)).abs() < 1e-10);
         }
     }
 

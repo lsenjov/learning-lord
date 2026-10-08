@@ -480,7 +480,7 @@ fn completed_and_active_work_do_not_shrink_alternative_capacity() {
 }
 
 #[test]
-fn remaining_recipe_inputs_and_personal_food_use_separate_portions_of_inventory() {
+fn remaining_recipe_inputs_and_personal_reserves_use_separate_portions_of_inventory() {
     let (universe, baker) = producer(
         Universe::with_map(Map::default()),
         "Baker",
@@ -503,7 +503,7 @@ fn remaining_recipe_inputs_and_personal_food_use_separate_portions_of_inventory(
     let reserves = worker.reserved_goods().unwrap();
     assert_eq!(reserves.units(Good::Flour), 100);
     assert_eq!(reserves.units(Good::Wood), 25);
-    assert_eq!(reserves.units(Good::Water), 100);
+    assert_eq!(reserves.units(Good::Water), 500);
     assert_eq!(reserves.units(Good::Berries), 1030);
     assert_eq!(worker.excess_goods().unwrap().units(Good::Berries), 100);
     assert_eq!(citizen(&universe, baker).production_targets(), None);

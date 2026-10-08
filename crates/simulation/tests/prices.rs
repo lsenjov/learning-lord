@@ -102,6 +102,8 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .unwrap()
         .with_thirst(-100.0)
         .unwrap()
+        .with_good(Good::Water, 400)
+        .unwrap()
         .with_berries(200)
         .unwrap();
     let (universe, id) = Universe::with_map(Map::default())
