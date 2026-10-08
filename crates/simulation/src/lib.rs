@@ -212,6 +212,7 @@ pub enum StartingRole {
     Baker,
     Weaver,
     Tailor,
+    Fisher,
 }
 
 impl StartingRole {
@@ -223,6 +224,7 @@ impl StartingRole {
             Self::Baker => "Baker",
             Self::Weaver => "Weaver",
             Self::Tailor => "Tailor",
+            Self::Fisher => "Fisher",
         }
     }
 }
@@ -402,6 +404,7 @@ impl Citizen {
             StartingRole::Baker => production::Skill::Baking,
             StartingRole::Weaver => production::Skill::Weaving,
             StartingRole::Tailor => production::Skill::Tailoring,
+            StartingRole::Fisher => production::Skill::Fishing,
         };
         citizen.skills[skill as usize] = Some(0);
         citizen
@@ -604,7 +607,9 @@ impl Citizen {
             CitizenAction::Produce(recipe) => {
                 if matches!(
                     recipe,
-                    production::Recipe::GrowWheat | production::Recipe::GrowFlax
+                    production::Recipe::GrowWheat
+                        | production::Recipe::GrowFlax
+                        | production::Recipe::GrowCabbage
                 ) {
                     return Err(SimulationError::MissingInputs);
                 }
@@ -727,7 +732,9 @@ impl Citizen {
         production::Recipe::ALL.into_iter().filter(|recipe| {
             !matches!(
                 recipe,
-                production::Recipe::GrowWheat | production::Recipe::GrowFlax
+                production::Recipe::GrowWheat
+                    | production::Recipe::GrowFlax
+                    | production::Recipe::GrowCabbage
             ) && recipe.duration_ms(self).is_ok()
                 && self.production_place(*recipe).is_ok()
         })

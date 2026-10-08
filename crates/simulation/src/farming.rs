@@ -13,26 +13,30 @@ pub const GROWTH_MS: u64 = 96 * HOUR_MS;
 pub enum CropKind {
     Wheat,
     Flax,
+    Cabbage,
 }
 
 impl CropKind {
-    pub const ALL: [Self; 2] = [Self::Wheat, Self::Flax];
+    pub const ALL: [Self; 3] = [Self::Wheat, Self::Flax, Self::Cabbage];
     pub fn name(self) -> &'static str {
         match self {
             Self::Wheat => "Wheat",
             Self::Flax => "Flax",
+            Self::Cabbage => "Cabbage",
         }
     }
     pub fn good(self) -> Good {
         match self {
             Self::Wheat => Good::Wheat,
             Self::Flax => Good::Flax,
+            Self::Cabbage => Good::Cabbage,
         }
     }
     pub fn recipe(self) -> Recipe {
         match self {
             Self::Wheat => Recipe::GrowWheat,
             Self::Flax => Recipe::GrowFlax,
+            Self::Cabbage => Recipe::GrowCabbage,
         }
     }
 }
@@ -81,7 +85,11 @@ impl Crop {
         if self.status(now_ms) == CropStatus::Dead {
             0
         } else {
-            150 + 225 * self.tended.into_iter().filter(|tended| *tended).count() as Quantity
+            let care = self.tended.into_iter().filter(|tended| *tended).count() as Quantity;
+            match self.kind {
+                CropKind::Cabbage => 2 + 3 * care,
+                _ => 150 + 225 * care,
+            }
         }
     }
     pub fn tend_missed(self, stage: usize, now_ms: u64) -> bool {
@@ -377,7 +385,7 @@ mod tests {
             matches!(citizen.farming_actions()[0], CitizenAction::Tend { field: site, plot: 0, .. } if site == field)
         );
         citizen.market.refresh_affordability(&[(citizen.id, 0)]);
-        assert_eq!(citizen.crop_demand(), [1.0, 1.0]);
+        assert_eq!(citizen.crop_demand(), [1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -401,7 +409,7 @@ mod tests {
             )
             .unwrap();
         assert!(citizen.market.current_period().goods[Good::Wheat as usize].exported_units > 0);
-        assert_eq!(citizen.crop_demand(), [1.0, 1.0]);
+        assert_eq!(citizen.crop_demand(), [1.0, 1.0, 1.0]);
         let (mut citizen, _) = farmer();
         citizen.market.prices = citizen
             .prices
@@ -684,11 +692,11 @@ impl Citizen {
         Some((base as f64 * (1.0 - skill_duration_reduction(practice))).ceil() as u64)
     }
 
-    fn crop_demand(&self) -> [f64; 2] {
+    fn crop_demand(&self) -> [f64; 3] {
         let start = self
             .market_time_ms
             .saturating_sub(7 * crate::marketplace::DAY_MS);
-        let mut demand = [0.0; 2];
+        let mut demand = [0.0; 3];
         for (index, kind) in CropKind::ALL.into_iter().enumerate() {
             demand[index] = self
                 .market
@@ -709,10 +717,10 @@ impl Citizen {
             demand[index] += current.local_traded_units as f64
                 + current.caravan_purchased_units as f64
                 + current.affordable_demand_units as f64;
-            demand[index] *= GROWTH_MS as f64 / 600.0;
+            demand[index] *= GROWTH_MS as f64 / kind.recipe().outputs()[0].1 as f64;
         }
         if demand.iter().sum::<f64>() == 0.0 {
-            [1.0, 1.0]
+            [1.0, 1.0, 1.0]
         } else {
             demand
         }
@@ -728,12 +736,15 @@ impl Citizen {
         let mut pipeline = CropKind::ALL.map(|kind| {
             (self.available_units(kind.good()) as f64
                 + self.market.listed_units(self.id, kind.good()) as f64)
-                / 600.0
+                / kind.recipe().outputs()[0].1 as f64
         });
         for place in self.owned_properties() {
             for crop in place.plots.iter().flatten() {
                 if crop.status(self.market_time_ms) != CropStatus::Dead {
-                    let index = if crop.kind == CropKind::Wheat { 0 } else { 1 };
+                    let index = CropKind::ALL
+                        .iter()
+                        .position(|kind| *kind == crop.kind)
+                        .unwrap();
                     pipeline[index] += 1.0;
                 }
             }

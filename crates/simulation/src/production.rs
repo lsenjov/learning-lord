@@ -16,10 +16,11 @@ pub enum Skill {
     Baking,
     Weaving,
     Tailoring,
+    Fishing,
 }
 
 impl Skill {
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Farming,
         Self::Milling,
@@ -27,6 +28,7 @@ impl Skill {
         Self::Baking,
         Self::Weaving,
         Self::Tailoring,
+        Self::Fishing,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -36,6 +38,7 @@ impl Skill {
             Self::Baking => "Baking",
             Self::Weaving => "Weaving",
             Self::Tailoring => "Tailoring",
+            Self::Fishing => "Fishing",
         }
     }
 }
@@ -54,10 +57,12 @@ pub enum Recipe {
     WeaveCloth,
     MakeClothingBlock,
     AssembleGarment,
+    CatchFish,
+    GrowCabbage,
 }
 
 impl Recipe {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 14;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Forage,
         Self::GrowWheat,
@@ -71,6 +76,8 @@ impl Recipe {
         Self::WeaveCloth,
         Self::MakeClothingBlock,
         Self::AssembleGarment,
+        Self::CatchFish,
+        Self::GrowCabbage,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -86,14 +93,17 @@ impl Recipe {
             Self::WeaveCloth => "Weave cloth",
             Self::MakeClothingBlock => "Make clothing block",
             Self::AssembleGarment => "Assemble garment",
+            Self::CatchFish => "Catch fish",
+            Self::GrowCabbage => "Grow cabbage",
         }
     }
     pub fn skill(self) -> Option<Skill> {
         match self {
-            Self::GrowWheat | Self::GrowFlax => Some(Skill::Farming),
+            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage => Some(Skill::Farming),
             Self::MillFlour => Some(Skill::Milling),
             Self::ChopWood => Some(Skill::Woodcutting),
             Self::FetchWater | Self::Forage => None,
+            Self::CatchFish => Some(Skill::Fishing),
             Self::BakeBread | Self::BakeBerryPie => Some(Skill::Baking),
             Self::SpinThread | Self::WeaveCloth => Some(Skill::Weaving),
             Self::MakeClothingBlock | Self::AssembleGarment => Some(Skill::Tailoring),
@@ -101,10 +111,10 @@ impl Recipe {
     }
     pub fn location(self) -> Location {
         match self {
-            Self::GrowWheat | Self::GrowFlax => Location::Field,
+            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage => Location::Field,
             Self::MillFlour => Location::Mill,
             Self::ChopWood | Self::Forage => Location::Forest,
-            Self::FetchWater => Location::River,
+            Self::FetchWater | Self::CatchFish => Location::River,
             Self::BakeBread | Self::BakeBerryPie => Location::Bakery,
             Self::SpinThread | Self::WeaveCloth => Location::Weavery,
             Self::MakeClothingBlock | Self::AssembleGarment => Location::Tailory,
@@ -112,9 +122,13 @@ impl Recipe {
     }
     pub fn inputs(self) -> &'static [(Good, Quantity)] {
         match self {
-            Self::GrowWheat | Self::GrowFlax | Self::ChopWood | Self::FetchWater | Self::Forage => {
-                &[]
-            }
+            Self::GrowWheat
+            | Self::GrowFlax
+            | Self::GrowCabbage
+            | Self::ChopWood
+            | Self::FetchWater
+            | Self::Forage
+            | Self::CatchFish => &[],
             Self::MillFlour => &[(Good::Wheat, 300)],
             Self::SpinThread => &[(Good::Flax, 200)],
             Self::WeaveCloth => &[(Good::Thread, 200)],
@@ -134,6 +148,8 @@ impl Recipe {
             Self::Forage => &[(Good::Berries, crate::FORAGE_AVERAGE_GRAMS)],
             Self::GrowWheat => &[(Good::Wheat, 600)],
             Self::GrowFlax => &[(Good::Flax, 600)],
+            Self::GrowCabbage => &[(Good::Cabbage, 8)],
+            Self::CatchFish => &[(Good::Fish, 1)],
             Self::SpinThread => &[(Good::Thread, 200)],
             Self::WeaveCloth => &[(Good::Cloth, 200)],
             Self::MakeClothingBlock => &[(Good::FlaxBlock, 1)],
@@ -148,12 +164,13 @@ impl Recipe {
     pub fn base_duration_ms(self) -> u64 {
         match self {
             Self::Forage
+            | Self::CatchFish
             | Self::FetchWater
             | Self::SpinThread
             | Self::WeaveCloth
             | Self::MakeClothingBlock
             | Self::AssembleGarment => 30 * 60_000,
-            Self::GrowWheat | Self::GrowFlax => 3 * 60 * 60_000,
+            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage => 3 * 60 * 60_000,
             Self::BakeBerryPie => 90 * 60_000,
             _ => 60 * 60_000,
         }

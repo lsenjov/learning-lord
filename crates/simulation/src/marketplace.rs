@@ -20,10 +20,12 @@ pub enum Good {
     Cloth,
     FlaxBlock,
     FlaxGarment,
+    Fish,
+    Cabbage,
 }
 
 impl Good {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 14;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Berries,
         Self::Wheat,
@@ -37,8 +39,16 @@ impl Good {
         Self::Cloth,
         Self::FlaxBlock,
         Self::FlaxGarment,
+        Self::Fish,
+        Self::Cabbage,
     ];
-    pub const FOOD: [Self; 3] = [Self::Berries, Self::Bread, Self::BerryPie];
+    pub const FOOD: [Self; 5] = [
+        Self::Berries,
+        Self::Bread,
+        Self::BerryPie,
+        Self::Fish,
+        Self::Cabbage,
+    ];
     pub fn core_price(self) -> f64 {
         Prices::core().price(self).unwrap()
     }
@@ -53,6 +63,7 @@ impl Good {
             Self::Berries => Some(crate::BERRY_NUTRITION_PER_GRAM),
             Self::Bread => Some(50.0),
             Self::BerryPie => Some(60.0),
+            Self::Fish | Self::Cabbage => Some(25.0),
             _ => None,
         }
     }
@@ -62,6 +73,8 @@ impl Good {
     }
     pub fn weight_grams(self) -> u64 {
         match self {
+            Self::Fish => 250,
+            Self::Cabbage => 500,
             Self::Bread => 100,
             Self::BerryPie => 125,
             Self::FlaxBlock => 25,
@@ -71,6 +84,8 @@ impl Good {
     }
     pub fn unit_name(self) -> &'static str {
         match self {
+            Self::Fish => "fish",
+            Self::Cabbage => "cabbages",
             Self::Bread => "loaves",
             Self::BerryPie => "pies",
             Self::FlaxBlock => "blocks",
@@ -82,13 +97,18 @@ impl Good {
         match self {
             Self::Bread => "loaf",
             Self::BerryPie => "pie",
-            Self::FlaxBlock | Self::FlaxGarment => "each",
+            Self::FlaxBlock | Self::FlaxGarment | Self::Fish | Self::Cabbage => "each",
             _ => "kg",
         }
     }
     pub fn units_per_price_unit(self) -> u64 {
         match self {
-            Self::Bread | Self::BerryPie | Self::FlaxBlock | Self::FlaxGarment => 1,
+            Self::Bread
+            | Self::BerryPie
+            | Self::FlaxBlock
+            | Self::FlaxGarment
+            | Self::Fish
+            | Self::Cabbage => 1,
             _ => 1000,
         }
     }
@@ -109,6 +129,8 @@ impl Good {
             Self::Cloth => "Cloth",
             Self::FlaxBlock => "Flax block",
             Self::FlaxGarment => "Flax garment",
+            Self::Fish => "Fish",
+            Self::Cabbage => "Cabbage",
         }
     }
 }

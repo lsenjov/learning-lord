@@ -7,8 +7,9 @@ use learning_lord_simulation::{
 
 fn worker(recipe: Recipe) -> Citizen {
     let role = match recipe {
-        Recipe::GrowWheat | Recipe::GrowFlax => StartingRole::Farmer,
+        Recipe::GrowWheat | Recipe::GrowFlax | Recipe::GrowCabbage => StartingRole::Farmer,
         Recipe::MillFlour => StartingRole::Miller,
+        Recipe::CatchFish => StartingRole::Fisher,
         Recipe::SpinThread | Recipe::WeaveCloth => StartingRole::Weaver,
         Recipe::MakeClothingBlock | Recipe::AssembleGarment => StartingRole::Tailor,
         Recipe::ChopWood | Recipe::Forage => StartingRole::Woodcutter,
@@ -53,10 +54,12 @@ fn close(a: impl Numeric, b: impl Numeric) {
 
 #[test]
 fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stocks() {
-    for recipe in Recipe::ALL
-        .into_iter()
-        .filter(|r| !matches!(r, Recipe::Forage | Recipe::GrowWheat | Recipe::GrowFlax))
-    {
+    for recipe in Recipe::ALL.into_iter().filter(|r| {
+        !matches!(
+            r,
+            Recipe::Forage | Recipe::GrowWheat | Recipe::GrowFlax | Recipe::GrowCabbage
+        )
+    }) {
         let source = worker(recipe);
         let started = source.start_action(CitizenAction::Produce(recipe)).unwrap();
         let duration = started.active_action().unwrap().duration_ms();

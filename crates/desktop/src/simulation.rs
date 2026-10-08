@@ -265,7 +265,7 @@ impl Pacing {
     }
 }
 
-pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 24] = {
+pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 7] = {
     use learning_lord_simulation::StartingRole;
     [
         ("Ada", StartingRole::Farmer),
@@ -274,24 +274,7 @@ pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 24
         ("Dara", StartingRole::Baker),
         ("Eira", StartingRole::Weaver),
         ("Finn", StartingRole::Tailor),
-        ("Gita", StartingRole::Farmer),
-        ("Hugo", StartingRole::Miller),
-        ("Iris", StartingRole::Woodcutter),
-        ("Jori", StartingRole::Baker),
-        ("Kira", StartingRole::Weaver),
-        ("Leon", StartingRole::Tailor),
-        ("Mara", StartingRole::Farmer),
-        ("Niko", StartingRole::Miller),
-        ("Orla", StartingRole::Woodcutter),
-        ("Perrin", StartingRole::Baker),
-        ("Quinn", StartingRole::Weaver),
-        ("Rosa", StartingRole::Tailor),
-        ("Soren", StartingRole::Farmer),
-        ("Tessa", StartingRole::Miller),
-        ("Una", StartingRole::Woodcutter),
-        ("Vera", StartingRole::Baker),
-        ("Wren", StartingRole::Weaver),
-        ("Yara", StartingRole::Tailor),
+        ("Gita", StartingRole::Fisher),
     ]
 };
 
@@ -329,7 +312,7 @@ fn workplace(
     match role {
         StartingRole::Farmer => Some(Location::Field),
         StartingRole::Miller => Some(Location::Mill),
-        StartingRole::Woodcutter => None,
+        StartingRole::Woodcutter | StartingRole::Fisher => None,
         StartingRole::Baker => Some(Location::Bakery),
         StartingRole::Weaver => Some(Location::Weavery),
         StartingRole::Tailor => Some(Location::Tailory),
@@ -1000,11 +983,10 @@ mod tests {
     }
 
     #[test]
-    fn twenty_four_citizens_start_with_agreed_role_supplies_and_advance_without_changing_the_source()
-     {
+    fn seven_citizens_start_with_agreed_role_supplies_and_advance_without_changing_the_source() {
         let universe = new_universe().unwrap();
         let source = universe.clone();
-        assert_eq!(universe.agents().len(), 24);
+        assert_eq!(universe.agents().len(), 7);
         assert_eq!(universe.current_time_ms(), START_TIME_MS);
         for good in Good::ALL {
             let expected = if good == Good::Berries {
@@ -1052,7 +1034,7 @@ mod tests {
         }
         let started = Instant::now();
         let next = universe.advance(STEP_MS).unwrap();
-        println!("First 24-citizen step: {:?}", started.elapsed());
+        println!("First seven-citizen step: {:?}", started.elapsed());
         assert_eq!(universe, source);
         assert_eq!(next.current_time_ms(), START_TIME_MS + STEP_MS);
         for (id, agent) in next.agents() {
@@ -1128,19 +1110,19 @@ mod tests {
     }
 
     #[test]
-    fn initial_town_has_forty_eight_separated_identified_places_and_agreed_starting_roles() {
+    fn initial_town_has_sixteen_separated_identified_places_and_agreed_starting_roles() {
         use learning_lord_simulation::{AgentKind, locations::Location, marketplace::Good};
         for _ in 0..3 {
             let universe = new_universe().unwrap();
             let map = universe.map();
             let places: Vec<_> = map.places().values().collect();
-            assert_eq!(places.len(), 48);
+            assert_eq!(places.len(), 16);
             assert_eq!(
                 places
                     .iter()
                     .filter(|place| place.kind == Location::Home)
                     .count(),
-                24
+                7
             );
             assert_eq!(
                 places.iter().filter(|place| place.owner.is_none()).count(),
@@ -1194,7 +1176,7 @@ mod tests {
                     assert!(citizen.owned_properties().any(|place| place.kind == kind));
                 }
             }
-            for (_, role) in &STARTING_CITIZENS[..6] {
+            for (_, role) in &STARTING_CITIZENS {
                 assert_eq!(
                     universe
                         .agents()
@@ -1204,7 +1186,7 @@ mod tests {
                             citizen.starting_role() == Some(*role)
                         })
                         .count(),
-                    4
+                    1
                 );
             }
             assert_eq!(universe.clone().map(), map);
@@ -1230,7 +1212,7 @@ mod tests {
         state.pacing.pending_simulated_ns = 123456789;
         assert!(state.apply(Command::Restart, Duration::from_secs(10)));
         assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
-        assert_eq!(state.universe.agents().len(), 24);
+        assert_eq!(state.universe.agents().len(), 7);
         assert_eq!(state.universe.prices().price(Good::Berries), Some(65.0));
         for agent in state.universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;

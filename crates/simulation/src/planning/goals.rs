@@ -138,13 +138,15 @@ impl CitizenAction {
     }
 }
 
-const ACTIONS: [CitizenAction; 6] = [
+const ACTIONS: [CitizenAction; 8] = [
     CitizenAction::Eat,
     CitizenAction::Sleep,
     CitizenAction::Produce(crate::production::Recipe::Forage),
     CitizenAction::BuyFood(Good::Berries),
     CitizenAction::BuyFood(Good::Bread),
     CitizenAction::BuyFood(Good::BerryPie),
+    CitizenAction::BuyFood(Good::Fish),
+    CitizenAction::BuyFood(Good::Cabbage),
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -341,15 +343,9 @@ fn suppliers(
     if requirement.resource != Effect::Food {
         return Ok(actions);
     }
-    let [a, b, c] = Good::FOOD;
-    for order in [
-        [a, b, c],
-        [a, c, b],
-        [b, a, c],
-        [b, c, a],
-        [c, a, b],
-        [c, b, a],
-    ] {
+    for first in Good::FOOD {
+        let order =
+            std::iter::once(first).chain(Good::FOOD.into_iter().filter(|good| *good != first));
         let mut remaining =
             (requirement.amount - state.citizen.available_food_nutrition()).max(0.0);
         let mut items = Vec::new();
