@@ -299,7 +299,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
     let mut ids = Vec::new();
     for (name, role) in STARTING_CITIZENS {
         let mut citizen = Citizen::with_needs(-50.0, -66.6)?
-            .with_good(Good::Bread, 4)?
+            .with_good(Good::Bread, 14)?
             .with_garment_condition(Some(0.5))?
             .with_starting_role(role)
             .with_coins(learning_lord_simulation::production::starting_coins(role))?;
@@ -1019,12 +1019,21 @@ mod tests {
             assert_eq!(citizen.tiredness(), -66.6);
             assert_eq!(citizen.coins(), 3000);
             assert_eq!(citizen.berries_units(), 0);
-            assert_eq!(citizen.units(Good::Bread), 4);
+            assert_eq!(citizen.units(Good::Bread), 14);
             assert_eq!(citizen.garment_condition(), Some(0.5));
             assert_eq!(citizen.map(), universe.map());
             assert_eq!(citizen.prices(), universe.prices());
             assert_eq!(citizen.position(), universe.map().position(citizen.home()));
             assert!(citizen.active_plan().is_some());
+        }
+        for place in universe
+            .map()
+            .places()
+            .values()
+            .filter(|place| place.kind == learning_lord_simulation::locations::Location::Field)
+        {
+            assert_eq!(place.plots.len(), 12);
+            assert!(place.plots.iter().all(Option::is_none));
         }
         let started = Instant::now();
         let next = universe.advance(STEP_MS).unwrap();
@@ -1045,7 +1054,7 @@ mod tests {
         let started = std::time::Instant::now();
         let source = new_universe().unwrap();
         let mut universe = source.clone();
-        for step in 0..144 {
+        for step in 0..480 {
             universe = universe
                 .advance(STEP_MS)
                 .unwrap_or_else(|error| panic!("Town step {step}: {error:?}"));
@@ -1056,7 +1065,7 @@ mod tests {
             }
         }
         println!(
-            "Three-day town: {:?}, {} trades, {} orders",
+            "Ten-day town: {:?}, {} trades, {} orders",
             started.elapsed(),
             universe.market().trades().len(),
             universe.market().orders().count()
@@ -1150,7 +1159,7 @@ mod tests {
                     .items()
                     .find(|(g, _)| *g == good)
                     .map_or(0, |(_, units)| units)
-                        + if good == Good::Bread { 4 } else { 0 };
+                        + if good == Good::Bread { 14 } else { 0 };
                     assert_eq!(citizen.units(good), expected);
                 }
                 assert_eq!(map.place(citizen.home()).unwrap().owner, Some(*id));
@@ -1209,7 +1218,7 @@ mod tests {
         assert_eq!(state.universe.agents().len(), 24);
         for agent in state.universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
-            assert_eq!(citizen.units(Good::Bread), 4);
+            assert_eq!(citizen.units(Good::Bread), 14);
             assert_eq!(citizen.berries_units(), 0);
         }
         assert!(!state.universe.agents().contains_key(&old_ids[0]));

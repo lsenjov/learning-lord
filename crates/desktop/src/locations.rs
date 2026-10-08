@@ -13,6 +13,7 @@ use bevy::{
 };
 use learning_lord_simulation::{
     AgentId, AgentKind, Universe,
+    farming::{Crop, CropStatus},
     locations::{Location, PlaceId},
     marketplace::Good,
     production::Recipe,
@@ -340,7 +341,49 @@ pub(crate) fn place_owner(
     }
 }
 
-pub(crate) fn stocks(universe: &Universe, place: PlaceId) -> String {
+pub(crate) fn plot_readout(plot: usize, crop: Option<Crop>, now: u64) -> String {
+    let Some(crop) = crop else {
+        return format!("Plot {} | Empty", plot + 1);
+    };
+    let status = match crop.status(now) {
+        CropStatus::Growing => "Growing",
+        CropStatus::Ready => "Ready",
+        CropStatus::Dead => "Dead",
+    };
+    let tending = (0..2)
+        .map(|stage| {
+            let (start, end) = crop.tend_window(stage).unwrap();
+            let state = if crop.tended[stage] {
+                "Done"
+            } else if now > end {
+                "Missed"
+            } else if now >= start {
+                "Open"
+            } else {
+                "Upcoming"
+            };
+            format!(
+                "Tend {}: {} | {} to {}",
+                stage + 1,
+                state,
+                crate::format_clock(start),
+                crate::format_clock(end)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Plot {} | {} | {} | Expected {} g\n{}\nReady: {}",
+        plot + 1,
+        crop.kind.name(),
+        status,
+        crop.expected_yield(now),
+        tending,
+        crate::format_clock(crop.ready_at_ms())
+    )
+}
+
+fn stocks(universe: &Universe, place: PlaceId) -> String {
     let mut lines = Vec::new();
     for (key, units) in universe
         .storage()
@@ -539,6 +582,12 @@ pub fn refresh(
                 let place_id = place.id;
                 details.spawn(text(&place.name, 23.0, TEXT));
                 details.spawn(text(format!("Owner: {}", place_owner(universe, place)), 15.0, MUTED));
+                if place.kind == Location::Field {
+                    details.spawn(text("FIELD PLOTS", 15.0, MUTED));
+                    for (plot, crop) in place.plots.iter().enumerate() {
+                        details.spawn(text(plot_readout(plot, *crop, universe.current_time_ms()), 15.0, TEXT));
+                    }
+                }
                 details.spawn(text("STOCK BY OWNER", 15.0, MUTED));
                 details.spawn(text(stocks(universe, place_id), 15.0, TEXT));
                 details.spawn(text("LOCAL TRANSFERS", 15.0, MUTED));
@@ -1073,6 +1122,29 @@ pub(crate) fn stop_editing(state: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plots_show_empty_growing_ready_and_dead_crops_with_tending_windows() {
+        use learning_lord_simulation::farming::{CropKind, HOUR_MS};
+        assert_eq!(plot_readout(0, None, 0), "Plot 1 | Empty");
+        let mut crop = Crop {
+            kind: CropKind::Wheat,
+            planted_at_ms: 0,
+            tended: [false; 2],
+        };
+        let growing = plot_readout(1, Some(crop), 24 * HOUR_MS);
+        assert!(growing.contains("Plot 2 | Wheat | Growing | Expected 150 g"));
+        assert!(growing.contains("Tend 1: Open"));
+        assert!(growing.contains("Tend 2: Upcoming"));
+        assert!(growing.contains("Ready: Day 4"));
+        crop.tended[0] = true;
+        let ready = plot_readout(1, Some(crop), 96 * HOUR_MS);
+        assert!(ready.contains("Ready | Expected 375 g"));
+        assert!(ready.contains("Tend 1: Done"));
+        assert!(ready.contains("Tend 2: Missed"));
+        crop.tended[0] = false;
+        assert!(plot_readout(1, Some(crop), 96 * HOUR_MS).contains("Dead | Expected 0 g"));
+    }
 
     fn ui_app(universe: Universe, state: State) -> App {
         let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
