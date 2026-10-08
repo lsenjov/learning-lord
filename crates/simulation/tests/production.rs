@@ -53,7 +53,10 @@ fn close(a: impl Numeric, b: impl Numeric) {
 
 #[test]
 fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stocks() {
-    for recipe in Recipe::ALL.into_iter().filter(|r| *r != Recipe::Forage) {
+    for recipe in Recipe::ALL
+        .into_iter()
+        .filter(|r| !matches!(r, Recipe::Forage | Recipe::GrowWheat | Recipe::GrowFlax))
+    {
         let source = worker(recipe);
         let started = source.start_action(CitizenAction::Produce(recipe)).unwrap();
         let duration = started.active_action().unwrap().duration_ms();
@@ -110,7 +113,7 @@ fn all_inputs_skill_and_owned_property_are_required_before_work_starts() {
         .with_starting_role(StartingRole::Farmer);
     assert_eq!(
         farmer.start_action(CitizenAction::Produce(Recipe::GrowWheat)),
-        Err(SimulationError::MissingProperty)
+        Err(SimulationError::MissingInputs)
     );
     let public = Citizen::new(0.0).unwrap();
     assert!(

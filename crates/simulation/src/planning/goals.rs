@@ -55,7 +55,11 @@ impl CitizenAction {
             {
                 &[Food, ReplenishReserves]
             }
-            Self::Produce(_) => &[Production],
+            Self::Produce(_)
+            | Self::Plant { .. }
+            | Self::Tend { .. }
+            | Self::Harvest { .. }
+            | Self::Clear { .. } => &[Production],
             Self::Wait
             | Self::Travel(_)
             | Self::ListExcess
@@ -1373,7 +1377,31 @@ pub(super) fn production_prefixes(
             }
         }
     }
-    Ok(paths.finish())
+    let mut variants = paths.finish();
+    let mut farm = initial.clone();
+    while farm.elapsed_ms < PRODUCTION_DURATION_MS {
+        let Some(action) = farm.citizen.farming_actions().into_iter().next() else {
+            break;
+        };
+        let Some(mut ready) = prepare(&farm, action, 0.0, 0, prior_actions)?
+            .into_iter()
+            .next()
+        else {
+            break;
+        };
+        if ready.citizen.farming_duration_ms(action).is_err() {
+            break;
+        }
+        let Some(next) = ready.perform(action, prior_actions)? else {
+            break;
+        };
+        ready = next;
+        farm = ready;
+    }
+    if farm.actions.len() > initial.actions.len() {
+        variants.push(farm);
+    }
+    Ok(variants)
 }
 
 fn variants_from(

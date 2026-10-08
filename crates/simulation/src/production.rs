@@ -132,8 +132,8 @@ impl Recipe {
     pub fn outputs(self) -> &'static [(Good, Quantity)] {
         match self {
             Self::Forage => &[(Good::Berries, crate::FORAGE_AVERAGE_GRAMS)],
-            Self::GrowWheat => &[(Good::Wheat, 200)],
-            Self::GrowFlax => &[(Good::Flax, 200)],
+            Self::GrowWheat => &[(Good::Wheat, 600)],
+            Self::GrowFlax => &[(Good::Flax, 600)],
             Self::SpinThread => &[(Good::Thread, 200)],
             Self::WeaveCloth => &[(Good::Cloth, 200)],
             Self::MakeClothingBlock => &[(Good::FlaxBlock, 1)],
@@ -153,6 +153,7 @@ impl Recipe {
             | Self::WeaveCloth
             | Self::MakeClothingBlock
             | Self::AssembleGarment => 30 * 60_000,
+            Self::GrowWheat | Self::GrowFlax => 3 * 60 * 60_000,
             Self::BakeBerryPie => 90 * 60_000,
             _ => 60 * 60_000,
         }
@@ -484,10 +485,10 @@ mod tests {
             assert!(value(recipe.outputs()) > value(recipe.inputs()));
             assert_eq!(recipe.base_duration_ms(), 30 * 60_000);
         }
-        assert_eq!(Recipe::GrowFlax.outputs(), &[(Good::Flax, 200)]);
+        assert_eq!(Recipe::GrowFlax.outputs(), &[(Good::Flax, 600)]);
         assert_eq!(Recipe::GrowFlax.location(), Location::Field);
         assert_eq!(Recipe::GrowFlax.skill(), Some(Skill::Farming));
-        assert_eq!(Recipe::GrowFlax.base_duration_ms(), 60 * 60_000);
+        assert_eq!(Recipe::GrowFlax.base_duration_ms(), 3 * 60 * 60_000);
         assert_eq!(
             starting_inputs(StartingRole::Weaver).units(Good::Flax),
             1600

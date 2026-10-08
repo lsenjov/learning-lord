@@ -351,6 +351,7 @@ fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -
                 .inputs()
                 .iter()
                 .any(|&(good, units)| citizen.available_units(good) < units),
+            action if action.crop_plot().is_some() => citizen.farming_duration_ms(action).is_err(),
             _ => false,
         }
 }

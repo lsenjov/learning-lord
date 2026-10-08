@@ -482,6 +482,10 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                         good.name()
                     )
                 }
+                action @ (CitizenAction::Plant { .. }
+                | CitizenAction::Tend { .. }
+                | CitizenAction::Harvest { .. }
+                | CitizenAction::Clear { .. }) => action_label(action, citizen),
                 CitizenAction::Travel(id) => {
                     format!("Walking to {}", citizen.map().place(id).unwrap().name)
                 }
@@ -585,6 +589,37 @@ fn shopping_list_label(list: learning_lord_simulation::marketplace::ShoppingList
         .join(", ")
 }
 
+fn crop_label(
+    citizen: &learning_lord_simulation::Citizen,
+    field: learning_lord_simulation::locations::PlaceId,
+    plot: usize,
+) -> &'static str {
+    citizen
+        .map()
+        .place(field)
+        .ok()
+        .and_then(|place| place.plots.get(plot))
+        .and_then(|crop| *crop)
+        .map(|crop| crop.kind.name())
+        .or_else(|| {
+            citizen.active_plan().and_then(|active| {
+                active
+                    .plan()
+                    .actions()
+                    .iter()
+                    .find_map(|action| match action {
+                        CitizenAction::Plant {
+                            field: target,
+                            plot: target_plot,
+                            crop,
+                        } if *target == field && *target_plot == plot => Some(crop.name()),
+                        _ => None,
+                    })
+            })
+        })
+        .unwrap_or("crop")
+}
+
 fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citizen) -> String {
     match action {
         CitizenAction::Eat => "Eat".into(),
@@ -609,6 +644,31 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
         CitizenAction::Withdraw(good, units) => {
             format!("Withdraw {} {}", quantity_label(good, units), good.name())
         }
+        CitizenAction::Plant { field, plot, crop } => format!(
+            "Plant {} at {}, plot {}",
+            crop.name(),
+            citizen.map().place(field).unwrap().name,
+            plot + 1
+        ),
+        CitizenAction::Tend { field, plot, stage } => format!(
+            "Tend {} at {}, plot {} (stage {})",
+            crop_label(citizen, field, plot),
+            citizen.map().place(field).unwrap().name,
+            plot + 1,
+            stage + 1
+        ),
+        CitizenAction::Harvest { field, plot } => format!(
+            "Harvest {} at {}, plot {}",
+            crop_label(citizen, field, plot),
+            citizen.map().place(field).unwrap().name,
+            plot + 1
+        ),
+        CitizenAction::Clear { field, plot } => format!(
+            "Clear {} at {}, plot {}",
+            crop_label(citizen, field, plot),
+            citizen.map().place(field).unwrap().name,
+            plot + 1
+        ),
         CitizenAction::Travel(id) => format!("Travel to {}", citizen.map().place(id).unwrap().name),
     }
 }
@@ -871,6 +931,38 @@ mod tests {
                 .universe
                 .current_time_ms(),
             0
+        );
+    }
+
+    #[test]
+    fn farming_action_labels_identify_crop_field_plot_and_tending_stage() {
+        use learning_lord_simulation::{farming::CropKind, locations::Location};
+        let (universe, id) = Universe::default()
+            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (universe, field) = universe.with_property(id, Location::Field).unwrap();
+        let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
+        let label = action_label(
+            CitizenAction::Plant {
+                field,
+                plot: 2,
+                crop: CropKind::Flax,
+            },
+            citizen,
+        );
+        assert!(label.starts_with("Plant Flax at "));
+        assert!(label.contains(&universe.map().place(field).unwrap().name));
+        assert!(label.ends_with("plot 3"));
+        assert!(
+            action_label(
+                CitizenAction::Tend {
+                    field,
+                    plot: 2,
+                    stage: 1
+                },
+                citizen
+            )
+            .ends_with("plot 3 (stage 2)")
         );
     }
 

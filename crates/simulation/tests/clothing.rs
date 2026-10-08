@@ -185,7 +185,41 @@ fn clothing_chain_keeps_exact_integer_intermediates_until_garment_completion() {
     }
     let AgentKind::Citizen(worker) = &town.agents()[&id].kind;
     let mut worker = worker.clone();
-    for recipe in [Recipe::GrowFlax, Recipe::SpinThread, Recipe::WeaveCloth] {
+    let field = worker.production_place(Recipe::GrowFlax).unwrap();
+    let mut crop_work = |action| {
+        let duration = worker.action_duration_ms(action).unwrap();
+        worker = worker
+            .start_action(action)
+            .unwrap()
+            .advance(duration)
+            .unwrap();
+    };
+    crop_work(CitizenAction::Plant {
+        field,
+        plot: 0,
+        crop: learning_lord_simulation::farming::CropKind::Flax,
+    });
+    worker = worker.advance(24 * 3_600_000).unwrap();
+    let action = CitizenAction::Tend {
+        field,
+        plot: 0,
+        stage: 0,
+    };
+    let duration = worker.action_duration_ms(action).unwrap();
+    worker = worker
+        .start_action(action)
+        .unwrap()
+        .advance(duration)
+        .unwrap();
+    worker = worker.advance(96 * 3_600_000).unwrap();
+    let action = CitizenAction::Harvest { field, plot: 0 };
+    let duration = worker.action_duration_ms(action).unwrap();
+    worker = worker
+        .start_action(action)
+        .unwrap()
+        .advance(duration)
+        .unwrap();
+    for recipe in [Recipe::SpinThread, Recipe::WeaveCloth] {
         let duration = worker
             .action_duration_ms(CitizenAction::Produce(recipe))
             .unwrap();
@@ -224,7 +258,8 @@ fn clothing_chain_keeps_exact_integer_intermediates_until_garment_completion() {
     let finished = started.advance(duration).unwrap();
     assert_eq!(finished.units(Good::FlaxBlock), 0);
     assert_eq!(finished.units(Good::FlaxGarment), 1);
-    for good in [Good::Flax, Good::Thread, Good::Cloth] {
+    assert_eq!(finished.units(Good::Flax), 175);
+    for good in [Good::Thread, Good::Cloth] {
         assert_eq!(finished.units(good), 0);
     }
 }

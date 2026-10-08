@@ -36,7 +36,12 @@ fn producer(
         StartingRole::Tailor => Recipe::MakeClothingBlock,
     };
     let (universe, id) = universe.with_citizen(name, worker).unwrap();
-    (universe.with_property(id, recipe.location()).unwrap().0, id)
+    let universe = if recipe.location().is_public() {
+        universe
+    } else {
+        universe.with_property(id, recipe.location()).unwrap().0
+    };
+    (universe, id)
 }
 
 fn targets(universe: &Universe, id: AgentId) -> ProductionTargets {
@@ -95,37 +100,37 @@ fn competing_bakers_each_consider_the_full_unmet_demand() {
 fn carried_and_listed_stock_reduce_the_daily_floor() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
-        "Farmer",
-        StartingRole::Farmer,
-        &[(Good::Wheat, 400)],
+        "Woodcutter",
+        StartingRole::Woodcutter,
+        &[(Good::Wood, 400)],
         0,
     );
     assert_eq!(
-        targets(&universe, farmer).remaining_batches(Recipe::GrowWheat),
+        targets(&universe, farmer).remaining_batches(Recipe::ChopWood),
         10
     );
     let fully_stocked = citizen(&universe, farmer)
-        .with_good(Good::Wheat, 2_400)
+        .with_good(Good::Wood, 2_400)
         .unwrap();
     assert_eq!(
         ProductionTargets::calculate(&fully_stocked, 0)
             .unwrap()
-            .remaining_batches(Recipe::GrowWheat),
+            .remaining_batches(Recipe::ChopWood),
         0
     );
-    let listed = list(universe, farmer, Good::Wheat, 200);
-    assert_eq!(citizen(&listed, farmer).units(Good::Wheat), 200);
+    let listed = list(universe, farmer, Good::Wood, 200);
+    assert_eq!(citizen(&listed, farmer).units(Good::Wood), 200);
     assert_eq!(
-        targets(&listed, farmer).remaining_batches(Recipe::GrowWheat),
+        targets(&listed, farmer).remaining_batches(Recipe::ChopWood),
         10
     );
     let withdrawn = listed
-        .start_action(farmer, CitizenAction::Withdraw(Good::Wheat, 200))
+        .start_action(farmer, CitizenAction::Withdraw(Good::Wood, 200))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
     assert_eq!(
-        targets(&withdrawn, farmer).remaining_batches(Recipe::GrowWheat),
+        targets(&withdrawn, farmer).remaining_batches(Recipe::ChopWood),
         10
     );
 }
@@ -135,19 +140,19 @@ fn skill_adjusted_floor_subtracts_adas_existing_listing() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Ada",
-        StartingRole::Farmer,
-        &[(Good::Wheat, 200)],
+        StartingRole::Woodcutter,
+        &[(Good::Wood, 200)],
         0,
     );
-    let universe = list(universe, farmer, Good::Wheat, 200);
+    let universe = list(universe, farmer, Good::Wood, 200);
     let worker = citizen(&universe, farmer)
-        .with_skill_practice_ms(Skill::Farming, Some(3_600_000))
+        .with_skill_practice_ms(Skill::Woodcutting, Some(3_600_000))
         .unwrap();
-    assert_eq!(Recipe::GrowWheat.duration_ms(&worker).unwrap(), 3_599_176);
+    assert_eq!(Recipe::ChopWood.duration_ms(&worker).unwrap(), 3_599_176);
     assert_eq!(
         ProductionTargets::calculate(&worker, 0)
             .unwrap()
-            .remaining_batches(Recipe::GrowWheat),
+            .remaining_batches(Recipe::ChopWood),
         11
     );
 }
@@ -156,23 +161,23 @@ fn skill_adjusted_floor_subtracts_adas_existing_listing() {
 fn completed_work_counts_as_stock_without_shrinking_the_stock_floor() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
-        "Farmer",
-        StartingRole::Farmer,
-        &[(Good::Wheat, 2_000)],
+        "Woodcutter",
+        StartingRole::Woodcutter,
+        &[(Good::Wood, 2_000)],
         0,
     );
     let working = citizen(&universe, farmer)
-        .start_action(CitizenAction::Produce(Recipe::GrowWheat))
+        .start_action(CitizenAction::Produce(Recipe::ChopWood))
         .unwrap();
     let finished = working
         .advance(working.active_action().unwrap().duration_ms())
         .unwrap();
     assert_eq!(finished.production_work_today_ms(), 60 * 60_000);
-    assert_eq!(finished.units(Good::Wheat), 2_200);
+    assert_eq!(finished.units(Good::Wood), 2_200);
     assert_eq!(
         ProductionTargets::calculate(&finished, 60 * 60_000)
             .unwrap()
-            .remaining_batches(Recipe::GrowWheat),
+            .remaining_batches(Recipe::ChopWood),
         1
     );
 }
@@ -181,16 +186,16 @@ fn completed_work_counts_as_stock_without_shrinking_the_stock_floor() {
 fn in_progress_output_counts_toward_the_floor() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
-        "Farmer",
-        StartingRole::Farmer,
-        &[(Good::Wheat, 2_000)],
+        "Woodcutter",
+        StartingRole::Woodcutter,
+        &[(Good::Wood, 2_000)],
         0,
     );
     let working = citizen(&universe, farmer)
-        .start_action(CitizenAction::Produce(Recipe::GrowWheat))
+        .start_action(CitizenAction::Produce(Recipe::ChopWood))
         .unwrap();
     let target = ProductionTargets::calculate(&working, 0).unwrap();
-    assert_eq!(target.remaining_batches(Recipe::GrowWheat), 2);
+    assert_eq!(target.remaining_batches(Recipe::ChopWood), 2);
 }
 
 #[test]
@@ -228,18 +233,18 @@ fn each_profitable_good_has_an_independent_twelve_hour_floor() {
 fn low_positive_demand_keeps_the_daily_floor() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
-        "Farmer",
-        StartingRole::Farmer,
+        "Woodcutter",
+        StartingRole::Woodcutter,
         &[],
         0,
     );
     assert_eq!(
-        targets(&universe, farmer).remaining_batches(Recipe::GrowWheat),
+        targets(&universe, farmer).remaining_batches(Recipe::ChopWood),
         12
     );
-    let universe = demand(universe, &[(Good::Wheat, 200)]);
+    let universe = demand(universe, &[(Good::Wood, 200)]);
     assert_eq!(
-        targets(&universe, farmer).remaining_batches(Recipe::GrowWheat),
+        targets(&universe, farmer).remaining_batches(Recipe::ChopWood),
         12
     );
 }
@@ -280,44 +285,37 @@ fn alternative_recipes_each_use_the_same_inputs_and_cash() {
 }
 
 #[test]
-fn missing_skill_or_property_prevents_targets_and_faster_skill_increases_capacity() {
-    let source = Citizen::new(0.0)
-        .unwrap()
-        .with_starting_role(StartingRole::Farmer);
-    assert_eq!(
-        ProductionTargets::calculate(&source, 0)
-            .unwrap()
-            .remaining_batches(Recipe::GrowWheat),
-        0
-    );
+fn missing_skill_prevents_targets_and_faster_skill_increases_capacity() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
-        "Farmer",
-        StartingRole::Farmer,
+        "Woodcutter",
+        StartingRole::Woodcutter,
         &[],
         0,
     );
     let worker = citizen(&universe, farmer);
-    let unskilled = worker.with_skill_practice_ms(Skill::Farming, None).unwrap();
+    let unskilled = worker
+        .with_skill_practice_ms(Skill::Woodcutting, None)
+        .unwrap();
     assert_eq!(
         ProductionTargets::calculate(&unskilled, 0)
             .unwrap()
-            .remaining_batches(Recipe::GrowWheat),
+            .remaining_batches(Recipe::ChopWood),
         0
     );
-    let normal = targets(&universe, farmer).remaining_batches(Recipe::GrowWheat);
+    let normal = targets(&universe, farmer).remaining_batches(Recipe::ChopWood);
     let skilled = worker
         .with_skill_practice_ms(
-            Skill::Farming,
+            Skill::Woodcutting,
             Some(learning_lord_simulation::production::MAX_SKILL_PRACTICE_MS),
         )
         .unwrap();
     let faster = ProductionTargets::calculate(&skilled, 0)
         .unwrap()
-        .remaining_batches(Recipe::GrowWheat);
+        .remaining_batches(Recipe::ChopWood);
     assert_eq!(normal, 12);
     assert_eq!(faster, 24);
-    assert!(faster * Recipe::GrowWheat.duration_ms(&skilled).unwrap() <= DAILY_CAPACITY_MS);
+    assert!(faster * Recipe::ChopWood.duration_ms(&skilled).unwrap() <= DAILY_CAPACITY_MS);
 }
 
 #[test]
@@ -415,12 +413,12 @@ fn replacement_asks_can_make_a_recipe_unprofitable_even_when_inputs_are_owned() 
 fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
-        "Farmer",
-        StartingRole::Farmer,
-        &[(Good::Wheat, 2_800)],
+        "Woodcutter",
+        StartingRole::Woodcutter,
+        &[(Good::Wood, 2_800)],
         0,
     );
-    let universe = list(universe, farmer, Good::Wheat, 2_800);
+    let universe = list(universe, farmer, Good::Wood, 2_800);
     let (universe, buyer) = universe
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(200).unwrap())
         .unwrap();
@@ -429,54 +427,54 @@ fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
             buyer,
             CitizenAction::BuyAt {
                 place: citizen(&universe, farmer).selling_place(),
-                list: ShoppingList::single(Good::Wheat, 2_800),
+                list: ShoppingList::single(Good::Wood, 2_800),
             },
         )
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
     let universe = universe
-        .with_purchase_request(buyer, ShoppingList::single(Good::Wheat, 200))
+        .with_purchase_request(buyer, ShoppingList::single(Good::Wood, 200))
         .unwrap();
-    assert_eq!(universe.market().unmet_units(Good::Wheat), 200);
+    assert_eq!(universe.market().unmet_units(Good::Wood), 200);
     let worker = citizen(&universe, farmer)
-        .with_good(Good::Wheat, 800)
+        .with_good(Good::Wood, 800)
         .unwrap();
     assert_eq!(
         ProductionTargets::calculate(&worker, universe.current_time_ms())
             .unwrap()
-            .remaining_batches(Recipe::GrowWheat),
+            .remaining_batches(Recipe::ChopWood),
         11
     );
     let later = ProductionTargets::calculate(&worker, 2 * DAY_MS).unwrap();
-    assert_eq!(later.remaining_batches(Recipe::GrowWheat), 8);
+    assert_eq!(later.remaining_batches(Recipe::ChopWood), 8);
 }
 
 #[test]
 fn completed_and_active_work_do_not_shrink_alternative_capacity() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
-        "Farmer",
-        StartingRole::Farmer,
+        "Woodcutter",
+        StartingRole::Woodcutter,
         &[],
         0,
     );
-    let universe = demand(universe, &[(Good::Wheat, 20_000)]);
+    let universe = demand(universe, &[(Good::Wood, 20_000)]);
     let worker = citizen(&universe, farmer)
-        .start_action(CitizenAction::Produce(Recipe::GrowWheat))
+        .start_action(CitizenAction::Produce(Recipe::ChopWood))
         .unwrap();
     let done = worker
         .advance(worker.active_action().unwrap().duration_ms())
         .unwrap();
     let second = done
-        .start_action(CitizenAction::Produce(Recipe::GrowWheat))
+        .start_action(CitizenAction::Produce(Recipe::ChopWood))
         .unwrap();
     let partial = second.advance(20 * 60_000).unwrap();
     assert_eq!(partial.production_work_today_ms(), 80 * 60_000);
-    let daily_batches = DAILY_CAPACITY_MS / Recipe::GrowWheat.duration_ms(&partial).unwrap();
+    let daily_batches = DAILY_CAPACITY_MS / Recipe::ChopWood.duration_ms(&partial).unwrap();
     let target = ProductionTargets::calculate(&partial, 80 * 60_000).unwrap();
     assert_eq!(
-        target.remaining_batches(Recipe::GrowWheat),
+        target.remaining_batches(Recipe::ChopWood),
         daily_batches + 1
     );
 }
@@ -525,13 +523,13 @@ fn decision_snapshots_inputs_targets_and_observed_production() {
                 .unwrap()
                 .with_price(learning_lord_simulation::marketplace::Good::Water, 10.0)
                 .unwrap()
-                .with_price(learning_lord_simulation::marketplace::Good::Wheat, 40.0)
+                .with_price(learning_lord_simulation::marketplace::Good::Wood, 40.0)
                 .unwrap()
                 .with_price(learning_lord_simulation::marketplace::Good::Flax, 40.0)
                 .unwrap(),
         ),
-        "Farmer",
-        StartingRole::Farmer,
+        "Woodcutter",
+        StartingRole::Woodcutter,
         &[(Good::Berries, 930)],
         0,
     );
@@ -541,7 +539,7 @@ fn decision_snapshots_inputs_targets_and_observed_production() {
     let wheat = decision
         .production
         .iter()
-        .find(|d| d.recipe == Recipe::GrowWheat)
+        .find(|d| d.recipe == Recipe::ChopWood)
         .unwrap();
     assert!(wheat.profit_per_hour.unwrap() > 0.0);
     assert!(wheat.remaining_batches.unwrap() > 0);
@@ -556,7 +554,7 @@ fn decision_snapshots_inputs_targets_and_observed_production() {
             .unwrap()
             .plan()
             .actions()
-            .contains(&CitizenAction::Produce(Recipe::GrowWheat))
+            .contains(&CitizenAction::Produce(Recipe::ChopWood))
     );
     let snapshot = decision.clone();
     let later = universe.advance(1).unwrap();
@@ -614,12 +612,12 @@ fn decision_observes_recipe_only_reached_in_later_goals() {
     let (universe, id) = producer(
         Universe::with_map(Map::default()).with_prices(
             learning_lord_simulation::marketplace::Prices::default()
-                .with_price(Good::Wheat, 10000.0)
+                .with_price(Good::Wood, 10000.0)
                 .unwrap(),
         ),
-        "Farmer",
-        StartingRole::Farmer,
-        &[(Good::Berries, 930), (Good::Wheat, 400)],
+        "Woodcutter",
+        StartingRole::Woodcutter,
+        &[(Good::Berries, 930), (Good::Wood, 400)],
         0,
     );
     let universe = universe.start_planning(id).unwrap();
@@ -640,7 +638,7 @@ fn decision_observes_recipe_only_reached_in_later_goals() {
     let wheat = decision
         .production
         .iter()
-        .find(|d| d.recipe == Recipe::GrowWheat)
+        .find(|d| d.recipe == Recipe::ChopWood)
         .unwrap();
     assert!(!wheat.prefix_attempted);
     assert!(wheat.feasible_sequence_found);

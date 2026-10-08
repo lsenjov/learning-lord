@@ -14,6 +14,7 @@ use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
 mod background;
 pub mod planning;
 pub use background::PlanningRuntime;
+pub mod farming;
 pub mod history;
 pub mod production;
 
@@ -101,6 +102,24 @@ pub enum CitizenAction {
     Sleep,
     BuyFood(Good),
     Produce(production::Recipe),
+    Plant {
+        field: PlaceId,
+        plot: usize,
+        crop: farming::CropKind,
+    },
+    Tend {
+        field: PlaceId,
+        plot: usize,
+        stage: usize,
+    },
+    Harvest {
+        field: PlaceId,
+        plot: usize,
+    },
+    Clear {
+        field: PlaceId,
+        plot: usize,
+    },
     ListExcess,
     List(Good, Quantity),
     Buy(marketplace::ShoppingList),
@@ -116,6 +135,10 @@ impl CitizenAction {
     pub fn required_place(self, citizen: &Citizen) -> Option<PlaceId> {
         match self {
             Self::Sleep => Some(citizen.home),
+            Self::Plant { field, .. }
+            | Self::Tend { field, .. }
+            | Self::Harvest { field, .. }
+            | Self::Clear { field, .. } => Some(field),
             Self::Produce(recipe) => citizen.production_place(recipe).ok(),
             Self::BuyFood(_) | Self::Buy(..) => Some(citizen.map.public_place(Location::Market)),
             Self::BuyAt { place, .. } => Some(place),
@@ -460,6 +483,15 @@ impl Citizen {
                     * remaining;
             }
         }
+        for place in self.owned_properties() {
+            for crop in place.plots.iter().flatten() {
+                wealth += self
+                    .prices
+                    .value(crop.kind.good(), crop.expected_yield(self.market_time_ms))
+                    .unwrap_or(0.0)
+                    * 0.70;
+            }
+        }
         if !wealth.is_finite() {
             return Err(SimulationError::WealthOverflow);
         }
@@ -489,9 +521,19 @@ impl Citizen {
                 .map(|(index, units)| units * Good::ALL[index].eating_ms_per_unit().unwrap_or(0))
                 .sum::<u64>(),
             CitizenAction::Produce(recipe) => {
+                if matches!(
+                    recipe,
+                    production::Recipe::GrowWheat | production::Recipe::GrowFlax
+                ) {
+                    return Err(SimulationError::MissingInputs);
+                }
                 self.production_place(recipe)?;
                 recipe.duration_ms(self)?
             }
+            CitizenAction::Plant { .. }
+            | CitizenAction::Tend { .. }
+            | CitizenAction::Harvest { .. }
+            | CitizenAction::Clear { .. } => self.farming_duration_ms(action)?,
             CitizenAction::Wait => ACTION_DURATION_MS,
             CitizenAction::Sleep => SLEEP_DURATION_MS,
             CitizenAction::EquipClothing => EQUIP_CLOTHING_DURATION_MS,
@@ -602,7 +644,11 @@ impl Citizen {
 
     pub fn available_recipes(&self) -> impl Iterator<Item = production::Recipe> + '_ {
         production::Recipe::ALL.into_iter().filter(|recipe| {
-            recipe.duration_ms(self).is_ok() && self.production_place(*recipe).is_ok()
+            !matches!(
+                recipe,
+                production::Recipe::GrowWheat | production::Recipe::GrowFlax
+            ) && recipe.duration_ms(self).is_ok()
+                && self.production_place(*recipe).is_ok()
         })
     }
 
@@ -859,8 +905,19 @@ impl Citizen {
         if let Some(mut active) = citizen.active_action {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
             citizen.advance_needs(action_elapsed_ms, Some(active))?;
-            if let CitizenAction::Produce(recipe) = active.action {
-                if let Some(skill) = recipe.skill() {
+            let work_skill = match active.action {
+                CitizenAction::Produce(recipe) => recipe.skill(),
+                action if action.crop_plot().is_some() => Some(production::Skill::Farming),
+                _ => None,
+            };
+            if matches!(active.action, CitizenAction::Produce(_))
+                || active.action.crop_plot().is_some()
+                || matches!(active.action, CitizenAction::Travel(_))
+                    && citizen
+                        .skill_practice_ms(production::Skill::Farming)
+                        .is_some()
+            {
+                if let Some(skill) = work_skill {
                     let practice = citizen.skills[skill as usize]
                         .as_mut()
                         .ok_or(SimulationError::MissingSkill)?;
@@ -916,6 +973,13 @@ impl Citizen {
                     }
                     CitizenAction::Produce(recipe) => {
                         citizen.complete_production(recipe, prediction)?
+                    }
+                    action if action.crop_plot().is_some() => {
+                        let finish = self
+                            .market_time_ms
+                            .checked_add(action_elapsed_ms)
+                            .ok_or(SimulationError::TimeOverflow)?;
+                        citizen.complete_farming(action, finish)?;
                     }
                     CitizenAction::EquipClothing => {
                         let remaining = citizen
@@ -1536,6 +1600,7 @@ impl Universe {
                 let agent_trades_before = universe.market.trades().len();
                 let agent = universe.agents.get_mut(id).unwrap();
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
+                citizen.map = universe.map.clone();
                 citizen.market = universe.market.clone();
                 citizen.prices = universe.market.prices;
                 citizen.market_time_ms = universe.current_time_ms;
@@ -1555,6 +1620,7 @@ impl Universe {
                     execution.record_elapsed(step)?;
                     citizen.active_plan = Some(execution);
                 }
+                universe.map = citizen.map.clone();
                 universe.market = citizen.market.clone();
                 for (seller, coins) in payments {
                     let seller = universe
@@ -1590,6 +1656,24 @@ impl Universe {
                         {
                             runtime.cancel(*id);
                         }
+                    }
+                }
+                if let Some(active) = before.active_action()
+                    && active.remaining_ms() == step
+                    && let CitizenAction::Harvest { field, plot } = active.action()
+                {
+                    let crop = before
+                        .crop(field, plot)?
+                        .ok_or(SimulationError::MissingInputs)?;
+                    if universe.tax_production(
+                        *id,
+                        field,
+                        crop.kind.good(),
+                        crop.expected_yield(finishing_time),
+                        finishing_time,
+                    )? && let Some(runtime) = runtime.as_deref_mut()
+                    {
+                        runtime.cancel(*id);
                     }
                 }
                 let new_trades: Vec<_> = universe
@@ -1628,6 +1712,10 @@ impl Universe {
                 }
             }
             universe.current_time_ms = finishing_time;
+            for (_, agent) in universe.agents.iter_mut() {
+                let AgentKind::Citizen(citizen) = &mut agent.kind;
+                citizen.map = universe.map.clone();
+            }
             for id in &ids {
                 let AgentKind::Citizen(citizen) = &universe.agents[id].kind;
                 universe

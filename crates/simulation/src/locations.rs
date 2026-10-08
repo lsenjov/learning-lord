@@ -71,6 +71,7 @@ pub struct Place {
     pub position: Position,
     pub owner: Option<AgentId>,
     pub name: String,
+    pub plots: Vec<Option<crate::farming::Crop>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,6 +150,23 @@ impl Map {
         Ok(map)
     }
 
+    pub(crate) fn set_crop(
+        &mut self,
+        field: PlaceId,
+        plot: usize,
+        crop: Option<crate::farming::Crop>,
+    ) -> Result<(), SimulationError> {
+        let place = self
+            .places
+            .get_mut(&field)
+            .ok_or(SimulationError::PlaceNotFound)?;
+        *place
+            .plots
+            .get_mut(plot)
+            .ok_or(SimulationError::MissingProperty)? = crop;
+        Ok(())
+    }
+
     pub fn places(&self) -> &HashMap<PlaceId, Place> {
         &self.places
     }
@@ -220,6 +238,11 @@ impl Map {
                 position,
                 owner,
                 name: name.into(),
+                plots: if kind == Location::Field {
+                    vec![None; crate::farming::FIELD_PLOTS]
+                } else {
+                    Vec::new()
+                },
             },
         );
         Ok((map, id))

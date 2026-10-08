@@ -106,7 +106,13 @@ impl CitizenHistory {
         let active = before.active_action();
         let action = active.map(|a| a.action());
         let target = match action {
-            Some(CitizenAction::Produce(_)) => &mut self.current.activity.production_ms,
+            Some(
+                CitizenAction::Produce(_)
+                | CitizenAction::Plant { .. }
+                | CitizenAction::Tend { .. }
+                | CitizenAction::Harvest { .. }
+                | CitizenAction::Clear { .. },
+            ) => &mut self.current.activity.production_ms,
             Some(CitizenAction::Travel(_)) => &mut self.current.activity.travel_ms,
             Some(CitizenAction::Sleep) => &mut self.current.activity.sleep_ms,
             Some(CitizenAction::Eat) => &mut self.current.activity.eating_ms,
@@ -169,6 +175,15 @@ impl CitizenHistory {
                             .checked_add(after.units(good) - (before.units(good) - inputs))
                             .ok_or(SimulationError::InventoryOverflow)?;
                     }
+                }
+                Some(CitizenAction::Harvest { field, plot }) => {
+                    let crop = before
+                        .crop(field, plot)?
+                        .ok_or(SimulationError::MissingInputs)?;
+                    let good = crop.kind.good();
+                    self.current.produced[good as usize] = self.current.produced[good as usize]
+                        .checked_add(after.units(good) - before.units(good))
+                        .ok_or(SimulationError::InventoryOverflow)?;
                 }
                 Some(CitizenAction::EquipClothing) => {
                     self.current.consumed[Good::FlaxGarment as usize] = self.current.consumed
