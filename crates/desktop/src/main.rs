@@ -556,7 +556,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         |condition| format!("{:.1}%", condition * 100.0),
     );
     format!(
-        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
+        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nDrinking reserves: {:.0} g | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
         agent.name,
         citizen.coins(),
         citizen
@@ -568,6 +568,8 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         citizen.clothing_need(),
         citizen.food_nutrition(),
         citizen.food_reserve_wellbeing(),
+        citizen.drinking_water_reserve(),
+        citizen.water_reserve_wellbeing(),
         citizens::location_label(citizen)
     )
 }
@@ -1162,6 +1164,8 @@ mod tests {
         let citizen = Citizen::with_needs(-50.0, 50.0)
             .unwrap()
             .with_thirst(-100.0)
+            .unwrap()
+            .with_good(Good::Water, 400)
             .unwrap();
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
@@ -1176,6 +1180,7 @@ mod tests {
         let readout = citizen_readout(&universe, None);
         assert!(readout.contains("Sleeping | 06:00:00 remaining"));
         assert!(readout.contains("Location: Ada's home"));
+        assert!(readout.contains("Drinking reserves: 400 g | Reserve wellbeing: +10.00"));
         assert!(readout.contains("Replan after Reduce Sleep Need completes"));
     }
 
