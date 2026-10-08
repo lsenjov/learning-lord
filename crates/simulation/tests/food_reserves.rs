@@ -217,3 +217,95 @@ fn foraging_does_not_publish_a_food_reserve_wishlist() {
         .unwrap();
     assert_eq!(universe.market().requested(worker), ShoppingList::default());
 }
+
+#[test]
+fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
+    use learning_lord_simulation::locations::{Location, Map, Position};
+    let map = Map::new(
+        Position::default(),
+        Position::default(),
+        Position { x: 10.0, y: 0.0 },
+    )
+    .unwrap();
+    let (world, seller) = Universe::with_map(map)
+        .with_citizen(
+            "Seller",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_good(Good::Fish, 20)
+                .unwrap()
+                .with_good(Good::Cabbage, 20)
+                .unwrap(),
+        )
+        .unwrap();
+    let market = world.map().public_place(Location::Market);
+    let moved = world
+        .start_action(seller, CitizenAction::Travel(market))
+        .unwrap();
+    let AgentKind::Citizen(citizen) = &moved.agents()[&seller].kind;
+    let world = moved
+        .advance(citizen.active_action().unwrap().remaining_ms())
+        .unwrap();
+    let world = world
+        .start_action(seller, CitizenAction::List(Good::Fish, 20))
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    let world = world
+        .start_action(seller, CitizenAction::List(Good::Cabbage, 20))
+        .unwrap()
+        .advance(TRADE_DURATION_MS)
+        .unwrap();
+    let (world, buyer) = world
+        .with_citizen(
+            "Buyer",
+            Citizen::with_needs(-50.0, -100.0)
+                .unwrap()
+                .with_thirst(-50.0)
+                .unwrap()
+                .with_garment_condition(Some(1.0))
+                .unwrap()
+                .with_coins(1000)
+                .unwrap()
+                .with_good(Good::BreadRoll, 70)
+                .unwrap()
+                .with_good(Good::Water, 400)
+                .unwrap(),
+        )
+        .unwrap();
+    let before = world.clone();
+    let AgentKind::Citizen(citizen) = &world.agents()[&buyer].kind;
+    let selected = plan(citizen).unwrap();
+    let first = &selected.actions()[selected.goals()[0].actions.clone()];
+    assert!(matches!(
+        first,
+        [CitizenAction::Travel(_), CitizenAction::BuyAt { .. }]
+    ));
+    let CitizenAction::BuyAt { list: basket, .. } = first[1] else {
+        unreachable!()
+    };
+    assert!(basket.units(Good::Fish) > 0 || basket.units(Good::Cabbage) > 0);
+    assert_eq!(world, before);
+    assert_eq!(world.market().requested(buyer), ShoppingList::default());
+    let travelling = world.start_planning(buyer).unwrap();
+    for good in Good::FOOD {
+        assert_eq!(
+            travelling.market().requested(buyer).units(good),
+            basket.units(good)
+        );
+    }
+    let AgentKind::Citizen(citizen) = &travelling.agents()[&buyer].kind;
+    let arrived = travelling
+        .advance(citizen.active_action().unwrap().remaining_ms())
+        .unwrap();
+    for good in Good::FOOD {
+        assert_eq!(
+            arrived.market().requested(buyer).units(good),
+            basket.units(good)
+        );
+    }
+    let bought = arrived.advance(TRADE_DURATION_MS).unwrap();
+    for good in Good::FOOD {
+        assert_eq!(bought.market().requested(buyer).units(good), 0);
+    }
+}

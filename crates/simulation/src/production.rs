@@ -274,14 +274,7 @@ impl ProductionTargets {
                 usable_stocks[good as usize] = usable_stocks[good as usize].saturating_sub(units);
             }
         }
-        let mut food_left = PERSONAL_FOOD_RESERVE;
-        let mut personal_reserve = [0; Good::COUNT];
-        for good in Good::FOOD {
-            let nutrition = good.nutrition_per_unit().unwrap();
-            let kept = stocks[good as usize].min((food_left / nutrition).ceil() as Quantity);
-            personal_reserve[good as usize] = kept;
-            food_left = (food_left - kept as f64 * nutrition).max(0.0);
-        }
+        let mut personal_reserve = citizen.retained_food(usable_stocks);
         personal_reserve[Good::Water as usize] =
             stocks[Good::Water as usize].min(crate::WATER_RESERVE_GRAMS);
         let mut recipes: Vec<_> = citizen

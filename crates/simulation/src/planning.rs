@@ -13,6 +13,7 @@ pub struct GoalForecast {
     pub duration_ms: u64,
     pub average_wellbeing: f64,
     pub full_plan_wellbeing: f64,
+    pub future_food_benefit: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -546,6 +547,7 @@ fn evaluate_goal(
         let actions = variant.actions.clone();
         let duration_ms = variant.elapsed_ms;
         let average_wellbeing = variant.average()?;
+        let future_food_benefit = variant.citizen.food_forecast(6).benefit;
         let mut continuation = empty_plan();
         let boundary = PlanGoal {
             goal,
@@ -575,6 +577,7 @@ fn evaluate_goal(
                 duration_ms,
                 average_wellbeing,
                 full_plan_wellbeing: continuation.average_wellbeing,
+                future_food_benefit,
             });
             goal_best = continuation;
         }

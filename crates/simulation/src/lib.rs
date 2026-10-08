@@ -28,6 +28,13 @@ pub const FOOD_RESERVE_CAP_NUTRITION: f64 = 300.0;
 pub const WATER_RESERVE_GRAMS: Quantity = 400;
 pub const WATER_RESERVE_CAP_GRAMS: Quantity = 1_200;
 
+pub(crate) fn food_reserve_bonus(nutrition: f64) -> f64 {
+    0.10 * nutrition.min(FOOD_RESERVE_FULL_BONUS_NUTRITION)
+        + 0.02
+            * (nutrition.min(FOOD_RESERVE_CAP_NUTRITION) - FOOD_RESERVE_FULL_BONUS_NUTRITION)
+                .max(0.0)
+}
+
 pub(crate) fn water_reserve_bonus(grams: f64) -> f64 {
     0.025 * grams.min(WATER_RESERVE_GRAMS as f64)
         + 0.005 * (grams.min(WATER_RESERVE_CAP_GRAMS as f64) - WATER_RESERVE_GRAMS as f64).max(0.0)
@@ -255,6 +262,7 @@ pub struct Citizen {
     prices: Prices,
     market: Market,
     market_time_ms: u64,
+    last_meal_started_ms: Option<u64>,
     map: Map,
     position: Position,
     active_action: Option<ActiveAction>,
@@ -309,6 +317,7 @@ impl Citizen {
             prices: Prices::default(),
             market: Market::default(),
             market_time_ms: 0,
+            last_meal_started_ms: None,
             map,
             position: Position::default(),
             active_action: None,
@@ -750,15 +759,13 @@ impl Citizen {
 
     pub fn reserved_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
         let mut reserve = self.production_ingredient_reserve()?;
-        let mut nutrition = FOOD_RESERVE_CAP_NUTRITION;
+        let available = std::array::from_fn(|index| {
+            self.available_units(Good::ALL[index])
+                .saturating_sub(reserve[index])
+        });
+        let food = self.retained_food(available);
         for good in Good::FOOD {
-            let available = self
-                .available_units(good)
-                .saturating_sub(reserve[good as usize]);
-            let kept =
-                available.min((nutrition / good.nutrition_per_unit().unwrap()).ceil() as Quantity);
-            reserve[good as usize] += kept;
-            nutrition = (nutrition - kept as f64 * good.nutrition_per_unit().unwrap()).max(0.0);
+            reserve[good as usize] += food[good as usize];
         }
         reserve[Good::Water as usize] = reserve[Good::Water as usize]
             .checked_add(WATER_RESERVE_GRAMS)
@@ -910,6 +917,9 @@ impl Citizen {
         citizen
             .inventory
             .insert(Good::Water, self.units(Good::Water) - drink_units);
+        if action == CitizenAction::Eat {
+            citizen.last_meal_started_ms = Some(self.market_time_ms);
+        }
         citizen.active_action = Some(ActiveAction {
             action,
             remaining_ms: duration_ms,
@@ -938,10 +948,7 @@ impl Citizen {
                         as f64
                     / active.meal_duration_ms.max(1) as f64
             });
-        0.10 * nutrition.min(FOOD_RESERVE_FULL_BONUS_NUTRITION)
-            + 0.02
-                * (nutrition.min(FOOD_RESERVE_CAP_NUTRITION) - FOOD_RESERVE_FULL_BONUS_NUTRITION)
-                    .max(0.0)
+        food_reserve_bonus(nutrition)
     }
 
     pub fn drinking_water_reserve(&self) -> f64 {
@@ -958,18 +965,21 @@ impl Citizen {
         water_reserve_bonus(self.drinking_water_reserve())
     }
 
-    pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
-        let wellbeing = -self.clothing_need()
+    pub(crate) fn needs_wellbeing(&self) -> f64 {
+        -self.clothing_need()
             - self.thirst.max(0.0)
             - 4.0 * (self.thirst - 100.0).max(0.0)
             - self.hunger.max(0.0)
             - 4.0 * (self.hunger - 100.0).max(0.0)
             - (-self.hunger - 100.0).max(0.0)
             - self.tiredness.max(0.0)
-            + self.wealth()? * WEALTH_WELLBEING_PER_COIN
             + self.food_reserve_wellbeing()
             + self.water_reserve_wellbeing()
-            + self.dietary_wellbeing();
+            + self.dietary_wellbeing()
+    }
+
+    pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
+        let wellbeing = self.needs_wellbeing() + self.wealth()? * WEALTH_WELLBEING_PER_COIN;
         if !wellbeing.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }

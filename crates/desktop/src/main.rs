@@ -745,12 +745,13 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
         if let Some(forecast) = &candidate.forecast {
             let seconds = forecast.duration_ms.div_ceil(1000);
             lines.push(format!(
-                "{:02}:{:02}:{:02} | Goal avg {:.2} | Plan avg {:.2}",
+                "{:02}:{:02}:{:02} | Goal avg {:.2} | Plan avg {:.2} | Future food +{:.2}",
                 seconds / 3600,
                 seconds / 60 % 60,
                 seconds % 60,
                 forecast.average_wellbeing,
-                forecast.full_plan_wellbeing
+                forecast.full_plan_wellbeing,
+                forecast.future_food_benefit
             ));
             lines.push(sequence_readout(&forecast.actions, citizen));
         } else {
