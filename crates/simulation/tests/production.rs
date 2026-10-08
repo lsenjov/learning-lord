@@ -13,7 +13,7 @@ fn worker(recipe: Recipe) -> Citizen {
         Recipe::SpinThread | Recipe::WeaveCloth => StartingRole::Weaver,
         Recipe::MakeClothingBlock | Recipe::AssembleGarment => StartingRole::Tailor,
         Recipe::ChopWood | Recipe::Forage => StartingRole::Woodcutter,
-        Recipe::FetchWater | Recipe::BakeBread | Recipe::BakeBerryPie => StartingRole::Baker,
+        Recipe::FetchWater | Recipe::BakeRolls | Recipe::BakeBerryPie => StartingRole::Baker,
     };
     let mut citizen = Citizen::new(0.0).unwrap().with_starting_role(role);
     for &(good, grams) in recipe.inputs() {
@@ -97,18 +97,18 @@ fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stoc
 
 #[test]
 fn all_inputs_skill_and_owned_property_are_required_before_work_starts() {
-    let baker = worker(Recipe::BakeBread);
-    for &(good, grams) in Recipe::BakeBread.inputs() {
+    let baker = worker(Recipe::BakeRolls);
+    for &(good, grams) in Recipe::BakeRolls.inputs() {
         let short = baker.with_good(good, grams - 1).unwrap();
         assert_eq!(
-            short.start_action(CitizenAction::Produce(Recipe::BakeBread)),
+            short.start_action(CitizenAction::Produce(Recipe::BakeRolls)),
             Err(SimulationError::MissingInputs)
         );
         assert_eq!(short.active_action(), None);
     }
     let unskilled = baker.with_skill_practice_ms(Skill::Baking, None).unwrap();
     assert_eq!(
-        unskilled.start_action(CitizenAction::Produce(Recipe::BakeBread)),
+        unskilled.start_action(CitizenAction::Produce(Recipe::BakeRolls)),
         Err(SimulationError::MissingSkill)
     );
     let farmer = Citizen::new(0.0)
@@ -158,17 +158,17 @@ fn practice_shortens_future_work_and_caps_at_half_duration() {
 
 #[test]
 fn failed_production_does_not_consume_inputs_or_change_progress() {
-    let source = worker(Recipe::BakeBread)
-        .with_good(Good::Bread, u64::MAX)
+    let source = worker(Recipe::BakeRolls)
+        .with_good(Good::BreadRoll, u64::MAX)
         .unwrap();
     let started = source
-        .start_action(CitizenAction::Produce(Recipe::BakeBread))
+        .start_action(CitizenAction::Produce(Recipe::BakeRolls))
         .unwrap();
     assert_eq!(
         started.advance(3_600_000),
         Err(SimulationError::InventoryOverflow)
     );
-    for &(good, grams) in Recipe::BakeBread.inputs() {
+    for &(good, grams) in Recipe::BakeRolls.inputs() {
         assert_eq!(started.units(good), grams);
     }
     assert_eq!(started.active_action().unwrap().remaining_ms(), 3_600_000);
@@ -179,7 +179,7 @@ fn failed_production_does_not_consume_inputs_or_change_progress() {
 fn starting_inputs_cover_four_baseline_hours_of_the_selected_profession() {
     for (role, recipe) in [
         (StartingRole::Miller, Recipe::MillFlour),
-        (StartingRole::Baker, Recipe::BakeBread),
+        (StartingRole::Baker, Recipe::BakeRolls),
     ] {
         let inputs = starting_inputs(role).items().collect::<Vec<_>>();
         for &(good, grams) in recipe.inputs() {
@@ -210,12 +210,12 @@ fn meals_choose_one_available_food_and_keep_other_inventory() {
         .unwrap()
         .with_berries(40)
         .unwrap()
-        .with_good(Good::Bread, 1)
+        .with_good(Good::BreadRoll, 5)
         .unwrap()
         .with_good(Good::BerryPie, 1)
         .unwrap();
     let started = source.start_action(CitizenAction::Eat).unwrap();
-    assert_eq!(started.units(Good::Bread), 1);
+    assert_eq!(started.units(Good::BreadRoll), 5);
     assert_eq!(started.units(Good::BerryPie), 0);
     assert_eq!(started.berries_units(), 40);
     let duration = started.active_action().unwrap().duration_ms();
@@ -236,7 +236,7 @@ fn meals_choose_one_available_food_and_keep_other_inventory() {
 fn each_food_requires_a_whole_meal_and_nonfood_is_rejected() {
     for (good, units, nutrition) in [
         (Good::Berries, 155, 50.0),
-        (Good::Bread, 1, 50.0),
+        (Good::BreadRoll, 5, 50.0),
         (Good::BerryPie, 1, 60.0),
         (Good::Fish, 2, 50.0),
         (Good::Cabbage, 2, 50.0),

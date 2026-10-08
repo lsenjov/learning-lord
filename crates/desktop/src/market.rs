@@ -632,14 +632,17 @@ mod tests {
         let mut policy = Universe::default().caravan_policy();
         policy.import_tariff_basis_points = 5000;
         policy.export_tariff_basis_points = 5000;
-        policy.exports[Good::Bread as usize].minimum_reserve = 7;
+        policy.exports[Good::BreadRoll as usize].minimum_reserve = 7;
         let universe = Universe::default().with_caravan_policy(policy).unwrap();
-        let label = price_details(&universe, Good::Bread);
-        assert!(label.contains("Export below 5.014 coins/loaf | Import above 60.166"));
-        assert!(label.contains("Town stock: 0 loaves | Saved minimum reserve: 7 loaves"));
+        let label = price_details(&universe, Good::BreadRoll);
+        assert!(label.contains("Export below 1.003 coins/roll | Import above 12.033"));
+        assert!(label.contains("Town stock: 0 rolls | Saved minimum reserve: 7 rolls"));
         policy.import_tariff_basis_points = 10_000;
         policy.export_tariff_basis_points = 10_000;
-        let label = price_details(&universe.with_caravan_policy(policy).unwrap(), Good::Bread);
+        let label = price_details(
+            &universe.with_caravan_policy(policy).unwrap(),
+            Good::BreadRoll,
+        );
         assert!(label.contains("Exports disabled | Imports disabled"));
         assert!(label.contains("Caravan asking price: disabled"));
         assert!(!label.to_lowercase().contains("inf"));
@@ -649,12 +652,12 @@ mod tests {
     #[test]
     fn core_threshold_readout_stays_fixed_when_local_prices_change() {
         let universe = Universe::default()
-            .with_prices(Prices::default().with_price(Good::Bread, 1.0).unwrap());
-        let label = price_details(&universe, Good::Bread);
-        assert!(label.contains("Current price: 1.000 coins/loaf"));
-        assert!(label.contains("Core price: 20.055 coins/loaf"));
-        assert!(label.contains("Export below 10.028 coins/loaf | Import above 30.083 coins/loaf"));
-        assert!(label.contains("Caravan asking price: 30.083 coins/loaf"));
+            .with_prices(Prices::default().with_price(Good::BreadRoll, 1.0).unwrap());
+        let label = price_details(&universe, Good::BreadRoll);
+        assert!(label.contains("Current price: 1.000 coins/roll"));
+        assert!(label.contains("Core price: 4.011 coins/roll"));
+        assert!(label.contains("Export below 2.006 coins/roll | Import above 6.017 coins/roll"));
+        assert!(label.contains("Caravan asking price: 6.017 coins/roll"));
     }
 
     #[test]
@@ -663,7 +666,7 @@ mod tests {
         let (universe, buyer) = Universe::default()
             .with_prices(
                 Prices::default()
-                    .with_price(Good::Bread, Good::Bread.core_price() * 2.0)
+                    .with_price(Good::BreadRoll, Good::BreadRoll.core_price() * 2.0)
                     .unwrap(),
             )
             .with_citizen(
@@ -672,23 +675,23 @@ mod tests {
             )
             .unwrap();
         let universe = universe
-            .with_purchase_request(buyer, ShoppingList::single(Good::Bread, 6))
+            .with_purchase_request(buyer, ShoppingList::single(Good::BreadRoll, 6))
             .unwrap()
             .advance(UPDATE_TIME_MS)
             .unwrap();
-        let groups = seller_orders(&universe, Good::Bread);
+        let groups = seller_orders(&universe, Good::BreadRoll);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].id, MarketParty::Caravan);
         assert_eq!(groups[0].name, "Caravan");
         assert_eq!(groups[0].orders[0].1, 3);
-        assert_eq!(groups[0].orders[0].2, Good::Bread.import_threshold());
+        assert_eq!(groups[0].orders[0].2, Good::BreadRoll.import_threshold());
         assert_eq!(universe.agents().len(), 1);
         let current = metrics(
-            Good::Bread,
-            universe.market().current_period().goods[Good::Bread as usize],
+            Good::BreadRoll,
+            universe.market().current_period().goods[Good::BreadRoll as usize],
         );
-        assert!(current.contains("Import deliveries: 3 loaves"));
-        assert!(current.contains("Caravan stock: 3 loaves"));
+        assert!(current.contains("Import deliveries: 3 rolls"));
+        assert!(current.contains("Caravan stock: 3 rolls"));
     }
 
     #[test]
@@ -788,8 +791,8 @@ mod tests {
     #[test]
     fn counted_goods_display_integer_quantities_and_item_prices() {
         assert_eq!(
-            order_label(Good::Bread, 2, 15.0),
-            "2 loaves remaining  |  15.000 coins/loaf  |  30.000 coins quoted value"
+            order_label(Good::BreadRoll, 2, 15.0),
+            "2 rolls remaining  |  15.000 coins/roll  |  30.000 coins quoted value"
         );
         assert_eq!(
             order_label(Good::BerryPie, 1, 25.0),
@@ -797,7 +800,7 @@ mod tests {
         );
         assert!(
             metrics(
-                Good::Bread,
+                Good::BreadRoll,
                 GoodActivity {
                     traded_units: 1,
                     listed_units: 2,
@@ -805,7 +808,7 @@ mod tests {
                     ..default()
                 }
             )
-            .contains("Buy volume: 4 loaves")
+            .contains("Buy volume: 4 rolls")
         );
     }
 
@@ -842,7 +845,7 @@ mod tests {
             .join("\n\n");
         assert_eq!(buyer_requests(&universe, Good::Berries), expected);
         assert_eq!(
-            buyer_requests(&universe, Good::Bread),
+            buyer_requests(&universe, Good::BreadRoll),
             "No current buy requests for this good."
         );
 
@@ -1065,18 +1068,18 @@ mod tests {
             assert_eq!(node.display, Display::Flex);
             assert_eq!(*visibility, Visibility::Inherited);
         }
-        press(&mut app, Choice::Good(Good::Bread));
+        press(&mut app, Choice::Good(Good::BreadRoll));
         app.update();
-        assert_eq!(app.world().resource::<Selection>().good(), Good::Bread);
+        assert_eq!(app.world().resource::<Selection>().good(), Good::BreadRoll);
         app.world_mut().resource_mut::<DisplaySnapshot>().0.revision += 1;
         app.update();
-        assert_eq!(app.world().resource::<Selection>().good(), Good::Bread);
+        assert_eq!(app.world().resource::<Selection>().good(), Good::BreadRoll);
         app.world_mut()
             .resource_mut::<DisplaySnapshot>()
             .0
             .generation += 1;
         app.update();
-        assert_eq!(app.world().resource::<Selection>().good(), Good::Bread);
+        assert_eq!(app.world().resource::<Selection>().good(), Good::BreadRoll);
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::ArrowDown);

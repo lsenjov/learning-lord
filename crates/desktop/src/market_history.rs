@@ -588,16 +588,16 @@ mod tests {
                 ..default()
             },
         };
-        let label = hover_label(Good::Bread, &day);
+        let label = hover_label(Good::BreadRoll, &day);
         assert!(label.contains("CLOSED | quantities at close"));
-        assert!(label.contains("Total traded volume: 6 loaves"));
-        assert!(label.contains("Local trades: 1 loaf | 20 coins"));
-        assert!(label.contains("Exports: 2 loaves | 15 gross coins entering town"));
-        assert!(label.contains("Import deliveries: 4 loaves"));
-        assert!(label.contains("Bought from caravans: 3 loaves | 91 gross coins spent"));
-        assert!(label.contains("Caravan stock: 1 loaf"));
+        assert!(label.contains("Total traded volume: 6 rolls"));
+        assert!(label.contains("Local trades: 1 roll | 20 coins"));
+        assert!(label.contains("Exports: 2 rolls | 15 gross coins entering town"));
+        assert!(label.contains("Import deliveries: 4 rolls"));
+        assert!(label.contains("Bought from caravans: 3 rolls | 91 gross coins spent"));
+        assert!(label.contains("Caravan stock: 1 roll"));
         day.partial = true;
-        assert!(hover_label(Good::Bread, &day).contains("PARTIAL | live quantities so far"));
+        assert!(hover_label(Good::BreadRoll, &day).contains("PARTIAL | live quantities so far"));
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
         let (universe, buyer) = Universe::default()
             .with_prices(
                 Prices::default()
-                    .with_price(Good::Bread, Good::Bread.core_price() * 2.0)
+                    .with_price(Good::BreadRoll, Good::BreadRoll.core_price() * 2.0)
                     .unwrap(),
             )
             .with_citizen(
@@ -614,11 +614,11 @@ mod tests {
             )
             .unwrap();
         let universe = universe
-            .with_purchase_request(buyer, ShoppingList::single(Good::Bread, 6))
+            .with_purchase_request(buyer, ShoppingList::single(Good::BreadRoll, 6))
             .unwrap()
             .advance(UPDATE_TIME_MS + DAY_MS)
             .unwrap();
-        let values = days(&universe, Good::Bread);
+        let values = days(&universe, Good::BreadRoll);
         let closed = values
             .iter()
             .find(|day| day.start == UPDATE_TIME_MS)
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(closed.activity.imported_units, 3);
         assert_eq!(closed.activity.caravan_listed_units, 3);
         assert_eq!(closed.activity.traded_units, 0);
-        assert!(hover_label(Good::Bread, closed).contains("Import deliveries: 3 loaves"));
+        assert!(hover_label(Good::BreadRoll, closed).contains("Import deliveries: 3 rolls"));
     }
 
     #[test]
@@ -678,10 +678,10 @@ mod tests {
     #[test]
     fn initial_short_period_and_recent_window_are_bounded() {
         let universe = Universe::default().advance(UPDATE_TIME_MS).unwrap();
-        let values = days(&universe, Good::Bread);
+        let values = days(&universe, Good::BreadRoll);
         assert_eq!(values.len(), 2);
         assert_eq!((values[0].start, values[0].end), (0, UPDATE_TIME_MS));
-        let values = days(&universe.advance(40 * DAY_MS).unwrap(), Good::Bread);
+        let values = days(&universe.advance(40 * DAY_MS).unwrap(), Good::BreadRoll);
         assert_eq!(values.len(), WINDOW);
         assert_eq!(values[1].start - values[0].start, DAY_MS);
         assert_eq!(
@@ -783,19 +783,19 @@ mod tests {
         assert!(detail(&mut app).starts_with("PINNED | Day 0 | Monday | 00:00:00"));
         let button = app
             .world_mut()
-            .spawn((market::Choice::Good(Good::Bread), Interaction::Pressed))
+            .spawn((market::Choice::Good(Good::BreadRoll), Interaction::Pressed))
             .id();
         app.update();
         app.world_mut().despawn(button);
         assert_eq!(
             app.world().resource::<ChartDisplay>().good,
-            Some(Good::Bread)
+            Some(Good::BreadRoll)
         );
         assert_eq!(app.world().resource::<ChartDisplay>().pinned, Some(0));
         let label = detail(&mut app);
         assert!(label.starts_with("PINNED | Day 0 | Monday | 00:00:00"));
-        assert!(label.contains("coins/loaf"));
-        assert!(label.contains("Total traded volume: 0 loaves"));
+        assert!(label.contains("coins/roll"));
+        assert!(label.contains("Total traded volume: 0 rolls"));
         pointer(&mut app, Some(Vec2::new(0.0, 0.0)), true);
         assert_eq!(
             app.world().resource::<ChartDisplay>().pinned,
@@ -916,8 +916,8 @@ mod tests {
         assert_eq!(chart_quantity_label(Good::Fish, 2.0), "2 fish");
         assert_eq!(chart_quantity_label(Good::Cabbage, 1.0), "1 cabbage");
         assert_eq!(chart_quantity_label(Good::Cabbage, 2.0), "2 cabbages");
-        assert_eq!(chart_quantity_label(Good::Bread, 1.0), "1 loaf");
-        assert_eq!(chart_quantity_label(Good::Bread, 2.0), "2 loaves");
+        assert_eq!(chart_quantity_label(Good::BreadRoll, 1.0), "1 roll");
+        assert_eq!(chart_quantity_label(Good::BreadRoll, 2.0), "2 rolls");
         assert_eq!(chart_quantity_label(Good::BerryPie, 1.0), "1 pie");
         assert_eq!(chart_quantity_label(Good::BerryPie, 3.0), "3 pies");
         assert_eq!(chart_quantity_label(Good::FlaxBlock, 1.0), "1 block");

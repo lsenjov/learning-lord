@@ -78,14 +78,14 @@ fn storage_retains_goods_ownership_independently_and_snapshots_are_immutable() {
     let (world, ada) = Universe::with_map(Map::default())
         .with_prices(
             learning_lord_simulation::marketplace::Prices::default()
-                .with_price(learning_lord_simulation::marketplace::Good::Bread, 15.0)
+                .with_price(learning_lord_simulation::marketplace::Good::BreadRoll, 3.0)
                 .unwrap(),
         )
         .with_citizen(
             "Ada",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 5)
+                .with_good(Good::BreadRoll, 25)
                 .unwrap(),
         )
         .unwrap();
@@ -99,29 +99,31 @@ fn storage_retains_goods_ownership_independently_and_snapshots_are_immutable() {
         .id;
     let before = world.clone();
     let stored = world
-        .with_stored_good(home, GoodsOwner::Agent(bram), Good::Bread, 3)
+        .with_stored_good(home, GoodsOwner::Agent(bram), Good::BreadRoll, 15)
         .unwrap()
-        .with_stored_good(home, GoodsOwner::Town, Good::Bread, 7)
+        .with_stored_good(home, GoodsOwner::Town, Good::BreadRoll, 35)
         .unwrap();
     assert_eq!(
         stored
             .storage()
-            .units(home, GoodsOwner::Agent(bram), Good::Bread),
-        3
+            .units(home, GoodsOwner::Agent(bram), Good::BreadRoll),
+        15
     );
     assert_eq!(
-        stored.storage().units(home, GoodsOwner::Town, Good::Bread),
-        7
+        stored
+            .storage()
+            .units(home, GoodsOwner::Town, Good::BreadRoll),
+        35
     );
     assert_eq!(citizen(&stored, bram).wealth().unwrap(), 45.0);
-    assert_eq!(citizen(&stored, bram).units(Good::Bread), 0);
+    assert_eq!(citizen(&stored, bram).units(Good::BreadRoll), 0);
     assert_eq!(citizen(&stored, bram).food_nutrition(), 0.0);
     assert_eq!(
-        stored.withdraw_goods(ada, home, Good::Bread, 1),
+        stored.withdraw_goods(ada, home, Good::BreadRoll, 5),
         Err(SimulationError::MissingInputs)
     );
     assert_eq!(
-        stored.withdraw_goods(bram, home, Good::Bread, 1),
+        stored.withdraw_goods(bram, home, Good::BreadRoll, 5),
         Err(SimulationError::PrivateProperty)
     );
     assert_eq!(world, before);
@@ -135,7 +137,7 @@ fn local_transfers_conserve_wealth_and_never_use_another_owners_stock() {
             "Ada",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 5)
+                .with_good(Good::BreadRoll, 25)
                 .unwrap(),
         )
         .unwrap();
@@ -144,13 +146,13 @@ fn local_transfers_conserve_wealth_and_never_use_another_owners_stock() {
         .find(|place| place.kind == Location::Home)
         .unwrap()
         .id;
-    let deposited = world.deposit_goods(ada, home, Good::Bread, 4).unwrap();
-    assert_eq!(citizen(&deposited, ada).units(Good::Bread), 1);
+    let deposited = world.deposit_goods(ada, home, Good::BreadRoll, 20).unwrap();
+    assert_eq!(citizen(&deposited, ada).units(Good::BreadRoll), 5);
     assert_eq!(
         deposited
             .storage()
-            .units(home, GoodsOwner::Agent(ada), Good::Bread),
-        4
+            .units(home, GoodsOwner::Agent(ada), Good::BreadRoll),
+        20
     );
     assert_eq!(
         citizen(&deposited, ada).wealth().unwrap(),
@@ -158,21 +160,23 @@ fn local_transfers_conserve_wealth_and_never_use_another_owners_stock() {
     );
     assert_eq!(citizen(&deposited, ada).food_nutrition(), 50.0);
     assert_eq!(
-        deposited.withdraw_goods(ada, home, Good::Bread, 5),
+        deposited.withdraw_goods(ada, home, Good::BreadRoll, 25),
         Err(SimulationError::MissingInputs)
     );
-    let restored = deposited.withdraw_goods(ada, home, Good::Bread, 4).unwrap();
-    assert_eq!(citizen(&restored, ada).units(Good::Bread), 5);
+    let restored = deposited
+        .withdraw_goods(ada, home, Good::BreadRoll, 20)
+        .unwrap();
+    assert_eq!(citizen(&restored, ada).units(Good::BreadRoll), 25);
     assert!(restored.storage().stock().is_empty());
     let busy = world.start_action(ada, CitizenAction::Wait).unwrap();
-    let moved = busy.deposit_goods(ada, home, Good::Bread, 1).unwrap();
+    let moved = busy.deposit_goods(ada, home, Good::BreadRoll, 5).unwrap();
     assert_eq!(
         citizen(&moved, ada).active_action(),
         citizen(&busy, ada).active_action()
     );
     assert_eq!(
-        citizen(&moved.advance(1).unwrap(), ada).units(Good::Bread),
-        4
+        citizen(&moved.advance(1).unwrap(), ada).units(Good::BreadRoll),
+        20
     );
 }
 
@@ -183,7 +187,7 @@ fn storage_validates_references_and_overflow_without_changing_source() {
             "Ada",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 1)
+                .with_good(Good::BreadRoll, 5)
                 .unwrap(),
         )
         .unwrap();
@@ -193,27 +197,32 @@ fn storage_validates_references_and_overflow_without_changing_source() {
         .unwrap()
         .id;
     assert_eq!(
-        world.with_stored_good(PlaceId(Uuid::new_v4()), GoodsOwner::Town, Good::Bread, 1),
+        world.with_stored_good(
+            PlaceId(Uuid::new_v4()),
+            GoodsOwner::Town,
+            Good::BreadRoll,
+            1
+        ),
         Err(SimulationError::PlaceNotFound)
     );
     assert_eq!(
         world.with_stored_good(
             home,
             GoodsOwner::Agent(AgentId(Uuid::new_v4())),
-            Good::Bread,
+            Good::BreadRoll,
             1
         ),
         Err(SimulationError::AgentNotFound)
     );
     assert_eq!(
-        world.with_stored_good(home, GoodsOwner::Agent(ada), Good::Bread, u64::MAX),
+        world.with_stored_good(home, GoodsOwner::Agent(ada), Good::BreadRoll, u64::MAX),
         Err(SimulationError::WealthOverflow)
     );
     let town = world
-        .with_stored_good(home, GoodsOwner::Town, Good::Bread, u64::MAX)
+        .with_stored_good(home, GoodsOwner::Town, Good::BreadRoll, u64::MAX)
         .unwrap();
     assert_eq!(
-        town.withdraw_goods(ada, home, Good::Bread, 1),
+        town.withdraw_goods(ada, home, Good::BreadRoll, 5),
         Err(SimulationError::MissingInputs)
     );
     assert!(world.storage().stock().is_empty());
@@ -285,19 +294,19 @@ fn storage_transfers_require_arrival_and_refuse_travel() {
             "Ada",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 1)
+                .with_good(Good::BreadRoll, 5)
                 .unwrap(),
         )
         .unwrap();
     assert_eq!(
-        world.deposit_goods(ada, forest, Good::Bread, 1),
+        world.deposit_goods(ada, forest, Good::BreadRoll, 5),
         Err(SimulationError::WrongLocation)
     );
     let moving = world
         .start_action(ada, CitizenAction::Travel(forest))
         .unwrap();
     assert_eq!(
-        moving.deposit_goods(ada, forest, Good::Bread, 1),
+        moving.deposit_goods(ada, forest, Good::BreadRoll, 5),
         Err(SimulationError::CitizenBusy)
     );
 }

@@ -30,7 +30,7 @@ pub fn category_bonus(value: f64) -> f64 {
 impl Good {
     pub fn diet_per_unit(self) -> [f64; 4] {
         match self {
-            Self::Bread => [0.0, 50.0, 0.0, 0.0],
+            Self::BreadRoll => [0.0, 10.0, 0.0, 0.0],
             Self::Berries => [0.0, 0.0, 0.0, crate::BERRY_NUTRITION_PER_GRAM],
             Self::BerryPie => [0.0, 45.0, 0.0, 15.0],
             Self::Fish => [25.0, 0.0, 0.0, 0.0],
@@ -83,26 +83,33 @@ impl Citizen {
         }
     }
 
-    fn meal_wellbeing(&self, good: Good, units: crate::Quantity) -> Option<f64> {
+    fn meal_wellbeing(&self, meal_units: [crate::Quantity; Good::COUNT]) -> Option<f64> {
         let mut predicted = self.clone();
         predicted.active_action = None;
-        predicted.inventory.insert(good, self.units(good) - units);
-        let meal_ms = units * good.eating_ms_per_unit()?;
+        let mut meal_ms = 0;
+        let mut meal_nutrition = 0.0;
+        for good in Good::FOOD {
+            let units = meal_units[good as usize];
+            predicted.inventory.insert(good, self.units(good) - units);
+            meal_ms += units * good.eating_ms_per_unit()?;
+            meal_nutrition += units as f64 * good.nutrition_per_unit()?;
+        }
         let drink_units = self.drink_units();
         predicted
             .inventory
             .insert(Good::Water, self.units(Good::Water) - drink_units);
         let duration_ms =
             meal_ms.max(drink_units * crate::DRINK_DURATION_MS / crate::DRINK_WATER_GRAMS);
-        let mut meal_units = [0; Good::COUNT];
-        meal_units[good as usize] = units;
+        if duration_ms == 0 {
+            return None;
+        }
         let action = ActiveAction {
             action: crate::CitizenAction::Eat,
             remaining_ms: duration_ms,
             duration_ms,
             meal_duration_ms: meal_ms,
             drink_units,
-            meal_nutrition: units as f64 * good.nutrition_per_unit()?,
+            meal_nutrition,
             meal_units,
             travel_origin: self.position,
             travel_destination: None,
@@ -111,21 +118,70 @@ impl Citizen {
         predicted.personal_wellbeing().ok()
     }
 
-    pub(crate) fn preferred_complete_meal(&self) -> Option<(Good, crate::Quantity)> {
-        Good::FOOD
+    pub(crate) fn preferred_meal(&self) -> ([crate::Quantity; Good::COUNT], f64) {
+        let mut candidates = Vec::new();
+        self.mixed_meals(0, [0; Good::COUNT], 0.0, &mut candidates);
+        let complete = candidates
+            .iter()
+            .any(|(_, nutrition)| *nutrition >= crate::MEAL_NOURISHMENT);
+        let partial_nutrition = candidates
+            .iter()
+            .map(|(_, nutrition)| *nutrition)
+            .fold(0.0, f64::max);
+        candidates
             .into_iter()
-            .filter_map(|good| {
-                let units = (crate::MEAL_NOURISHMENT / good.nutrition_per_unit()?).ceil()
-                    as crate::Quantity;
-                (self.available_units(good) >= units)
-                    .then(|| (good, units, self.meal_wellbeing(good, units)))
+            .filter(|(_, nutrition)| {
+                if complete {
+                    *nutrition >= crate::MEAL_NOURISHMENT
+                } else {
+                    *nutrition == partial_nutrition
+                }
             })
-            .filter_map(|(good, units, score)| Some((good, units, score?)))
-            .max_by(|a, b| {
-                a.2.total_cmp(&b.2)
-                    .then_with(|| (b.0 as usize).cmp(&(a.0 as usize)))
+            .filter_map(|(units, nutrition)| Some((units, nutrition, self.meal_wellbeing(units)?)))
+            .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)))
+            .map_or(([0; Good::COUNT], 0.0), |(units, nutrition, _)| {
+                (units, nutrition)
             })
-            .map(|(good, units, _)| (good, units))
+    }
+
+    fn mixed_meals(
+        &self,
+        index: usize,
+        mut units: [crate::Quantity; Good::COUNT],
+        nutrition: f64,
+        candidates: &mut Vec<([crate::Quantity; Good::COUNT], f64)>,
+    ) {
+        const COUNTED: [Good; 4] = [Good::BreadRoll, Good::Fish, Good::Cabbage, Good::BerryPie];
+        if index == COUNTED.len() {
+            let berries = self.available_units(Good::Berries).min(
+                ((crate::MEAL_NOURISHMENT - nutrition).max(0.0) / crate::BERRY_NUTRITION_PER_GRAM)
+                    .ceil() as crate::Quantity,
+            );
+            units[Good::Berries as usize] = berries;
+            let total = nutrition + berries as f64 * crate::BERRY_NUTRITION_PER_GRAM;
+            if total > 0.0 {
+                candidates.push((units, total));
+            }
+            return;
+        }
+        let good = COUNTED[index];
+        let per_unit = good.nutrition_per_unit().unwrap();
+        let limit = self
+            .available_units(good)
+            .min((crate::MEAL_NOURISHMENT / per_unit).ceil() as crate::Quantity);
+        for count in 0..=limit {
+            let total = nutrition + count as f64 * per_unit;
+            units[good as usize] = count;
+            if total > crate::MEAL_NOURISHMENT
+                && COUNTED.into_iter().any(|food| {
+                    units[food as usize] > 0
+                        && total - food.nutrition_per_unit().unwrap() >= crate::MEAL_NOURISHMENT
+                })
+            {
+                break;
+            }
+            self.mixed_meals(index + 1, units, total, candidates);
+        }
     }
 }
 
@@ -160,7 +216,7 @@ mod tests {
     #[test]
     fn each_food_contributes_proportionally_during_the_meal() {
         for (good, units) in [
-            (Good::Bread, 1),
+            (Good::BreadRoll, 5),
             (Good::Berries, 155),
             (Good::BerryPie, 1),
             (Good::Fish, 2),
@@ -192,18 +248,88 @@ mod tests {
     fn meals_consider_diet_cost_and_time_instead_of_only_nutrition_price() {
         let mut source = Citizen::new(40.0)
             .unwrap()
-            .with_good(Good::Bread, 1)
+            .with_good(Good::BreadRoll, 5)
             .unwrap()
             .with_good(Good::Fish, 2)
             .unwrap();
         source.diet = [0.0, 100.0, 0.0, 0.0];
         let chosen = source.start_action(CitizenAction::Eat).unwrap();
         assert_eq!(chosen.units(Good::Fish), 0);
-        assert_eq!(chosen.units(Good::Bread), 1);
+        assert_eq!(chosen.units(Good::BreadRoll), 5);
         source.prices = source.prices.with_price(Good::Fish, 100.0).unwrap();
         let economical = source.start_action(CitizenAction::Eat).unwrap();
         assert_eq!(economical.units(Good::Fish), 2);
-        assert_eq!(economical.units(Good::Bread), 0);
+        assert_eq!(economical.units(Good::BreadRoll), 0);
+    }
+
+    #[test]
+    fn mixed_whole_food_supplies_a_complete_meal() {
+        let source = Citizen::new(80.0)
+            .unwrap()
+            .with_good(Good::Fish, 1)
+            .unwrap()
+            .with_good(Good::Cabbage, 1)
+            .unwrap();
+        assert!(source.has_complete_meal());
+        let started = source.start_action(CitizenAction::Eat).unwrap();
+        let active = started.active_action().unwrap();
+        assert_eq!(active.meal_nutrition, 50.0);
+        assert_eq!(active.meal_units[Good::Fish as usize], 1);
+        assert_eq!(active.meal_units[Good::Cabbage as usize], 1);
+        assert_eq!(source.units(Good::Fish), 1);
+    }
+
+    #[test]
+    fn mixed_rolls_fish_and_berries_fill_the_remaining_nutrition() {
+        let source = Citizen::new(80.0)
+            .unwrap()
+            .with_good(Good::Fish, 1)
+            .unwrap()
+            .with_good(Good::BreadRoll, 2)
+            .unwrap()
+            .with_good(Good::Berries, 16)
+            .unwrap();
+        let started = source.start_action(CitizenAction::Eat).unwrap();
+        let active = started.active_action().unwrap();
+        assert_eq!(active.meal_units[Good::Fish as usize], 1);
+        assert_eq!(active.meal_units[Good::BreadRoll as usize], 2);
+        assert_eq!(active.meal_units[Good::Berries as usize], 16);
+        close(
+            active.meal_nutrition,
+            45.0 + 16.0 * crate::BERRY_NUTRITION_PER_GRAM,
+        );
+    }
+
+    #[test]
+    fn minimal_whole_food_overfill_remains_a_complete_meal() {
+        let source = Citizen::new(80.0)
+            .unwrap()
+            .with_good(Good::Fish, 1)
+            .unwrap()
+            .with_good(Good::BreadRoll, 3)
+            .unwrap();
+        assert!(source.has_complete_meal());
+        let started = source.start_action(CitizenAction::Eat).unwrap();
+        assert_eq!(started.active_action().unwrap().meal_nutrition, 55.0);
+    }
+
+    #[test]
+    fn mixed_partial_meal_uses_available_food_without_phantom_nutrition() {
+        let source = Citizen::new(80.0)
+            .unwrap()
+            .with_good(Good::Fish, 1)
+            .unwrap()
+            .with_good(Good::Berries, 10)
+            .unwrap();
+        assert!(!source.has_complete_meal());
+        let started = source.start_action(CitizenAction::Eat).unwrap();
+        let active = started.active_action().unwrap();
+        assert_eq!(active.meal_units[Good::Fish as usize], 1);
+        assert_eq!(active.meal_units[Good::Berries as usize], 10);
+        close(
+            active.meal_nutrition,
+            25.0 + 10.0 * crate::BERRY_NUTRITION_PER_GRAM,
+        );
     }
 
     #[test]

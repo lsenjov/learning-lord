@@ -41,7 +41,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         Good::Flour,
         Good::Wood,
         Good::Water,
-        Good::Bread,
+        Good::BreadRoll,
     ] {
         assert!(
             Prices::default()
@@ -62,7 +62,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         .advance(50_000)
         .unwrap();
     assert_eq!(eaten.berries_units(), 45);
-    assert_eq!(eaten.units(Good::Bread), 1000);
+    assert_eq!(eaten.units(Good::BreadRoll), 1000);
     let sold = stocked
         .start_action(CitizenAction::List(Good::Berries, 50))
         .unwrap()
@@ -77,7 +77,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         Good::Flour,
         Good::Wood,
         Good::Water,
-        Good::Bread,
+        Good::BreadRoll,
     ] {
         assert_eq!(
             eaten.units(good),
@@ -87,14 +87,17 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     }
     let bread_only = Citizen::new(40.0)
         .unwrap()
-        .with_good(Good::Bread, 10)
+        .with_good(Good::BreadRoll, 50)
         .unwrap();
     let bread_meal = bread_only.start_action(CitizenAction::Eat).unwrap();
     assert_eq!(bread_meal.active_action().unwrap().duration_ms(), 100_000);
-    assert_eq!(bread_meal.advance(100_000).unwrap().units(Good::Bread), 9);
+    assert_eq!(
+        bread_meal.advance(100_000).unwrap().units(Good::BreadRoll),
+        45
+    );
     assert_eq!(
         bread_only.wealth().unwrap(),
-        Good::Bread.core_price() * 10.0
+        Good::BreadRoll.core_price() * 50.0
     );
 }
 

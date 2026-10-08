@@ -1005,21 +1005,21 @@ mod tests {
 
     #[test]
     fn reserved_food_keeps_wellbeing_credit_but_cannot_be_eaten() {
-        let (world, id, _) = reserved_worker(Good::Bread, 2);
+        let (world, id, _) = reserved_worker(Good::BreadRoll, 10);
         let AgentKind::Citizen(worker) = &world.agents[&id].kind;
         assert_eq!(worker.food_nutrition(), 100.0);
         assert_eq!(worker.available_food_nutrition(), 50.0);
         assert_eq!(worker.food_reserve_wellbeing(), 10.0);
         let busy = world.start_action(id, crate::CitizenAction::Eat).unwrap();
         let AgentKind::Citizen(worker) = &busy.agents[&id].kind;
-        assert_eq!(worker.units(Good::Bread), 1);
-        assert_eq!(worker.tax_reserved_units(Good::Bread), 1);
-        assert_eq!(worker.available_units(Good::Bread), 0);
+        assert_eq!(worker.units(Good::BreadRoll), 5);
+        assert_eq!(worker.tax_reserved_units(Good::BreadRoll), 5);
+        assert_eq!(worker.available_units(Good::BreadRoll), 0);
         let done = busy
             .advance(worker.active_action().unwrap().remaining_ms())
             .unwrap();
         let AgentKind::Citizen(worker) = &done.agents[&id].kind;
-        assert_eq!(worker.units(Good::Bread), 1);
+        assert_eq!(worker.units(Good::BreadRoll), 5);
     }
 
     #[test]

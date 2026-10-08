@@ -1043,13 +1043,13 @@ mod tests {
                 )
                 .unwrap();
         let (universe, _) = universe
-            .with_property(id, Recipe::BakeBread.location())
+            .with_property(id, Recipe::BakeRolls.location())
             .unwrap();
         let universe = universe.start_planning(id).unwrap();
         let text = decision_readout(&universe, Some(id));
         assert!(text.contains("Production recipes | last decision snapshot"));
         assert!(text.contains("not current inventory"));
-        assert!(text.contains("Bake bread | Estimated profit"));
+        assert!(text.contains("Bake rolls | Estimated profit"));
         assert!(text.contains("Target remaining"));
         assert!(text.contains("insufficient accessible input supplies"));
         assert!(text.contains("100 g missing"));
@@ -1136,7 +1136,7 @@ mod tests {
         assert!(readout.contains("Berries: 155 g"));
         assert!(readout.contains("Clothing need: 20.0 | Garment condition: None"));
         assert!(!readout.contains("Water: 0 g"));
-        assert!(!readout.contains("Bread: 0 loaves"));
+        assert!(!readout.contains("Bread: 0 rolls"));
         assert!(readout.contains("Coins: 0 | Wealth: 0.260 coins"));
     }
 
@@ -1146,7 +1146,7 @@ mod tests {
             .unwrap()
             .with_thirst(25.0)
             .unwrap()
-            .with_good(Good::Bread, 1)
+            .with_good(Good::BreadRoll, 5)
             .unwrap()
             .with_good(Good::Water, 200)
             .unwrap();

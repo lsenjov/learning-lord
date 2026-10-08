@@ -860,7 +860,7 @@ mod tests {
                 .unwrap()
                 .with_thirst(-50.0)
                 .unwrap()
-                .with_good(Good::Bread, 14)
+                .with_good(Good::BreadRoll, 70)
                 .unwrap()
                 .with_garment_condition(Some(0.5))
                 .unwrap()
@@ -918,7 +918,7 @@ mod tests {
                 produced[Good::Cabbage as usize],
                 consumed[Good::Fish as usize],
                 consumed[Good::Cabbage as usize],
-                consumed[Good::Bread as usize],
+                consumed[Good::BreadRoll as usize],
                 consumed[Good::BerryPie as usize],
                 consumed[Good::Berries as usize],
                 diet.map(|value| value / 7.0)

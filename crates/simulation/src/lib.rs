@@ -650,31 +650,11 @@ impl Citizen {
     }
 
     pub fn has_complete_meal(&self) -> bool {
-        Good::FOOD.into_iter().any(|good| {
-            self.available_units(good)
-                >= (MEAL_NOURISHMENT / good.nutrition_per_unit().unwrap()).ceil() as Quantity
-        })
+        self.available_food_nutrition() >= MEAL_NOURISHMENT
     }
 
     fn meal(&self) -> ([Quantity; Good::COUNT], f64) {
-        let complete = self.preferred_complete_meal();
-        let mut units = [0; Good::COUNT];
-        if let Some((good, needed)) = complete {
-            units[good as usize] = needed;
-            return (units, needed as f64 * good.nutrition_per_unit().unwrap());
-        }
-        let mut remaining = MEAL_NOURISHMENT;
-        let mut total = 0.0;
-        for good in Good::FOOD {
-            let nutrition = good.nutrition_per_unit().unwrap();
-            let portion = self
-                .available_units(good)
-                .min((remaining / nutrition).ceil() as Quantity);
-            units[good as usize] = portion;
-            total += portion as f64 * nutrition;
-            remaining = (remaining - portion as f64 * nutrition).max(0.0);
-        }
-        (units, total)
+        self.preferred_meal()
     }
 
     pub fn skill_practice_ms(&self, skill: production::Skill) -> Option<u64> {
@@ -880,7 +860,24 @@ impl Citizen {
             self.accessible_place(id)?;
         }
         let mut citizen = self.clone();
-        let duration_ms = self.action_duration_ms(action)?;
+        let (meal_units, meal_nutrition) = if action == CitizenAction::Eat {
+            self.meal()
+        } else {
+            ([0; Good::COUNT], 0.0)
+        };
+        let meal_duration_ms: u64 = Good::FOOD
+            .into_iter()
+            .map(|good| meal_units[good as usize] * good.eating_ms_per_unit().unwrap())
+            .sum();
+        let duration_ms = if action == CitizenAction::Eat {
+            if meal_duration_ms == 0 {
+                0
+            } else {
+                meal_duration_ms.max(self.drink_units() * DRINK_DURATION_MS / DRINK_WATER_GRAMS)
+            }
+        } else {
+            self.action_duration_ms(action)?
+        };
         if duration_ms == 0 {
             return Ok(citizen);
         }
@@ -900,11 +897,6 @@ impl Citizen {
         if action == CitizenAction::EquipClothing && self.available_units(Good::FlaxGarment) == 0 {
             return Err(SimulationError::MissingInputs);
         }
-        let (meal_units, meal_nutrition) = if action == CitizenAction::Eat {
-            self.meal()
-        } else {
-            ([0; Good::COUNT], 0.0)
-        };
         for good in Good::FOOD {
             citizen
                 .inventory
@@ -923,11 +915,7 @@ impl Citizen {
             remaining_ms: duration_ms,
             duration_ms,
             meal_nutrition,
-            meal_duration_ms: if action == CitizenAction::Eat {
-                self.meal_duration_ms()
-            } else {
-                0
-            },
+            meal_duration_ms,
             drink_units,
             meal_units,
             travel_origin: self.position,
@@ -2213,7 +2201,7 @@ mod tests {
             .with_citizen("Baker", worker)
             .unwrap();
         let (universe, _) = universe
-            .with_property(id, production::Recipe::BakeBread.location())
+            .with_property(id, production::Recipe::BakeRolls.location())
             .unwrap();
         let AgentKind::Citizen(worker) = &universe.agents()[&id].kind;
         let mut worker = worker.clone();
@@ -2285,7 +2273,7 @@ mod tests {
     fn alternative_ingredient_reserves_use_each_goods_maximum_requirement() {
         let worker = baker_with_targets();
         let targets = worker.production_targets().unwrap();
-        assert_eq!(targets.remaining_batches(production::Recipe::BakeBread), 12);
+        assert_eq!(targets.remaining_batches(production::Recipe::BakeRolls), 12);
         assert_eq!(
             targets.remaining_batches(production::Recipe::BakeBerryPie),
             8
@@ -2321,7 +2309,7 @@ mod tests {
             .with_good(Good::Berries, 100)
             .unwrap();
         let bread = worker
-            .start_action(CitizenAction::Produce(production::Recipe::BakeBread))
+            .start_action(CitizenAction::Produce(production::Recipe::BakeRolls))
             .unwrap();
         assert_eq!(bread.reserved_goods().unwrap().units(Good::Flour), 1200);
         let pie = worker
@@ -2416,38 +2404,35 @@ mod tests {
         assert!((total as f64 / 2000.0 - 10.0).abs() < 0.2);
     }
     #[test]
-    fn complete_meals_choose_one_available_food_by_quoted_value_per_nutrition() {
+    fn complete_meals_consider_mixed_food_and_quoted_value() {
         let source = Citizen::new(50.0)
             .unwrap()
             .with_prices(
                 Prices::new(5.0)
                     .unwrap()
-                    .with_price(Good::Bread, 15.0)
+                    .with_price(Good::BreadRoll, 3.0)
                     .unwrap()
                     .with_price(Good::BerryPie, 25.0)
                     .unwrap(),
             )
             .with_berries(154)
             .unwrap()
-            .with_good(Good::Bread, 1)
+            .with_good(Good::BreadRoll, 5)
             .unwrap()
             .with_good(Good::BerryPie, 1)
             .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(started.units(Good::Bread), 0);
+        assert_eq!(started.units(Good::BreadRoll), 4);
         assert_eq!(started.units(Good::BerryPie), 1);
-        assert_eq!(started.berries_units(), 154);
-        assert_eq!(started.active_action().unwrap().duration_ms(), 100_000);
+        assert!(started.active_action().unwrap().meal_nutrition >= MEAL_NOURISHMENT);
+        assert!(started.berries_units() < source.berries_units());
         let source = source.with_berries(155).unwrap();
-        let started = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(started.berries_units(), 0);
-        assert_eq!(started.units(Good::Bread), 1);
         let source = source.with_prices(
             source
                 .prices()
                 .with_price(Good::Berries, 200.0)
                 .unwrap()
-                .with_price(Good::Bread, 30.0)
+                .with_price(Good::BreadRoll, 6.0)
                 .unwrap(),
         );
         let started = source.start_action(CitizenAction::Eat).unwrap();

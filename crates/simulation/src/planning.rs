@@ -769,7 +769,7 @@ mod tests {
                 hungry
                     .map()
                     .public_place(crate::locations::Location::Market),
-                Good::Bread,
+                Good::BreadRoll,
                 8,
             )
             .unwrap();
@@ -841,7 +841,7 @@ mod tests {
                     CitizenAction::Travel(place),
                     CitizenAction::BuyAt {
                         place,
-                        list: ShoppingList::single(Good::Bread, 1),
+                        list: ShoppingList::single(Good::BreadRoll, 1),
                     },
                     CitizenAction::Travel(place),
                     CitizenAction::BuyAt {
@@ -850,7 +850,7 @@ mod tests {
                     },
                     CitizenAction::BuyAt {
                         place,
-                        list: ShoppingList::single(Good::Bread, 10),
+                        list: ShoppingList::single(Good::BreadRoll, 10),
                     },
                 ],
                 action_durations_ms: vec![
@@ -877,7 +877,7 @@ mod tests {
             elapsed_ms: 0,
         };
         let request = execution.shopping_request(1).unwrap().unwrap();
-        assert_eq!(request.units(Good::Bread), 1);
+        assert_eq!(request.units(Good::BreadRoll), 1);
         assert_eq!(request.units(Good::BerryPie), 1);
         execution.action_index = 2;
         assert_eq!(
@@ -885,7 +885,7 @@ mod tests {
                 .shopping_request(1)
                 .unwrap()
                 .unwrap()
-                .units(Good::Bread),
+                .units(Good::BreadRoll),
             0
         );
         execution.elapsed_ms = TWO_HOURS_MS + 1;
@@ -909,12 +909,12 @@ mod tests {
 
         execution.action_index = 1;
         let request = execution.shopping_request(1).unwrap().unwrap();
-        assert_eq!(request.units(Good::Bread), 1);
+        assert_eq!(request.units(Good::BreadRoll), 1);
         assert_eq!(request.units(Good::BerryPie), 1);
         execution.action_index = 0;
         execution.elapsed_ms = TWO_HOURS_MS - crate::TRADE_DURATION_MS - 2;
         let request = execution.shopping_request(1).unwrap().unwrap();
-        assert_eq!(request.units(Good::Bread), 1);
+        assert_eq!(request.units(Good::BreadRoll), 1);
         assert_eq!(request.units(Good::BerryPie), 1);
     }
 
@@ -1033,21 +1033,21 @@ mod tests {
         );
         let mut buyer = executing(
             &source,
-            vec![CitizenAction::Buy(ShoppingList::single(Good::Bread, 2))],
+            vec![CitizenAction::Buy(ShoppingList::single(Good::BreadRoll, 2))],
         );
         let mut decision = forecast.decision().unwrap().clone();
         decision.blocked_requests =
-            ShoppingList::new([(Good::Bread, 3), (Good::FlaxGarment, 1)]).unwrap();
+            ShoppingList::new([(Good::BreadRoll, 3), (Good::FlaxGarment, 1)]).unwrap();
         buyer.active_plan.as_mut().unwrap().plan.decision = Some(Arc::new(decision));
         let (mut universe, id) = Universe::with_map(buyer.map())
             .with_citizen("Buyer", buyer)
             .unwrap();
-        assert_eq!(universe.market().requested(id).units(Good::Bread), 3);
+        assert_eq!(universe.market().requested(id).units(Good::BreadRoll), 3);
         assert_eq!(universe.market().requested(id).units(Good::FlaxGarment), 1);
         let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
         citizen.active_plan.as_mut().unwrap().plan.decision = None;
         universe.register_action_request(id).unwrap();
-        assert_eq!(universe.market().requested(id).units(Good::Bread), 2);
+        assert_eq!(universe.market().requested(id).units(Good::BreadRoll), 2);
         assert_eq!(universe.market().requested(id).units(Good::FlaxGarment), 0);
     }
 
@@ -1065,7 +1065,7 @@ mod tests {
         )
         .unwrap();
         let travel = CitizenAction::Travel(map.public_place(Location::Market));
-        let purchase = CitizenAction::Buy(ShoppingList::single(Good::Bread, 60));
+        let purchase = CitizenAction::Buy(ShoppingList::single(Good::BreadRoll, 60));
         let source = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
             .with_map(map.clone())
@@ -1108,7 +1108,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             universe.market().requested(id),
-            ShoppingList::single(Good::Bread, 60)
+            ShoppingList::single(Good::BreadRoll, 60)
         );
         let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
         let arrived = universe
@@ -1118,7 +1118,7 @@ mod tests {
         assert!(citizen.active_plan().unwrap().elapsed_ms() > TWO_HOURS_MS);
         assert_eq!(
             arrived.market().requested(id),
-            ShoppingList::single(Good::Bread, 60)
+            ShoppingList::single(Good::BreadRoll, 60)
         );
         let finished = arrived.advance(crate::TRADE_DURATION_MS).unwrap();
         assert_ne!(

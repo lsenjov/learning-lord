@@ -28,14 +28,26 @@ fn core_prices_cover_every_recipe_with_labour_and_recursive_material_markup() {
 
 #[test]
 fn core_thresholds_do_not_follow_local_price_changes() {
-    let local = Prices::default().with_price(Good::Bread, 1.0).unwrap();
-    assert_eq!(local.price(Good::Bread), Some(1.0));
+    let local = Prices::default().with_price(Good::BreadRoll, 0.2).unwrap();
+    assert_eq!(local.price(Good::BreadRoll), Some(0.2));
     assert_eq!(
-        Good::Bread.export_threshold(),
-        Good::Bread.core_price() * 0.5
+        Good::BreadRoll.export_threshold(),
+        Good::BreadRoll.core_price() * 0.5
     );
     assert_eq!(
-        Good::Bread.import_threshold(),
-        Good::Bread.core_price() * 1.5
+        Good::BreadRoll.import_threshold(),
+        Good::BreadRoll.core_price() * 1.5
+    );
+}
+
+#[test]
+fn bread_roll_batches_preserve_food_and_production_economics() {
+    assert_eq!(Recipe::BakeRolls.outputs(), &[(Good::BreadRoll, 10)]);
+    assert_eq!(Good::BreadRoll.weight_grams(), 20);
+    assert_eq!(Good::BreadRoll.nutrition_per_unit(), Some(10.0));
+    assert!((Good::BreadRoll.core_price() * 5.0 - 20.055208333333333).abs() < 1e-10);
+    assert_eq!(
+        Recipe::BakeRolls.inputs(),
+        &[(Good::Flour, 100), (Good::Wood, 25), (Good::Water, 100)]
     );
 }

@@ -13,14 +13,14 @@ fn citizen(world: &Universe, id: AgentId) -> &Citizen {
 #[test]
 fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_source() {
     let map = Map::default();
-    let prices = Prices::default().with_price(Good::Bread, 5.0).unwrap();
+    let prices = Prices::default().with_price(Good::BreadRoll, 1.0).unwrap();
     let (world, seller) = Universe::with_map(map)
         .with_prices(prices)
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 9)
+                .with_good(Good::BreadRoll, 9)
                 .unwrap(),
         )
         .unwrap();
@@ -30,14 +30,14 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
             market,
             "Income",
             TaxKind::Income {
-                rates: [(Good::Bread, TaxRate::new(2000).unwrap())]
+                rates: [(Good::BreadRoll, TaxRate::new(2000).unwrap())]
                     .into_iter()
                     .collect(),
             },
         )
         .unwrap();
     let listed = world
-        .start_action(seller, CitizenAction::List(Good::Bread, 9))
+        .start_action(seller, CitizenAction::List(Good::BreadRoll, 9))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -47,20 +47,20 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
     assert!(before.market().trades().is_empty());
     let after = before.advance(1).unwrap();
     assert_eq!(after.agents().len(), 1);
-    assert_eq!(after.market().listed_units(seller, Good::Bread), 4);
-    assert_eq!(citizen(&after, seller).coins(), 19);
-    assert_eq!(after.town_treasury(), 4);
+    assert_eq!(after.market().listed_units(seller, Good::BreadRoll), 4);
+    assert_eq!(citizen(&after, seller).coins(), 4);
+    assert_eq!(after.town_treasury(), 1);
     let trade = &after.market().trades()[0];
     assert_eq!(
         (trade.place, trade.buyer, trade.coins, trade.units),
-        (market, MarketParty::Caravan, 23, 5)
+        (market, MarketParty::Caravan, 5, 5)
     );
     assert_eq!(
         after.citizen_history(seller).unwrap().current.start_ms,
         UPDATE_TIME_MS
     );
     assert_eq!(
-        after.citizen_history(seller).unwrap().current.sold[Good::Bread as usize],
+        after.citizen_history(seller).unwrap().current.sold[Good::BreadRoll as usize],
         5
     );
     assert_eq!(
@@ -70,11 +70,11 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
             .completed
             .back()
             .unwrap()
-            .sold[Good::Bread as usize],
+            .sold[Good::BreadRoll as usize],
         0
     );
     assert_eq!(
-        after.market().current_period().goods[Good::Bread as usize].exported_units,
+        after.market().current_period().goods[Good::BreadRoll as usize].exported_units,
         5
     );
     assert_eq!(after.advance(0).unwrap(), after);
@@ -98,48 +98,52 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
 
 #[test]
 fn imports_deliver_at_market_purchase_cash_leaves_town_and_forecast_is_immutable() {
-    let price = Good::Bread.core_price() * 2.0;
+    let price = Good::BreadRoll.core_price() * 2.0;
     let (world, buyer) = Universe::with_map(Map::default())
-        .with_prices(Prices::default().with_price(Good::Bread, price).unwrap())
+        .with_prices(
+            Prices::default()
+                .with_price(Good::BreadRoll, price)
+                .unwrap(),
+        )
         .with_citizen(
             "Buyer",
             Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
         )
         .unwrap();
     let requested = world
-        .with_purchase_request(buyer, ShoppingList::single(Good::Bread, 9))
+        .with_purchase_request(buyer, ShoppingList::single(Good::BreadRoll, 9))
         .unwrap();
     let imported = requested.advance(UPDATE_TIME_MS).unwrap();
-    assert_eq!(imported.market().caravan_units(Good::Bread), 5);
+    assert_eq!(imported.market().caravan_units(Good::BreadRoll), 5);
     assert!(imported.market().trades().is_empty());
     assert_eq!(imported.agents().len(), 1);
     assert_eq!(
         imported.storage().units(
             imported.map().public_place(Location::Market),
             learning_lord_simulation::storage::GoodsOwner::Town,
-            Good::Bread
+            Good::BreadRoll
         ),
         0
     );
     let started = imported
         .start_action(
             buyer,
-            CitizenAction::Buy(ShoppingList::single(Good::Bread, 2)),
+            CitizenAction::Buy(ShoppingList::single(Good::BreadRoll, 2)),
         )
         .unwrap();
     let predicted = citizen(&started, buyer).advance(TRADE_DURATION_MS).unwrap();
-    assert_eq!(predicted.units(Good::Bread), 2);
-    assert_eq!(imported.market().caravan_units(Good::Bread), 5);
+    assert_eq!(predicted.units(Good::BreadRoll), 2);
+    assert_eq!(imported.market().caravan_units(Good::BreadRoll), 5);
     let purchased = started.advance(TRADE_DURATION_MS).unwrap();
-    assert_eq!(citizen(&purchased, buyer).units(Good::Bread), 2);
+    assert_eq!(citizen(&purchased, buyer).units(Good::BreadRoll), 2);
     assert_eq!(purchased.agents().len(), 1);
     assert_eq!(purchased.town_treasury(), 0);
     assert_eq!(
         citizen(&purchased, buyer).coins(),
-        1000 - (Good::Bread.import_threshold() * 2.0).ceil() as i64
+        1000 - (Good::BreadRoll.import_threshold() * 2.0).ceil() as i64
     );
     assert_eq!(purchased.market().trades()[0].seller, MarketParty::Caravan);
-    let activity = purchased.market().current_period().goods[Good::Bread as usize];
+    let activity = purchased.market().current_period().goods[Good::BreadRoll as usize];
     assert_eq!(
         (
             activity.imported_units,
@@ -149,10 +153,10 @@ fn imports_deliver_at_market_purchase_cash_leaves_town_and_forecast_is_immutable
         (5, 2, 0)
     );
     assert_eq!(
-        purchased.citizen_history(buyer).unwrap().current.bought[Good::Bread as usize],
+        purchased.citizen_history(buyer).unwrap().current.bought[Good::BreadRoll as usize],
         2
     );
-    assert_eq!(requested.market().caravan_units(Good::Bread), 0);
+    assert_eq!(requested.market().caravan_units(Good::BreadRoll), 0);
 }
 
 #[test]
@@ -174,19 +178,19 @@ fn empty_world_daily_progression_matches_smaller_advances() {
 #[test]
 fn failed_or_cancelled_daily_settlement_preserves_the_authoritative_snapshot() {
     let (world, seller) = Universe::with_map(Map::default())
-        .with_prices(Prices::default().with_price(Good::Bread, 5.0).unwrap())
+        .with_prices(Prices::default().with_price(Good::BreadRoll, 1.0).unwrap())
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 1)
+                .with_good(Good::BreadRoll, 1)
                 .unwrap()
                 .with_coins(i64::MAX)
                 .unwrap(),
         )
         .unwrap();
     let listed = world
-        .start_action(seller, CitizenAction::List(Good::Bread, 1))
+        .start_action(seller, CitizenAction::List(Good::BreadRoll, 1))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -197,17 +201,17 @@ fn failed_or_cancelled_daily_settlement_preserves_the_authoritative_snapshot() {
     );
     assert_eq!(listed, saved);
     let (world, seller) = Universe::with_map(Map::default())
-        .with_prices(Prices::default().with_price(Good::Bread, 5.0).unwrap())
+        .with_prices(Prices::default().with_price(Good::BreadRoll, 1.0).unwrap())
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 1)
+                .with_good(Good::BreadRoll, 1)
                 .unwrap(),
         )
         .unwrap();
     let listed = world
-        .start_action(seller, CitizenAction::List(Good::Bread, 1))
+        .start_action(seller, CitizenAction::List(Good::BreadRoll, 1))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -230,17 +234,17 @@ fn failed_or_cancelled_daily_settlement_preserves_the_authoritative_snapshot() {
 
 fn listed_world(units: u64) -> (Universe, AgentId) {
     let (world, seller) = Universe::with_map(Map::default())
-        .with_prices(Prices::default().with_price(Good::Bread, 4.0).unwrap())
+        .with_prices(Prices::default().with_price(Good::BreadRoll, 0.8).unwrap())
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, units)
+                .with_good(Good::BreadRoll, units)
                 .unwrap(),
         )
         .unwrap();
     let world = world
-        .start_action(seller, CitizenAction::List(Good::Bread, units))
+        .start_action(seller, CitizenAction::List(Good::BreadRoll, units))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -258,7 +262,7 @@ fn export_controls_limit_volume_without_consuming_reserve_stock() {
     ] {
         let (world, seller) = listed_world(10);
         let mut policy = world.caravan_policy();
-        policy.exports[Good::Bread as usize] =
+        policy.exports[Good::BreadRoll as usize] =
             learning_lord_simulation::marketplace::ExportPolicy {
                 allowed,
                 minimum_reserve: reserve,
@@ -268,12 +272,12 @@ fn export_controls_limit_volume_without_consuming_reserve_stock() {
             .advance(UPDATE_TIME_MS - TRADE_DURATION_MS)
             .unwrap();
         assert_eq!(
-            after.market().listed_units(seller, Good::Bread),
+            after.market().listed_units(seller, Good::BreadRoll),
             10 - exported
         );
-        assert_eq!(after.town_stock(Good::Bread), 10 - exported);
+        assert_eq!(after.town_stock(Good::BreadRoll), 10 - exported);
         assert_eq!(
-            world.caravan_policy().exports[Good::Bread as usize].minimum_reserve,
+            world.caravan_policy().exports[Good::BreadRoll as usize].minimum_reserve,
             0
         );
     }
@@ -286,13 +290,15 @@ fn full_export_tariff_disables_exports() {
     policy.export_tariff_basis_points = 10_000;
     let disabled = world.with_caravan_policy(policy).unwrap();
     assert_eq!(
-        disabled.market().effective_export_threshold(Good::Bread),
+        disabled
+            .market()
+            .effective_export_threshold(Good::BreadRoll),
         None
     );
     let after = disabled
         .advance(UPDATE_TIME_MS - TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(after.market().listed_units(seller, Good::Bread), 10);
+    assert_eq!(after.market().listed_units(seller, Good::BreadRoll), 10);
     assert_eq!(after.town_treasury(), 0);
 }
 
@@ -305,39 +311,39 @@ fn town_reserve_includes_carried_storage_and_town_goods_once() {
             "Holder",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 3)
+                .with_good(Good::BreadRoll, 3)
                 .unwrap(),
         )
         .unwrap();
     let market = world.map().public_place(Location::Market);
     let world = world
-        .with_stored_good(market, GoodsOwner::Agent(holder), Good::Bread, 4)
+        .with_stored_good(market, GoodsOwner::Agent(holder), Good::BreadRoll, 4)
         .unwrap()
-        .with_stored_good(market, GoodsOwner::Town, Good::Bread, 5)
+        .with_stored_good(market, GoodsOwner::Town, Good::BreadRoll, 5)
         .unwrap();
-    assert_eq!(world.town_stock(Good::Bread), 22);
+    assert_eq!(world.town_stock(Good::BreadRoll), 22);
     let mut policy = world.caravan_policy();
-    policy.exports[Good::Bread as usize].minimum_reserve = 20;
+    policy.exports[Good::BreadRoll as usize].minimum_reserve = 20;
     let after = world
         .with_caravan_policy(policy)
         .unwrap()
         .advance(UPDATE_TIME_MS - TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(after.town_stock(Good::Bread), 20);
-    assert_eq!(after.market().listed_units(seller, Good::Bread), 8);
-    assert_eq!(citizen(&after, holder).units(Good::Bread), 3);
+    assert_eq!(after.town_stock(Good::BreadRoll), 20);
+    assert_eq!(after.market().listed_units(seller, Good::BreadRoll), 8);
+    assert_eq!(citizen(&after, holder).units(Good::BreadRoll), 3);
     assert_eq!(after.storage(), world.storage());
 }
 
 #[test]
 fn export_tariff_grosses_up_net_receipts_and_income_tax_uses_only_receipts() {
     let (world, seller) = Universe::with_map(Map::default())
-        .with_prices(Prices::default().with_price(Good::Bread, 4.0).unwrap())
+        .with_prices(Prices::default().with_price(Good::BreadRoll, 0.8).unwrap())
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 10)
+                .with_good(Good::BreadRoll, 10)
                 .unwrap(),
         )
         .unwrap();
@@ -347,14 +353,14 @@ fn export_tariff_grosses_up_net_receipts_and_income_tax_uses_only_receipts() {
             bakery,
             "Income",
             TaxKind::Income {
-                rates: [(Good::Bread, TaxRate::new(2000).unwrap())]
+                rates: [(Good::BreadRoll, TaxRate::new(2000).unwrap())]
                     .into_iter()
                     .collect(),
             },
         )
         .unwrap();
     let world = world
-        .start_action(seller, CitizenAction::List(Good::Bread, 10))
+        .start_action(seller, CitizenAction::List(Good::BreadRoll, 10))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -367,26 +373,26 @@ fn export_tariff_grosses_up_net_receipts_and_income_tax_uses_only_receipts() {
     let trade = &after.market().trades()[0];
     assert_eq!(
         (trade.coins, trade.recipient_coins, trade.tariff_coins),
-        (36, 18, 18)
+        (8, 4, 4)
     );
-    assert_eq!(citizen(&after, seller).coins(), 15);
-    assert_eq!(after.town_treasury(), 21);
+    assert_eq!(citizen(&after, seller).coins(), 4);
+    assert_eq!(after.town_treasury(), 4);
     assert_eq!(
         trade.coins,
         citizen(&after, seller).coins() + after.town_treasury()
     );
     assert_eq!(
         after.citizen_history(seller).unwrap().current.coins_earned,
-        18
+        4
     );
-    let activity = after.market().current_period().goods[Good::Bread as usize];
+    let activity = after.market().current_period().goods[Good::BreadRoll as usize];
     assert_eq!(
         (
             activity.exported_coins,
             activity.exported_receipts,
             activity.export_tariff_coins
         ),
-        (36, 18, 18)
+        (8, 4, 4)
     );
     assert_eq!(
         configured
@@ -401,7 +407,7 @@ fn existing_imports_reprice_and_disable_immediately_without_mutating_forecasts()
     let (world, buyer) = Universe::with_map(Map::default())
         .with_prices(
             Prices::default()
-                .with_price(Good::Bread, Good::Bread.core_price() * 4.0)
+                .with_price(Good::BreadRoll, Good::BreadRoll.core_price() * 4.0)
                 .unwrap(),
         )
         .with_citizen(
@@ -410,7 +416,7 @@ fn existing_imports_reprice_and_disable_immediately_without_mutating_forecasts()
         )
         .unwrap();
     let imported = world
-        .with_purchase_request(buyer, ShoppingList::single(Good::Bread, 9))
+        .with_purchase_request(buyer, ShoppingList::single(Good::BreadRoll, 9))
         .unwrap()
         .advance(UPDATE_TIME_MS)
         .unwrap();
@@ -418,17 +424,17 @@ fn existing_imports_reprice_and_disable_immediately_without_mutating_forecasts()
     let mut policy = imported.caravan_policy();
     policy.import_tariff_basis_points = 5000;
     let taxed = imported.with_caravan_policy(policy).unwrap();
-    let gross = (Good::Bread.import_threshold() * 4.0).ceil() as i64;
+    let gross = (Good::BreadRoll.import_threshold() * 4.0).ceil() as i64;
     assert_eq!(
         taxed
             .market()
-            .purchase_cost_at(buyer, market, Good::Bread, 2),
+            .purchase_cost_at(buyer, market, Good::BreadRoll, 2),
         Some(gross)
     );
     let started = taxed
         .start_action(
             buyer,
-            CitizenAction::Buy(ShoppingList::single(Good::Bread, 2)),
+            CitizenAction::Buy(ShoppingList::single(Good::BreadRoll, 2)),
         )
         .unwrap();
     let predicted = citizen(&started, buyer).advance(TRADE_DURATION_MS).unwrap();
@@ -441,25 +447,27 @@ fn existing_imports_reprice_and_disable_immediately_without_mutating_forecasts()
     assert_eq!(trade.recipient_coins + trade.tariff_coins, gross);
     assert!(purchased.tax_history().is_empty());
     assert_eq!(taxed.town_treasury(), 0);
-    assert_eq!(imported.market().caravan_units(Good::Bread), 5);
+    assert_eq!(imported.market().caravan_units(Good::BreadRoll), 5);
     policy.import_tariff_basis_points = 10_000;
     let disabled = taxed.with_caravan_policy(policy).unwrap();
-    assert_eq!(disabled.market().available_units(buyer, Good::Bread), 0);
+    assert_eq!(disabled.market().available_units(buyer, Good::BreadRoll), 0);
     assert_eq!(
         disabled
             .market()
-            .purchase_cost_at(buyer, market, Good::Bread, 2),
+            .purchase_cost_at(buyer, market, Good::BreadRoll, 2),
         Some(0)
     );
     assert_eq!(
-        disabled.market().effective_import_threshold(Good::Bread),
+        disabled
+            .market()
+            .effective_import_threshold(Good::BreadRoll),
         None
     );
     assert_eq!(
-        disabled.market().current_period().goods[Good::Bread as usize].listed_units,
+        disabled.market().current_period().goods[Good::BreadRoll as usize].listed_units,
         0
     );
-    assert_eq!(disabled.market().caravan_units(Good::Bread), 5);
+    assert_eq!(disabled.market().caravan_units(Good::BreadRoll), 5);
     assert!(
         disabled
             .market()
@@ -469,21 +477,21 @@ fn existing_imports_reprice_and_disable_immediately_without_mutating_forecasts()
     let attempted = disabled
         .start_action(
             buyer,
-            CitizenAction::Buy(ShoppingList::single(Good::Bread, 2)),
+            CitizenAction::Buy(ShoppingList::single(Good::BreadRoll, 2)),
         )
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(citizen(&attempted, buyer).units(Good::Bread), 0);
+    assert_eq!(citizen(&attempted, buyer).units(Good::BreadRoll), 0);
     assert_eq!(attempted.town_treasury(), 0);
     policy.import_tariff_basis_points = 0;
     let restored = disabled.with_caravan_policy(policy).unwrap();
-    assert_eq!(restored.market().available_units(buyer, Good::Bread), 5);
+    assert_eq!(restored.market().available_units(buyer, Good::BreadRoll), 5);
     assert_eq!(
         restored
             .market()
-            .purchase_cost_at(buyer, market, Good::Bread, 2),
-        Some((Good::Bread.import_threshold() * 2.0).ceil() as i64)
+            .purchase_cost_at(buyer, market, Good::BreadRoll, 2),
+        Some((Good::BreadRoll.import_threshold() * 2.0).ceil() as i64)
     );
     policy.import_tariff_basis_points = 10_001;
     assert_eq!(

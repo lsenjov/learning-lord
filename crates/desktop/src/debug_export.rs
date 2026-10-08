@@ -142,7 +142,7 @@ mod tests {
             "Flour",
             "Wood",
             "Water",
-            "Bread",
+            "BreadRoll",
             "Town warehouse",
             "town_treasury",
             "storage",

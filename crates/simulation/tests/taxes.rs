@@ -198,26 +198,26 @@ fn assets_tax_goods_owners_at_current_prices_and_exclude_town_carried_and_buildi
     let (world, owner, place) = block_worker();
     let payer = Citizen::new(0.0)
         .unwrap()
-        .with_good(Good::Bread, 2)
+        .with_good(Good::BreadRoll, 10)
         .unwrap()
         .with_coins(1000)
         .unwrap();
     let (world, payer) = world.with_citizen("Bram", payer).unwrap();
     let world = world
-        .with_stored_good(place, GoodsOwner::Agent(payer), Good::Bread, 2)
+        .with_stored_good(place, GoodsOwner::Agent(payer), Good::BreadRoll, 10)
         .unwrap()
-        .with_stored_good(place, GoodsOwner::Town, Good::Bread, 100)
+        .with_stored_good(place, GoodsOwner::Town, Good::BreadRoll, 500)
         .unwrap();
     let (world, rule) = world
         .with_tax_rule(
             place,
             "Asset",
             TaxKind::Asset {
-                rates: rates(Good::Bread, 1000),
+                rates: rates(Good::BreadRoll, 1000),
             },
         )
         .unwrap();
-    let world = world.with_prices(Prices::default().with_price(Good::Bread, 20.0).unwrap());
+    let world = world.with_prices(Prices::default().with_price(Good::BreadRoll, 4.0).unwrap());
     let next = world.advance(FIRST_WEEKLY_SETTLEMENT_MS).unwrap();
     assert_eq!(next.town_treasury(), 4);
     assert_eq!(citizen(&next, payer).coins(), 996);
@@ -229,7 +229,7 @@ fn assets_tax_goods_owners_at_current_prices_and_exclude_town_carried_and_buildi
 fn seller_world() -> (Universe, AgentId, AgentId, PlaceId) {
     let seller = Citizen::new(0.0)
         .unwrap()
-        .with_good(Good::Bread, 10)
+        .with_good(Good::BreadRoll, 50)
         .unwrap();
     let (world, seller) = Universe::with_map(Map::default())
         .with_citizen("Seller", seller)
@@ -267,7 +267,7 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
     let (world, seller, buyer, place) = seller_world();
     let world = world.with_prices(
         learning_lord_simulation::marketplace::Prices::default()
-            .with_price(Good::Bread, 15.0)
+            .with_price(Good::BreadRoll, 3.0)
             .unwrap(),
     );
     let (world, _) = world
@@ -275,7 +275,7 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
             place,
             "Income1",
             TaxKind::Income {
-                rates: rates(Good::Bread, 2000),
+                rates: rates(Good::BreadRoll, 2000),
             },
         )
         .unwrap();
@@ -284,7 +284,7 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
             place,
             "Income2",
             TaxKind::Income {
-                rates: rates(Good::Bread, 3000),
+                rates: rates(Good::BreadRoll, 3000),
             },
         )
         .unwrap();
@@ -293,22 +293,22 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
             place,
             "Assets",
             TaxKind::Asset {
-                rates: rates(Good::Bread, 1000),
+                rates: rates(Good::BreadRoll, 1000),
             },
         )
         .unwrap();
-    let world = list(world, seller, Good::Bread, 2);
+    let world = list(world, seller, Good::BreadRoll, 10);
     let before_sale = world.clone();
-    let sold = buy(world, buyer, place, Good::Bread, 2);
+    let sold = buy(world, buyer, place, Good::BreadRoll, 10);
     assert_eq!(citizen(&sold, seller).coins(), 15);
     assert_eq!(sold.town_treasury(), 15);
     assert_eq!(sold.market().trades().back().unwrap().place, place);
-    assert_eq!(citizen(&sold, buyer).units(Good::Bread), 2);
+    assert_eq!(citizen(&sold, buyer).units(Good::BreadRoll), 10);
     let weekly = before_sale
         .with_prices(
             before_sale
                 .prices()
-                .with_price(Good::Bread, Good::Bread.core_price() * 2.0)
+                .with_price(Good::BreadRoll, Good::BreadRoll.core_price() * 2.0)
                 .unwrap(),
         )
         .advance(FIRST_WEEKLY_SETTLEMENT_MS - before_sale.current_time_ms())
@@ -318,12 +318,12 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
         .history()
         .iter()
         .rev()
-        .find(|activity| activity.good == Good::Bread)
+        .find(|activity| activity.good == Good::BreadRoll)
         .unwrap()
         .price_before;
     assert_eq!(
         weekly.tax_arrears(learning_lord_simulation::taxation::TaxRuleId(2), seller),
-        (assessment_price * 2.0 * 0.1).floor() as i64
+        (assessment_price * 10.0 * 0.1).floor() as i64
     );
     assert_eq!(weekly.town_treasury(), 0);
 }
@@ -333,7 +333,7 @@ fn rule_edits_and_removal_preserve_arrears_and_retired_debts_retry_weekly() {
     let (world, seller, buyer, place) = seller_world();
     let world = world.with_prices(
         learning_lord_simulation::marketplace::Prices::default()
-            .with_price(Good::Bread, 15.0)
+            .with_price(Good::BreadRoll, 3.0)
             .unwrap(),
     );
     let (world, rule) = world
@@ -363,11 +363,11 @@ fn rule_edits_and_removal_preserve_arrears_and_retired_debts_retry_weekly() {
     let retired = edited.without_tax_rule(rule).unwrap();
     assert_eq!(retired.tax_arrears(rule, seller), 20);
     let funded = buy(
-        list(retired, seller, Good::Bread, 2),
+        list(retired, seller, Good::BreadRoll, 10),
         buyer,
         place,
-        Good::Bread,
-        2,
+        Good::BreadRoll,
+        10,
     );
     assert_eq!(citizen(&funded, seller).coins(), 30);
     let paid = funded
@@ -507,19 +507,19 @@ fn planner_backed_and_sync_advances_match_and_cancellation_preserves_source() {
 #[test]
 fn income_fraction_survives_rule_edit_and_collects_after_four_one_coin_sales() {
     let (world, seller, buyer, place) = seller_world();
-    let world = world.with_prices(Prices::default().with_price(Good::Bread, 1.0).unwrap());
+    let world = world.with_prices(Prices::default().with_price(Good::BreadRoll, 0.2).unwrap());
     let (world, rule) = world
         .with_tax_rule(
             place,
             "Income",
             TaxKind::Income {
-                rates: rates(Good::Bread, 3000),
+                rates: rates(Good::BreadRoll, 3000),
             },
         )
         .unwrap();
-    let mut world = list(world, seller, Good::Bread, 4);
+    let mut world = list(world, seller, Good::BreadRoll, 20);
     for sale in 1..=4 {
-        world = buy(world, buyer, place, Good::Bread, 1);
+        world = buy(world, buyer, place, Good::BreadRoll, 5);
         assert_eq!(
             citizen(&world, seller).coins(),
             if sale < 4 { sale } else { 3 }
@@ -530,7 +530,7 @@ fn income_fraction_survives_rule_edit_and_collects_after_four_one_coin_sales() {
                     rule,
                     "Renamed",
                     TaxKind::Income {
-                        rates: rates(Good::Bread, 3000),
+                        rates: rates(Good::BreadRoll, 3000),
                     },
                 )
                 .unwrap();

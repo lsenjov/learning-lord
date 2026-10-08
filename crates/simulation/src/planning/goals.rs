@@ -143,7 +143,7 @@ const ACTIONS: [CitizenAction; 8] = [
     CitizenAction::Sleep,
     CitizenAction::Produce(crate::production::Recipe::Forage),
     CitizenAction::BuyFood(Good::Berries),
-    CitizenAction::BuyFood(Good::Bread),
+    CitizenAction::BuyFood(Good::BreadRoll),
     CitizenAction::BuyFood(Good::BerryPie),
     CitizenAction::BuyFood(Good::Fish),
     CitizenAction::BuyFood(Good::Cabbage),
@@ -1587,14 +1587,18 @@ mod tests {
         use crate::marketplace::ShoppingList;
         let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
-        for (good, units) in [(Good::Bread, 2), (Good::Bread, 1), (Good::BerryPie, 2)] {
+        for (good, units) in [
+            (Good::BreadRoll, 10),
+            (Good::BreadRoll, 5),
+            (Good::BerryPie, 2),
+        ] {
             assert!(
                 shopping_trip(&initial, ShoppingList::single(good, units), 0, 0)
                     .unwrap()
                     .is_empty()
             );
         }
-        assert_eq!(initial.blocked_requests.borrow().units(Good::Bread), 2);
+        assert_eq!(initial.blocked_requests.borrow().units(Good::BreadRoll), 10);
         assert_eq!(initial.blocked_requests.borrow().units(Good::BerryPie), 2);
         assert_eq!(
             citizen.market().requested(citizen.id()),
@@ -1614,11 +1618,16 @@ mod tests {
             .map()
             .public_place(crate::locations::Location::Market);
         market
-            .list(crate::AgentId(uuid::Uuid::new_v4()), place, Good::Bread, 1)
+            .list(
+                crate::AgentId(uuid::Uuid::new_v4()),
+                place,
+                Good::BreadRoll,
+                1,
+            )
             .unwrap();
         let initial = Prediction::new(&citizen.with_market(market.clone()), Cooldowns::default());
-        record_blocked_purchase(&initial, ShoppingList::single(Good::Bread, 2)).unwrap();
-        assert_eq!(initial.blocked_requests.borrow().units(Good::Bread), 2);
+        record_blocked_purchase(&initial, ShoppingList::single(Good::BreadRoll, 10)).unwrap();
+        assert_eq!(initial.blocked_requests.borrow().units(Good::BreadRoll), 10);
         market
             .list(citizen.id(), place, Good::Berries, 3000)
             .unwrap();
@@ -1666,7 +1675,9 @@ mod tests {
         let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
         let place = citizen.selling_place();
         let mut market = citizen.market().clone();
-        market.list(citizen.id(), place, Good::Bread, 1).unwrap();
+        market
+            .list(citizen.id(), place, Good::BreadRoll, 5)
+            .unwrap();
         let initial = Prediction::new(&citizen.with_market(market), Cooldowns::default());
         order_variants(&initial, CitizenAction::BuyFood(Good::BerryPie), 50.0, 0, 0).unwrap();
         assert_eq!(*initial.blocked_requests.borrow(), ShoppingList::default());
@@ -1733,7 +1744,7 @@ mod tests {
             .unwrap();
         let mut market = buyer.market().clone();
         market.list(seller, mill, Good::Flour, 100).unwrap();
-        market.list(seller, mill, Good::Bread, 1).unwrap();
+        market.list(seller, mill, Good::BreadRoll, 5).unwrap();
         market.list(seller, market_place, Good::Flour, 100).unwrap();
         market.list(seller, market_place, Good::Wood, 25).unwrap();
         market
@@ -1818,14 +1829,14 @@ mod tests {
         let trip = variants
             .iter()
             .find(|trip| {
-                trip.citizen.available_units(Good::Bread) == 1
+                trip.citizen.available_units(Good::BreadRoll) == 5
                     && trip.citizen.available_units(Good::BerryPie) == 1
                     && trip.actions.len() == 4
             })
             .unwrap();
         assert_eq!(
             trip.citizen.available_food_nutrition(),
-            Good::Bread.nutrition_per_unit().unwrap()
+            5.0 * Good::BreadRoll.nutrition_per_unit().unwrap()
                 + Good::BerryPie.nutrition_per_unit().unwrap()
         );
         assert_eq!(
@@ -2057,11 +2068,11 @@ mod tests {
                 candidate
                     .actions
                     .iter()
-                    .all(|action| *action == CitizenAction::Produce(Recipe::BakeBread))
+                    .all(|action| *action == CitizenAction::Produce(Recipe::BakeRolls))
             );
             let replay = production_order(
                 &initial,
-                &vec![Recipe::BakeBread; candidate.actions.len()],
+                &vec![Recipe::BakeRolls; candidate.actions.len()],
                 None,
                 0,
                 0,
@@ -2069,8 +2080,8 @@ mod tests {
             .unwrap();
             assert_eq!(candidate.action_durations_ms, replay[0].action_durations_ms);
             assert_eq!(
-                candidate.citizen.available_units(Good::Bread),
-                replay[0].citizen.available_units(Good::Bread)
+                candidate.citizen.available_units(Good::BreadRoll),
+                replay[0].citizen.available_units(Good::BreadRoll)
             );
             assert_eq!(candidate.average().unwrap(), replay[0].average().unwrap());
         }
@@ -2079,7 +2090,7 @@ mod tests {
     #[test]
     fn long_production_jobs_finish_the_first_crossing_batch() {
         use crate::production::Recipe;
-        let mut worker = baker().with_good(Good::Bread, 10_000).unwrap();
+        let mut worker = baker().with_good(Good::BreadRoll, 10_000).unwrap();
         worker.refresh_production_targets(true).unwrap();
         let variants =
             production_prefixes(Prediction::new(&worker, Cooldowns::default()), 0, &mut [])
@@ -2113,8 +2124,10 @@ mod tests {
         .with_good(Good::Water, 10_000)
         .unwrap();
         let batches =
-            crate::production::DAILY_CAPACITY_MS / Recipe::BakeBread.duration_ms(&worker).unwrap();
-        worker = worker.with_good(Good::Bread, (batches - 1) * 2).unwrap();
+            crate::production::DAILY_CAPACITY_MS / Recipe::BakeRolls.duration_ms(&worker).unwrap();
+        worker = worker
+            .with_good(Good::BreadRoll, (batches - 1) * 10)
+            .unwrap();
         worker.refresh_production_targets(true).unwrap();
         let variants =
             production_prefixes(Prediction::new(&worker, Cooldowns::default()), 0, &mut [])
@@ -2122,7 +2135,7 @@ mod tests {
         assert_eq!(variants.len(), 1);
         assert_eq!(
             variants[0].actions,
-            [CitizenAction::Produce(Recipe::BakeBread)]
+            [CitizenAction::Produce(Recipe::BakeRolls)]
         );
         assert!(variants[0].elapsed_ms < PRODUCTION_DURATION_MS);
 
@@ -2149,7 +2162,7 @@ mod tests {
             candidate
                 .actions
                 .iter()
-                .filter(|&&a| a == CitizenAction::Produce(Recipe::BakeBread))
+                .filter(|&&a| a == CitizenAction::Produce(Recipe::BakeRolls))
                 .count()
                 == 1
         }));
@@ -2178,11 +2191,11 @@ mod tests {
                 let count = candidate
                     .actions
                     .iter()
-                    .filter(|&&a| a == CitizenAction::Produce(Recipe::BakeBread))
+                    .filter(|&&a| a == CitizenAction::Produce(Recipe::BakeRolls))
                     .count();
                 assert!(count > previous_count);
                 previous_count = count;
-                let exact = production_order(&initial, &vec![Recipe::BakeBread; count], None, 0, 0)
+                let exact = production_order(&initial, &vec![Recipe::BakeRolls; count], None, 0, 0)
                     .unwrap();
                 let replay = exact
                     .iter()
@@ -2401,12 +2414,12 @@ mod tests {
     fn production_prefixes_repeat_batches_stop_after_crossing_and_follow_caps() {
         use crate::production::{Recipe, recipe_profit};
         let mut worker = baker();
-        let bread_rate = recipe_profit(Recipe::BakeBread, &worker).unwrap()
-            / Recipe::BakeBread.duration_ms(&worker).unwrap() as f64;
+        let bread_rate = recipe_profit(Recipe::BakeRolls, &worker).unwrap()
+            / Recipe::BakeRolls.duration_ms(&worker).unwrap() as f64;
         let pie_rate = recipe_profit(Recipe::BakeBerryPie, &worker).unwrap()
             / Recipe::BakeBerryPie.duration_ms(&worker).unwrap() as f64;
         let first = if bread_rate >= pie_rate {
-            Recipe::BakeBread
+            Recipe::BakeRolls
         } else {
             Recipe::BakeBerryPie
         };
@@ -2540,7 +2553,7 @@ mod tests {
         use crate::production::{Recipe, Skill};
         let source = buying_baker(2000);
         let initial = Prediction::new(&source, Cooldowns::default());
-        let variants = production_order(&initial, &[Recipe::BakeBread; 2], None, 0, 0).unwrap();
+        let variants = production_order(&initial, &[Recipe::BakeRolls; 2], None, 0, 0).unwrap();
         let candidate = variants
             .iter()
             .find(|candidate| {
@@ -2548,8 +2561,8 @@ mod tests {
                     candidate.actions.as_slice(),
                     [
                         CitizenAction::BuyAt { .. },
-                        CitizenAction::Produce(Recipe::BakeBread),
-                        CitizenAction::Produce(Recipe::BakeBread)
+                        CitizenAction::Produce(Recipe::BakeRolls),
+                        CitizenAction::Produce(Recipe::BakeRolls)
                     ]
                 )
             })
@@ -2560,7 +2573,7 @@ mod tests {
         assert_eq!(list.units(Good::Flour), 200);
         assert_eq!(list.units(Good::Wood), 50);
         assert_eq!(list.units(Good::Water), 200);
-        assert_eq!(candidate.citizen.available_units(Good::Bread), 4);
+        assert_eq!(candidate.citizen.available_units(Good::BreadRoll), 20);
         assert_eq!(candidate.citizen.available_units(Good::Flour), 0);
         assert_eq!(
             candidate.citizen.skill_practice_ms(Skill::Baking).unwrap()
@@ -2587,7 +2600,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let one = production_order(&initial, &[Recipe::BakeBread], None, 0, 0).unwrap();
+        let one = production_order(&initial, &[Recipe::BakeRolls], None, 0, 0).unwrap();
         let CitizenAction::BuyAt { list, .. } = one[0].actions[0] else {
             unreachable!()
         };
@@ -2601,7 +2614,7 @@ mod tests {
         let initial = Prediction::new(&buying_baker(2000), Cooldowns::default());
         let variants = production_order(
             &initial,
-            &[Recipe::BakeBread, Recipe::BakeBerryPie],
+            &[Recipe::BakeRolls, Recipe::BakeBerryPie],
             None,
             0,
             0,
@@ -2614,7 +2627,7 @@ mod tests {
                     candidate.actions.as_slice(),
                     [
                         CitizenAction::BuyAt { .. },
-                        CitizenAction::Produce(Recipe::BakeBread),
+                        CitizenAction::Produce(Recipe::BakeRolls),
                         CitizenAction::Produce(Recipe::BakeBerryPie)
                     ]
                 )
@@ -2627,7 +2640,7 @@ mod tests {
         assert_eq!(list.units(Good::Wood), 50);
         assert_eq!(list.units(Good::Water), 150);
         assert_eq!(list.units(Good::Berries), 100);
-        assert_eq!(candidate.citizen.available_units(Good::Bread), 2);
+        assert_eq!(candidate.citizen.available_units(Good::BreadRoll), 10);
         assert_eq!(
             candidate.citizen.available_units(Good::BerryPie),
             initial.citizen.available_units(Good::BerryPie) + 2
@@ -2696,19 +2709,19 @@ mod tests {
         use crate::production::Recipe;
         let mut initial = Prediction::new(&buying_baker(2000), Cooldowns::default());
         initial.elapsed_ms = GOAL_HORIZON_MS - 60 * 60_000;
-        let one = production_order(&initial, &[Recipe::BakeBread], None, 0, 0).unwrap();
+        let one = production_order(&initial, &[Recipe::BakeRolls], None, 0, 0).unwrap();
         assert!(
             one.iter()
                 .any(|candidate| candidate.elapsed_ms >= GOAL_HORIZON_MS)
         );
         assert!(
-            production_order(&initial, &[Recipe::BakeBread; 2], None, 0, 0)
+            production_order(&initial, &[Recipe::BakeRolls; 2], None, 0, 0)
                 .unwrap()
                 .is_empty()
         );
         initial.elapsed_ms = GOAL_HORIZON_MS;
         assert!(
-            production_order(&initial, &[Recipe::BakeBread], None, 0, 0)
+            production_order(&initial, &[Recipe::BakeRolls], None, 0, 0)
                 .unwrap()
                 .is_empty()
         );
@@ -2737,7 +2750,7 @@ mod tests {
         assert!(
             production_order_with_evidence(
                 &initial,
-                &[Recipe::BakeBread; 2],
+                &[Recipe::BakeRolls; 2],
                 None,
                 0,
                 0,
@@ -2754,12 +2767,12 @@ mod tests {
         use crate::production::Recipe;
         let initial = Prediction::new(&buying_baker(100), Cooldowns::default());
         assert!(
-            !production_order(&initial, &[Recipe::BakeBread], None, 0, 0)
+            !production_order(&initial, &[Recipe::BakeRolls], None, 0, 0)
                 .unwrap()
                 .is_empty()
         );
         assert!(
-            production_order(&initial, &[Recipe::BakeBread; 2], None, 0, 0)
+            production_order(&initial, &[Recipe::BakeRolls; 2], None, 0, 0)
                 .unwrap()
                 .is_empty()
         );
@@ -2789,14 +2802,14 @@ mod tests {
         source.refresh_production_targets(true).unwrap();
         let targets = source.production_targets().unwrap();
         assert!(targets.remaining_batches(Recipe::BakeBerryPie) > 0);
-        assert!(targets.remaining_batches(Recipe::BakeBread) > 0);
+        assert!(targets.remaining_batches(Recipe::BakeRolls) > 0);
         assert!(
             production_prefixes(Prediction::new(&source, Cooldowns::default()), 0, &mut [])
                 .unwrap()
                 .iter()
                 .any(|candidate| candidate
                     .actions
-                    .contains(&CitizenAction::Produce(Recipe::BakeBread)))
+                    .contains(&CitizenAction::Produce(Recipe::BakeRolls)))
         );
     }
 
@@ -3288,7 +3301,7 @@ mod tests {
     fn water_reserves_withdraw_own_stock_before_obtaining_the_remainder() {
         let buyer = Citizen::new(-50.0)
             .unwrap()
-            .with_good(Good::Bread, 6)
+            .with_good(Good::BreadRoll, 30)
             .unwrap()
             .with_good(Good::Water, 200)
             .unwrap();
@@ -3319,7 +3332,7 @@ mod tests {
     #[test]
     fn water_reserves_compare_fetching_and_purchases_and_stop_when_stocked() {
         let buyer = reserve_shopper(100, &[(Good::Water, 1000, 1.0)])
-            .with_good(Good::Bread, 6)
+            .with_good(Good::BreadRoll, 30)
             .unwrap();
         let variants = variants_after(
             &Prediction::new(&buyer, Cooldowns::default()),
@@ -3371,7 +3384,7 @@ mod tests {
 
     #[test]
     fn reserves_prefer_actual_rounded_cost_and_coalesce_fragmented_food() {
-        let buyer = reserve_shopper(1, &[(Good::Bread, 1, 0.4); 55]);
+        let buyer = reserve_shopper(1, &[(Good::BreadRoll, 5, 0.08); 55]);
         let initial = Prediction::new(&buyer, Cooldowns::default());
         let bought = replenish(&initial, 100.0, 0).unwrap().pop().unwrap();
         assert_eq!(bought.citizen.available_food_nutrition(), 100.0);
@@ -3381,16 +3394,19 @@ mod tests {
             bought.actions[0],
             CitizenAction::BuyAt {
                 place: buyer.map().public_place(crate::locations::Location::Market),
-                list: crate::marketplace::ShoppingList::single(Good::Bread, 2),
+                list: crate::marketplace::ShoppingList::single(Good::BreadRoll, 10),
             }
         );
-        let buyer = reserve_shopper(100, &[(Good::Bread, 10, 10.1), (Good::BerryPie, 10, 12.01)]);
+        let buyer = reserve_shopper(
+            100,
+            &[(Good::BreadRoll, 50, 2.02), (Good::BerryPie, 10, 12.01)],
+        );
         let bought = replenish(&Prediction::new(&buyer, Cooldowns::default()), 100.0, 0)
             .unwrap()
             .pop()
             .unwrap();
         assert_eq!(bought.citizen.available_units(Good::BerryPie), 2);
-        assert_eq!(bought.citizen.available_units(Good::Bread), 0);
+        assert_eq!(bought.citizen.available_units(Good::BreadRoll), 0);
         assert_eq!(bought.citizen.coins(), 75);
     }
 
@@ -3398,10 +3414,12 @@ mod tests {
     fn reserves_fill_nearby_equal_price_stock_before_a_larger_farther_basket() {
         let (buyer, mill, market_place) = workplace_shopper();
         let mut market = crate::marketplace::Market::default();
-        market.prices = market.prices.with_price(Good::Bread, 0.4).unwrap();
+        market.prices = market.prices.with_price(Good::BreadRoll, 0.08).unwrap();
         let seller = crate::AgentId(uuid::Uuid::new_v4());
-        market.list(seller, mill, Good::Bread, 1).unwrap();
-        market.list(seller, market_place, Good::Bread, 10).unwrap();
+        market.list(seller, mill, Good::BreadRoll, 5).unwrap();
+        market
+            .list(seller, market_place, Good::BreadRoll, 50)
+            .unwrap();
         let buyer = buyer.with_market(market);
         let bought = replenish(&Prediction::new(&buyer, Cooldowns::default()), 100.0, 0)
             .unwrap()
@@ -3412,7 +3430,7 @@ mod tests {
             bought.actions[1],
             CitizenAction::BuyAt {
                 place: mill,
-                list: crate::marketplace::ShoppingList::single(Good::Bread, 1),
+                list: crate::marketplace::ShoppingList::single(Good::BreadRoll, 5),
             }
         );
         assert_eq!(bought.citizen.available_food_nutrition(), 100.0);
@@ -3421,41 +3439,41 @@ mod tests {
 
     #[test]
     fn reserves_mix_food_in_one_stop_and_keep_cash_or_stock_limited_prefixes() {
-        let buyer = reserve_shopper(3, &[(Good::Bread, 1, 1.0), (Good::Berries, 100, 1.0)]);
+        let buyer = reserve_shopper(3, &[(Good::BreadRoll, 5, 0.2), (Good::Berries, 100, 1.0)]);
         let bought = replenish(&Prediction::new(&buyer, Cooldowns::default()), 200.0, 0)
             .unwrap()
             .pop()
             .unwrap();
         assert_eq!(bought.actions.len(), 1);
-        assert_eq!(bought.citizen.available_units(Good::Bread), 1);
+        assert_eq!(bought.citizen.available_units(Good::BreadRoll), 5);
         assert_eq!(bought.citizen.available_units(Good::Berries), 100);
         assert_eq!(bought.citizen.coins(), 1);
         assert!(bought.citizen.available_food_nutrition() < 100.0);
-        let buyer = reserve_shopper(15, &[(Good::Bread, 10, 10.0)]);
+        let buyer = reserve_shopper(15, &[(Good::BreadRoll, 50, 2.0)]);
         let bought = replenish(&Prediction::new(&buyer, Cooldowns::default()), 100.0, 0)
             .unwrap()
             .pop()
             .unwrap();
-        assert_eq!(bought.citizen.available_food_nutrition(), 50.0);
-        assert_eq!(bought.citizen.coins(), 5);
+        assert_eq!(bought.citizen.available_food_nutrition(), 70.0);
+        assert_eq!(bought.citizen.coins(), 1);
         assert_eq!(bought.actions.len(), 1);
     }
 
     #[test]
     fn reserves_complete_a_mixed_final_basket_after_the_preparation_limit() {
-        let buyer = reserve_shopper(3, &[(Good::Bread, 1, 1.0), (Good::Berries, 100, 1.0)]);
+        let buyer = reserve_shopper(3, &[(Good::BreadRoll, 5, 0.2), (Good::Berries, 100, 1.0)]);
         let mut initial = Prediction::new(&buyer, Cooldowns::default());
         initial.elapsed_ms = GOAL_HORIZON_MS - 1;
         let bought = replenish(&initial, 100.0, 0).unwrap().pop().unwrap();
         assert_eq!(bought.actions.len(), 1);
-        assert_eq!(bought.citizen.available_units(Good::Bread), 1);
+        assert_eq!(bought.citizen.available_units(Good::BreadRoll), 5);
         assert_eq!(bought.citizen.available_units(Good::Berries), 100);
         assert_eq!(bought.elapsed_ms, initial.elapsed_ms + TRADE_DURATION_MS);
     }
 
     #[test]
     fn reserves_withdraw_before_shopping_and_respect_purchase_cooldown() {
-        let buyer = reserve_shopper(100, &[(Good::Bread, 10, 1.0)])
+        let buyer = reserve_shopper(100, &[(Good::BreadRoll, 50, 0.2)])
             .with_good(Good::BerryPie, 1)
             .unwrap();
         let listed = buyer
@@ -3495,10 +3513,12 @@ mod tests {
                 .unwrap();
         }
         let seller = crate::AgentId(uuid::Uuid::new_v4());
-        market.prices = market.prices.with_price(Good::Bread, 100.0).unwrap();
-        market.list(seller, mill, Good::Bread, 10).unwrap();
-        market.prices = market.prices.with_price(Good::Bread, 0.4).unwrap();
-        market.list(seller, market_place, Good::Bread, 10).unwrap();
+        market.prices = market.prices.with_price(Good::BreadRoll, 20.0).unwrap();
+        market.list(seller, mill, Good::BreadRoll, 50).unwrap();
+        market.prices = market.prices.with_price(Good::BreadRoll, 0.08).unwrap();
+        market
+            .list(seller, market_place, Good::BreadRoll, 50)
+            .unwrap();
         let buyer = buyer.with_coins(1).unwrap().with_market(market);
         let bought = replenish(&Prediction::new(&buyer, Cooldowns::default()), 100.0, 0)
             .unwrap()
@@ -3537,7 +3557,7 @@ mod tests {
             .unwrap()
             .with_coins(300)
             .unwrap()
-            .with_good(Good::Bread, 1)
+            .with_good(Good::BreadRoll, 5)
             .unwrap();
         let seller = Citizen::new(0.0).unwrap().with_map(map).unwrap();
         let mut market = buyer.market().clone();
@@ -3545,7 +3565,7 @@ mod tests {
             .list(
                 seller.id(),
                 buyer.map().public_place(crate::locations::Location::Market),
-                Good::Bread,
+                Good::BreadRoll,
                 1000,
             )
             .unwrap();
@@ -3573,8 +3593,8 @@ mod tests {
                 unreachable!()
             };
             assert_eq!(
-                basket.units(Good::Bread),
-                ((target - 50.0) / 50.0).ceil() as u64
+                basket.units(Good::BreadRoll),
+                ((target - 50.0) / 10.0).ceil() as u64
             );
         }
     }
@@ -3583,10 +3603,10 @@ mod tests {
     fn reserve_acquisition_can_withdraw_own_food_and_omits_completed_targets() {
         let buyer = Citizen::new(0.0)
             .unwrap()
-            .with_good(Good::Bread, 4)
+            .with_good(Good::BreadRoll, 20)
             .unwrap();
         let listed = buyer
-            .start_action(CitizenAction::List(Good::Bread, 4))
+            .start_action(CitizenAction::List(Good::BreadRoll, 20))
             .unwrap()
             .advance(TRADE_DURATION_MS)
             .unwrap();
@@ -3598,15 +3618,15 @@ mod tests {
         assert!(
             variants
                 .iter()
-                .any(|variant| variant.actions == [CitizenAction::Withdraw(Good::Bread, 2)])
+                .any(|variant| variant.actions == [CitizenAction::Withdraw(Good::BreadRoll, 10)])
         );
         assert!(
             variants
                 .iter()
-                .any(|variant| variant.actions == [CitizenAction::Withdraw(Good::Bread, 4)])
+                .any(|variant| variant.actions == [CitizenAction::Withdraw(Good::BreadRoll, 20)])
         );
         let stocked = buyer
-            .with_good(Good::Bread, 6)
+            .with_good(Good::BreadRoll, 30)
             .unwrap()
             .with_good(Good::Water, crate::WATER_RESERVE_GRAMS)
             .unwrap();
@@ -3809,7 +3829,7 @@ mod tests {
         let place = source
             .map()
             .public_place(crate::locations::Location::Market);
-        market.list(seller, place, Good::Bread, 1).unwrap();
+        market.list(seller, place, Good::BreadRoll, 5).unwrap();
         market.list(seller, place, Good::BerryPie, 1).unwrap();
         market.list(seller, place, Good::Fish, 2).unwrap();
         market.list(seller, place, Good::Cabbage, 2).unwrap();

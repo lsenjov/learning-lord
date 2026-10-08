@@ -265,7 +265,7 @@ mod tests {
         let citizen = citizen
             .advance(6 * HOUR_MS)
             .unwrap()
-            .with_good(Good::Bread, 14)
+            .with_good(Good::BreadRoll, 70)
             .unwrap()
             .with_coins(40)
             .unwrap();
@@ -317,7 +317,7 @@ mod tests {
             let mut citizen = Citizen::with_needs(-50.0, -66.6)
                 .unwrap()
                 .with_starting_role(role)
-                .with_good(Good::Bread, 14)
+                .with_good(Good::BreadRoll, 70)
                 .unwrap()
                 .with_coins(crate::production::starting_coins(role))
                 .unwrap()

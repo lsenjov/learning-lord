@@ -19,8 +19,8 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
         let citizen = Citizen::new(0.0)
             .unwrap()
             .with_good(
-                Good::Bread,
-                (nutrition / Good::Bread.nutrition_per_unit().unwrap()).ceil() as u64,
+                Good::BreadRoll,
+                (nutrition / Good::BreadRoll.nutrition_per_unit().unwrap()).ceil() as u64,
             )
             .unwrap();
         close(citizen.food_reserve_wellbeing(), bonus);
@@ -33,7 +33,7 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
         .unwrap()
         .with_good(Good::Berries, 155)
         .unwrap()
-        .with_good(Good::Bread, 1)
+        .with_good(Good::BreadRoll, 5)
         .unwrap()
         .with_good(Good::BerryPie, 2)
         .unwrap();
@@ -45,11 +45,11 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
 fn listing_excludes_food_from_bonus_and_excess_preserves_the_cap() {
     let citizen = Citizen::new(0.0)
         .unwrap()
-        .with_good(Good::Bread, 8)
+        .with_good(Good::BreadRoll, 40)
         .unwrap();
     close(
-        citizen.excess_goods().unwrap().units(Good::Bread) as f64,
-        2.0,
+        citizen.excess_goods().unwrap().units(Good::BreadRoll) as f64,
+        10.0,
     );
     let listed = citizen
         .start_action(CitizenAction::ListExcess)
@@ -60,7 +60,7 @@ fn listing_excludes_food_from_bonus_and_excess_preserves_the_cap() {
     close(listed.food_reserve_wellbeing(), 14.0);
     close(listed.wealth().unwrap(), citizen.wealth().unwrap());
     let all_listed = citizen
-        .start_action(CitizenAction::List(Good::Bread, 8))
+        .start_action(CitizenAction::List(Good::BreadRoll, 40))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -71,7 +71,7 @@ fn listing_excludes_food_from_bonus_and_excess_preserves_the_cap() {
 fn eating_loses_reserve_bonus_but_hunger_relief_outweighs_it() {
     let hungry = Citizen::with_needs(80.0, -100.0)
         .unwrap()
-        .with_good(Good::Bread, 2)
+        .with_good(Good::BreadRoll, 10)
         .unwrap();
     let eating = hungry.start_action(CitizenAction::Eat).unwrap();
     let eaten = eating
@@ -94,7 +94,7 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
         learning_lord_simulation::marketplace::Prices::default()
             .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
             .unwrap()
-            .with_price(learning_lord_simulation::marketplace::Good::Bread, 15.0)
+            .with_price(learning_lord_simulation::marketplace::Good::BreadRoll, 3.0)
             .unwrap(),
     );
     let (universe, seller) = universe
@@ -102,7 +102,7 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
-                .with_good(Good::Bread, 10)
+                .with_good(Good::BreadRoll, 50)
                 .unwrap(),
         )
         .unwrap();
@@ -114,7 +114,7 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
         .advance(citizen.active_action().unwrap().remaining_ms())
         .unwrap();
     let universe = universe
-        .start_action(seller, CitizenAction::List(Good::Bread, 10))
+        .start_action(seller, CitizenAction::List(Good::BreadRoll, 50))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -126,8 +126,8 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
                 .with_coins(300)
                 .unwrap()
                 .with_good(
-                    Good::Bread,
-                    (nutrition / Good::Bread.nutrition_per_unit().unwrap()).ceil() as u64,
+                    Good::BreadRoll,
+                    (nutrition / Good::BreadRoll.nutrition_per_unit().unwrap()).ceil() as u64,
                 )
                 .unwrap(),
         )
@@ -153,15 +153,15 @@ fn replenishment_above_meal_stock_chooses_an_actual_purchase_and_reports_it_duri
         unreachable!()
     };
     let target =
-        50.0 + basket.units(Good::Bread) as f64 * Good::Bread.nutrition_per_unit().unwrap();
+        50.0 + basket.units(Good::BreadRoll) as f64 * Good::BreadRoll.nutrition_per_unit().unwrap();
     assert!([100.0, 200.0, 300.0].contains(&target));
     assert_eq!(universe, snapshot);
     assert_eq!(universe.market().requested(buyer), ShoppingList::default());
 
     let travelling = universe.start_planning(buyer).unwrap();
     close(
-        travelling.market().requested(buyer).units(Good::Bread) as f64,
-        basket.units(Good::Bread) as f64,
+        travelling.market().requested(buyer).units(Good::BreadRoll) as f64,
+        basket.units(Good::BreadRoll) as f64,
     );
     let AgentKind::Citizen(citizen) = &travelling.agents()[&buyer].kind;
     assert!(matches!(
@@ -172,12 +172,12 @@ fn replenishment_above_meal_stock_chooses_an_actual_purchase_and_reports_it_duri
         .advance(citizen.active_action().unwrap().remaining_ms())
         .unwrap();
     close(
-        arrived.market().requested(buyer).units(Good::Bread) as f64,
-        basket.units(Good::Bread) as f64,
+        arrived.market().requested(buyer).units(Good::BreadRoll) as f64,
+        basket.units(Good::BreadRoll) as f64,
     );
     let bought = arrived.advance(TRADE_DURATION_MS).unwrap();
     close(
-        bought.market().requested(buyer).units(Good::Bread) as f64,
+        bought.market().requested(buyer).units(Good::BreadRoll) as f64,
         0.0,
     );
     let AgentKind::Citizen(citizen) = &bought.agents()[&buyer].kind;
@@ -193,7 +193,7 @@ fn foraging_does_not_publish_a_food_reserve_wishlist() {
                 Citizen::new(0.0)
                     .unwrap()
                     .with_starting_role(learning_lord_simulation::StartingRole::Woodcutter)
-                    .with_good(Good::Bread, 1)
+                    .with_good(Good::BreadRoll, 5)
                     .unwrap(),
             )
             .unwrap();

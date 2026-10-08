@@ -31,7 +31,7 @@ fn producer(
         StartingRole::Farmer => Recipe::GrowWheat,
         StartingRole::Miller => Recipe::MillFlour,
         StartingRole::Woodcutter => Recipe::ChopWood,
-        StartingRole::Baker => Recipe::BakeBread,
+        StartingRole::Baker => Recipe::BakeRolls,
         StartingRole::Weaver => Recipe::SpinThread,
         StartingRole::Tailor => Recipe::MakeClothingBlock,
         StartingRole::Fisher => Recipe::CatchFish,
@@ -73,7 +73,7 @@ fn list(universe: Universe, id: AgentId, good: Good, grams: u64) -> Universe {
 fn competing_bakers_each_consider_the_full_unmet_demand() {
     let inputs = [
         (Good::Berries, 930),
-        (Good::Bread, 8),
+        (Good::BreadRoll, 40),
         (Good::Flour, 2_000),
         (Good::Wood, 500),
         (Good::Water, 2_000),
@@ -87,11 +87,11 @@ fn competing_bakers_each_consider_the_full_unmet_demand() {
         0,
     );
     let (universe, second) = producer(universe, "Second", StartingRole::Baker, &inputs, 0);
-    let universe = demand(universe, &[(Good::Bread, 28)]);
-    assert_eq!(universe.market().unmet_units(Good::Bread), 28);
+    let universe = demand(universe, &[(Good::BreadRoll, 140)]);
+    assert_eq!(universe.market().unmet_units(Good::BreadRoll), 140);
     for id in [first, second] {
         assert_eq!(
-            targets(&universe, id).remaining_batches(Recipe::BakeBread),
+            targets(&universe, id).remaining_batches(Recipe::BakeRolls),
             10
         );
     }
@@ -216,18 +216,18 @@ fn each_profitable_good_has_an_independent_twelve_hour_floor() {
     );
     let target = targets(&universe, baker);
     assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 4);
-    assert_eq!(target.remaining_batches(Recipe::BakeBread), 12);
+    assert_eq!(target.remaining_batches(Recipe::BakeRolls), 12);
     let worker = citizen(&universe, baker);
     let work: u64 = target
         .batches()
-        .filter(|(recipe, _)| matches!(recipe, Recipe::BakeBread | Recipe::BakeBerryPie))
+        .filter(|(recipe, _)| matches!(recipe, Recipe::BakeRolls | Recipe::BakeBerryPie))
         .map(|(recipe, count)| count * recipe.duration_ms(worker).unwrap())
         .sum();
     assert_eq!(work, 18 * 60 * 60_000);
     let unstocked = worker.with_good(Good::BerryPie, 0).unwrap();
     let full = ProductionTargets::calculate(&unstocked, 0).unwrap();
     assert_eq!(full.remaining_batches(Recipe::BakeBerryPie), 8);
-    assert_eq!(full.remaining_batches(Recipe::BakeBread), 12);
+    assert_eq!(full.remaining_batches(Recipe::BakeRolls), 12);
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn alternative_recipes_each_use_the_same_inputs_and_cash() {
             coins,
         );
         let target = targets(&universe, baker);
-        let bread = target.remaining_batches(Recipe::BakeBread);
+        let bread = target.remaining_batches(Recipe::BakeRolls);
         let pie = target.remaining_batches(Recipe::BakeBerryPie);
         assert_eq!(bread, 1);
         assert_eq!(pie, 1);
@@ -334,12 +334,12 @@ fn active_batch_uses_inputs_once_and_subtracts_its_output_from_the_target() {
         ],
         0,
     );
-    let universe = demand(universe, &[(Good::Bread, 4)]);
+    let universe = demand(universe, &[(Good::BreadRoll, 20)]);
     let working = citizen(&universe, baker)
-        .start_action(CitizenAction::Produce(Recipe::BakeBread))
+        .start_action(CitizenAction::Produce(Recipe::BakeRolls))
         .unwrap();
     let target = ProductionTargets::calculate(&working, 0).unwrap();
-    assert_eq!(target.remaining_batches(Recipe::BakeBread), 2);
+    assert_eq!(target.remaining_batches(Recipe::BakeRolls), 2);
     assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 0);
 }
 
@@ -349,7 +349,7 @@ fn personal_food_reserve_is_shared_across_edible_goods_and_does_not_block_eating
         .unwrap()
         .with_good(Good::Berries, 124)
         .unwrap()
-        .with_good(Good::Bread, 6)
+        .with_good(Good::BreadRoll, 30)
         .unwrap()
         .with_good(Good::BerryPie, 1)
         .unwrap();
@@ -358,14 +358,14 @@ fn personal_food_reserve_is_shared_across_edible_goods_and_does_not_block_eating
         .into_iter()
         .map(|good| reserves.units(good) as f64 * good.nutrition_per_unit().unwrap())
         .sum();
-    assert_eq!(nutrition, 340.0);
+    assert_eq!(nutrition, 300.0);
     assert_eq!(reserves.units(Good::BerryPie), 0);
     let excess = worker.excess_goods().unwrap();
     let excess_nutrition: f64 = Good::FOOD
         .into_iter()
         .map(|good| excess.units(good) as f64 * good.nutrition_per_unit().unwrap())
         .sum();
-    assert_eq!(excess_nutrition, 60.0);
+    assert_eq!(excess_nutrition, 100.0);
     assert_eq!(nutrition + excess_nutrition, worker.food_nutrition());
     let eating = worker.start_action(CitizenAction::Eat).unwrap();
     let eaten = eating
@@ -399,9 +399,9 @@ fn replacement_asks_can_make_a_recipe_unprofitable_even_when_inputs_are_owned() 
         ],
         0,
     );
-    assert!(recipe_profit(Recipe::BakeBread, citizen(&universe, baker)).unwrap() < 0.0);
+    assert!(recipe_profit(Recipe::BakeRolls, citizen(&universe, baker)).unwrap() < 0.0);
     assert_eq!(
-        targets(&universe, baker).remaining_batches(Recipe::BakeBread),
+        targets(&universe, baker).remaining_batches(Recipe::BakeRolls),
         0
     );
     assert_eq!(
@@ -491,7 +491,7 @@ fn remaining_recipe_inputs_and_personal_reserves_use_separate_portions_of_invent
             (Good::Flour, 200),
             (Good::Wood, 50),
             (Good::Water, 150),
-            (Good::Bread, 22),
+            (Good::BreadRoll, 110),
             (Good::BerryPie, 15),
         ],
         0,
@@ -499,7 +499,7 @@ fn remaining_recipe_inputs_and_personal_reserves_use_separate_portions_of_invent
     let planned = universe.start_planning(baker).unwrap();
     let worker = citizen(&planned, baker);
     let target = worker.production_targets().unwrap();
-    assert_eq!(target.remaining_batches(Recipe::BakeBread), 1);
+    assert_eq!(target.remaining_batches(Recipe::BakeRolls), 1);
     assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 1);
     let reserves = worker.reserved_goods().unwrap();
     assert_eq!(reserves.units(Good::Flour), 100);
@@ -589,7 +589,7 @@ fn decision_proves_missing_supplies_without_claiming_missing_water_is_unavailabl
     let bread = decision
         .production
         .iter()
-        .find(|d| d.recipe == Recipe::BakeBread)
+        .find(|d| d.recipe == Recipe::BakeRolls)
         .unwrap();
     let flour = bread
         .inputs

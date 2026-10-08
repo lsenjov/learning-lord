@@ -393,7 +393,7 @@ mod tests {
             let mut state = app.world_mut().resource_mut::<State>();
             state.drafts[Good::Berries as usize].allowed = false;
             state.drafts[Good::Berries as usize].reserve = "1234".into();
-            state.drafts[Good::Bread as usize].reserve = "7".into();
+            state.drafts[Good::BreadRoll as usize].reserve = "7".into();
             state.import = "50".into();
             state.export = "12.34".into();
         }
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(policy.import_tariff_basis_points, 0);
         assert_eq!(app.world().resource::<State>().import, "50");
         assert_eq!(
-            app.world().resource::<State>().drafts[Good::Bread as usize].reserve,
+            app.world().resource::<State>().drafts[Good::BreadRoll as usize].reserve,
             "7"
         );
         press(&mut app, Choice::SaveTariffs);

@@ -50,7 +50,7 @@ pub enum Recipe {
     MillFlour,
     ChopWood,
     FetchWater,
-    BakeBread,
+    BakeRolls,
     BakeBerryPie,
     GrowFlax,
     SpinThread,
@@ -69,7 +69,7 @@ impl Recipe {
         Self::MillFlour,
         Self::ChopWood,
         Self::FetchWater,
-        Self::BakeBread,
+        Self::BakeRolls,
         Self::BakeBerryPie,
         Self::GrowFlax,
         Self::SpinThread,
@@ -86,7 +86,7 @@ impl Recipe {
             Self::MillFlour => "Mill flour",
             Self::ChopWood => "Chop wood",
             Self::FetchWater => "Fetch water",
-            Self::BakeBread => "Bake bread",
+            Self::BakeRolls => "Bake rolls",
             Self::BakeBerryPie => "Bake berry pie",
             Self::GrowFlax => "Grow flax",
             Self::SpinThread => "Spin thread",
@@ -104,7 +104,7 @@ impl Recipe {
             Self::ChopWood => Some(Skill::Woodcutting),
             Self::FetchWater | Self::Forage => None,
             Self::CatchFish => Some(Skill::Fishing),
-            Self::BakeBread | Self::BakeBerryPie => Some(Skill::Baking),
+            Self::BakeRolls | Self::BakeBerryPie => Some(Skill::Baking),
             Self::SpinThread | Self::WeaveCloth => Some(Skill::Weaving),
             Self::MakeClothingBlock | Self::AssembleGarment => Some(Skill::Tailoring),
         }
@@ -115,7 +115,7 @@ impl Recipe {
             Self::MillFlour => Location::Mill,
             Self::ChopWood | Self::Forage => Location::Forest,
             Self::FetchWater | Self::CatchFish => Location::River,
-            Self::BakeBread | Self::BakeBerryPie => Location::Bakery,
+            Self::BakeRolls | Self::BakeBerryPie => Location::Bakery,
             Self::SpinThread | Self::WeaveCloth => Location::Weavery,
             Self::MakeClothingBlock | Self::AssembleGarment => Location::Tailory,
         }
@@ -134,7 +134,7 @@ impl Recipe {
             Self::WeaveCloth => &[(Good::Thread, 200)],
             Self::MakeClothingBlock => &[(Good::Cloth, 25)],
             Self::AssembleGarment => &[(Good::FlaxBlock, 8)],
-            Self::BakeBread => &[(Good::Flour, 100), (Good::Wood, 25), (Good::Water, 100)],
+            Self::BakeRolls => &[(Good::Flour, 100), (Good::Wood, 25), (Good::Water, 100)],
             Self::BakeBerryPie => &[
                 (Good::Flour, 100),
                 (Good::Wood, 25),
@@ -157,7 +157,7 @@ impl Recipe {
             Self::MillFlour => &[(Good::Flour, 240)],
             Self::ChopWood => &[(Good::Wood, 200)],
             Self::FetchWater => &[(Good::Water, 200)],
-            Self::BakeBread => &[(Good::Bread, 2)],
+            Self::BakeRolls => &[(Good::BreadRoll, 10)],
             Self::BakeBerryPie => &[(Good::BerryPie, 2)],
         }
     }
@@ -191,7 +191,7 @@ impl Recipe {
 pub fn starting_inputs(role: crate::StartingRole) -> crate::marketplace::ShoppingList {
     let recipe = match role {
         crate::StartingRole::Miller => Recipe::MillFlour,
-        crate::StartingRole::Baker => Recipe::BakeBread,
+        crate::StartingRole::Baker => Recipe::BakeRolls,
         crate::StartingRole::Weaver => Recipe::SpinThread,
         crate::StartingRole::Tailor => Recipe::MakeClothingBlock,
         _ => return crate::marketplace::ShoppingList::default(),
@@ -432,7 +432,7 @@ mod tests {
             .unwrap()
             .with_price(Good::Wood, 1.0)
             .unwrap()
-            .with_price(Good::Bread, 100.0)
+            .with_price(Good::BreadRoll, 100.0)
             .unwrap();
         for _ in 0..12 {
             market
@@ -474,7 +474,7 @@ mod tests {
         let crate::AgentKind::Citizen(citizen) = &universe.agents()[&buyer].kind;
         let citizen = citizen.with_market(market);
         let targets = ProductionTargets::calculate(&citizen, 0).unwrap();
-        assert_eq!(targets.remaining_batches(Recipe::BakeBread), 10);
+        assert_eq!(targets.remaining_batches(Recipe::BakeRolls), 10);
     }
 
     use crate::{StartingRole, marketplace::Prices};
