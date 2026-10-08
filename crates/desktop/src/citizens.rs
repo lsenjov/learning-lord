@@ -29,6 +29,7 @@ pub struct Summary(usize);
 #[derive(Clone, Copy)]
 pub enum Need {
     Hunger,
+    Thirst,
     Sleep,
     Clothing,
 }
@@ -37,6 +38,7 @@ impl Need {
     fn value(self, citizen: &Citizen) -> f64 {
         match self {
             Self::Hunger => citizen.hunger(),
+            Self::Thirst => citizen.thirst(),
             Self::Sleep => citizen.tiredness(),
             Self::Clothing => citizen.clothing_need(),
         }
@@ -44,6 +46,7 @@ impl Need {
     fn name(self) -> &'static str {
         match self {
             Self::Hunger => "Hunger",
+            Self::Thirst => "Thirst",
             Self::Sleep => "Sleep",
             Self::Clothing => "Clothing",
         }
@@ -114,7 +117,7 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
                 ))
                 .with_children(|card| {
                     card.spawn((text("", 15.0, TEXT), Summary(slot)));
-                    for need in [Need::Hunger, Need::Sleep, Need::Clothing] {
+                    for need in [Need::Hunger, Need::Thirst, Need::Sleep, Need::Clothing] {
                         card.spawn((text("", 12.0, TEXT), NeedLabel(slot, need)));
                         card.spawn((
                             Node {
@@ -314,6 +317,20 @@ fn need_label(value: f64, sleep: bool) -> &'static str {
     }
 }
 
+fn thirst_label(value: f64) -> &'static str {
+    if value < 0.0 {
+        "Hydrated"
+    } else if value == 0.0 {
+        "Balanced"
+    } else if value <= 50.0 {
+        "Thirsty"
+    } else if value <= 100.0 {
+        "Very thirsty"
+    } else {
+        "URGENT >100"
+    }
+}
+
 fn clothing_geometry(value: f64) -> (f32, f32) {
     let width = if value.is_finite() {
         (value / learning_lord_simulation::CLOTHING_MAX_PENALTY).clamp(0.0, 1.0) as f32 * 100.0
@@ -335,6 +352,7 @@ fn need_geometry(value: f64) -> (f32, f32) {
 pub(crate) fn goal_label(goal: Effect) -> &'static str {
     match goal {
         Effect::ReduceHunger => "Reduce Hunger",
+        Effect::ReduceThirst => "Reduce Thirst",
         Effect::ReduceTiredness => "Reduce Sleep Need",
         Effect::ReduceClothingNeed => "Reduce Clothing Need",
         Effect::Production => "Production",
@@ -468,10 +486,13 @@ pub fn refresh_cards(
                         Some(_) => "Worn",
                     }
                 ),
-                Need::Hunger | Need::Sleep => format!(
+                Need::Hunger | Need::Thirst | Need::Sleep => format!(
                     "{}: {}   (- < 0 > +)",
                     label.1.name(),
-                    need_label(label.1.value(citizen), matches!(label.1, Need::Sleep))
+                    match label.1 {
+                        Need::Thirst => thirst_label(citizen.thirst()),
+                        _ => need_label(label.1.value(citizen), matches!(label.1, Need::Sleep)),
+                    }
                 ),
             };
             if value.0 != next {
@@ -754,6 +775,21 @@ mod tests {
         ] {
             assert_eq!(clothing_geometry(need), (0.0, width));
         }
+    }
+
+    #[test]
+    fn thirst_labels_show_hydration_and_urgency() {
+        for (value, label) in [
+            (-100.0, "Hydrated"),
+            (-50.0, "Hydrated"),
+            (0.0, "Balanced"),
+            (25.0, "Thirsty"),
+            (100.0, "Very thirsty"),
+            (101.0, "URGENT >100"),
+        ] {
+            assert_eq!(thirst_label(value), label);
+        }
+        assert_eq!(goal_label(Effect::ReduceThirst), "Reduce Thirst");
     }
 
     #[test]

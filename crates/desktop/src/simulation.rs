@@ -301,6 +301,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
     let mut ids = Vec::new();
     for (name, role) in STARTING_CITIZENS {
         let mut citizen = Citizen::with_needs(-50.0, -66.6)?
+            .with_thirst(-50.0)?
             .with_good(Good::Bread, 14)?
             .with_garment_condition(Some(0.5))?
             .with_starting_role(role)
@@ -1029,6 +1030,7 @@ mod tests {
         for agent in universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert_eq!(citizen.hunger(), -50.0);
+            assert_eq!(citizen.thirst(), -50.0);
             assert_eq!(citizen.tiredness(), -66.6);
             assert_eq!(citizen.coins(), 3000);
             assert_eq!(citizen.berries_units(), 0);
@@ -1257,6 +1259,7 @@ mod tests {
         );
         assert_eq!(citizen.map(), state.universe.map());
         assert_eq!(citizen.hunger(), -50.0);
+        assert_eq!(citizen.thirst(), -50.0);
         assert_eq!(citizen.tiredness(), -66.6);
         assert_eq!(citizen.coins(), 3000);
         assert!(citizen.active_plan().is_some());

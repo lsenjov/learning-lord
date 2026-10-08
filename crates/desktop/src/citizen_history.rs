@@ -206,7 +206,7 @@ pub(crate) fn day_label(
 ) -> String {
     let a = day.activity;
     format!(
-        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Other / idle / waiting {}\nFood goals (includes meals) {} · overlaps activity times\n\nGOODS\n{}\nConsumed includes recipe inputs, food reserved when eating starts, and equipped clothing.\n\nCOINS\nEarned {}  |  Spent {}  |  Net {:+}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
+        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals (includes meals) {} · overlaps activity times\n\nGOODS\n{}\nConsumed includes recipe inputs, food and water reserved when eating or drinking starts, and equipped clothing.\n\nCOINS\nEarned {}  |  Spent {}  |  Net {:+}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
         crate::format_clock(day.start_ms),
         crate::format_clock(day.end_ms),
         if partial {
@@ -220,6 +220,7 @@ pub(crate) fn day_label(
         citizens::duration(a.sleep_ms),
         citizens::duration(a.trade_ms),
         citizens::duration(a.eating_ms),
+        citizens::duration(a.drinking_ms),
         citizens::duration(a.idle_ms),
         citizens::duration(day.food_goal_ms),
         goods_label(day),
@@ -231,6 +232,7 @@ pub(crate) fn day_label(
             |value| format!("{value:.1}")
         ),
         day.worst_hunger,
+        day.worst_thirst,
         day.worst_tiredness,
         day.worst_clothing_need
     )
@@ -350,7 +352,12 @@ mod tests {
             .with_citizen("Ada", Citizen::new(0.0).unwrap())
             .unwrap();
         let history = universe.citizen_history(id).unwrap();
-        let label = day_label(&history.current, true);
+        let mut day = history.current.clone();
+        day.activity.drinking_ms = 60_000;
+        day.worst_thirst = 125.0;
+        let label = day_label(&day, true);
+        assert!(label.contains("Drinking 00:01:00"));
+        assert!(label.contains("Thirst 125.0"));
         assert!(label.contains("PARTIAL"));
         assert!(label.contains("No elapsed time yet"));
         assert!(label.contains("No goods produced, traded or consumed yet."));
