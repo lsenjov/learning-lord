@@ -6,6 +6,8 @@ use crate::{
 
 pub const GOAL_HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
 pub const TRADE_PLAN_COOLDOWN_MS: u64 = 2 * 60 * 60 * 1000;
+const WATER_RESERVE_REPLENISH_GRAMS: crate::Quantity = 200;
+const DRINK_PLAN_MIN_THIRST: f64 = -50.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {
@@ -1577,7 +1579,7 @@ fn variants_from(
         }
     };
     if goal == Effect::ReduceThirst {
-        if citizen.thirst() <= -100.0 {
+        if citizen.thirst() < DRINK_PLAN_MIN_THIRST {
             return Ok(variants);
         }
         if let Some(candidate) = initial.perform(CitizenAction::Drink, prior_actions)? {
@@ -1611,7 +1613,7 @@ fn variants_from(
         return production_prefixes(initial, prior_actions, &mut []);
     }
     if goal == Effect::ReplenishReserves {
-        if citizen.available_units(Good::Water) < crate::WATER_RESERVE_GRAMS {
+        if citizen.available_units(Good::Water) <= WATER_RESERVE_REPLENISH_GRAMS {
             let water =
                 crate::marketplace::ShoppingList::single(Good::Water, crate::WATER_RESERVE_GRAMS);
             for candidate in prepare_inputs(&initial, &water, 0, prior_actions)? {
@@ -1714,6 +1716,71 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, CitizenAction::Buy(_) | CitizenAction::BuyAt { .. }))
                 && v.actions.last() == Some(&CitizenAction::Drink)
+        }));
+    }
+
+    #[test]
+    fn standalone_drinking_requires_room_for_full_relief() {
+        for (thirst, eligible) in [(-50.0, true), (-50.001, false), (-99.789, false)] {
+            let citizen = Citizen::new(-50.0)
+                .unwrap()
+                .with_thirst(thirst)
+                .unwrap()
+                .with_good(Good::Water, 398)
+                .unwrap();
+            let variants = variants_after(
+                &Prediction::new(&citizen, Cooldowns::default()),
+                Effect::ReduceThirst,
+            )
+            .unwrap();
+            assert_eq!(!variants.is_empty(), eligible, "thirst {thirst}");
+        }
+    }
+
+    #[test]
+    fn water_replenishment_waits_until_half_the_target_remains() {
+        for (water, eligible) in [(200, true), (201, false), (398, false)] {
+            let citizen = Citizen::new(-50.0)
+                .unwrap()
+                .with_thirst(-99.789)
+                .unwrap()
+                .with_good(Good::BreadRoll, 30)
+                .unwrap()
+                .with_good(Good::Water, water)
+                .unwrap();
+            let variants = variants_after(
+                &Prediction::new(&citizen, Cooldowns::default()),
+                Effect::ReplenishReserves,
+            )
+            .unwrap();
+            assert_eq!(!variants.is_empty(), eligible, "water {water}");
+            if eligible {
+                assert!(variants.iter().all(|p| {
+                    p.citizen.available_units(Good::Water) >= crate::WATER_RESERVE_GRAMS
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn meals_still_drink_when_standalone_drinking_is_ineligible() {
+        let citizen = Citizen::new(50.0)
+            .unwrap()
+            .with_thirst(-75.0)
+            .unwrap()
+            .with_good(Good::BreadRoll, 1)
+            .unwrap()
+            .with_good(Good::Water, 200)
+            .unwrap();
+        let variants = variants_after(
+            &Prediction::new(&citizen, Cooldowns::default()),
+            Effect::ReduceHunger,
+        )
+        .unwrap();
+        assert!(variants.iter().any(|p| {
+            p.actions == [CitizenAction::Eat]
+                && p.citizen.available_units(Good::Water) == 100
+                && p.citizen.thirst() < -99.0
         }));
     }
 
