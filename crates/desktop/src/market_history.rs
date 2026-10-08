@@ -168,7 +168,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Cyan body: current partial day. Close pressure affects the next 04:00 price.", 13.0, MUTED));
+    parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Cyan body: current partial day. At 04:00, only unsold stock priced at or below the reference price creates downward pressure.", 13.0, MUTED));
     let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {

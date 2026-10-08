@@ -1180,6 +1180,12 @@ impl Market {
         }
         for good in Good::ALL {
             let traded = self.period_activity[good as usize];
+            let before = self.prices.price(good).unwrap();
+            let price_eligible_supply: Quantity = self
+                .orders()
+                .filter(|o| self.purchasable(o) && o.good == good && o.quoted_price <= before)
+                .map(|o| o.units)
+                .sum();
             let supply: Quantity = self
                 .orders()
                 .filter(|o| self.purchasable(o) && o.good == good)
@@ -1194,11 +1200,15 @@ impl Market {
                 continue;
             }
             // Scale before adding so finite large volumes do not overflow the imbalance ratio.
-            let scale = traded.traded_units.max(supply).max(unmet) as f64;
-            let demand = traded.traded_units as f64 / scale + unmet as f64 / scale;
-            let available = traded.traded_units as f64 / scale + supply as f64 / scale;
-            let imbalance = (demand - available) / (demand + available);
-            let before = self.prices.price(good).unwrap();
+            let scale = traded.traded_units.max(price_eligible_supply).max(unmet) as f64;
+            let imbalance = if scale == 0.0 {
+                0.0
+            } else {
+                let demand = traded.traded_units as f64 / scale + unmet as f64 / scale;
+                let available =
+                    traded.traded_units as f64 / scale + price_eligible_supply as f64 / scale;
+                (demand - available) / (demand + available)
+            };
             let after = (before * (1.0 + MAX_DAILY_PRICE_CHANGE * imbalance))
                 .clamp(MIN_QUOTED_PRICE, f64::MAX);
             self.prices = self.prices.with_price(good, after)?;
@@ -1287,6 +1297,128 @@ mod tests {
     use super::*;
 
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
+
+    #[test]
+    fn expensive_caravan_stock_preserves_price_history_and_purchases() {
+        let buyer = AgentId(uuid::Uuid::from_u128(1));
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::Thread, 10.0049).unwrap();
+        let id = OrderId(0);
+        market.orders.insert(
+            id,
+            SellOrder {
+                id,
+                seller: MarketParty::Caravan,
+                place: PLACE,
+                good: Good::Thread,
+                units: 9600,
+                quoted_price: Good::Thread.import_threshold(),
+            },
+        );
+        market.next_order_id = 1;
+        market.period_activity[Good::Thread as usize].imported_units = 9600;
+        for day in 0..3 {
+            market.update(UPDATE_TIME_MS + day * DAY_MS).unwrap();
+            assert_eq!(market.prices.price(Good::Thread), Some(10.0049));
+            let history = market.history().back().unwrap();
+            assert_eq!(history.remaining_supply_units, 9600);
+            assert_eq!(history.caravan_remaining_supply_units, 9600);
+            assert_eq!(history.imported_units, if day == 0 { 9600 } else { 0 });
+            assert_eq!(
+                market.previous_period().unwrap().goods[Good::Thread as usize].listed_units,
+                9600
+            );
+            assert_eq!(
+                market.current_period().goods[Good::Thread as usize].listed_units,
+                9600
+            );
+            assert_eq!(market.orders[&id].quoted_price, 175.5);
+        }
+        market
+            .set_request(buyer, ShoppingList::single(Good::Thread, 1000))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 176)]);
+        assert_eq!(market.affordable_request(buyer).units(Good::Thread), 1000);
+        assert_eq!(market.available_units(buyer, Good::Thread), 9600);
+        let purchase = market
+            .purchase(buyer, PLACE, (Good::Thread, 1000), 176, 0, true)
+            .unwrap();
+        assert_eq!((purchase.units, purchase.coins), (1000, 176));
+        assert!(purchase.payments.is_empty());
+        market.refresh_affordability(&[(buyer, 0)]);
+        market.update(UPDATE_TIME_MS + 3 * DAY_MS).unwrap();
+        assert_eq!(market.prices.price(Good::Thread), Some(10.0049));
+        let history = market.history().back().unwrap();
+        assert_eq!(
+            (
+                history.traded_units,
+                history.caravan_purchased_units,
+                history.remaining_supply_units
+            ),
+            (1000, 1000, 8600)
+        );
+    }
+
+    #[test]
+    fn import_delivery_without_pricing_activity_keeps_price_and_history() {
+        let mut market = Market::default();
+        market.period_activity[Good::Thread as usize].imported_units = 10;
+        let before = market.prices;
+        market.update(UPDATE_TIME_MS).unwrap();
+        assert_eq!(market.prices, before);
+        let history = market.history().back().unwrap();
+        assert_eq!(history.good, Good::Thread);
+        assert_eq!(history.imported_units, 10);
+        assert_eq!(history.remaining_supply_units, 0);
+        assert_eq!(history.price_before, history.price_after);
+    }
+
+    #[test]
+    fn price_pressure_uses_only_stock_at_or_below_reference_price() {
+        for quote in [9.0, 10.0, f64::from_bits(10.0_f64.to_bits() + 1)] {
+            let buyer = AgentId(uuid::Uuid::from_u128(1));
+            let mut market = Market::default();
+            market.prices = market.prices.with_price(Good::Bread, 10.0).unwrap();
+            for (id, units, quoted_price) in [(OrderId(0), 30, quote), (OrderId(1), 100, 20.0)] {
+                market.orders.insert(
+                    id,
+                    SellOrder {
+                        id,
+                        seller: MarketParty::Caravan,
+                        place: PLACE,
+                        good: Good::Bread,
+                        units,
+                        quoted_price,
+                    },
+                );
+            }
+            market.next_order_id = 2;
+            market
+                .purchase(buyer, PLACE, (Good::Bread, 10), 1000, 0, true)
+                .unwrap();
+            market
+                .set_request(buyer, ShoppingList::single(Good::Bread, 10))
+                .unwrap();
+            market.refresh_affordability(&[(buyer, 1000)]);
+            market.update(UPDATE_TIME_MS).unwrap();
+            let expected = if quote <= 10.0 {
+                9.8
+            } else {
+                10.0 * (1.0 + 0.1 / 3.0)
+            };
+            assert!((market.prices.price(Good::Bread).unwrap() - expected).abs() < 1e-12);
+            let history = market.history().back().unwrap();
+            assert_eq!(
+                (
+                    history.traded_units,
+                    history.remaining_supply_units,
+                    history.unmet_demand_units
+                ),
+                (10, 120, 10)
+            );
+            assert_eq!(history.caravan_purchased_units, 10);
+        }
+    }
 
     #[test]
     fn tariffs_preserve_asking_receipts_and_carry_by_good_and_direction() {

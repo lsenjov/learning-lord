@@ -13,7 +13,7 @@ The later [Caravan controls and tariffs](caravan-controls-and-tariffs.md) plan e
 - Above 1.5 times core price, import half the closed day's affordable unfulfilled demand, less remaining caravan stock. Caravan orders are at the public market and retain the fixed 1.5-times-core price.
 - Threshold comparisons are strict. Half quantities round up once per good. Allocate exports proportionally between sellers with deterministic remainder allocation.
 - Caravans are external: exported goods leave town, export payments enter town, and import purchase payments leave town.
-- Imported stock counts as supply. Local trades, exports, import deliveries and purchases from caravans have distinct records and display; exports do not become local consumer demand for replenishing imports.
+- All purchasable imported stock remains listed supply. Unsold stock lowers the reference price only when its asking price is at or below the closing reference price. Local trades, exports, import deliveries and purchases from caravans have distinct records and display; exports do not become local consumer demand for replenishing imports.
 - Caravans are an outlet and supply intervention, not a hard price floor or ceiling.
 
 ## Implementation steps

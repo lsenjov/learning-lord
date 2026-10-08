@@ -1378,12 +1378,6 @@ mod tests {
             .find(|(_, control)| matches!(control, Control::Restart))
             .unwrap()
             .0;
-        let previous_prices = app
-            .world()
-            .resource::<DisplaySnapshot>()
-            .0
-            .universe
-            .prices();
         app.world_mut()
             .entity_mut(restart)
             .insert(Interaction::Pressed);
@@ -1401,7 +1395,12 @@ mod tests {
             snapshot.universe.current_time_ms(),
             simulation::START_TIME_MS
         );
-        assert_eq!(snapshot.universe.prices(), previous_prices);
+        assert_eq!(
+            snapshot.universe.prices(),
+            learning_lord_simulation::marketplace::Prices::core()
+                .with_price(Good::Berries, 65.0)
+                .unwrap()
+        );
         assert_eq!(snapshot.universe.agents().len(), 24);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
