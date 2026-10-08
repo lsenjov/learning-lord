@@ -451,6 +451,7 @@ fn root_goals(citizen: &Citizen) -> Result<Vec<Effect>, SimulationError> {
         && citizen.clothing_need() > 0.0;
     let standing_listing = !clothing_choice
         && citizen.production_targets().is_some()
+        && citizen.thirst() < crate::production::URGENT_HUNGER
         && citizen.hunger() < crate::production::URGENT_HUNGER
         && citizen.tiredness() < crate::production::URGENT_TIREDNESS
         && citizen.excess_value()? >= crate::production::MIN_LISTING_VALUE;
@@ -459,6 +460,7 @@ fn root_goals(citizen: &Citizen) -> Result<Vec<Effect>, SimulationError> {
     } else {
         &[
             Effect::ReduceHunger,
+            Effect::ReduceThirst,
             Effect::ReduceTiredness,
             Effect::ReplenishReserves,
             Effect::ReduceClothingNeed,
@@ -599,9 +601,10 @@ fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
     reduce_results(citizen, production, results)
 }
 
-fn ordinary_goals() -> [Effect; 5] {
+fn ordinary_goals() -> [Effect; 6] {
     [
         Effect::ReduceHunger,
+        Effect::ReduceThirst,
         Effect::ReduceTiredness,
         Effect::ReplenishReserves,
         Effect::ReduceClothingNeed,
@@ -1131,6 +1134,8 @@ mod tests {
         use crate::marketplace::Prices;
         let citizen = Citizen::with_needs(70.0, -100.0)
             .unwrap()
+            .with_thirst(-100.0)
+            .unwrap()
             .with_prices(Prices::new(200.0).unwrap());
         let selected = plan(&citizen).unwrap();
         let forecast = selected
@@ -1262,7 +1267,7 @@ mod tests {
             assert_eq!(chosen.actions(), reference.actions());
             assert_eq!(chosen.average_wellbeing(), reference.average_wellbeing());
             let decision = chosen.decision().unwrap();
-            assert_eq!(decision.candidates.len(), 5);
+            assert_eq!(decision.candidates.len(), 6);
             assert_eq!(decision.prices, prices);
             for candidate in &decision.candidates {
                 let expected = goals::variants_after(

@@ -12,6 +12,7 @@ pub enum Effect {
     Food,
     Coins,
     ReduceHunger,
+    ReduceThirst,
     ReduceTiredness,
     ReduceClothingNeed,
     ReplenishReserves,
@@ -31,6 +32,7 @@ impl CitizenAction {
         use Effect::*;
         match self {
             Self::Eat => &[ReduceHunger],
+            Self::Drink => &[ReduceThirst],
             Self::Sleep => &[ReduceTiredness],
             Self::EquipClothing => &[ReduceClothingNeed],
             Self::BuyFood(good) if good.nutrition_per_unit().is_some() => {
@@ -112,6 +114,7 @@ impl CitizenAction {
             Self::Eat => (MEAL_NOURISHMENT / BERRY_NUTRITION_PER_GRAM * BERRY_EATING_MS_PER_GRAM)
                 .ceil() as u64,
             Self::Sleep => SLEEP_DURATION_MS,
+            Self::Drink => crate::DRINK_DURATION_MS,
             Self::BuyFood(_)
             | Self::ListExcess
             | Self::List(..)
@@ -231,8 +234,23 @@ impl Prediction {
             return Ok(None);
         }
         next.citizen = citizen;
-        next.score.add(before, after, duration)?;
-        next.goal_score.add(before, after, duration)?;
+        if matches!(action, CitizenAction::Eat | CitizenAction::Drink) {
+            let mut current = started;
+            let mut remaining = duration;
+            while remaining > 0 {
+                let step = current.active_action().unwrap().next_boundary_ms();
+                let advanced = current.advance_predicted(step)?;
+                let from = current.personal_wellbeing()?;
+                let to = advanced.personal_wellbeing()?;
+                next.score.add(from, to, step)?;
+                next.goal_score.add(from, to, step)?;
+                current = advanced;
+                remaining -= step;
+            }
+        } else {
+            next.score.add(before, after, duration)?;
+            next.goal_score.add(before, after, duration)?;
+        }
         if !matches!(
             action,
             CitizenAction::Produce(crate::production::Recipe::Forage) | CitizenAction::Travel(_)
@@ -1417,6 +1435,23 @@ fn variants_from(
             variants.push(candidate);
         }
     };
+    if goal == Effect::ReduceThirst {
+        if citizen.thirst() <= -100.0 {
+            return Ok(variants);
+        }
+        if let Some(candidate) = initial.perform(CitizenAction::Drink, prior_actions)? {
+            consider(candidate);
+        }
+        let units = crate::DRINK_WATER_GRAMS
+            .min(((citizen.thirst() + 100.0).max(0.0) * 4.0).floor() as crate::Quantity);
+        let water = crate::marketplace::ShoppingList::single(Good::Water, units);
+        for ready in prepare_inputs(&initial, &water, 0, prior_actions)? {
+            if let Some(candidate) = ready.perform(CitizenAction::Drink, prior_actions)? {
+                consider(candidate);
+            }
+        }
+        return Ok(variants);
+    }
     if goal == Effect::ReduceClothingNeed {
         if citizen.clothing_need() <= 0.0 {
             return Ok(variants);
@@ -1477,6 +1512,58 @@ fn variants_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thirst_uses_carried_water_then_existing_fetch_or_buy_preparation() {
+        let source = Citizen::new(0.0).unwrap().with_thirst(80.0).unwrap();
+        let carried = source.with_good(Good::Water, 100).unwrap();
+        let immediate = variants_after(
+            &Prediction::new(&carried, Cooldowns::default()),
+            Effect::ReduceThirst,
+        )
+        .unwrap();
+        assert!(
+            immediate
+                .iter()
+                .any(|v| v.actions == [CitizenAction::Drink] && v.citizen.units(Good::Water) == 0)
+        );
+        let fetch = variants_after(
+            &Prediction::new(&source, Cooldowns::default()),
+            Effect::ReduceThirst,
+        )
+        .unwrap();
+        assert!(
+            fetch
+                .iter()
+                .any(|v| v.actions.contains(&CitizenAction::Produce(
+                    crate::production::Recipe::FetchWater
+                )) && v.actions.last() == Some(&CitizenAction::Drink))
+        );
+        let funded = source.with_coins(1000).unwrap();
+        let mut market = funded.market().clone();
+        market
+            .list(
+                crate::AgentId(uuid::Uuid::new_v4()),
+                funded
+                    .map()
+                    .public_place(crate::locations::Location::Market),
+                Good::Water,
+                200,
+            )
+            .unwrap();
+        let funded = funded.with_market(market);
+        let bought = variants_after(
+            &Prediction::new(&funded, Cooldowns::default()),
+            Effect::ReduceThirst,
+        )
+        .unwrap();
+        assert!(bought.iter().any(|v| {
+            v.actions
+                .iter()
+                .any(|a| matches!(a, CitizenAction::Buy(_) | CitizenAction::BuyAt { .. }))
+                && v.actions.last() == Some(&CitizenAction::Drink)
+        }));
+    }
 
     #[test]
     fn blocked_purchases_keep_alternatives_and_maximum_affordable_requests() {
@@ -3135,7 +3222,7 @@ mod tests {
             .unwrap();
         assert!((direct.average().unwrap() - split.average().unwrap()).abs() < 1e-12);
         let rate_per_ms = 100.0 / (24.0 * 60.0 * 60_000.0);
-        let expected = -30.0 - 45_000.0 * rate_per_ms;
+        let expected = -30.0 - 2.0 * 45_000.0 * rate_per_ms;
         assert!((direct.average().unwrap() - expected).abs() < 1e-12);
         assert_eq!(direct.score.elapsed_ms, 90_000);
     }
@@ -3452,7 +3539,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            (gathered.average().unwrap() - (-20.0 + 0.05 + 0.05 * 10.0 * BERRY_NUTRITION_PER_GRAM))
+            (gathered.average().unwrap()
+                - (-20.0 - crate::THIRST_PER_HOUR / 4.0
+                    + 0.05
+                    + 0.05 * 10.0 * BERRY_NUTRITION_PER_GRAM))
                 .abs()
                 < 1e-12
         );

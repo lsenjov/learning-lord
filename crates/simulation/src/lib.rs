@@ -26,6 +26,9 @@ pub const FOOD_RESERVE_FULL_BONUS_NUTRITION: f64 = 100.0;
 pub const FOOD_RESERVE_CAP_NUTRITION: f64 = 300.0;
 
 pub const HUNGER_PER_HOUR: f64 = 100.0 / 24.0;
+pub const THIRST_PER_HOUR: f64 = 100.0 / 24.0;
+pub const DRINK_WATER_GRAMS: Quantity = 200;
+pub const DRINK_DURATION_MS: u64 = 60_000;
 pub const TIREDNESS_PER_HOUR: f64 = 100.0 / 24.0;
 pub const MEAL_NOURISHMENT: f64 = 50.0;
 pub const ACTION_DURATION_MS: u64 = 30 * 60 * 1000;
@@ -97,6 +100,7 @@ pub enum AgentKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CitizenAction {
     Eat,
+    Drink,
     EquipClothing,
     Wait,
     Sleep,
@@ -153,6 +157,8 @@ pub struct ActiveAction {
     action: CitizenAction,
     remaining_ms: u64,
     duration_ms: u64,
+    meal_duration_ms: u64,
+    drink_units: Quantity,
     meal_nutrition: f64,
     meal_units: [Quantity; Good::COUNT],
     travel_origin: Position,
@@ -166,6 +172,24 @@ impl ActiveAction {
 
     pub fn remaining_ms(&self) -> u64 {
         self.remaining_ms
+    }
+
+    fn next_boundary_ms(&self) -> u64 {
+        let elapsed = self.duration_ms - self.remaining_ms;
+        [
+            self.meal_duration_ms,
+            self.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS,
+        ]
+        .into_iter()
+        .filter(|duration| *duration > elapsed)
+        .map(|duration| duration - elapsed)
+        .min()
+        .unwrap_or(self.remaining_ms)
+        .min(self.remaining_ms)
+    }
+
+    pub fn drinking_units(&self) -> Quantity {
+        self.drink_units
     }
 
     pub fn duration_ms(&self) -> u64 {
@@ -199,6 +223,7 @@ impl StartingRole {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Citizen {
     hunger: f64,
+    thirst: f64,
     garment_condition: Option<f64>,
     hunger_per_hour: f64,
     tiredness: f64,
@@ -251,6 +276,7 @@ impl Citizen {
             Map::default().with_place(Location::Home, Position::default(), Some(id), "Home")?;
         Ok(Self {
             hunger,
+            thirst: 0.0,
             garment_condition: None,
             hunger_per_hour,
             tiredness: 0.0,
@@ -311,6 +337,37 @@ impl Citizen {
         let mut citizen = self.clone();
         citizen.position = position;
         Ok(citizen)
+    }
+
+    pub fn thirst(&self) -> f64 {
+        self.thirst
+    }
+
+    pub fn with_thirst(&self, thirst: f64) -> Result<Self, SimulationError> {
+        if !thirst.is_finite() {
+            return Err(SimulationError::InvalidThirst);
+        }
+        if self.active_action.is_some() || self.active_plan.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        citizen.thirst = thirst.max(-100.0);
+        Ok(citizen)
+    }
+
+    fn drink_units(&self) -> Quantity {
+        self.available_units(Good::Water)
+            .min(DRINK_WATER_GRAMS)
+            .min(((self.thirst + 100.0).max(0.0) * 4.0).floor() as Quantity)
+    }
+
+    fn meal_duration_ms(&self) -> u64 {
+        self.meal()
+            .0
+            .iter()
+            .enumerate()
+            .map(|(index, units)| units * Good::ALL[index].eating_ms_per_unit().unwrap_or(0))
+            .sum()
     }
 
     pub fn hunger(&self) -> f64 {
@@ -474,7 +531,22 @@ impl Citizen {
             wealth += self.prices.value(good, units).unwrap_or(0.0);
         }
         if let Some(active) = self.active_action {
-            let remaining = active.remaining_ms as f64 / active.duration_ms as f64;
+            let drink_duration = active.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS;
+            let elapsed = active.duration_ms - active.remaining_ms;
+            if drink_duration > 0 {
+                wealth += self
+                    .prices
+                    .value(Good::Water, active.drink_units)
+                    .unwrap_or(0.0)
+                    * drink_duration.saturating_sub(elapsed) as f64
+                    / drink_duration as f64;
+            }
+            let remaining = if active.meal_duration_ms == 0 {
+                0.0
+            } else {
+                active.meal_duration_ms.saturating_sub(elapsed) as f64
+                    / active.meal_duration_ms as f64
+            };
             for good in Good::FOOD {
                 wealth += self
                     .prices
@@ -513,13 +585,15 @@ impl Citizen {
                 .distance(self.accessible_place(destination)?.position)
                 * WALK_MS_PER_METRE)
                 .ceil() as u64,
-            CitizenAction::Eat => self
-                .meal()
-                .0
-                .iter()
-                .enumerate()
-                .map(|(index, units)| units * Good::ALL[index].eating_ms_per_unit().unwrap_or(0))
-                .sum::<u64>(),
+            CitizenAction::Eat => {
+                let meal = self.meal_duration_ms();
+                if meal == 0 {
+                    0
+                } else {
+                    meal.max(self.drink_units() * DRINK_DURATION_MS / DRINK_WATER_GRAMS)
+                }
+            }
+            CitizenAction::Drink => self.drink_units() * DRINK_DURATION_MS / DRINK_WATER_GRAMS,
             CitizenAction::Produce(recipe) => {
                 if matches!(
                     recipe,
@@ -831,11 +905,25 @@ impl Citizen {
                 .inventory
                 .insert(good, self.units(good) - meal_units[good as usize]);
         }
+        let drink_units = if matches!(action, CitizenAction::Eat | CitizenAction::Drink) {
+            self.drink_units()
+        } else {
+            0
+        };
+        citizen
+            .inventory
+            .insert(Good::Water, self.units(Good::Water) - drink_units);
         citizen.active_action = Some(ActiveAction {
             action,
             remaining_ms: duration_ms,
             duration_ms,
             meal_nutrition,
+            meal_duration_ms: if action == CitizenAction::Eat {
+                self.meal_duration_ms()
+            } else {
+                0
+            },
+            drink_units,
             meal_units,
             travel_origin: self.position,
             travel_destination: if let CitizenAction::Travel(location) = action {
@@ -850,7 +938,12 @@ impl Citizen {
     pub fn food_reserve_wellbeing(&self) -> f64 {
         let nutrition = self.food_nutrition()
             + self.active_action.map_or(0.0, |active| {
-                active.meal_nutrition * active.remaining_ms as f64 / active.duration_ms as f64
+                active.meal_nutrition
+                    * active
+                        .meal_duration_ms
+                        .saturating_sub(active.duration_ms - active.remaining_ms)
+                        as f64
+                    / active.meal_duration_ms.max(1) as f64
             });
         0.10 * nutrition.min(FOOD_RESERVE_FULL_BONUS_NUTRITION)
             + 0.02
@@ -860,6 +953,8 @@ impl Citizen {
 
     pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
         let wellbeing = -self.clothing_need()
+            - self.thirst.max(0.0)
+            - 4.0 * (self.thirst - 100.0).max(0.0)
             - self.hunger.max(0.0)
             - 4.0 * (self.hunger - 100.0).max(0.0)
             - (-self.hunger - 100.0).max(0.0)
@@ -1119,16 +1214,35 @@ impl Citizen {
             (condition - elapsed_ms as f64 / GARMENT_LIFETIME_MS as f64).clamp(0.0, 1.0)
         });
         let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
-        let nourishment_per_hour = active.map_or(0.0, |action| {
-            action.meal_nutrition * 3_600_000.0 / action.duration_ms as f64
+        let consumed_fraction = |duration: u64, action: ActiveAction| {
+            if duration == 0 {
+                return 0.0;
+            }
+            let started = action.duration_ms - action.remaining_ms;
+            elapsed_ms.min(duration.saturating_sub(started)) as f64 / duration as f64
+        };
+        let nourishment = active.map_or(0.0, |action| {
+            action.meal_nutrition * consumed_fraction(action.meal_duration_ms, action)
         });
+        let hydration = active.map_or(0.0, |action| {
+            action.drink_units as f64 / 4.0
+                * consumed_fraction(
+                    action.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS,
+                    action,
+                )
+        });
+        let thirst = self.thirst + THIRST_PER_HOUR * elapsed_hours - hydration;
+        if !thirst.is_finite() {
+            return Err(SimulationError::ThirstOverflow);
+        }
+        self.thirst = thirst.max(-100.0);
         let recovery_per_hour =
             if active.is_some_and(|action| action.action == CitizenAction::Sleep) {
                 SLEEP_RECOVERY * 3_600_000.0 / SLEEP_DURATION_MS as f64
             } else {
                 0.0
             };
-        let hunger = self.hunger + (self.hunger_per_hour - nourishment_per_hour) * elapsed_hours;
+        let hunger = self.hunger + self.hunger_per_hour * elapsed_hours - nourishment;
         if !hunger.is_finite() {
             return Err(SimulationError::HungerOverflow);
         }
@@ -1584,7 +1698,7 @@ impl Universe {
                 .iter()
                 .filter_map(|id| {
                     let AgentKind::Citizen(citizen) = &universe.agents[id].kind;
-                    citizen.active_action().map(|a| a.remaining_ms())
+                    citizen.active_action().map(|a| a.next_boundary_ms())
                 })
                 .min()
                 .unwrap_or(end - universe.current_time_ms);
@@ -1986,6 +2100,8 @@ pub enum SimulationError {
     InvalidOwnership,
     PrivateProperty,
     PlaceNotFound,
+    InvalidThirst,
+    ThirstOverflow,
     InvalidHunger,
     InvalidHungerRate,
     InvalidTiredness,
@@ -2028,6 +2144,8 @@ impl fmt::Display for SimulationError {
             }
             Self::PrivateProperty => "citizen cannot use another citizen's private property",
             Self::PlaceNotFound => "place does not exist",
+            Self::InvalidThirst => "thirst must be finite",
+            Self::ThirstOverflow => "advancing time would produce nonfinite thirst",
             Self::InvalidHunger => "hunger must be finite",
             Self::InvalidHungerRate => "hunger per hour must be finite and nonnegative",
             Self::InvalidGarmentCondition => "garment condition must be finite",
@@ -2080,6 +2198,37 @@ mod tests {
         worker.production_targets =
             Some(production::ProductionTargets::calculate(&worker, 0).unwrap());
         worker
+    }
+
+    #[test]
+    fn drinking_excludes_reserved_and_town_water_and_preserves_active_wealth() {
+        let mut source = Citizen::new(0.0)
+            .unwrap()
+            .with_good(Good::Water, 300)
+            .unwrap();
+        source.tax_reserved.insert(Good::Water, 250);
+        source.town_inventory.insert(Good::Water, 500);
+        let wealth = source.wealth().unwrap();
+        let started = source.start_action(CitizenAction::Drink).unwrap();
+        assert_eq!(started.active_action().unwrap().drinking_units(), 50);
+        assert_eq!(started.units(Good::Water), 250);
+        assert!((started.wealth().unwrap() - wealth).abs() < 1e-9);
+        let middle = started.advance(7500).unwrap();
+        let water_value = source.prices.value(Good::Water, 25).unwrap();
+        assert!((middle.wealth().unwrap() - wealth + water_value).abs() < 1e-9);
+        let done = middle.advance(7500).unwrap();
+        assert!(
+            done.start_action(CitizenAction::Drink)
+                .unwrap()
+                .active_action()
+                .is_none()
+        );
+        assert_eq!(done.town_inventory[&Good::Water], 500);
+        assert_eq!(done.tax_reserved[&Good::Water], 250);
+        assert!(matches!(
+            source.with_thirst(f64::NAN),
+            Err(SimulationError::InvalidThirst)
+        ));
     }
 
     #[test]

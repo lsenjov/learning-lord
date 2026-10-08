@@ -114,11 +114,11 @@ fn personal_wellbeing_reflects_each_snapshot_without_changing_it() {
     assert_eq!(original.agents()[&id].personal_wellbeing(), Ok(-20.0));
     assert_eq!(
         advanced.agents()[&id].personal_wellbeing(),
-        Ok(-120.0 - 100.0 / 24.0)
+        Ok(-120.0 - 2.0 * 100.0 / 24.0)
     );
     assert_eq!(
         citizen(&advanced, id).personal_wellbeing(),
-        Ok(-120.0 - 100.0 / 24.0)
+        Ok(-120.0 - 2.0 * 100.0 / 24.0)
     );
     assert_eq!(original, snapshot);
     assert_eq!(citizen(&advanced, id).hunger(), 100.0);

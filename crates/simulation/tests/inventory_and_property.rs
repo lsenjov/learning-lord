@@ -79,7 +79,10 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         Good::Water,
         Good::Bread,
     ] {
-        assert_eq!(eaten.units(good), stocked.units(good));
+        assert_eq!(
+            eaten.units(good),
+            stocked.units(good) - if good == Good::Water { 200 } else { 0 }
+        );
         assert_eq!(sold.units(good), stocked.units(good));
     }
     let bread_only = Citizen::new(40.0)
@@ -177,7 +180,13 @@ fn ownership_is_multiple_homes_are_private_and_workplaces_allow_customers() {
 #[test]
 fn planning_routes_sleep_to_own_home_with_correct_durations_and_goal_metadata() {
     let (universe, ada) = Universe::default()
-        .with_citizen("Ada", Citizen::with_needs(-50.0, 100.0).unwrap())
+        .with_citizen(
+            "Ada",
+            Citizen::with_needs(-50.0, 100.0)
+                .unwrap()
+                .with_thirst(-100.0)
+                .unwrap(),
+        )
         .unwrap();
     let (universe, bram) = universe
         .with_citizen("Bram", Citizen::new(0.0).unwrap())

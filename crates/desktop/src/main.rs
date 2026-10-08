@@ -456,7 +456,9 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .active_action()
         .map(|active| {
             let name = match active.action() {
+                CitizenAction::Eat if active.drinking_units() > 0 => "Eating & drinking".into(),
                 CitizenAction::Eat => "Eating".into(),
+                CitizenAction::Drink => "Drinking".into(),
                 CitizenAction::Wait => "Waiting".into(),
                 CitizenAction::Sleep => "Sleeping".into(),
                 CitizenAction::EquipClothing => "Equipping clothing".into(),
@@ -554,13 +556,14 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         |condition| format!("{:.1}%", condition * 100.0),
     );
     format!(
-        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
+        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
         agent.name,
         citizen.coins(),
         citizen
             .wealth()
             .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}")),
         citizen.hunger(),
+        citizen.thirst(),
         citizen.tiredness(),
         citizen.clothing_need(),
         citizen.food_nutrition(),
@@ -623,6 +626,7 @@ fn crop_label(
 fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citizen) -> String {
     match action {
         CitizenAction::Eat => "Eat".into(),
+        CitizenAction::Drink => "Drink".into(),
         CitizenAction::Wait => "Wait".into(),
         CitizenAction::Sleep => "Sleep".into(),
         CitizenAction::EquipClothing => "Equip clothing".into(),
@@ -718,6 +722,7 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
     for candidate in &decision.candidates {
         let name = match candidate.goal {
             Effect::ReduceHunger => "Hunger",
+            Effect::ReduceThirst => "Thirst",
             Effect::ReduceTiredness => "Sleep",
             Effect::ReduceClothingNeed => "Clothing",
             Effect::Production => "Production",
@@ -1130,8 +1135,34 @@ mod tests {
     }
 
     #[test]
+    fn readout_shows_thirst_and_water_consumed_with_food() {
+        let citizen = Citizen::with_needs(50.0, 0.0)
+            .unwrap()
+            .with_thirst(25.0)
+            .unwrap()
+            .with_good(Good::Bread, 1)
+            .unwrap()
+            .with_good(Good::Water, 200)
+            .unwrap();
+        let (universe, id) = Universe::starting_at(0)
+            .with_citizen("Ada", citizen)
+            .unwrap();
+        let universe = universe.start_action(id, CitizenAction::Eat).unwrap();
+        let readout = citizen_readout(&universe, Some(id));
+        assert!(readout.contains("Thirst: 25.0"));
+        assert!(readout.contains("Eating & drinking | 00:01:40 remaining"));
+        assert_eq!(
+            action_label(CitizenAction::Drink, &Citizen::new(0.0).unwrap()),
+            "Drink"
+        );
+    }
+
+    #[test]
     fn sleeping_readout_counts_down_to_goal_completion() {
-        let citizen = Citizen::with_needs(-50.0, 50.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, 50.0)
+            .unwrap()
+            .with_thirst(-100.0)
+            .unwrap();
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(learning_lord_simulation::marketplace::Prices::default())

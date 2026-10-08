@@ -14,6 +14,7 @@ pub struct ActivityTimes {
     pub sleep_ms: u64,
     pub trade_ms: u64,
     pub eating_ms: u64,
+    pub drinking_ms: u64,
     pub idle_ms: u64,
 }
 
@@ -31,6 +32,7 @@ pub struct DailyCitizenHistory {
     pub coins_earned: Coins,
     pub coins_spent: Coins,
     pub worst_hunger: f64,
+    pub worst_thirst: f64,
     pub worst_tiredness: f64,
     pub worst_clothing_need: f64,
     mean_wellbeing: f64,
@@ -51,6 +53,7 @@ impl DailyCitizenHistory {
             coins_earned: 0,
             coins_spent: 0,
             worst_hunger: citizen.hunger(),
+            worst_thirst: citizen.thirst(),
             worst_tiredness: citizen.tiredness(),
             worst_clothing_need: citizen.clothing_need(),
             mean_wellbeing: 0.0,
@@ -62,6 +65,7 @@ impl DailyCitizenHistory {
     }
 
     fn observe(&mut self, citizen: &Citizen) {
+        self.worst_thirst = self.worst_thirst.max(citizen.thirst());
         self.worst_hunger = self.worst_hunger.max(citizen.hunger());
         self.worst_tiredness = self.worst_tiredness.max(citizen.tiredness());
         self.worst_clothing_need = self.worst_clothing_need.max(citizen.clothing_need());
@@ -84,8 +88,12 @@ impl CitizenHistory {
 
     pub(crate) fn start_action(&mut self, citizen: &Citizen) -> Result<(), SimulationError> {
         if let Some(active) = citizen.active_action()
-            && active.action() == CitizenAction::Eat
+            && matches!(active.action(), CitizenAction::Eat | CitizenAction::Drink)
         {
+            self.current.consumed[Good::Water as usize] = self.current.consumed
+                [Good::Water as usize]
+                .checked_add(active.drink_units)
+                .ok_or(SimulationError::InventoryOverflow)?;
             for good in Good::FOOD {
                 self.current.consumed[good as usize] = self.current.consumed[good as usize]
                     .checked_add(active.meal_units[good as usize])
@@ -115,6 +123,7 @@ impl CitizenHistory {
             ) => &mut self.current.activity.production_ms,
             Some(CitizenAction::Travel(_)) => &mut self.current.activity.travel_ms,
             Some(CitizenAction::Sleep) => &mut self.current.activity.sleep_ms,
+            Some(CitizenAction::Drink) => &mut self.current.activity.drinking_ms,
             Some(CitizenAction::Eat) => &mut self.current.activity.eating_ms,
             Some(
                 CitizenAction::BuyFood(_)
@@ -126,7 +135,14 @@ impl CitizenHistory {
             ) => &mut self.current.activity.trade_ms,
             _ => &mut self.current.activity.idle_ms,
         };
-        *target += elapsed;
+        if let Some(action) = active.filter(|action| action.action() == CitizenAction::Eat) {
+            let passed = action.duration_ms - action.remaining_ms;
+            let eating = elapsed.min(action.meal_duration_ms.saturating_sub(passed));
+            self.current.activity.eating_ms += eating;
+            self.current.activity.drinking_ms += elapsed - eating;
+        } else {
+            *target += elapsed;
+        }
         if before.active_plan().is_some_and(|plan| {
             plan.plan().goals().iter().any(|goal| {
                 goal.actions.contains(&plan.action_index())
@@ -244,12 +260,16 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
             }
         }
     };
+    split(start.thirst(), end.thirst(), &[-100.0, 0.0, 100.0]);
     split(start.hunger(), end.hunger(), &[-100.0, 0.0, 100.0]);
     split(start.tiredness(), end.tiredness(), &[0.0]);
     let reserve = |citizen: &Citizen| {
         citizen.food_nutrition()
             + citizen.active_action.map_or(0.0, |a| {
-                a.meal_nutrition * a.remaining_ms as f64 / a.duration_ms as f64
+                a.meal_nutrition
+                    * a.meal_duration_ms
+                        .saturating_sub(a.duration_ms - a.remaining_ms) as f64
+                    / a.meal_duration_ms.max(1) as f64
             })
     };
     split(
@@ -270,6 +290,7 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
     fractions.sort_by(f64::total_cmp);
     let wellbeing = |fraction: f64| -> Result<f64, SimulationError> {
         let mut citizen = start.clone();
+        citizen.thirst = start.thirst + (end.thirst - start.thirst) * fraction;
         citizen.hunger = start.hunger + (end.hunger - start.hunger) * fraction;
         citizen.tiredness = start.tiredness + (end.tiredness - start.tiredness) * fraction;
         citizen.garment_condition = start.garment_condition.map(|value| {
@@ -278,9 +299,26 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
         // Keep interpolation fractional so millisecond rounding cannot bias the daily average.
         let mut value = citizen.personal_wellbeing()?;
         if let Some(active) = start.active_action {
-            let remaining = active.remaining_ms as f64 - elapsed as f64 * fraction;
-            let ratio = remaining.max(0.0) / active.duration_ms as f64;
-            let initial_ratio = active.remaining_ms as f64 / active.duration_ms as f64;
+            let passed = active.duration_ms - active.remaining_ms;
+            let ratio =
+                (active.meal_duration_ms as f64 - passed as f64 - elapsed as f64 * fraction)
+                    .max(0.0)
+                    / active.meal_duration_ms.max(1) as f64;
+            let initial_ratio = active.meal_duration_ms.saturating_sub(passed) as f64
+                / active.meal_duration_ms.max(1) as f64;
+            let duration = active.drink_units * crate::DRINK_DURATION_MS / crate::DRINK_WATER_GRAMS;
+            if duration > 0 {
+                let water_ratio = (duration as f64 - passed as f64 - elapsed as f64 * fraction)
+                    .max(0.0)
+                    / duration as f64;
+                let initial_water_ratio = duration.saturating_sub(passed) as f64 / duration as f64;
+                value += citizen
+                    .prices
+                    .value(Good::Water, active.drink_units)
+                    .unwrap_or(0.0)
+                    * (water_ratio - initial_water_ratio)
+                    * crate::WEALTH_WELLBEING_PER_COIN;
+            }
             let meal_value: f64 = Good::FOOD
                 .into_iter()
                 .map(|good| {
