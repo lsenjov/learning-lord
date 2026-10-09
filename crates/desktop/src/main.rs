@@ -17,7 +17,7 @@ use bevy::{
     render::pipelined_rendering::PipelinedRenderingPlugin,
     winit::{EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent},
 };
-use learning_lord_simulation::{AgentKind, CitizenAction, Universe, marketplace::Good};
+use learning_lord_simulation::{AgentKind, Citizen, CitizenAction, Universe, marketplace::Good};
 use simulation::{Command as SimulationCommand, SPEEDS, SimulationWorker, Snapshot};
 
 const BACKGROUND: Color = Color::srgb(0.06, 0.08, 0.10);
@@ -714,6 +714,45 @@ fn sequence_readout(
     labels.join(" > ")
 }
 
+fn forecast_readout(
+    forecast: &learning_lord_simulation::planning::GoalForecast,
+    citizen: &Citizen,
+) -> Vec<String> {
+    let seconds = forecast.duration_ms.div_ceil(1000);
+    vec![
+        format!(
+            "{:02}:{:02}:{:02} | Goal avg {:.2} | Plan avg {:.2} | Future food +{:.2}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60,
+            forecast.average_wellbeing,
+            forecast.full_plan_wellbeing,
+            forecast.future_food_benefit
+        ),
+        sequence_readout(&forecast.actions, citizen),
+    ]
+}
+
+fn production_location_readout(
+    candidate: &learning_lord_simulation::planning::ProductionLocationForecast,
+    citizen: &Citizen,
+) -> Vec<String> {
+    let marker = if candidate.selected {
+        " [chosen location]"
+    } else if candidate.best_for_goal {
+        " [best production option]"
+    } else {
+        ""
+    };
+    let mut lines = vec![format!("{}{}", candidate.location_name, marker)];
+    if let Some(forecast) = &candidate.forecast {
+        lines.extend(forecast_readout(forecast, citizen));
+    } else {
+        lines.push("Unavailable: No executable production sequence at this location.".into());
+    }
+    lines
+}
+
 fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::AgentId>) -> String {
     use learning_lord_simulation::planning::goals::Effect;
     let Some(agent) = citizens::selected_agent(universe, id) else {
@@ -750,18 +789,12 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
             ""
         };
         lines.push(format!("\n{name}{selected}"));
-        if let Some(forecast) = &candidate.forecast {
-            let seconds = forecast.duration_ms.div_ceil(1000);
-            lines.push(format!(
-                "{:02}:{:02}:{:02} | Goal avg {:.2} | Plan avg {:.2} | Future food +{:.2}",
-                seconds / 3600,
-                seconds / 60 % 60,
-                seconds % 60,
-                forecast.average_wellbeing,
-                forecast.full_plan_wellbeing,
-                forecast.future_food_benefit
-            ));
-            lines.push(sequence_readout(&forecast.actions, citizen));
+        if !candidate.production_locations.is_empty() {
+            for location in &candidate.production_locations {
+                lines.extend(production_location_readout(location, citizen));
+            }
+        } else if let Some(forecast) = &candidate.forecast {
+            lines.extend(forecast_readout(forecast, citizen));
         } else {
             lines.push(format!(
                 "Unavailable: {}",
@@ -1035,6 +1068,43 @@ mod tests {
             ),
             "Forage x2 > Eat"
         );
+    }
+
+    #[test]
+    fn production_location_readout_distinguishes_best_and_chosen_sites() {
+        use learning_lord_simulation::planning::{GoalForecast, ProductionLocationForecast};
+        let citizen = Citizen::new(0.0).unwrap();
+        let mut location = ProductionLocationForecast {
+            place: citizen.home(),
+            location_name: "North workshop".into(),
+            forecast: Some(GoalForecast {
+                actions: vec![CitizenAction::Produce(
+                    learning_lord_simulation::production::Recipe::Forage,
+                )],
+                duration_ms: 7_200_000,
+                average_wellbeing: 12.5,
+                full_plan_wellbeing: 15.25,
+                future_food_benefit: 0.0,
+            }),
+            best_for_goal: true,
+            selected: false,
+        };
+        let text = production_location_readout(&location, &citizen).join("\n");
+        assert!(text.contains("North workshop [best production option]"));
+        assert!(!text.contains("chosen"));
+        assert!(text.contains("02:00:00 | Goal avg 12.50 | Plan avg 15.25"));
+        assert!(text.ends_with("Forage"));
+        location.selected = true;
+        let text = production_location_readout(&location, &citizen).join("\n");
+        assert!(text.contains("North workshop [chosen location]"));
+        assert!(!text.contains("best production option"));
+        location.selected = false;
+        location.best_for_goal = false;
+        location.forecast = None;
+        let text = production_location_readout(&location, &citizen).join("\n");
+        assert!(text.starts_with("North workshop\nUnavailable:"));
+        assert!(!text.contains("chosen"));
+        assert!(!text.contains("best production option"));
     }
 
     #[test]

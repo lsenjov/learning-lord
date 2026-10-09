@@ -2,6 +2,13 @@
 
 1. Completed: add explicit site-aware production actions, validate ownership and recipe location, preserve skill/input checks, and account for production stock, taxes, replanning, and display at the actual physical site. Execution and ownership regressions pass, including colocated workshops with different taxes. Independent review reports no findings; all 482 workspace tests, formatting, and Clippy with warnings denied pass.
 2. Completed: expose eligible sites and site-restricted recipe projections and farming choices, then generate one feasible Production candidate per site. Recipes can mix at that site; preparation can visit other places. Keep the scored two-hour block with its first crossing job and restrict the restock trigger and twelve total working hours to the selected site. Predicted, initially adopted, and synchronously replanned work installs the same selected-site targets for reserves and standing demand. Candidate, field-care, travel, procurement, site-tax, and infeasibility regressions pass; independent review reports no findings.
-3. In progress: show each eligible location and its executable forecast beneath the single Production goal in citizen planning reports. Report actions, duration, wellbeing, full-plan score, the best Production option, and the actual chosen location; unavailable places retain a diagnostic row. Review and commit the desktop display separately.
+3. Completed: show each eligible location and its executable forecast beneath the single Production goal in citizen planning reports. Report actions, duration, wellbeing, full-plan score, the best Production option, and the actual chosen location; unavailable places retain a diagnostic row. The focused report test passes and independent review reports no findings.
 
 An explicit ProduceAt action is necessary because a recipe alone resolves to the minimum-ID workplace and coordinates cannot distinguish colocated owned workplaces. The existing Produce action remains available for compatibility and prerequisite work. Reference valuation, net socage dependencies, local caps, and acquired-ingredient retention remain shared production policy.
+
+## Validation
+
+- All 491 workspace tests passed with the lockfile enforced; four manual probes remain ignored in the ordinary suite.
+- Formatting, workspace Clippy with warnings denied, and the locked workspace build passed.
+- A separate `cargo run --locked` instance initialized the renderer and application window successfully, then was stopped after the smoke test.
+- The ten-day town probe passed in 14.82 seconds, versus an 18.37-second baseline. These single runs produced different economic trajectories, so they check the workload rather than establish a directly comparable speedup.
