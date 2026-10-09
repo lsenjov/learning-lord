@@ -56,10 +56,9 @@ fn berries_arrive_on_completion_and_prediction_preserves_randomness() {
         .unwrap();
     let original = source.clone();
     let planned = plan(&source).unwrap();
-    assert!(planned.actions().iter().any(|a| matches!(
-        a,
-        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage)
-    )));
+    assert!(planned.actions().iter().any(|action| {
+        action.production_recipe() == Some(learning_lord_simulation::production::Recipe::Forage)
+    }));
     assert!(planned.average_wellbeing() > -20.0);
     assert_eq!(source, original);
     let started = source

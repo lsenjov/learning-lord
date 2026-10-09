@@ -17,9 +17,19 @@ pub struct GoalForecast {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ProductionLocationForecast {
+    pub place: crate::locations::PlaceId,
+    pub location_name: String,
+    pub forecast: Option<GoalForecast>,
+    pub best_for_goal: bool,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct GoalDecision {
     pub goal: Effect,
     pub forecast: Option<GoalForecast>,
+    pub production_locations: Vec<ProductionLocationForecast>,
 }
 
 impl GoalDecision {
@@ -130,6 +140,14 @@ impl Plan {
 
     pub fn decision(&self) -> Option<&PlanningDecision> {
         self.decision.as_deref()
+    }
+
+    pub(crate) fn production_site(&self) -> Option<crate::locations::PlaceId> {
+        let goal = self
+            .goals
+            .first()
+            .filter(|goal| goal.goal == Effect::Production)?;
+        productive_site(&self.actions[goal.actions.clone()])
     }
 
     pub fn actions(&self) -> &[CitizenAction] {
@@ -301,9 +319,10 @@ impl ActivePlan {
 
     pub(crate) fn adopt(
         &mut self,
-        citizen: Citizen,
+        mut citizen: Citizen,
         plan: Plan,
     ) -> Result<Citizen, SimulationError> {
+        set_production_site(&mut citizen, &plan)?;
         let Some(&action) = plan.actions.first() else {
             return Err(SimulationError::PlanningFailed);
         };
@@ -322,6 +341,7 @@ impl ActivePlan {
             if self.needs_replan(&citizen) {
                 self.prepare_replan(&mut citizen)?;
                 self.plan = plan(&citizen)?;
+                set_production_site(&mut citizen, &self.plan)?;
                 self.action_index = 0;
                 self.elapsed_ms = 0;
             }
@@ -502,6 +522,13 @@ fn reduce_results(
         }
         candidates.push(candidate);
     }
+    let selected_site = best.production_site();
+    for candidate in &mut candidates {
+        for location in &mut candidate.production_locations {
+            location.selected =
+                selected_goal == Effect::Production && selected_site == Some(location.place);
+        }
+    }
     for diagnostic in &mut production {
         diagnostic.selected = contains_production(citizen, &best.actions, diagnostic.recipe);
     }
@@ -513,6 +540,24 @@ fn reduce_results(
         blocked_requests,
     }));
     Ok(best)
+}
+
+fn productive_site(actions: &[CitizenAction]) -> Option<crate::locations::PlaceId> {
+    actions.iter().find_map(|action| match *action {
+        CitizenAction::ProduceAt { place, .. } => Some(place),
+        action => action.crop_plot().map(|(field, _)| field),
+    })
+}
+
+fn set_production_site(citizen: &mut Citizen, plan: &Plan) -> Result<(), SimulationError> {
+    if let Some(site) = plan.production_site() {
+        citizen.production_targets = Some(crate::production::ProductionTargets::calculate_at(
+            citizen,
+            citizen.current_time_ms(),
+            Some(site),
+        )?);
+    }
+    Ok(())
 }
 
 fn contains_production(
@@ -541,6 +586,18 @@ fn evaluate_goal(
     mut production: Vec<ProductionDecision>,
 ) -> Result<GoalEvaluation, SimulationError> {
     let mut forecast = None;
+    let mut production_locations = Vec::new();
+    if goal == Effect::Production {
+        for place in citizen.production_sites() {
+            production_locations.push(ProductionLocationForecast {
+                place,
+                location_name: citizen.map().place(place)?.name.clone(),
+                forecast: None,
+                best_for_goal: false,
+                selected: false,
+            });
+        }
+    }
     let mut goal_best = empty_plan();
     let initial = Prediction::new(citizen, Cooldowns::default());
     let blocked_requests = initial.blocked_requests.clone();
@@ -578,21 +635,41 @@ fn evaluate_goal(
                 }
             }
         }
+        let candidate_forecast = GoalForecast {
+            actions,
+            duration_ms,
+            average_wellbeing,
+            full_plan_wellbeing: continuation.average_wellbeing,
+            future_food_benefit,
+        };
+        if continuation.average_wellbeing.is_finite()
+            && let Some(site) = productive_site(&candidate_forecast.actions)
+            && let Some(location) = production_locations
+                .iter_mut()
+                .find(|location| location.place == site)
+        {
+            location.forecast = Some(candidate_forecast.clone());
+        }
         if continuation.average_wellbeing > goal_best.average_wellbeing {
-            forecast = Some(GoalForecast {
-                actions,
-                duration_ms,
-                average_wellbeing,
-                full_plan_wellbeing: continuation.average_wellbeing,
-                future_food_benefit,
-            });
+            forecast = Some(candidate_forecast);
             goal_best = continuation;
         }
+    }
+    if let Some(site) = goal_best.production_site()
+        && let Some(location) = production_locations
+            .iter_mut()
+            .find(|location| location.place == site)
+    {
+        location.best_for_goal = true;
     }
     let blocked_requests = *blocked_requests.borrow();
     Ok((
         goal_best,
-        GoalDecision { goal, forecast },
+        GoalDecision {
+            goal,
+            forecast,
+            production_locations,
+        },
         production,
         blocked_requests,
     ))
@@ -688,6 +765,8 @@ fn search_with_goals(
 
 pub(crate) fn start(citizen: &Citizen) -> Result<Citizen, SimulationError> {
     let plan = plan(citizen)?;
+    let mut citizen = citizen.clone();
+    set_production_site(&mut citizen, &plan)?;
     let mut citizen = citizen.start_action(plan.actions[0])?;
     citizen.active_plan = Some(ActivePlan {
         plan,
@@ -741,6 +820,141 @@ mod tests {
 
     const MINUTE_MS: u64 = 60_000;
     const TWO_HOURS_MS: u64 = 2 * 60 * MINUTE_MS;
+
+    #[test]
+    fn synchronous_replan_installs_the_new_selected_workplace_targets() {
+        use crate::{
+            StartingRole,
+            locations::{Location, Position},
+            marketplace::Good,
+            production::{ProductionTargets, Recipe},
+        };
+        let mut worker = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Miller)
+            .with_good(Good::Wheat, 600)
+            .unwrap()
+            .with_good(Good::Berries, 240)
+            .unwrap()
+            .with_good(Good::Water, 400)
+            .unwrap();
+        worker = worker.with_prices(
+            worker
+                .prices()
+                .with_price(Good::Wheat, 1.0)
+                .unwrap()
+                .with_price(Good::Flour, 10000.0)
+                .unwrap(),
+        );
+        let (map, mill) = worker
+            .map()
+            .with_place(
+                Location::Mill,
+                Position::default(),
+                Some(worker.id()),
+                "Mill",
+            )
+            .unwrap();
+        worker = worker.with_map(map).unwrap();
+        let forest = worker.map().public_place(Location::Forest);
+        worker.production_targets =
+            Some(ProductionTargets::calculate_at(&worker, 0, Some(forest)).unwrap());
+        let mut execution = ActivePlan {
+            plan: empty_plan(),
+            action_index: 0,
+            elapsed_ms: 0,
+        };
+        let started = execution.start_next_action(worker).unwrap();
+        assert_eq!(execution.plan.production_site(), Some(mill));
+        assert_eq!(started.production_targets().unwrap().site, Some(mill));
+        assert_eq!(
+            started
+                .production_targets()
+                .unwrap()
+                .remaining_batches(Recipe::Forage),
+            0
+        );
+    }
+
+    #[test]
+    fn production_diagnostics_report_each_location_and_keep_one_goal() {
+        use crate::{
+            StartingRole,
+            locations::{Location, Position},
+            marketplace::Good,
+            production::Recipe,
+        };
+        let worker = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Miller)
+            .with_good(Good::Wheat, 600)
+            .unwrap();
+        let (map, first) = worker
+            .map()
+            .with_place(
+                Location::Mill,
+                Position::default(),
+                Some(worker.id()),
+                "First mill",
+            )
+            .unwrap();
+        let (map, second) = map
+            .with_place(
+                Location::Mill,
+                Position::default(),
+                Some(worker.id()),
+                "Second mill",
+            )
+            .unwrap();
+        let worker = worker.with_map(map).unwrap();
+        let (_, decision, _, _) = evaluate_goal(&worker, Effect::Production, Vec::new()).unwrap();
+        assert_eq!(decision.goal, Effect::Production);
+        assert_eq!(
+            decision
+                .production_locations
+                .iter()
+                .filter(|location| location.best_for_goal)
+                .count(),
+            1
+        );
+        for site in [first, second] {
+            let location = decision
+                .production_locations
+                .iter()
+                .find(|location| location.place == site)
+                .unwrap();
+            let forecast = location.forecast.as_ref().unwrap();
+            assert!(forecast.actions.contains(&CitizenAction::ProduceAt {
+                place: site,
+                recipe: Recipe::MillFlour
+            }));
+            assert!(forecast.duration_ms > 0);
+            assert!(forecast.average_wellbeing.is_finite());
+            assert!(forecast.full_plan_wellbeing.is_finite());
+        }
+        let plan = plan(&worker).unwrap();
+        assert_eq!(
+            plan.decision()
+                .unwrap()
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.goal == Effect::Production)
+                .count(),
+            1
+        );
+        let selected = plan
+            .decision()
+            .unwrap()
+            .candidates
+            .iter()
+            .flat_map(|candidate| &candidate.production_locations)
+            .filter(|location| location.selected)
+            .count();
+        assert_eq!(
+            selected,
+            usize::from(plan.decision().unwrap().selected_goal == Effect::Production)
+        );
+    }
 
     #[test]
     fn replanning_refreshes_same_day_ingredient_budgets_after_output_stock_changes() {

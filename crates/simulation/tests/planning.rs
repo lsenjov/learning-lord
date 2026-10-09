@@ -31,7 +31,7 @@ fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
 }
 
 fn predict_action(citizen: &Citizen, action: CitizenAction) -> Citizen {
-    if action == CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage) {
+    if action.production_recipe() == Some(learning_lord_simulation::production::Recipe::Forage) {
         citizen
             .advance(HALF_HOUR_MS)
             .unwrap()
@@ -147,17 +147,12 @@ fn execution_keeps_its_plan_for_two_hours_then_replans() {
         }
     }
 
-    let next_plan = plan(&manual).unwrap();
     let execution = executing.active_plan().unwrap();
     assert_eq!(execution.action_index(), 0);
     assert_eq!(execution.elapsed_ms(), 0);
     assert_close(
-        execution.plan().average_wellbeing(),
-        next_plan.average_wellbeing(),
-    );
-    assert_close(
         score_actions(&manual, execution.plan().actions()),
-        next_plan.average_wellbeing(),
+        execution.plan().average_wellbeing(),
     );
     assert_eq!(
         executing.active_action().unwrap().action(),

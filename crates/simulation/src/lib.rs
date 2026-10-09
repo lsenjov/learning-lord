@@ -759,6 +759,23 @@ impl Citizen {
         Ok(())
     }
 
+    pub(crate) fn production_sites(&self) -> Vec<PlaceId> {
+        let mut sites: Vec<_> = self
+            .map
+            .places()
+            .values()
+            .filter(|place| {
+                production::Recipe::ALL.into_iter().any(|recipe| {
+                    recipe.duration_ms(self).is_ok()
+                        && self.validate_production_site(place.id, recipe).is_ok()
+                })
+            })
+            .map(|place| place.id)
+            .collect();
+        sites.sort_by_key(|place| place.0);
+        sites
+    }
+
     pub(crate) fn available_production_recipes(
         &self,
     ) -> impl Iterator<Item = production::Recipe> + '_ {
@@ -801,18 +818,46 @@ impl Citizen {
             .saturating_add(self.withdrawable_units(good))
     }
 
+    #[cfg(test)]
     pub(crate) fn production_restock_recipes(
         &self,
     ) -> Result<Option<Vec<production::Recipe>>, SimulationError> {
-        let preferred = production::projected_recipes(self, production::PRODUCTION_BLOCK_MS)?;
-        let threshold = production::recipe_requirements(self, &preferred)?;
+        self.production_restock_recipes_at(None)
+    }
+
+    pub(crate) fn production_restock_recipes_at(
+        &self,
+        site: Option<PlaceId>,
+    ) -> Result<Option<Vec<production::Recipe>>, SimulationError> {
+        let recipes = if let Some(targets) = self
+            .production_targets
+            .as_ref()
+            .filter(|targets| site.is_some() && targets.site == site)
+        {
+            targets.projected_order.clone()
+        } else {
+            production::projected_recipes_at(self, site, production::DAILY_CAPACITY_MS)?
+        };
+        let mut duration = 0;
+        let preferred: Vec<_> = recipes
+            .iter()
+            .copied()
+            .take_while(|recipe| {
+                if duration >= production::PRODUCTION_BLOCK_MS {
+                    return false;
+                }
+                duration += recipe.duration_ms(self).unwrap_or(0);
+                true
+            })
+            .collect();
+        let threshold = production::recipe_requirements_at(self, site, &preferred)?;
         if threshold
             .items()
             .all(|(good, units)| self.usable_owned_units(good) >= units)
         {
             return Ok(None);
         }
-        production::projected_recipes(self, production::DAILY_CAPACITY_MS).map(Some)
+        Ok(Some(recipes))
     }
 
     #[cfg(test)]
@@ -864,7 +909,7 @@ impl Citizen {
             {
                 future.remove(index);
             }
-            let requirements = production::recipe_requirements(self, &future)?;
+            let requirements = production::recipe_requirements_at(self, targets.site, &future)?;
             for (good, units) in requirements.items() {
                 reserve[good as usize] = units;
             }
@@ -920,14 +965,18 @@ impl Citizen {
                 true
             })
             .collect();
-        let threshold = production::recipe_requirements(self, &prefix)?;
+        if targets.site.is_none() {
+            return Ok(marketplace::ShoppingList::default());
+        }
+        let threshold = production::recipe_requirements_at(self, targets.site, &prefix)?;
         if threshold
             .items()
             .all(|(good, units)| self.usable_owned_units(good) >= units)
         {
             return Ok(marketplace::ShoppingList::default());
         }
-        let requirements = production::recipe_requirements(self, &targets.projected_order)?;
+        let requirements =
+            production::recipe_requirements_at(self, targets.site, &targets.projected_order)?;
         let needed = std::array::from_fn::<_, { Good::COUNT }, _>(|index| {
             let good = Good::ALL[index];
             requirements

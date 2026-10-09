@@ -781,12 +781,20 @@ impl Citizen {
     }
 
     pub(crate) fn farming_actions(&self) -> Vec<CitizenAction> {
+        self.farming_actions_for(None)
+    }
+
+    pub(crate) fn farming_actions_at(&self, field: PlaceId) -> Vec<CitizenAction> {
+        self.farming_actions_for(Some(field))
+    }
+
+    fn farming_actions_for(&self, field: Option<PlaceId>) -> Vec<CitizenAction> {
         if self.skill_practice_ms(Skill::Farming).is_none() {
             return Vec::new();
         }
         let mut fields: Vec<_> = self
             .owned_properties()
-            .filter(|place| !place.plots.is_empty())
+            .filter(|place| !place.plots.is_empty() && field.is_none_or(|field| field == place.id))
             .collect();
         fields.sort_by_key(|place| place.id.0);
         let mut existing = Vec::new();
@@ -846,7 +854,7 @@ impl Citizen {
         }
         for (field, plot) in empty {
             if self.can_support_plant(field) {
-                return crate::production::ranked_recipes(self)
+                return crate::production::ranked_recipes_at(self, Some(field))
                     .into_iter()
                     .filter_map(crate::production::crop_kind)
                     .map(|crop| CitizenAction::Plant { field, plot, crop })

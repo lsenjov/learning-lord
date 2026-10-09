@@ -1109,7 +1109,7 @@ fn production_order_with_evidence(
         reserved_ms,
         prior_actions,
         preparation_limit,
-        false,
+        None,
     )
 }
 
@@ -1120,9 +1120,9 @@ fn production_order_bounded(
     reserved_ms: u64,
     prior_actions: usize,
     preparation_limit: &mut bool,
-    bounded_production: bool,
+    site: Option<crate::locations::PlaceId>,
 ) -> Result<Vec<Prediction>, SimulationError> {
-    let requirements = recipe_requirements(&initial.citizen, recipes)?;
+    let requirements = crate::production::recipe_requirements_at(&initial.citizen, site, recipes)?;
     let mut variants = Vec::new();
     for mut state in prepare_inputs(initial, &requirements, reserved_ms, prior_actions)? {
         let mut complete = requirements
@@ -1130,7 +1130,7 @@ fn production_order_bounded(
             .all(|(good, units)| state.citizen.available_units(good) >= units);
         for (index, &recipe) in recipes.iter().enumerate() {
             if !complete
-                || index > 0 && bounded_production && state.elapsed_ms >= PRODUCTION_DURATION_MS
+                || index > 0 && site.is_some() && state.elapsed_ms >= PRODUCTION_DURATION_MS
                 || index > 0
                     && food_target
                         .is_some_and(|target| state.citizen.available_food_nutrition() >= target)
@@ -1139,13 +1139,15 @@ fn production_order_bounded(
                 break;
             }
             if food_target.is_none()
-                && crate::production::recipe_profit(recipe, &state.citizen)
+                && crate::production::recipe_profit_for_site(recipe, &state.citizen, site)
                     .is_none_or(|profit| profit <= 0.0)
             {
                 complete = false;
                 break;
             }
-            let action = CitizenAction::Produce(recipe);
+            let action = site.map_or(CitizenAction::Produce(recipe), |place| {
+                CitizenAction::ProduceAt { place, recipe }
+            });
             if recipe == crate::production::Recipe::Forage
                 && (index == 0 || recipes[index - 1] != recipe)
                 && state.last_gathering_order.is_some_and(|previous| {
@@ -1393,17 +1395,26 @@ pub(super) fn variants_after(
 
 pub(super) const PRODUCTION_DURATION_MS: u64 = crate::production::PRODUCTION_BLOCK_MS;
 
+#[cfg(test)]
 fn production_restock(
     initial: &Prediction,
     prior_actions: usize,
 ) -> Result<Prediction, SimulationError> {
+    production_restock_at(initial, prior_actions, None)
+}
+
+fn production_restock_at(
+    initial: &Prediction,
+    prior_actions: usize,
+    site: Option<crate::locations::PlaceId>,
+) -> Result<Prediction, SimulationError> {
     if initial.cooldowns.buy > 0 {
         return Ok(initial.clone());
     }
-    let Some(recipes) = initial.citizen.production_restock_recipes()? else {
+    let Some(recipes) = initial.citizen.production_restock_recipes_at(site)? else {
         return Ok(initial.clone());
     };
-    let target = recipe_requirements(&initial.citizen, &recipes)?;
+    let target = crate::production::recipe_requirements_at(&initial.citizen, site, &recipes)?;
     let demand_for = |requirements: crate::marketplace::ShoppingList| {
         crate::marketplace::ShoppingList::new(requirements.items().map(|(good, units)| {
             (
@@ -1416,7 +1427,8 @@ fn production_restock(
     record_blocked_purchase(initial, demand)?;
     let mut affordable_prefix_len = 0;
     for length in (1..=recipes.len()).rev() {
-        let requirements = recipe_requirements(&initial.citizen, &recipes[..length])?;
+        let requirements =
+            crate::production::recipe_requirements_at(&initial.citizen, site, &recipes[..length])?;
         let list = demand_for(requirements)?;
         let citizen = &initial.citizen;
         let available = list
@@ -1441,7 +1453,11 @@ fn production_restock(
     if affordable_prefix_len == 0 {
         return Ok(initial.clone());
     }
-    let requirements = recipe_requirements(&initial.citizen, &recipes[..affordable_prefix_len])?;
+    let requirements = crate::production::recipe_requirements_at(
+        &initial.citizen,
+        site,
+        &recipes[..affordable_prefix_len],
+    )?;
     let mut state = initial.clone();
     for (good, units) in requirements.items() {
         let listed = units
@@ -1484,17 +1500,42 @@ pub(super) fn production_prefixes(
     prior_actions: usize,
     diagnostics: &mut [super::ProductionDecision],
 ) -> Result<Vec<Prediction>, SimulationError> {
-    let mut state = production_restock(&initial, prior_actions)?;
+    let mut variants = Vec::new();
+    for site in initial.citizen.production_sites() {
+        variants.extend(production_at_site(
+            initial.clone(),
+            site,
+            prior_actions,
+            diagnostics,
+        )?);
+    }
+    Ok(variants)
+}
+
+fn production_at_site(
+    initial: Prediction,
+    site: crate::locations::PlaceId,
+    prior_actions: usize,
+    diagnostics: &mut [super::ProductionDecision],
+) -> Result<Vec<Prediction>, SimulationError> {
+    let mut initial = initial;
+    initial.citizen.production_targets = Some(crate::production::ProductionTargets::calculate_at(
+        &initial.citizen,
+        initial.citizen.current_time_ms(),
+        Some(site),
+    )?);
+    let mut state = production_restock_at(&initial, prior_actions, Some(site))?;
     let mut segment_start = state.clone();
     let mut order = Vec::new();
-    while state.elapsed_ms < PRODUCTION_DURATION_MS {
-        let farm_actions = state.citizen.farming_actions();
+    let mut productive = false;
+    while state.elapsed_ms < PRODUCTION_DURATION_MS || !productive {
+        let farm_actions = state.citizen.farming_actions_at(site);
         let care = farm_actions
             .iter()
             .copied()
             .find(|action| !matches!(action, CitizenAction::Plant { .. }));
         let mut progressed = false;
-        let recipes = crate::production::ranked_recipes(&state.citizen);
+        let recipes = crate::production::ranked_recipes_at(&state.citizen, Some(site));
         let mut choices: Vec<_> = care
             .map(|action| {
                 let recipe = action
@@ -1538,6 +1579,7 @@ pub(super) fn production_prefixes(
                 segment_start = state.clone();
                 order.clear();
                 progressed = true;
+                productive = true;
                 break;
             }
             let Some(recipe) = recipe else {
@@ -1556,7 +1598,7 @@ pub(super) fn production_prefixes(
                 0,
                 prior_actions,
                 &mut preparation_limit,
-                true,
+                Some(site),
             )?;
             if let Some(diagnostic) = diagnostics.iter_mut().find(|d| d.recipe == recipe) {
                 diagnostic.prefix_attempted = true;
@@ -1571,17 +1613,14 @@ pub(super) fn production_prefixes(
             state = candidate;
             order = extended;
             progressed = true;
+            productive = true;
             break;
         }
         if !progressed {
             break;
         }
     }
-    Ok(if state.actions.len() > initial.actions.len() {
-        vec![state]
-    } else {
-        Vec::new()
-    })
+    Ok(if productive { vec![state] } else { Vec::new() })
 }
 
 fn variants_from(
@@ -1686,6 +1725,327 @@ fn variants_from(
 mod tests {
     use super::*;
 
+    fn site_candidate(initial: &Citizen, site: crate::locations::PlaceId) -> Prediction {
+        production_at_site(
+            Prediction::new(initial, Cooldowns::default()),
+            site,
+            0,
+            &mut [],
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+    }
+
+    #[test]
+    fn production_site_candidates_keep_each_workplace_separate() {
+        use crate::{
+            StartingRole,
+            locations::{Location, Position},
+            production::{Recipe, Skill},
+        };
+        let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Baker)
+            .with_skill_practice_ms(Skill::Milling, Some(0))
+            .unwrap()
+            .with_good(Good::Wheat, 600)
+            .unwrap()
+            .with_good(Good::Flour, 500)
+            .unwrap()
+            .with_good(Good::Wood, 500)
+            .unwrap()
+            .with_good(Good::Water, 1000)
+            .unwrap()
+            .with_good(Good::Berries, 100)
+            .unwrap();
+        let (map, mill) = worker
+            .map()
+            .with_place(
+                Location::Mill,
+                Position { x: 10.0, y: 0.0 },
+                Some(worker.id()),
+                "Mill A",
+            )
+            .unwrap();
+        let (map, second) = map
+            .with_place(
+                Location::Mill,
+                Position { x: 20.0, y: 0.0 },
+                Some(worker.id()),
+                "Mill B",
+            )
+            .unwrap();
+        let (map, bakery) = map
+            .with_place(
+                Location::Bakery,
+                Position::default(),
+                Some(worker.id()),
+                "Bakery",
+            )
+            .unwrap();
+        let (map, private) = map
+            .with_place(
+                Location::Mill,
+                Position::default(),
+                Some(crate::AgentId(uuid::Uuid::new_v4())),
+                "Private mill",
+            )
+            .unwrap();
+        let worker = worker.with_map(map).unwrap();
+        let variants =
+            production_prefixes(Prediction::new(&worker, Cooldowns::default()), 0, &mut [])
+                .unwrap();
+        assert_eq!(variants.len(), 5);
+        for site in [
+            mill,
+            second,
+            bakery,
+            worker.map().public_place(Location::Forest),
+            worker.map().public_place(Location::River),
+        ] {
+            let variant = variants.iter().find(|variant| variant.actions.iter().any(|action| matches!(action, CitizenAction::ProduceAt { place, .. } if *place == site))).unwrap();
+            assert!(
+                variant
+                    .actions
+                    .iter()
+                    .filter_map(|action| match action {
+                        CitizenAction::ProduceAt { place, .. } => Some(*place),
+                        _ => None,
+                    })
+                    .all(|place| place == site)
+            );
+            assert_eq!(
+                variant.citizen.production_targets().unwrap().site,
+                Some(site)
+            );
+        }
+        assert!(!worker.production_sites().contains(&private));
+        let mill_plan = variants
+            .iter()
+            .find(|variant| {
+                variant.actions.contains(&CitizenAction::ProduceAt {
+                    place: mill,
+                    recipe: Recipe::MillFlour,
+                })
+            })
+            .unwrap();
+        assert!(mill_plan.actions.contains(&CitizenAction::Travel(mill)));
+        assert!(mill_plan.elapsed_ms > PRODUCTION_DURATION_MS);
+    }
+
+    #[test]
+    fn production_site_bakery_mixes_recipes_without_other_site_work() {
+        use crate::{locations::Location, production::Recipe};
+        let worker = baker();
+        let site = worker.production_place(Recipe::BakeRolls).unwrap();
+        let variant = site_candidate(&worker, site);
+        let recipes: Vec<_> = variant
+            .actions
+            .iter()
+            .filter_map(|action| match *action {
+                CitizenAction::ProduceAt { place, recipe } if place == site => Some(recipe),
+                _ => None,
+            })
+            .collect();
+        assert!(recipes.contains(&Recipe::BakeRolls));
+        assert!(recipes.contains(&Recipe::BakeBerryPie));
+        assert!(variant.actions.iter().all(|action| {
+            action
+                .production_recipe()
+                .is_none_or(|recipe| recipe.location() == Location::Bakery)
+        }));
+        assert!(variant.elapsed_ms >= PRODUCTION_DURATION_MS);
+    }
+
+    #[test]
+    fn production_site_restock_uses_only_its_mix_and_skips_a_covered_block() {
+        use crate::{
+            locations::{Location, Position},
+            production::{Recipe, Skill},
+        };
+        let worker = bread_only(buying_baker(2000))
+            .with_skill_practice_ms(Skill::Milling, Some(0))
+            .unwrap();
+        let (map, _) = worker
+            .map()
+            .with_place(
+                Location::Mill,
+                Position::default(),
+                Some(worker.id()),
+                "Mill",
+            )
+            .unwrap();
+        let mut worker = worker.with_map(map).unwrap();
+        let site = worker.production_place(Recipe::BakeRolls).unwrap();
+        worker.production_targets = Some(
+            crate::production::ProductionTargets::calculate_at(&worker, 0, Some(site)).unwrap(),
+        );
+        let variant = production_restock_at(
+            &Prediction::new(&worker, Cooldowns::default()),
+            0,
+            Some(site),
+        )
+        .unwrap();
+        assert!(
+            variant
+                .actions
+                .iter()
+                .any(|action| matches!(action, CitizenAction::BuyAt { .. }))
+        );
+        for action in &variant.actions {
+            if let CitizenAction::BuyAt { list, .. } = action {
+                assert_eq!(list.units(Good::Wheat), 0);
+                assert_eq!(list.units(Good::Flour), 1200);
+            }
+        }
+        let preferred =
+            crate::production::projected_recipes_at(&worker, Some(site), PRODUCTION_DURATION_MS)
+                .unwrap();
+        for (good, units) in
+            crate::production::recipe_requirements_at(&worker, Some(site), &preferred)
+                .unwrap()
+                .items()
+        {
+            worker = worker.with_good(good, units).unwrap();
+        }
+        let covered = production_restock_at(
+            &Prediction::new(&worker, Cooldowns::default()),
+            0,
+            Some(site),
+        )
+        .unwrap();
+        assert!(covered.actions.is_empty());
+        assert!(
+            worker
+                .purchase_shortages()
+                .unwrap()
+                .items()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn production_site_missing_inputs_can_buy_elsewhere_and_long_preparation_finishes_a_job() {
+        use crate::{
+            locations::{Location, Position},
+            production::Recipe,
+        };
+        let mut worker = bread_only(buying_baker(2000));
+        let site = worker.production_place(Recipe::BakeRolls).unwrap();
+        let mut map = worker.map();
+        let mut suppliers = Vec::new();
+        for index in 0..24 {
+            let (next, place) = map
+                .with_place(
+                    Location::Warehouse,
+                    Position { x: 1000.0, y: 0.0 },
+                    None,
+                    format!("Supplier {index}"),
+                )
+                .unwrap();
+            map = next;
+            suppliers.push(place);
+        }
+        worker = worker.with_map(map).unwrap();
+        worker.market = crate::marketplace::Market::default();
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        for &supplier in &suppliers {
+            worker
+                .market
+                .list(seller, supplier, Good::Flour, 50)
+                .unwrap();
+        }
+        worker
+            .market
+            .list(seller, suppliers[0], Good::Wood, 300)
+            .unwrap();
+        worker
+            .market
+            .list(seller, suppliers[0], Good::Water, 1200)
+            .unwrap();
+        let variant = site_candidate(&worker, site);
+        assert!(variant.actions.iter().any(
+            |action| matches!(action, CitizenAction::Travel(place) if suppliers.contains(place))
+        ));
+        assert!(variant.actions.contains(&CitizenAction::Travel(site)));
+        assert!(variant.actions.contains(&CitizenAction::ProduceAt {
+            place: site,
+            recipe: Recipe::BakeRolls
+        }));
+        assert!(variant.elapsed_ms > PRODUCTION_DURATION_MS);
+        assert_eq!(
+            variant
+                .actions
+                .iter()
+                .filter(|action| matches!(action, CitizenAction::ProduceAt { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn production_site_fields_care_for_their_own_crops_even_when_exports_are_disabled() {
+        use crate::{
+            StartingRole,
+            farming::{Crop, CropKind, HOUR_MS},
+            locations::{Location, Position},
+        };
+        let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Farmer);
+        let (map, first) = worker
+            .map()
+            .with_place(
+                Location::Field,
+                Position::default(),
+                Some(worker.id()),
+                "First field",
+            )
+            .unwrap();
+        let (mut map, second) = map
+            .with_place(
+                Location::Field,
+                Position::default(),
+                Some(worker.id()),
+                "Second field",
+            )
+            .unwrap();
+        for field in [first, second] {
+            map.set_crop(
+                field,
+                0,
+                Some(Crop {
+                    kind: CropKind::Wheat,
+                    planted_at_ms: 0,
+                    tended: [false; 2],
+                }),
+            )
+            .unwrap();
+        }
+        let mut worker = worker
+            .with_map(map)
+            .unwrap()
+            .with_good(Good::Wheat, 100000)
+            .unwrap();
+        worker.market_time_ms = 24 * HOUR_MS;
+        let mut policy = worker.market.caravan_policy();
+        policy.exports[Good::Wheat as usize].allowed = false;
+        worker.market.set_caravan_policy(policy).unwrap();
+        for site in [first, second] {
+            let variant = site_candidate(&worker, site);
+            let fields: Vec<_> = variant
+                .actions
+                .iter()
+                .filter_map(|action| action.crop_plot().map(|(field, _)| field))
+                .collect();
+            assert!(!fields.is_empty());
+            assert!(fields.into_iter().all(|field| field == site));
+            assert!(variant.actions.iter().any(|action| matches!(action, CitizenAction::Tend { field, stage: 0, .. } if *field == site)));
+        }
+    }
+
     #[test]
     fn site_specific_forage_preserves_the_existing_gathering_order() {
         let citizen = Citizen::new(0.0).unwrap();
@@ -1708,7 +2068,7 @@ mod tests {
     }
 
     #[test]
-    fn crop_planting_and_gathering_share_one_profit_and_stock_order() {
+    fn crop_planting_and_gathering_have_independent_site_candidates() {
         use crate::{StartingRole, locations::Location, production::Recipe};
         let citizen = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
@@ -1732,21 +2092,38 @@ mod tests {
         let variants =
             production_prefixes(Prediction::new(&citizen, Cooldowns::default()), 0, &mut [])
                 .unwrap();
-        assert_eq!(variants.len(), 1);
+        assert_eq!(variants.len(), 3);
+        let field_plan = variants
+            .iter()
+            .find(|variant| {
+                variant
+                    .actions
+                    .iter()
+                    .any(|action| action.crop_plot().is_some_and(|(site, _)| site == field))
+            })
+            .unwrap();
         assert!(
-            matches!(variants[0].actions.first(), Some(CitizenAction::Plant { field: site, crop: crate::farming::CropKind::Wheat, .. }) if *site == field)
+            matches!(field_plan.actions.first(), Some(CitizenAction::Plant { field: site, crop: crate::farming::CropKind::Wheat, .. }) if *site == field)
         );
         let citizen =
             citizen.with_prices(citizen.prices().with_price(Good::Berries, 5000.0).unwrap());
         let variants =
             production_prefixes(Prediction::new(&citizen, Cooldowns::default()), 0, &mut [])
                 .unwrap();
-        let first_work = variants[0]
+        let forest = citizen.map().public_place(Location::Forest);
+        let forest_plan = variants.iter().find(|variant| variant.actions.iter().any(|action| matches!(action, CitizenAction::ProduceAt { place, .. } if *place == forest))).unwrap();
+        let first_work = forest_plan
             .actions
             .iter()
             .find(|action| !matches!(action, CitizenAction::Travel(_)))
             .unwrap();
-        assert_eq!(*first_work, CitizenAction::Produce(Recipe::Forage));
+        assert_eq!(
+            *first_work,
+            CitizenAction::ProduceAt {
+                place: forest,
+                recipe: Recipe::Forage
+            }
+        );
     }
 
     #[test]
@@ -2216,7 +2593,10 @@ mod tests {
             production_prefixes(initial.clone(), 0, &mut [])
                 .unwrap()
                 .iter()
-                .any(|v| v.actions.contains(&forage))
+                .any(|v| v
+                    .actions
+                    .iter()
+                    .any(|action| action.production_recipe() == Some(Recipe::Forage)))
         );
         assert!(
             variants_after(&initial, Effect::ReduceHunger)
@@ -2266,7 +2646,9 @@ mod tests {
                     candidate
                         .actions
                         .iter()
-                        .filter(|&&a| a == CitizenAction::Produce(crate::production::Recipe::Forage))
+                        .filter(
+                            |&&a| a.production_recipe() == Some(crate::production::Recipe::Forage)
+                        )
                         .count(),
                     count
                 );
@@ -2279,8 +2661,8 @@ mod tests {
                         .actions
                         .iter()
                         .zip(&candidate.action_durations_ms)
-                        .all(|(action, duration)| *action
-                            != CitizenAction::Produce(crate::production::Recipe::Forage)
+                        .all(|(action, duration)| action.production_recipe()
+                            != Some(crate::production::Recipe::Forage)
                             || *duration == ACTION_DURATION_MS)
                 );
             }
@@ -2335,7 +2717,10 @@ mod tests {
                 .unwrap(),
         );
         let initial = Prediction::new(&worker, Cooldowns::default());
-        let variants = production_prefixes(initial.clone(), 0, &mut []).unwrap();
+        let variants = [site_candidate(
+            &worker,
+            worker.production_place(Recipe::BakeRolls).unwrap(),
+        )];
         assert_eq!(variants.len(), 1);
         for candidate in &variants {
             let checkpoint = PRODUCTION_DURATION_MS;
@@ -2352,7 +2737,7 @@ mod tests {
                 candidate
                     .actions
                     .iter()
-                    .all(|action| *action == CitizenAction::Produce(Recipe::BakeRolls))
+                    .all(|action| action.production_recipe() == Some(Recipe::BakeRolls))
             );
             let replay = production_order(
                 &initial,
@@ -2376,16 +2761,17 @@ mod tests {
         use crate::production::Recipe;
         let mut worker = baker().with_good(Good::BreadRoll, 10_000).unwrap();
         worker.refresh_production_targets(true).unwrap();
-        let variants =
-            production_prefixes(Prediction::new(&worker, Cooldowns::default()), 0, &mut [])
-                .unwrap();
+        let variants = [site_candidate(
+            &worker,
+            worker.production_place(Recipe::BakeRolls).unwrap(),
+        )];
         assert_eq!(variants.len(), 1);
         let candidate = &variants[0];
         assert!(
             candidate
                 .actions
                 .iter()
-                .all(|a| *a == CitizenAction::Produce(Recipe::BakeBerryPie))
+                .all(|a| a.production_recipe() == Some(Recipe::BakeBerryPie))
         );
         assert!(candidate.elapsed_ms >= PRODUCTION_DURATION_MS);
         assert!(
@@ -2430,14 +2816,14 @@ mod tests {
             candidate
                 .actions
                 .iter()
-                .filter(|&&action| action == CitizenAction::Produce(Recipe::BakeRolls))
+                .filter(|&&action| action.production_recipe() == Some(Recipe::BakeRolls))
                 .count(),
             1
         );
         assert!(candidate.elapsed_ms < PRODUCTION_DURATION_MS);
         assert!(!candidate.actions.iter().any(|action| matches!(
-            action,
-            CitizenAction::Produce(Recipe::Forage | Recipe::FetchWater)
+            action.production_recipe(),
+            Some(Recipe::Forage | Recipe::FetchWater)
         )));
     }
 
@@ -2446,14 +2832,17 @@ mod tests {
         use crate::production::Recipe;
         let worker = bread_only(buying_baker(2000));
         let initial = Prediction::new(&worker, Cooldowns::default());
-        let variants = production_prefixes(initial.clone(), 0, &mut []).unwrap();
+        let variants = [site_candidate(
+            &worker,
+            worker.production_place(Recipe::BakeRolls).unwrap(),
+        )];
         assert_eq!(variants.len(), 1);
         let candidate = &variants[0];
         let recipes: Vec<_> = candidate
             .actions
             .iter()
             .filter_map(|action| match action {
-                CitizenAction::Produce(recipe) => Some(*recipe),
+                CitizenAction::ProduceAt { recipe, .. } => Some(*recipe),
                 _ => None,
             })
             .collect();
@@ -2473,10 +2862,18 @@ mod tests {
         assert!(flour_bought > bread_batches * 100);
         assert_eq!(
             flour_bought,
-            worker
-                .production_restock_requirements()
+            crate::production::recipe_requirements_at(
+                &worker,
+                Some(worker.production_place(Recipe::BakeRolls).unwrap()),
+                &crate::production::projected_recipes_at(
+                    &worker,
+                    Some(worker.production_place(Recipe::BakeRolls).unwrap()),
+                    crate::production::DAILY_CAPACITY_MS
+                )
                 .unwrap()
-                .units(Good::Flour)
+            )
+            .unwrap()
+            .units(Good::Flour)
         );
         let mut replay = initial;
         for &action in &candidate.actions {
@@ -2529,15 +2926,19 @@ mod tests {
                 .iter()
                 .all(|action| !matches!(action, CitizenAction::Produce(_)))
         );
-        let candidate =
-            production_prefixes(Prediction::new(&worker, Cooldowns::default()), 0, &mut [])
-                .unwrap()
-                .pop()
-                .unwrap();
-        assert!(candidate.actions.iter().any(|action| matches!(
-            action,
-            CitizenAction::Produce(crate::production::Recipe::BakeRolls)
-        )));
+        let candidate = site_candidate(
+            &worker,
+            worker
+                .production_place(crate::production::Recipe::BakeRolls)
+                .unwrap(),
+        );
+        assert!(
+            candidate
+                .actions
+                .iter()
+                .any(|action| action.production_recipe()
+                    == Some(crate::production::Recipe::BakeRolls))
+        );
     }
 
     #[test]
@@ -2771,17 +3172,17 @@ mod tests {
     fn production_balances_recipes_and_finishes_the_first_crossing_job() {
         use crate::production::Recipe;
         let worker = baker().with_good(Good::BreadRoll, 100).unwrap();
-        let variants = variants_after(
-            &Prediction::new(&worker, Cooldowns::default()),
-            Effect::Production,
-        )
-        .unwrap();
+        let variants = [site_candidate(
+            &worker,
+            worker.production_place(Recipe::BakeRolls).unwrap(),
+        )];
         assert_eq!(variants.len(), 1);
         let candidate = &variants[0];
         assert!(
             candidate
                 .actions
-                .contains(&CitizenAction::Produce(Recipe::BakeBerryPie))
+                .iter()
+                .any(|action| action.production_recipe() == Some(Recipe::BakeBerryPie))
         );
         assert!(candidate.elapsed_ms >= PRODUCTION_DURATION_MS);
         assert!(
@@ -3130,7 +3531,8 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate
                     .actions
-                    .contains(&CitizenAction::Produce(Recipe::BakeRolls)))
+                    .iter()
+                    .any(|action| action.production_recipe() == Some(Recipe::BakeRolls)))
         );
     }
 
@@ -4273,7 +4675,15 @@ mod tests {
             let segments = gathering_segments(PRODUCTION_DURATION_MS, ACTION_DURATION_MS);
             assert_eq!(
                 chosen.actions,
-                vec![CitizenAction::Produce(crate::production::Recipe::Forage); segments as usize]
+                vec![
+                    CitizenAction::ProduceAt {
+                        place: source
+                            .map()
+                            .public_place(crate::locations::Location::Forest),
+                        recipe: crate::production::Recipe::Forage
+                    };
+                    segments as usize
+                ]
             );
             assert_eq!(chosen.citizen.prices(), source.prices());
             assert_eq!(chosen.citizen.berries_units(), 10 * segments);
