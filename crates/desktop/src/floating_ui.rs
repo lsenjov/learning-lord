@@ -244,7 +244,11 @@ pub fn spawn_window(
                     .spawn(Node {
                         width: percent(100),
                         height: percent(100),
-                        min_width: px(720),
+                        min_width: if kind == WindowKind::Market {
+                            px(0)
+                        } else {
+                            px(720)
+                        },
                         min_height: px(0),
                         padding: UiRect::all(px(10)),
                         flex_direction: FlexDirection::Column,

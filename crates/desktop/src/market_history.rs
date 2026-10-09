@@ -10,6 +10,8 @@ const HEIGHT: f32 = 280.0;
 const PRICE: Color = Color::srgb(0.38, 0.78, 0.91);
 const DEMAND: Color = Color::srgb(0.96, 0.70, 0.35);
 const STOCK: Color = Color::srgb(0.67, 0.57, 0.87);
+const EXPORT: Color = Color::srgb(0.35, 0.76, 0.49);
+const IMPORT: Color = Color::srgb(0.91, 0.39, 0.39);
 const BODY: Color = Color::srgb(0.69, 0.75, 0.77);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -168,7 +170,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue step line + body center: price (coins per kg or item). Body height: total traded quantity (local + exports + caravan purchases).\nAmber upper wick: affordable unmet demand. Purple lower wick: unsold stock.\nBody and wicks use the quantity size scale, not the price axis. Cyan body: current partial day. At 04:00, only unsold stock priced at or below the reference price creates downward pressure.", 13.0, MUTED));
+    parent.spawn(text("Blue: price | Body: green exports / grey local trades / red caravan purchases\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED));
     let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
@@ -244,6 +246,23 @@ fn body_mark(
         UiTransform::from_xy(percent(-50), px(0)),
         BackgroundColor(color),
     ));
+}
+
+fn body_segments(activity: GoodActivity, height: f32) -> [(f32, Color); 3] {
+    let units = [
+        activity.exported_units,
+        activity.local_traded_units,
+        activity.caravan_purchased_units,
+    ];
+    let total: f64 = units.iter().map(|units| *units as f64).sum();
+    let sizes = units.map(|units| {
+        if total == 0.0 {
+            0.0
+        } else {
+            (units as f64 / total) as f32 * height
+        }
+    });
+    [(sizes[0], EXPORT), (sizes[1], BODY), (sizes[2], IMPORT)]
 }
 
 fn label(parent: &mut ChildSpawnerCommands, value: String, x: f32, y: f32, color: Color) {
@@ -374,6 +393,7 @@ pub fn hover(
         hover_index(
             cursor.normalized,
             cursor.cursor_over
+                && selection.tab == market::Tab::Overview
                 && capture.as_ref().is_none_or(|capture| {
                     capture.hovered == Some(crate::floating_ui::WindowKind::Market)
                 }),
@@ -523,14 +543,32 @@ fn draw_chart(
                         scale.quantity(day.activity.listed_units as f64),
                         STOCK,
                     );
-                    body_mark(
-                        plot,
-                        center,
-                        if body == 0.0 { y - 0.5 } else { top },
-                        slot,
-                        if body == 0.0 { 1.0 } else { body },
-                        if day.partial { PRICE } else { BODY },
-                    );
+                    let mut segment_top = top;
+                    for (height, color) in body_segments(day.activity, body) {
+                        if height > 0.0 {
+                            body_mark(plot, center, segment_top, slot, height, color);
+                            segment_top += height;
+                        }
+                    }
+                    if body == 0.0 {
+                        body_mark(plot, center, y - 0.5, slot, 1.0, BODY);
+                    }
+                    if day.partial {
+                        plot.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: percent(center),
+                                top: px(top - 1.0),
+                                width: percent(slot * 0.40),
+                                max_width: px(18),
+                                height: px(body.max(1.0) + 2.0),
+                                border: UiRect::all(px(1)),
+                                ..default()
+                            },
+                            UiTransform::from_xy(percent(-50), px(0)),
+                            BorderColor::all(PRICE),
+                        ));
+                    }
                     body_mark(plot, center, y, slot, 2.0, PRICE);
                     if index == 0
                         || index == values.len() - 1
@@ -567,6 +605,60 @@ mod tests {
         Citizen,
         marketplace::{Prices, ShoppingList},
     };
+
+    #[test]
+    fn body_segments_are_proportional_completed_trades_and_safe_at_extremes() {
+        let activity = GoodActivity {
+            exported_units: 2,
+            local_traded_units: 3,
+            caravan_purchased_units: 5,
+            imported_units: u64::MAX,
+            traded_units: 10,
+            ..default()
+        };
+        assert_eq!(
+            body_segments(activity, 80.0),
+            [(16.0, EXPORT), (24.0, BODY), (40.0, IMPORT)]
+        );
+        assert_eq!(
+            body_segments(GoodActivity::default(), 0.0),
+            [(0.0, EXPORT), (0.0, BODY), (0.0, IMPORT)]
+        );
+        for activity in [
+            GoodActivity {
+                exported_units: u64::MAX,
+                local_traded_units: u64::MAX,
+                caravan_purchased_units: u64::MAX,
+                ..default()
+            },
+            GoodActivity {
+                caravan_purchased_units: 1,
+                ..default()
+            },
+        ] {
+            let segments = body_segments(activity, 80.0);
+            assert!(
+                segments
+                    .iter()
+                    .all(|(height, _)| height.is_finite() && *height >= 0.0)
+            );
+            assert!((segments.iter().map(|(height, _)| height).sum::<f32>() - 80.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn hidden_overview_ignores_cached_hover_and_clicks_and_keeps_pin() {
+        let mut app = selection_app();
+        pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), true);
+        let pinned = app.world().resource::<ChartDisplay>().pinned;
+        app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::Listings;
+        pointer(&mut app, Some(Vec2::new(0.49, 0.0)), true);
+        assert_eq!(app.world().resource::<ChartDisplay>().pinned, pinned);
+        assert!(detail(&mut app).starts_with("PINNED"));
+        app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::Overview;
+        pointer(&mut app, Some(Vec2::new(0.49, 0.0)), false);
+        assert!(detail(&mut app).starts_with("PREVIEW"));
+    }
 
     #[test]
     fn hover_distinguishes_trades_from_deliveries_for_closed_and_live_days() {

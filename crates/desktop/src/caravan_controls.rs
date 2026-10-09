@@ -167,7 +167,7 @@ pub fn handle(
         keys.clear();
         return;
     }
-    if selection.view != market::View::Market {
+    if selection.view != market::View::Market || selection.tab != market::Tab::CaravanPolicy {
         state.field = None;
         keys.clear();
         return;
@@ -368,6 +368,7 @@ mod tests {
             .add_message::<KeyboardInput>()
             .add_systems(Update, (handle, refresh).chain());
         app.world_mut().resource_mut::<market::Selection>().view = market::View::Market;
+        app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::CaravanPolicy;
         app.update();
         app
     }
@@ -386,6 +387,18 @@ mod tests {
             std::thread::yield_now();
         }
     }
+    #[test]
+    fn hiding_policy_clears_focus_and_preserves_drafts() {
+        let mut app = app();
+        press(&mut app, Choice::Field(FieldKind::Reserve));
+        app.world_mut().resource_mut::<State>().drafts[0].reserve = "123".into();
+        assert!(app.world().resource::<State>().editing());
+        app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::Listings;
+        app.update();
+        assert!(!app.world().resource::<State>().editing());
+        assert_eq!(app.world().resource::<State>().drafts[0].reserve, "123");
+    }
+
     #[test]
     fn good_and_tariff_saves_preserve_other_unsaved_drafts() {
         let mut app = app();

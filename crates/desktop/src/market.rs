@@ -18,10 +18,22 @@ pub enum View {
     Locations,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Tab {
+    #[default]
+    Overview,
+    Listings,
+    CaravanPolicy,
+}
+
+#[derive(Component)]
+pub struct TabPanel(pub Tab);
+
 #[derive(Resource, Default)]
 pub struct Selection {
     pub(super) view: View,
     good: Option<Good>,
+    pub(super) tab: Tab,
 }
 
 impl Selection {
@@ -37,6 +49,7 @@ pub struct ViewPanel(pub View);
 pub enum Choice {
     View(View),
     Good(Good),
+    Tab(Tab),
 }
 
 #[derive(Component)]
@@ -46,6 +59,7 @@ pub enum Readout {
     PriceNow,
     MaterialMargins,
     Buyers,
+    Unfulfilled,
 }
 
 #[derive(Component)]
@@ -139,40 +153,98 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                     padding: UiRect::all(px(16)),
                     flex_direction: FlexDirection::Column,
                     row_gap: px(12),
-                    overflow: Overflow::scroll_y(),
                     border_radius: BorderRadius::all(px(12)),
                     ..default()
                 },
                 BackgroundColor(PANEL),
-                ScrollPosition::default(),
-                RelativeCursorPosition::default(),
             ))
             .with_children(|details| {
-                details.spawn((text("", 24.0, TEXT), Readout::Title));
-                details.spawn((text("", 16.0, TEXT), Readout::PriceNow));
-                details.spawn((text("", 14.0, MUTED), Readout::MaterialMargins));
-                crate::caravan_controls::spawn(details);
-                crate::market_history::spawn(details);
-            details.spawn(text("Buy volume = total trades + affordable unfulfilled demand. Sell volume = total trades + listed stock (including caravans).\nTrades include exports; deliveries are separate. Caravans settle at 04:00 after prices update.", 13.0, MUTED));
-                details.spawn(text("CURRENT BUY REQUESTS  |  live", 14.0, MUTED));
                 details.spawn((
-                    text("", 14.0, TEXT),
+                    text("", 24.0, TEXT),
                     Node {
                         flex_shrink: 0.0,
                         ..default()
                     },
-                    Readout::Buyers,
+                    Readout::Title,
                 ));
-                details.spawn(text("CURRENT SELL ORDERS  |  live", 14.0, MUTED));
-                details.spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(10),
+                details
+                    .spawn(Node {
+                        column_gap: px(8),
+                        flex_wrap: FlexWrap::Wrap,
+                        row_gap: px(6),
                         flex_shrink: 0.0,
                         ..default()
-                    },
-                    Orders,
-                ));
+                    })
+                    .with_children(|tabs| {
+                        for (tab, label) in [
+                            (Tab::Overview, "Overview"),
+                            (Tab::Listings, "Listings"),
+                            (Tab::CaravanPolicy, "Caravan policy"),
+                        ] {
+                            tabs.spawn((
+                                Button,
+                                Choice::Tab(tab),
+                                BackgroundColor(PANEL),
+                                Node {
+                                    padding: UiRect::axes(px(12), px(8)),
+                                    border_radius: BorderRadius::all(px(6)),
+                                    ..default()
+                                },
+                            ))
+                            .with_children(|button| {
+                                button.spawn(text(label, 14.0, TEXT));
+                            });
+                        }
+                    });
+                for tab in [Tab::Overview, Tab::Listings, Tab::CaravanPolicy] {
+                    details
+                        .spawn((
+                            TabPanel(tab),
+                            ScrollPosition::default(),
+                            RelativeCursorPosition::default(),
+                            Node {
+                                width: percent(100),
+                                min_width: px(0),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(12),
+                                min_height: px(0),
+                                flex_grow: 1.0,
+                                flex_basis: px(0),
+                                overflow: Overflow::scroll_y(),
+                                ..default()
+                            },
+                        ))
+                        .with_children(|content| match tab {
+                            Tab::Overview => {
+                                content.spawn((text("", 16.0, TEXT), Readout::PriceNow));
+                                content.spawn((text("", 14.0, MUTED), Readout::MaterialMargins));
+                                crate::market_history::spawn(content);
+                            }
+                            Tab::Listings => {
+                                content.spawn(text("CURRENT BUY REQUESTS  |  live", 14.0, MUTED));
+                                content.spawn((text("", 14.0, MUTED), Readout::Unfulfilled));
+                                content.spawn((
+                                    text("", 14.0, TEXT),
+                                    Node {
+                                        flex_shrink: 0.0,
+                                        ..default()
+                                    },
+                                    Readout::Buyers,
+                                ));
+                                content.spawn(text("CURRENT SELL ORDERS  |  live", 14.0, MUTED));
+                                content.spawn((
+                                    Node {
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: px(10),
+                                        flex_shrink: 0.0,
+                                        ..default()
+                                    },
+                                    Orders,
+                                ));
+                            }
+                            Tab::CaravanPolicy => crate::caravan_controls::spawn(content),
+                        });
+                }
             });
         });
 }
@@ -190,6 +262,9 @@ pub fn handle_selection(
             match *choice {
                 Choice::View(view) => {
                     selection.view = view;
+                }
+                Choice::Tab(tab) => {
+                    selection.tab = tab;
                 }
                 Choice::Good(good) => {
                     if let Some(windows) = windows.as_mut() {
@@ -468,6 +543,7 @@ pub fn refresh_choices(
         let selected = match *choice {
             Choice::View(view) => selection.view == view,
             Choice::Good(good) => selection.good() == good,
+            Choice::Tab(tab) => selection.tab == tab,
         };
         let value = if *interaction == Interaction::Pressed {
             Color::srgb(0.18, 0.48, 0.39)
@@ -484,10 +560,10 @@ pub fn refresh_choices(
 
 pub fn refresh(
     mut commands: Commands,
-    snapshot: Res<DisplaySnapshot>,
-    selection: Res<Selection>,
+    (snapshot, selection): (Res<DisplaySnapshot>, Res<Selection>),
     mut cached: ResMut<OrderDisplay>,
-    mut panels: Query<(Ref<ViewPanel>, &mut Node, &mut Visibility)>,
+    mut panels: Query<(Ref<ViewPanel>, &mut Node, &mut Visibility), Without<TabPanel>>,
+    mut tab_panels: Query<(&TabPanel, &mut Node, &mut Visibility), Without<ViewPanel>>,
     mut readouts: Query<(&Readout, &mut Text)>,
     orders: Query<Entity, With<Orders>>,
 ) {
@@ -499,6 +575,18 @@ pub fn refresh(
         let _view = panel.0;
         node.display = Display::Flex;
         *visibility = Visibility::Inherited;
+    }
+    for (panel, mut node, mut visibility) in &mut tab_panels {
+        let active = panel.0 == selection.tab;
+        node.set_if_neq(Node {
+            display: if active { Display::Flex } else { Display::None },
+            ..node.clone()
+        });
+        visibility.set_if_neq(if active {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
     }
     let universe = &snapshot.0.universe;
     for (readout, mut value) in &mut readouts {
@@ -520,6 +608,14 @@ pub fn refresh(
             Readout::Title => selection.good().name().into(),
             Readout::PriceNow => price_details(universe, selection.good()),
             Readout::Buyers => buyer_requests(universe, selection.good()),
+            Readout::Unfulfilled => format!(
+                "Affordable unfulfilled demand: {}",
+                crate::quantity_label(
+                    selection.good(),
+                    universe.market().current_period().goods[selection.good() as usize]
+                        .affordable_demand_units
+                )
+            ),
         };
         if value.0 != next {
             value.0 = next;
@@ -626,6 +722,49 @@ mod tests {
     use learning_lord_simulation::{
         Citizen, CitizenAction, TRADE_DURATION_MS, locations::Map, marketplace::Prices,
     };
+
+    #[test]
+    fn market_tabs_show_one_panel_and_keep_the_live_selected_good() {
+        let mut app = app();
+        assert_eq!(app.world().resource::<Selection>().tab, Tab::Overview);
+        for tab in [Tab::Listings, Tab::CaravanPolicy, Tab::Overview] {
+            press(&mut app, Choice::Tab(tab));
+            press(&mut app, Choice::Good(Good::BreadRoll));
+            assert_eq!(app.world().resource::<Selection>().tab, tab);
+            for (panel, node, visibility) in app
+                .world_mut()
+                .query::<(&TabPanel, &Node, &Visibility)>()
+                .iter(app.world())
+            {
+                assert_eq!(
+                    node.display,
+                    if panel.0 == tab {
+                        Display::Flex
+                    } else {
+                        Display::None
+                    }
+                );
+                assert_eq!(
+                    *visibility,
+                    if panel.0 == tab {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    }
+                );
+            }
+            app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = Universe::default()
+                .with_prices(Prices::default().with_price(Good::BreadRoll, 9.0).unwrap());
+            app.update();
+            assert!(
+                app.world_mut()
+                    .query::<(&Readout, &Text)>()
+                    .iter(app.world())
+                    .any(|(readout, text)| matches!(readout, Readout::PriceNow)
+                        && text.0.contains("Current price: 9.000 coins/roll"))
+            );
+        }
+    }
 
     #[test]
     fn effective_thresholds_stock_and_disabled_trade_are_finite_labels() {
@@ -1021,6 +1160,7 @@ mod tests {
             .find(|(_, value)| match (choice, **value) {
                 (Choice::View(a), Choice::View(b)) => a == b,
                 (Choice::Good(a), Choice::Good(b)) => a == b,
+                (Choice::Tab(a), Choice::Tab(b)) => a == b,
                 _ => false,
             })
             .unwrap()
