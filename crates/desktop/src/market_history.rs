@@ -170,7 +170,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue: price | Body: green exports / grey local trades / red caravan purchases\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED));
+    parent.spawn(text("Blue: price | Body: red caravan purchases / grey local trades / green exports\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED));
     let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
@@ -250,9 +250,9 @@ fn body_mark(
 
 fn body_segments(activity: GoodActivity, height: f32) -> [(f32, Color); 3] {
     let units = [
-        activity.exported_units,
-        activity.local_traded_units,
         activity.caravan_purchased_units,
+        activity.local_traded_units,
+        activity.exported_units,
     ];
     let total: f64 = units.iter().map(|units| *units as f64).sum();
     let sizes = units.map(|units| {
@@ -262,7 +262,7 @@ fn body_segments(activity: GoodActivity, height: f32) -> [(f32, Color); 3] {
             (units as f64 / total) as f32 * height
         }
     });
-    [(sizes[0], EXPORT), (sizes[1], BODY), (sizes[2], IMPORT)]
+    [(sizes[0], IMPORT), (sizes[1], BODY), (sizes[2], EXPORT)]
 }
 
 fn label(parent: &mut ChildSpawnerCommands, value: String, x: f32, y: f32, color: Color) {
@@ -618,11 +618,11 @@ mod tests {
         };
         assert_eq!(
             body_segments(activity, 80.0),
-            [(16.0, EXPORT), (24.0, BODY), (40.0, IMPORT)]
+            [(40.0, IMPORT), (24.0, BODY), (16.0, EXPORT)]
         );
         assert_eq!(
             body_segments(GoodActivity::default(), 0.0),
-            [(0.0, EXPORT), (0.0, BODY), (0.0, IMPORT)]
+            [(0.0, IMPORT), (0.0, BODY), (0.0, EXPORT)]
         );
         for activity in [
             GoodActivity {
