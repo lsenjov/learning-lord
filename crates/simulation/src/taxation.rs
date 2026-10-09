@@ -384,6 +384,7 @@ impl Universe {
                 }
             }
             citizen.socage_rates = snapshot;
+            citizen.site_socage_rates = rates.clone();
         }
     }
 

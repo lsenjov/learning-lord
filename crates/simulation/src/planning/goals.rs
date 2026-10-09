@@ -41,9 +41,11 @@ impl CitizenAction {
                 &[Food, ReplenishReserves]
             }
             Self::BuyFood(_) => &[],
-            Self::Produce(crate::production::Recipe::FetchWater) => {
-                &[ReplenishReserves, Production]
-            }
+            Self::Produce(crate::production::Recipe::FetchWater)
+            | Self::ProduceAt {
+                recipe: crate::production::Recipe::FetchWater,
+                ..
+            } => &[ReplenishReserves, Production],
             Self::Withdraw(Good::Water, _) => &[ReplenishReserves],
             Self::Buy(list) | Self::BuyAt { list, .. }
                 if list.units(Good::Water) > 0
@@ -53,7 +55,7 @@ impl CitizenAction {
             {
                 &[ReplenishReserves]
             }
-            Self::Produce(recipe)
+            Self::Produce(recipe) | Self::ProduceAt { recipe, .. }
                 if recipe
                     .outputs()
                     .iter()
@@ -72,6 +74,7 @@ impl CitizenAction {
                 &[Food, ReplenishReserves]
             }
             Self::Produce(_)
+            | Self::ProduceAt { .. }
             | Self::Plant { .. }
             | Self::Tend { .. }
             | Self::Harvest { .. }
@@ -267,10 +270,9 @@ impl Prediction {
             next.score.add(before, after, duration)?;
             next.goal_score.add(before, after, duration)?;
         }
-        if !matches!(
-            action,
-            CitizenAction::Produce(crate::production::Recipe::Forage) | CitizenAction::Travel(_)
-        ) {
+        if action.production_recipe() != Some(crate::production::Recipe::Forage)
+            && !matches!(action, CitizenAction::Travel(_))
+        {
             next.last_gathering_order = None;
         }
         next.actions.push(action);
@@ -824,23 +826,28 @@ fn order_variants(
         }
         return shopping_trip(state, list, reserved_ms, prior_actions);
     }
-    if let CitizenAction::Produce(recipe) = action
+    if let Some(recipe) = action.production_recipe()
         && recipe != crate::production::Recipe::Forage
         && amount > state.citizen.available_food_nutrition()
     {
         return food_production_variants(state, recipe, amount, reserved_ms, prior_actions);
     }
-    let gathering = matches!(
-        action,
-        CitizenAction::Produce(crate::production::Recipe::Forage)
-    );
-    if gathering && state.last_gathering_order == Some(action) {
+    let gathering = action.production_recipe() == Some(crate::production::Recipe::Forage);
+    if gathering
+        && state
+            .last_gathering_order
+            .is_some_and(|previous| previous.production_recipe() == action.production_recipe())
+    {
         return Ok(Vec::new());
     }
     let mut variants = Vec::new();
     for ready in prepare(state, action, amount, reserved_ms, prior_actions)? {
         // Nested resource acquisition can change the preceding order.
-        if gathering && ready.last_gathering_order == Some(action) {
+        if gathering
+            && ready
+                .last_gathering_order
+                .is_some_and(|previous| previous.production_recipe() == action.production_recipe())
+        {
             continue;
         }
         let limit = if gathering {
@@ -1031,7 +1038,7 @@ fn prepare(
     reserved_ms: u64,
     prior_actions: usize,
 ) -> Result<Vec<Prediction>, SimulationError> {
-    let prepared = if let CitizenAction::Produce(recipe) = action {
+    let prepared = if let Some(recipe) = action.production_recipe() {
         prepare_inputs(
             state,
             &recipe_requirements(&state.citizen, &[recipe])?,
@@ -1141,7 +1148,9 @@ fn production_order_bounded(
             let action = CitizenAction::Produce(recipe);
             if recipe == crate::production::Recipe::Forage
                 && (index == 0 || recipes[index - 1] != recipe)
-                && state.last_gathering_order == Some(action)
+                && state.last_gathering_order.is_some_and(|previous| {
+                    previous.production_recipe() == action.production_recipe()
+                })
             {
                 complete = false;
                 break;
@@ -1676,6 +1685,27 @@ fn variants_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn site_specific_forage_preserves_the_existing_gathering_order() {
+        let citizen = Citizen::new(0.0).unwrap();
+        let mut initial = Prediction::new(&citizen, Cooldowns::default());
+        initial.last_gathering_order =
+            Some(CitizenAction::Produce(crate::production::Recipe::Forage));
+        let action = CitizenAction::ProduceAt {
+            place: citizen
+                .map()
+                .public_place(crate::locations::Location::Forest),
+            recipe: crate::production::Recipe::Forage,
+        };
+        let next = initial.perform(action, 0).unwrap().unwrap();
+        assert_eq!(next.last_gathering_order, initial.last_gathering_order);
+        assert!(
+            order_variants(&initial, action, 0.0, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn crop_planting_and_gathering_share_one_profit_and_stock_order() {

@@ -463,11 +463,15 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                 CitizenAction::Wait => "Waiting".into(),
                 CitizenAction::Sleep => "Sleeping".into(),
                 CitizenAction::EquipClothing => "Equipping clothing".into(),
-                CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage) => {
-                    "Foraging".into()
-                }
+                CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage)
+                | CitizenAction::ProduceAt {
+                    recipe: learning_lord_simulation::production::Recipe::Forage,
+                    ..
+                } => "Foraging".into(),
                 CitizenAction::BuyFood(good) => format!("Buying {}", good.name().to_lowercase()),
-                CitizenAction::Produce(recipe) => recipe.name().into(),
+                CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
+                    recipe.name().into()
+                }
                 CitizenAction::ListExcess => "List excess goods".into(),
                 CitizenAction::List(good, units) => {
                     format!("Listing {} {}", quantity_label(good, units), good.name())
@@ -636,11 +640,15 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
         CitizenAction::Wait => "Wait".into(),
         CitizenAction::Sleep => "Sleep".into(),
         CitizenAction::EquipClothing => "Equip clothing".into(),
-        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage) => {
-            "Forage".into()
-        }
+        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage)
+        | CitizenAction::ProduceAt {
+            recipe: learning_lord_simulation::production::Recipe::Forage,
+            ..
+        } => "Forage".into(),
         CitizenAction::BuyFood(good) => format!("Buy {}", good.name().to_lowercase()),
-        CitizenAction::Produce(recipe) => recipe.name().into(),
+        CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
+            recipe.name().into()
+        }
         CitizenAction::ListExcess => "List excess goods".into(),
         CitizenAction::List(good, units) => {
             format!("List {} {}", quantity_label(good, units), good.name())

@@ -256,13 +256,9 @@ impl ProductionTargets {
             remaining_batches: [0; Recipe::COUNT],
             projected_order: Vec::new(),
         };
-        let active = citizen.active_action().and_then(|active| {
-            if let crate::CitizenAction::Produce(recipe) = active.action() {
-                Some(recipe)
-            } else {
-                None
-            }
-        });
+        let active = citizen
+            .active_action()
+            .and_then(|active| active.action().production_recipe());
         target.projected_order = projected_recipes(citizen, DAILY_CAPACITY_MS)?;
         for &recipe in &target.projected_order {
             target.remaining_batches[recipe as usize] += 1;
@@ -294,7 +290,7 @@ pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
     let mut stock =
         citizen.units(good) as f64 + citizen.market().listed_units(citizen.id(), good) as f64;
     if let Some(active) = citizen.active_action()
-        && let crate::CitizenAction::Produce(recipe) = active.action()
+        && let Some(recipe) = active.action().production_recipe()
     {
         stock = (stock
             - recipe
@@ -474,7 +470,7 @@ pub(crate) fn projected_recipes(
         production_stock(Good::ALL[index], citizen)
     });
     if let Some(active) = citizen.active_action()
-        && let crate::CitizenAction::Produce(recipe) = active.action()
+        && let Some(recipe) = active.action().production_recipe()
     {
         for &(good, units) in recipe.inputs() {
             owned[good as usize] = owned[good as usize].saturating_sub(units);

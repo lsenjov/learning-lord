@@ -116,6 +116,7 @@ impl CitizenHistory {
         let target = match action {
             Some(
                 CitizenAction::Produce(_)
+                | CitizenAction::ProduceAt { .. }
                 | CitizenAction::Plant { .. }
                 | CitizenAction::Tend { .. }
                 | CitizenAction::Harvest { .. }
@@ -174,7 +175,7 @@ impl CitizenHistory {
         }
         if active.is_some_and(|a| a.remaining_ms() == elapsed) {
             match action {
-                Some(CitizenAction::Produce(recipe)) => {
+                Some(CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. }) => {
                     for &(good, units) in recipe.inputs() {
                         self.current.consumed[good as usize] = self.current.consumed[good as usize]
                             .checked_add(units)

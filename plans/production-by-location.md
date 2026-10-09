@@ -1,0 +1,6 @@
+# Production by physical location
+
+1. Completed: add explicit site-aware production actions, validate ownership and recipe location, preserve skill/input checks, and account for production stock, taxes, replanning, and display at the actual physical site. Execution and ownership regressions pass, including colocated workshops with different taxes. Independent review reports no findings; all 482 workspace tests, formatting, and Clippy with warnings denied pass.
+2. Pending: expose eligible sites and site-restricted recipe projections and farming choices, then generate one feasible Production candidate per site. Recipes can mix at that site; preparation can visit other places. Keep the scored two-hour block with its first crossing job and restrict the restock trigger and twelve total working hours to the selected site. Keep standing demand consistent with chosen work. Add candidate, field-care, travel, procurement, and infeasibility regressions, then review and commit.
+
+An explicit ProduceAt action is necessary because a recipe alone resolves to the minimum-ID workplace and coordinates cannot distinguish colocated owned workplaces. The existing Produce action remains available for compatibility and prerequisite work. Reference valuation, net socage dependencies, local caps, and acquired-ingredient retention remain shared production policy.

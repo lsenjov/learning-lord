@@ -121,6 +121,11 @@ pub enum CitizenAction {
     Sleep,
     BuyFood(Good),
     Produce(production::Recipe),
+    // A recipe alone cannot identify colocated workplaces.
+    ProduceAt {
+        place: PlaceId,
+        recipe: production::Recipe,
+    },
     Plant {
         field: PlaceId,
         plot: usize,
@@ -151,6 +156,13 @@ pub enum CitizenAction {
 }
 
 impl CitizenAction {
+    pub fn production_recipe(self) -> Option<production::Recipe> {
+        match self {
+            Self::Produce(recipe) | Self::ProduceAt { recipe, .. } => Some(recipe),
+            _ => None,
+        }
+    }
+
     pub fn required_place(self, citizen: &Citizen) -> Option<PlaceId> {
         match self {
             Self::Sleep => Some(citizen.home),
@@ -159,6 +171,7 @@ impl CitizenAction {
             | Self::Harvest { field, .. }
             | Self::Clear { field, .. } => Some(field),
             Self::Produce(recipe) => citizen.production_place(recipe).ok(),
+            Self::ProduceAt { place, .. } => Some(place),
             Self::BuyFood(_) | Self::Buy(..) => Some(citizen.map.public_place(Location::Market)),
             Self::BuyAt { place, .. } => Some(place),
             Self::ListExcess | Self::List(..) | Self::Withdraw(..) => Some(citizen.selling_place()),
@@ -249,6 +262,7 @@ pub struct Citizen {
     tax_reserved: HashMap<Good, Quantity>,
     town_inventory: HashMap<Good, Quantity>,
     socage_rates: HashMap<(production::Recipe, Good), taxation::TaxRate>,
+    site_socage_rates: HashMap<(PlaceId, Good), taxation::TaxRate>,
     storage: Storage,
     id: AgentId,
     home: PlaceId,
@@ -305,6 +319,7 @@ impl Citizen {
             tax_reserved: HashMap::new(),
             town_inventory: HashMap::new(),
             socage_rates: HashMap::new(),
+            site_socage_rates: HashMap::new(),
             storage: Storage::default(),
             id,
             home,
@@ -458,6 +473,24 @@ impl Citizen {
             .copied()
             .unwrap_or_else(|| taxation::TaxRate::new(0).unwrap())
     }
+    pub fn production_socage_rate_at(
+        &self,
+        place: PlaceId,
+        recipe: production::Recipe,
+        good: Good,
+    ) -> taxation::TaxRate {
+        self.site_socage_rates
+            .get(&(place, good))
+            .copied()
+            .unwrap_or_else(|| {
+                if self.production_place(recipe).ok() == Some(place) {
+                    self.production_socage_rate(recipe, good)
+                } else {
+                    taxation::TaxRate::new(0).unwrap()
+                }
+            })
+    }
+
     pub fn with_good(&self, good: Good, units: Quantity) -> Result<Self, SimulationError> {
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
@@ -618,7 +651,7 @@ impl Citizen {
                 }
             }
             CitizenAction::Drink => self.drink_units() * DRINK_DURATION_MS / DRINK_WATER_GRAMS,
-            CitizenAction::Produce(recipe) => {
+            CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
                 if matches!(
                     recipe,
                     production::Recipe::GrowWheat
@@ -627,7 +660,11 @@ impl Citizen {
                 ) {
                     return Err(SimulationError::MissingInputs);
                 }
-                self.production_place(recipe)?;
+                if let CitizenAction::ProduceAt { place, .. } = action {
+                    self.validate_production_site(place, recipe)?;
+                } else {
+                    self.production_place(recipe)?;
+                }
                 recipe.duration_ms(self)?
             }
             CitizenAction::Plant { .. }
@@ -705,6 +742,21 @@ impl Citizen {
             .map(|place| place.id)
             .min_by_key(|id| id.0)
             .ok_or(SimulationError::MissingProperty)
+    }
+
+    pub(crate) fn validate_production_site(
+        &self,
+        place: PlaceId,
+        recipe: production::Recipe,
+    ) -> Result<(), SimulationError> {
+        let place = self.map.place(place)?;
+        if place.kind != recipe.location()
+            || (!place.kind.is_public() && place.owner != Some(self.id))
+            || (place.kind.is_public() && place.owner.is_some())
+        {
+            return Err(SimulationError::MissingProperty);
+        }
+        Ok(())
     }
 
     pub(crate) fn available_production_recipes(
@@ -799,7 +851,9 @@ impl Citizen {
 
     fn production_ingredient_reserve(&self) -> Result<[Quantity; Good::COUNT], SimulationError> {
         let active = self.active_action.and_then(|active| match active.action {
-            CitizenAction::Produce(recipe) => Some(recipe),
+            CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
+                Some(recipe)
+            }
             _ => None,
         });
         let mut reserve = [0_u64; Good::COUNT];
@@ -945,6 +999,9 @@ impl Citizen {
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
         }
+        if let CitizenAction::ProduceAt { place, recipe } = action {
+            self.validate_production_site(place, recipe)?;
+        }
         if let CitizenAction::BuyAt { place, .. } = action {
             let site = self.accessible_place(place)?;
             if site.kind == Location::Home {
@@ -982,7 +1039,7 @@ impl Citizen {
         if duration_ms == 0 {
             return Ok(citizen);
         }
-        if let CitizenAction::Produce(recipe) = action
+        if let Some(recipe) = action.production_recipe()
             && recipe
                 .inputs()
                 .iter()
@@ -1110,11 +1167,13 @@ impl Citizen {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
             citizen.advance_needs(action_elapsed_ms, Some(active))?;
             let work_skill = match active.action {
-                CitizenAction::Produce(recipe) => recipe.skill(),
+                CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
+                    recipe.skill()
+                }
                 action if action.crop_plot().is_some() => Some(production::Skill::Farming),
                 _ => None,
             };
-            if matches!(active.action, CitizenAction::Produce(_))
+            if active.action.production_recipe().is_some()
                 || active.action.crop_plot().is_some()
                 || matches!(active.action, CitizenAction::Travel(_))
                     && citizen
@@ -1175,7 +1234,7 @@ impl Citizen {
                             action_elapsed_ms,
                         )?);
                     }
-                    CitizenAction::Produce(recipe) => {
+                    CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
                         citizen.complete_production(recipe, prediction)?
                     }
                     action if action.crop_plot().is_some() => {
@@ -1565,12 +1624,14 @@ impl Universe {
         let stored = self.storage.units(place, owner, good);
         let carried = citizen.units(good);
         let reserved = match citizen.active_action.map(|active| active.action) {
-            Some(CitizenAction::Produce(recipe)) => recipe
-                .inputs()
-                .iter()
-                .filter(|(input, _)| *input == good)
-                .map(|(_, units)| *units)
-                .sum(),
+            Some(CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. }) => {
+                recipe
+                    .inputs()
+                    .iter()
+                    .filter(|(input, _)| *input == good)
+                    .map(|(_, units)| *units)
+                    .sum()
+            }
             Some(CitizenAction::EquipClothing) if good == Good::FlaxGarment => 1,
             _ => 0,
         };
@@ -1864,9 +1925,12 @@ impl Universe {
                 let AgentKind::Citizen(before) = &agents_before[id].kind;
                 if let Some(active) = before.active_action()
                     && active.remaining_ms() == step
-                    && let CitizenAction::Produce(recipe) = active.action()
+                    && let Some(recipe) = active.action().production_recipe()
                 {
-                    let place = before.production_place(recipe)?;
+                    let place = active
+                        .action()
+                        .required_place(before)
+                        .ok_or(SimulationError::MissingProperty)?;
                     for &(good, _) in recipe.outputs() {
                         let inputs: Quantity = recipe
                             .inputs()

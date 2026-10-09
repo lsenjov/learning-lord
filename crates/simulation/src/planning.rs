@@ -341,7 +341,7 @@ fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -
             CitizenAction::EquipClothing => {
                 citizen.available_units(crate::marketplace::Good::FlaxGarment) == 0
             }
-            CitizenAction::Produce(recipe) => recipe
+            CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => recipe
                 .inputs()
                 .iter()
                 .any(|&(good, units)| citizen.available_units(good) < units),
@@ -521,7 +521,10 @@ fn contains_production(
     recipe: crate::production::Recipe,
 ) -> bool {
     actions.iter().any(|&action| match action {
-        CitizenAction::Produce(produced) => produced == recipe,
+        CitizenAction::Produce(produced)
+        | CitizenAction::ProduceAt {
+            recipe: produced, ..
+        } => produced == recipe,
         CitizenAction::Plant { crop, .. } => crop.recipe() == recipe,
         CitizenAction::Tend { field, plot, .. } | CitizenAction::Harvest { field, plot } => citizen
             .crop(field, plot)
