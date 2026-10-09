@@ -183,6 +183,14 @@ pub fn handle(
         if state.pending() {
             break;
         }
+        if !good.caravan_eligible()
+            && matches!(
+                choice,
+                Choice::Toggle | Choice::Field(FieldKind::Reserve) | Choice::SaveGood
+            )
+        {
+            continue;
+        }
         state.error = None;
         if !matches!(choice, Choice::Field(_)) {
             state.field = None;
@@ -290,6 +298,7 @@ pub fn refresh(
     snapshot: Res<DisplaySnapshot>,
     selection: Res<market::Selection>,
     mut readouts: Query<(&Readout, &mut Text)>,
+    mut buttons: Query<(&Choice, &mut BackgroundColor)>,
 ) {
     if state.drafts.is_empty() || state.generation != snapshot.0.generation {
         state.load(&snapshot.0.universe, snapshot.0.generation);
@@ -318,9 +327,23 @@ pub fn refresh(
     }
     let good = selection.good();
     let draft = &state.drafts[good as usize];
+    for (choice, mut color) in &mut buttons {
+        let disabled = !good.caravan_eligible()
+            && matches!(
+                choice,
+                Choice::Toggle | Choice::Field(FieldKind::Reserve) | Choice::SaveGood
+            );
+        color.set_if_neq(BackgroundColor(if disabled {
+            Color::srgb(0.04, 0.04, 0.04)
+        } else {
+            PANEL
+        }));
+    }
     for (readout, mut label) in &mut readouts {
         let cursor = |field| if state.field == Some(field) { " |" } else { "" };
         let next = match readout {
+            Readout::Toggle if !good.caravan_eligible() => "Caravan trade unavailable".into(),
+            Readout::Reserve if !good.caravan_eligible() => "Minimum reserve: unavailable".into(),
             Readout::Toggle => format!(
                 "Exports: {}",
                 if draft.allowed { "enabled" } else { "disabled" }
@@ -369,6 +392,7 @@ mod tests {
             .add_systems(Update, (handle, refresh).chain());
         app.world_mut().resource_mut::<market::Selection>().view = market::View::Market;
         app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::CaravanPolicy;
+        app.world_mut().resource_mut::<market::Selection>().good = Some(Good::Flour);
         app.update();
         app
     }
@@ -388,15 +412,44 @@ mod tests {
         }
     }
     #[test]
+    fn unavailable_good_controls_ignore_clicks_and_keep_tariffs_editable() {
+        let mut app = app();
+        app.world_mut().resource_mut::<market::Selection>().good = Some(Good::Berries);
+        press(&mut app, Choice::Toggle);
+        press(&mut app, Choice::Field(FieldKind::Reserve));
+        press(&mut app, Choice::SaveGood);
+        assert!(!app.world().resource::<State>().drafts[Good::Berries as usize].allowed);
+        assert!(!app.world().resource::<State>().editing());
+        assert!(!app.world().resource::<State>().pending());
+        press(&mut app, Choice::Field(FieldKind::Import));
+        assert!(app.world().resource::<State>().editing());
+        app.world_mut().resource_mut::<State>().import = "50".into();
+        press(&mut app, Choice::SaveTariffs);
+        await_save(&mut app);
+        assert_eq!(
+            app.world()
+                .resource::<DisplaySnapshot>()
+                .0
+                .universe
+                .caravan_policy()
+                .import_tariff_basis_points,
+            5000
+        );
+    }
+
+    #[test]
     fn hiding_policy_clears_focus_and_preserves_drafts() {
         let mut app = app();
         press(&mut app, Choice::Field(FieldKind::Reserve));
-        app.world_mut().resource_mut::<State>().drafts[0].reserve = "123".into();
+        app.world_mut().resource_mut::<State>().drafts[Good::Flour as usize].reserve = "123".into();
         assert!(app.world().resource::<State>().editing());
         app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::Listings;
         app.update();
         assert!(!app.world().resource::<State>().editing());
-        assert_eq!(app.world().resource::<State>().drafts[0].reserve, "123");
+        assert_eq!(
+            app.world().resource::<State>().drafts[Good::Flour as usize].reserve,
+            "123"
+        );
     }
 
     #[test]
@@ -404,8 +457,8 @@ mod tests {
         let mut app = app();
         {
             let mut state = app.world_mut().resource_mut::<State>();
-            state.drafts[Good::Berries as usize].allowed = false;
-            state.drafts[Good::Berries as usize].reserve = "1234".into();
+            state.drafts[Good::Flour as usize].allowed = false;
+            state.drafts[Good::Flour as usize].reserve = "1234".into();
             state.drafts[Good::BreadRoll as usize].reserve = "7".into();
             state.import = "50".into();
             state.export = "12.34".into();
@@ -418,8 +471,8 @@ mod tests {
             .0
             .universe
             .caravan_policy();
-        assert!(!policy.exports[Good::Berries as usize].allowed);
-        assert_eq!(policy.exports[Good::Berries as usize].minimum_reserve, 1234);
+        assert!(!policy.exports[Good::Flour as usize].allowed);
+        assert_eq!(policy.exports[Good::Flour as usize].minimum_reserve, 1234);
         assert_eq!(policy.import_tariff_basis_points, 0);
         assert_eq!(app.world().resource::<State>().import, "50");
         assert_eq!(
@@ -436,15 +489,18 @@ mod tests {
             .caravan_policy();
         assert_eq!(policy.import_tariff_basis_points, 5000);
         assert_eq!(policy.export_tariff_basis_points, 1234);
-        assert_eq!(policy.exports[Good::Berries as usize].minimum_reserve, 1234);
+        assert_eq!(policy.exports[Good::Flour as usize].minimum_reserve, 1234);
     }
     #[test]
     fn invalid_and_failed_saves_keep_drafts_and_restart_discards_stale_clicks() {
         let mut app = app();
-        app.world_mut().resource_mut::<State>().drafts[0].reserve = "1.5".into();
+        app.world_mut().resource_mut::<State>().drafts[Good::Flour as usize].reserve = "1.5".into();
         press(&mut app, Choice::SaveGood);
         assert!(!app.world().resource::<State>().pending());
-        assert_eq!(app.world().resource::<State>().drafts[0].reserve, "1.5");
+        assert_eq!(
+            app.world().resource::<State>().drafts[Good::Flour as usize].reserve,
+            "1.5"
+        );
         app.world_mut().resource_mut::<State>().import = "100.01".into();
         press(&mut app, Choice::SaveTariffs);
         assert!(app.world().resource::<State>().error.is_some());
@@ -481,7 +537,7 @@ mod tests {
         let mut app = app();
         app.insert_resource(crate::locations::State::pending_fixture());
         app.world_mut().resource_mut::<State>().import = "50".into();
-        app.world_mut().resource_mut::<State>().drafts[0].reserve = "123".into();
+        app.world_mut().resource_mut::<State>().drafts[Good::Flour as usize].reserve = "123".into();
         press(&mut app, Choice::SaveTariffs);
         assert!(!app.world().resource::<State>().pending());
         assert_eq!(app.world().resource::<State>().import, "50");
@@ -495,7 +551,10 @@ mod tests {
         );
         press(&mut app, Choice::SaveGood);
         assert!(!app.world().resource::<State>().pending());
-        assert_eq!(app.world().resource::<State>().drafts[0].reserve, "123");
+        assert_eq!(
+            app.world().resource::<State>().drafts[Good::Flour as usize].reserve,
+            "123"
+        );
         assert_eq!(
             app.world()
                 .resource::<SimulationWorker>()
@@ -508,7 +567,7 @@ mod tests {
     #[test]
     fn pending_guard_and_restart_request_prevent_dispatch() {
         let mut app = app();
-        app.world_mut().resource_mut::<State>().pending = Some((0, Saved::Good(Good::Berries)));
+        app.world_mut().resource_mut::<State>().pending = Some((0, Saved::Good(Good::Flour)));
         app.world_mut().resource_mut::<State>().import = "50".into();
         press(&mut app, Choice::SaveTariffs);
         assert_eq!(

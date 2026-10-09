@@ -2294,7 +2294,7 @@ mod tests {
     }
 
     #[test]
-    fn production_stops_input_costly_recipe_at_unprofitable_export_cap_and_continues_free_work() {
+    fn production_stops_at_cap_when_only_universal_gathering_remains() {
         use crate::production::{Recipe, Skill};
         let mut worker = bread_only(
             baker()
@@ -2333,10 +2333,11 @@ mod tests {
                 .count(),
             1
         );
-        assert!(candidate.elapsed_ms >= PRODUCTION_DURATION_MS);
-        assert!(candidate.actions.iter().any(
-            |action| matches!(action, CitizenAction::Produce(recipe) if recipe.inputs().is_empty())
-        ));
+        assert!(candidate.elapsed_ms < PRODUCTION_DURATION_MS);
+        assert!(!candidate.actions.iter().any(|action| matches!(
+            action,
+            CitizenAction::Produce(Recipe::Forage | Recipe::FetchWater)
+        )));
     }
 
     #[test]

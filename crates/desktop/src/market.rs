@@ -32,7 +32,7 @@ pub struct TabPanel(pub Tab);
 #[derive(Resource, Default)]
 pub struct Selection {
     pub(super) view: View,
-    good: Option<Good>,
+    pub(super) good: Option<Good>,
     pub(super) tab: Tab,
 }
 
@@ -453,6 +453,16 @@ pub(crate) fn buyer_requests(universe: &Universe, good: Good) -> String {
 pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
     let market = universe.market();
     let policy = universe.caravan_policy();
+    if !good.caravan_eligible() {
+        return format!(
+            "Current price: {:.3} coins/{}\nCore price: {:.3} coins/{}\nCaravan trade unavailable\nTown stock: {}",
+            universe.prices().price(good).unwrap(),
+            good.price_unit_name(),
+            good.core_price(),
+            good.price_unit_name(),
+            crate::quantity_label(good, universe.town_stock(good))
+        );
+    }
     let export =
         if !policy.exports[good as usize].allowed || policy.export_tariff_basis_points == 10_000 {
             "Exports disabled".into()
@@ -763,6 +773,18 @@ mod tests {
                     .any(|(readout, text)| matches!(readout, Readout::PriceNow)
                         && text.0.contains("Current price: 9.000 coins/roll"))
             );
+        }
+    }
+
+    #[test]
+    fn universal_goods_show_reference_prices_and_unavailable_caravan_trade() {
+        for good in [Good::Berries, Good::Water] {
+            let label = price_details(&Universe::default(), good);
+            assert!(label.contains("Current price:"));
+            assert!(label.contains("Core price:"));
+            assert!(label.contains("Caravan trade unavailable"));
+            assert!(!label.contains("Export below"));
+            assert!(!label.contains("Import above"));
         }
     }
 

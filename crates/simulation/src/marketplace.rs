@@ -49,6 +49,9 @@ impl Good {
         Self::Fish,
         Self::Cabbage,
     ];
+    pub fn caravan_eligible(self) -> bool {
+        !matches!(self, Self::Berries | Self::Water)
+    }
     pub fn core_price(self) -> f64 {
         Prices::core().price(self).unwrap()
     }
@@ -160,7 +163,10 @@ pub struct CaravanPolicy {
 impl Default for CaravanPolicy {
     fn default() -> Self {
         Self {
-            exports: [ExportPolicy::default(); Good::COUNT],
+            exports: Good::ALL.map(|good| ExportPolicy {
+                allowed: good.caravan_eligible(),
+                ..ExportPolicy::default()
+            }),
             import_tariff_basis_points: 0,
             export_tariff_basis_points: 0,
         }
@@ -416,14 +422,14 @@ impl Market {
     }
 
     pub fn effective_export_threshold(&self, good: Good) -> Option<f64> {
-        (self.policy.export_tariff_basis_points < 10_000).then(|| {
+        (good.caravan_eligible() && self.policy.export_tariff_basis_points < 10_000).then(|| {
             good.export_threshold()
                 * (1.0 - f64::from(self.policy.export_tariff_basis_points) / 10_000.0)
         })
     }
 
     pub fn effective_import_threshold(&self, good: Good) -> Option<f64> {
-        (self.policy.import_tariff_basis_points < 10_000).then(|| {
+        (good.caravan_eligible() && self.policy.import_tariff_basis_points < 10_000).then(|| {
             good.import_threshold()
                 / (1.0 - f64::from(self.policy.import_tariff_basis_points) / 10_000.0)
         })
@@ -431,10 +437,14 @@ impl Market {
 
     pub(crate) fn set_caravan_policy(
         &mut self,
-        policy: CaravanPolicy,
+        mut policy: CaravanPolicy,
     ) -> Result<(), SimulationError> {
         policy.validate()?;
+        for good in Good::ALL {
+            policy.exports[good as usize].allowed &= good.caravan_eligible();
+        }
         self.policy = policy;
+        self.remove_ineligible_caravan_orders();
         for id in self.orders.keys().copied().collect::<Vec<_>>() {
             let good = self.orders[&id].good;
             if self.orders[&id].seller == MarketParty::Caravan {
@@ -449,8 +459,15 @@ impl Market {
         Ok(())
     }
 
+    fn remove_ineligible_caravan_orders(&mut self) {
+        self.orders.retain(|_, order| {
+            order.seller != MarketParty::Caravan || order.good.caravan_eligible()
+        });
+    }
+
     fn purchasable(&self, order: &SellOrder) -> bool {
-        order.seller != MarketParty::Caravan || self.policy.import_tariff_basis_points < 10_000
+        order.seller != MarketParty::Caravan
+            || (order.good.caravan_eligible() && self.policy.import_tariff_basis_points < 10_000)
     }
 
     pub(crate) fn starting_at(time_ms: u64) -> Self {
@@ -1028,6 +1045,7 @@ impl Market {
         time_ms: u64,
         export_limits: [Quantity; Good::COUNT],
     ) -> Result<Vec<(AgentId, Coins)>, SimulationError> {
+        self.remove_ineligible_caravan_orders();
         let closed = self.previous_period();
         let mut payments = std::collections::BTreeMap::<uuid::Uuid, Coins>::new();
         for good in Good::ALL {
@@ -1321,6 +1339,69 @@ mod tests {
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
 
     #[test]
+    fn universal_goods_block_caravans_and_keep_local_orders_purchasable() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        for good in [Good::Berries, Good::Water] {
+            let mut market = Market::default();
+            assert!(!market.caravan_policy().exports[good as usize].allowed);
+            assert_eq!(market.effective_export_threshold(good), None);
+            assert_eq!(market.effective_import_threshold(good), None);
+            market.prices = market
+                .prices
+                .with_price(good, good.core_price() / 10.0)
+                .unwrap();
+            market.list(seller, PLACE, good, 1000).unwrap();
+            let old_id = OrderId(market.next_order_id);
+            market.orders.insert(
+                old_id,
+                SellOrder {
+                    id: old_id,
+                    seller: MarketParty::Caravan,
+                    place: PLACE,
+                    good,
+                    units: 100,
+                    quoted_price: good.import_threshold(),
+                },
+            );
+            assert!(!market.purchasable(&market.orders[&old_id]));
+            let mut policy = market.caravan_policy();
+            policy.exports[good as usize].allowed = true;
+            let mut daily = market.clone();
+            assert!(daily.caravans(PLACE, 0).unwrap().is_empty());
+            assert_eq!(daily.caravan_units(good), 0);
+            assert_eq!(daily.listed_units(seller, good), 1000);
+            market.set_caravan_policy(policy).unwrap();
+            assert!(!market.caravan_policy().exports[good as usize].allowed);
+            assert_eq!(market.caravan_units(good), 0);
+            assert_eq!(market.listed_units(seller, good), 1000);
+            let bought = market
+                .purchase(buyer, PLACE, (good, 10), 100, 0, true)
+                .unwrap();
+            assert_eq!(bought.units, 10);
+            assert_eq!(
+                market.trades().back().unwrap().seller,
+                MarketParty::Citizen(seller)
+            );
+            market.prices = market
+                .prices
+                .with_price(good, good.core_price() * 10.0)
+                .unwrap();
+            market
+                .set_request(buyer, ShoppingList::single(good, 10_000))
+                .unwrap();
+            market.refresh_affordability(&[(buyer, 100_000)]);
+            market.caravans(PLACE, UPDATE_TIME_MS).unwrap();
+            assert_eq!(market.caravan_units(good), 0);
+            assert_eq!(
+                market.current_period().goods[good as usize].imported_units,
+                0
+            );
+        }
+        assert!(Good::Fish.caravan_eligible());
+    }
+
+    #[test]
     fn expensive_caravan_stock_preserves_price_history_and_purchases() {
         let buyer = AgentId(uuid::Uuid::from_u128(1));
         let mut market = Market::default();
@@ -1447,7 +1528,7 @@ mod tests {
         let seller = AgentId(uuid::Uuid::from_u128(1));
         let buyer = AgentId(uuid::Uuid::from_u128(2));
         let mut market = Market::default();
-        market.prices = market.prices.with_price(Good::Berries, 2.0).unwrap();
+        market.prices = market.prices.with_price(Good::Flour, 2.0).unwrap();
         let policy = CaravanPolicy {
             export_tariff_basis_points: 3333,
             import_tariff_basis_points: 5000,
@@ -1455,7 +1536,7 @@ mod tests {
         };
         market.set_caravan_policy(policy).unwrap();
         for day in 0..3 {
-            market.list(seller, PLACE, Good::Berries, 1).unwrap();
+            market.list(seller, PLACE, Good::Flour, 1).unwrap();
             let payments = market
                 .caravans(PLACE, UPDATE_TIME_MS + day * DAY_MS)
                 .unwrap();
@@ -1477,9 +1558,9 @@ mod tests {
                 .sum::<Coins>(),
             5
         );
-        assert_eq!(market.export_tariff_carry[Good::Berries as usize], 9998);
+        assert_eq!(market.export_tariff_carry[Good::Flour as usize], 9998);
         assert_eq!(market.export_tariff_carry[Good::BreadRoll as usize], 0);
-        assert_eq!(market.import_tariff_carry[Good::Berries as usize], 0);
+        assert_eq!(market.import_tariff_carry[Good::Flour as usize], 0);
         let id = OrderId(market.next_order_id);
         market.orders.insert(
             id,
@@ -1487,31 +1568,31 @@ mod tests {
                 id,
                 seller: MarketParty::Caravan,
                 place: PLACE,
-                good: Good::Berries,
+                good: Good::Flour,
                 units: 1000,
                 quoted_price: 3.0,
             },
         );
         market
-            .set_request(buyer, ShoppingList::single(Good::Berries, 1000))
+            .set_request(buyer, ShoppingList::single(Good::Flour, 1000))
             .unwrap();
         market.refresh_affordability(&[(buyer, 2)]);
-        assert_eq!(market.affordable_request(buyer).units(Good::Berries), 666);
-        assert_eq!(market.purchase_cost(buyer, Good::Berries, 666), Some(2));
+        assert_eq!(market.affordable_request(buyer).units(Good::Flour), 666);
+        assert_eq!(market.purchase_cost(buyer, Good::Flour, 666), Some(2));
         let imported = market
-            .purchase(buyer, PLACE, (Good::Berries, 1000), 2, 0, true)
+            .purchase(buyer, PLACE, (Good::Flour, 1000), 2, 0, true)
             .unwrap();
         assert_eq!((imported.units, imported.coins), (666, 2));
         let trade = market.trades().back().unwrap();
         assert_eq!((trade.tariff_coins, trade.recipient_coins), (1, 1));
-        assert_eq!(market.export_tariff_carry[Good::Berries as usize], 9998);
+        assert_eq!(market.export_tariff_carry[Good::Flour as usize], 9998);
     }
 
     #[test]
     fn tariff_rounding_does_not_depend_on_export_order_fragmentation() {
         let seller = AgentId(uuid::Uuid::from_u128(1));
         let mut whole = Market::default();
-        whole.prices = whole.prices.with_price(Good::Berries, 2.0).unwrap();
+        whole.prices = whole.prices.with_price(Good::Flour, 2.0).unwrap();
         whole
             .set_caravan_policy(CaravanPolicy {
                 export_tariff_basis_points: 3333,
@@ -1519,9 +1600,9 @@ mod tests {
             })
             .unwrap();
         let mut fragmented = whole.clone();
-        whole.list(seller, PLACE, Good::Berries, 6).unwrap();
+        whole.list(seller, PLACE, Good::Flour, 6).unwrap();
         for _ in 0..6 {
-            fragmented.list(seller, PLACE, Good::Berries, 1).unwrap();
+            fragmented.list(seller, PLACE, Good::Flour, 1).unwrap();
         }
         assert_eq!(
             whole.caravans(PLACE, 0).unwrap(),
@@ -1539,21 +1620,21 @@ mod tests {
         let first = AgentId(uuid::Uuid::from_u128(1));
         let second = AgentId(uuid::Uuid::from_u128(2));
         let mut market = Market::default();
-        market.prices = market.prices.with_price(Good::Berries, 2.0).unwrap();
+        market.prices = market.prices.with_price(Good::Flour, 2.0).unwrap();
         for _ in 0..3 {
-            market.list(first, PLACE, Good::Berries, 1).unwrap();
+            market.list(first, PLACE, Good::Flour, 1).unwrap();
         }
-        market.list(second, PLACE, Good::Berries, 2).unwrap();
+        market.list(second, PLACE, Good::Flour, 2).unwrap();
         market.update(UPDATE_TIME_MS).unwrap();
         let payments = market.caravans(PLACE, UPDATE_TIME_MS).unwrap();
-        assert_eq!(market.listed_units(first, Good::Berries), 1);
-        assert_eq!(market.listed_units(second, Good::Berries), 1);
+        assert_eq!(market.listed_units(first, Good::Flour), 1);
+        assert_eq!(market.listed_units(second, Good::Flour), 1);
         assert_eq!(payments, vec![(first, 1), (second, 1)]);
-        let current = market.current_period().goods[Good::Berries as usize];
+        let current = market.current_period().goods[Good::Flour as usize];
         assert_eq!((current.exported_units, current.exported_coins), (3, 2));
         assert_eq!(current.local_traded_units, 0);
         assert_eq!(
-            market.previous_period().unwrap().goods[Good::Berries as usize].exported_units,
+            market.previous_period().unwrap().goods[Good::Flour as usize].exported_units,
             0
         );
         assert!(
@@ -1569,26 +1650,26 @@ mod tests {
         let first = AgentId(uuid::Uuid::from_u128(1));
         let second = AgentId(uuid::Uuid::from_u128(2));
         let mut whole = Market::default();
-        whole.prices = whole.prices.with_price(Good::Berries, 2.0).unwrap();
-        whole.list(second, PLACE, Good::Berries, 3).unwrap();
-        whole.list(first, PLACE, Good::Berries, 3).unwrap();
+        whole.prices = whole.prices.with_price(Good::Flour, 2.0).unwrap();
+        whole.list(second, PLACE, Good::Flour, 3).unwrap();
+        whole.list(first, PLACE, Good::Flour, 3).unwrap();
         let mut fragmented = Market {
             prices: whole.prices,
             ..Market::default()
         };
         for _ in 0..3 {
-            fragmented.list(second, PLACE, Good::Berries, 1).unwrap();
+            fragmented.list(second, PLACE, Good::Flour, 1).unwrap();
         }
-        fragmented.list(first, PLACE, Good::Berries, 3).unwrap();
+        fragmented.list(first, PLACE, Good::Flour, 3).unwrap();
         let whole_payments = whole.caravans(PLACE, UPDATE_TIME_MS).unwrap();
         let fragmented_payments = fragmented.caravans(PLACE, UPDATE_TIME_MS).unwrap();
         assert_eq!(whole_payments, fragmented_payments);
-        assert_eq!(fragmented.listed_units(first, Good::Berries), 1);
-        assert_eq!(fragmented.listed_units(second, Good::Berries), 2);
+        assert_eq!(fragmented.listed_units(first, Good::Flour), 1);
+        assert_eq!(fragmented.listed_units(second, Good::Flour), 2);
         for seller in [first, second] {
             assert_eq!(
-                whole.listed_units(seller, Good::Berries),
-                fragmented.listed_units(seller, Good::Berries)
+                whole.listed_units(seller, Good::Flour),
+                fragmented.listed_units(seller, Good::Flour)
             );
         }
     }

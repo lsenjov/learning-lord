@@ -2351,7 +2351,7 @@ mod tests {
     }
 
     #[test]
-    fn forage_targets_account_for_active_and_completed_batches() {
+    fn forage_at_cap_has_no_commercial_target_but_direct_gathering_remains_available() {
         let recipe = production::Recipe::Forage;
         let reserve = (production::PERSONAL_FOOD_RESERVE / BERRY_NUTRITION_PER_GRAM).ceil() as u64;
         let mut source = Citizen::new(0.0)
@@ -2365,11 +2365,11 @@ mod tests {
                 .production_targets()
                 .unwrap()
                 .remaining_batches(recipe),
-            24
+            0
         );
         let started = source.start_action(CitizenAction::Produce(recipe)).unwrap();
         let refreshed = production::ProductionTargets::calculate(&started, 0).unwrap();
-        assert_eq!(refreshed.remaining_batches(recipe), 25);
+        assert_eq!(refreshed.remaining_batches(recipe), 1);
         let predicted = started.advance_predicted(ACTION_DURATION_MS).unwrap();
         let actual = started.advance(ACTION_DURATION_MS).unwrap();
         for completed in [&predicted, &actual] {
@@ -2378,7 +2378,7 @@ mod tests {
                     .production_targets()
                     .unwrap()
                     .remaining_batches(recipe),
-                23
+                0
             );
             assert_eq!(completed.production_work_today_ms(), ACTION_DURATION_MS);
         }

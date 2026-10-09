@@ -490,6 +490,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn universal_gathering_uses_local_stock_caps() {
+        for recipe in [Recipe::Forage, Recipe::FetchWater] {
+            let base = Citizen::new(0.0).unwrap();
+            assert!(recipe_profit(recipe, &base).is_some_and(|profit| profit > 0.0));
+            let cap = stock_cap_batches(recipe, &base).unwrap().ceil() as u64;
+            let (good, units) = recipe.outputs()[0];
+            let full = base.with_good(good, cap * units).unwrap();
+            assert_eq!(recipe_profit(recipe, &full), None);
+            assert_eq!(
+                ProductionTargets::calculate(&full, 0)
+                    .unwrap()
+                    .remaining_batches(recipe),
+                0
+            );
+            let direct = full
+                .start_action(crate::CitizenAction::Produce(recipe))
+                .unwrap();
+            assert!(direct.active_action().is_some());
+        }
+    }
+
+    #[test]
     fn stock_ratios_compare_capacity_fractions_across_whole_goods_and_grams() {
         let prices = Prices::default()
             .with_price(Good::Fish, 1.0)
