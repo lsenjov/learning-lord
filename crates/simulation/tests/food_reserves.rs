@@ -228,6 +228,13 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     )
     .unwrap();
     let (world, seller) = Universe::with_map(map)
+        .with_prices(
+            learning_lord_simulation::marketplace::Prices::default()
+                .with_price(Good::Fish, 0.1)
+                .unwrap()
+                .with_price(Good::Cabbage, 0.1)
+                .unwrap(),
+        )
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
@@ -277,10 +284,13 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     let AgentKind::Citizen(citizen) = &world.agents()[&buyer].kind;
     let selected = plan(citizen).unwrap();
     let first = &selected.actions()[selected.goals()[0].actions.clone()];
-    assert!(matches!(
-        first,
-        [CitizenAction::Travel(_), CitizenAction::BuyAt { .. }]
-    ));
+    assert!(
+        matches!(
+            first,
+            [CitizenAction::Travel(_), CitizenAction::BuyAt { .. }]
+        ),
+        "{first:?}"
+    );
     let CitizenAction::BuyAt { list: basket, .. } = first[1] else {
         unreachable!()
     };

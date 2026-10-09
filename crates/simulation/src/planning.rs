@@ -58,9 +58,11 @@ impl ProductionDecision {
             profit_per_hour: crate::production::recipe_profit(recipe, citizen)
                 .zip(recipe.duration_ms(citizen).ok())
                 .map(|(profit, duration)| profit * 3_600_000.0 / duration as f64),
-            remaining_batches: citizen
-                .production_targets()
-                .map(|t| t.remaining_batches(recipe)),
+            remaining_batches: citizen.production_targets().and_then(|t| {
+                crate::production::crop_kind(recipe)
+                    .is_none()
+                    .then(|| t.remaining_batches(recipe))
+            }),
             inputs: recipe
                 .inputs()
                 .iter()
@@ -274,16 +276,7 @@ impl ActivePlan {
     }
 
     pub(crate) fn prepare_replan(&self, citizen: &mut Citizen) -> Result<(), SimulationError> {
-        let shortage = self
-            .plan
-            .actions
-            .get(self.action_index)
-            .is_some_and(|action| {
-                self.action_index < self.committed_actions_end()
-                    && matches!(action, CitizenAction::Produce(_))
-                    && replan_check(citizen, *action, self.action_index)
-            });
-        citizen.refresh_production_targets(shortage)
+        citizen.refresh_production_targets(true)
     }
 
     pub(crate) fn resume_committed(
@@ -415,7 +408,7 @@ pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationEr
         return Err(SimulationError::CitizenBusy);
     }
     let production: Vec<_> = citizen
-        .available_recipes()
+        .available_production_recipes()
         .map(|recipe| ProductionDecision::new(citizen, recipe))
         .collect();
     let goals = root_goals(citizen)?;
@@ -510,9 +503,7 @@ fn reduce_results(
         candidates.push(candidate);
     }
     for diagnostic in &mut production {
-        diagnostic.selected = best
-            .actions
-            .contains(&CitizenAction::Produce(diagnostic.recipe));
+        diagnostic.selected = contains_production(citizen, &best.actions, diagnostic.recipe);
     }
     best.decision = Some(Arc::new(PlanningDecision {
         candidates,
@@ -522,6 +513,23 @@ fn reduce_results(
         blocked_requests,
     }));
     Ok(best)
+}
+
+fn contains_production(
+    citizen: &Citizen,
+    actions: &[CitizenAction],
+    recipe: crate::production::Recipe,
+) -> bool {
+    actions.iter().any(|&action| match action {
+        CitizenAction::Produce(produced) => produced == recipe,
+        CitizenAction::Plant { crop, .. } => crop.recipe() == recipe,
+        CitizenAction::Tend { field, plot, .. } | CitizenAction::Harvest { field, plot } => citizen
+            .crop(field, plot)
+            .ok()
+            .flatten()
+            .is_some_and(|crop| crop.kind.recipe() == recipe),
+        _ => false,
+    })
 }
 
 fn evaluate_goal(
@@ -540,9 +548,8 @@ fn evaluate_goal(
     };
     for variant in variants {
         for diagnostic in &mut production {
-            diagnostic.feasible_sequence_found |= variant
-                .actions
-                .contains(&CitizenAction::Produce(diagnostic.recipe));
+            diagnostic.feasible_sequence_found |=
+                contains_production(citizen, &variant.actions, diagnostic.recipe);
         }
         let actions = variant.actions.clone();
         let duration_ms = variant.elapsed_ms;
@@ -556,10 +563,7 @@ fn evaluate_goal(
         search_with_goals(variant, &mut continuation, vec![boundary])?;
         if continuation.average_wellbeing.is_finite() {
             for diagnostic in &mut production {
-                if continuation
-                    .actions
-                    .contains(&CitizenAction::Produce(diagnostic.recipe))
-                {
+                if contains_production(citizen, &continuation.actions, diagnostic.recipe) {
                     diagnostic.feasible_sequence_found = true;
                     diagnostic.best_competing_score = Some(
                         diagnostic
@@ -594,7 +598,7 @@ fn evaluate_goal(
 #[cfg(test)]
 fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
     let production = citizen
-        .available_recipes()
+        .available_production_recipes()
         .map(|recipe| ProductionDecision::new(citizen, recipe))
         .collect::<Vec<_>>();
     let results = root_goals(citizen)?
@@ -734,6 +738,53 @@ mod tests {
 
     const MINUTE_MS: u64 = 60_000;
     const TWO_HOURS_MS: u64 = 2 * 60 * MINUTE_MS;
+
+    #[test]
+    fn replanning_refreshes_same_day_ingredient_budgets_after_output_stock_changes() {
+        use crate::{StartingRole, locations::Location, marketplace::Good, production::Recipe};
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Baker)
+            .with_good(Good::Flour, 1200)
+            .unwrap()
+            .with_good(Good::Wood, 300)
+            .unwrap()
+            .with_good(Good::Water, 1200)
+            .unwrap();
+        let citizen = citizen.with_prices(citizen.prices().with_price(Good::Flour, 300.0).unwrap());
+        let (map, _) = citizen
+            .map()
+            .with_place(
+                Location::Bakery,
+                citizen.position(),
+                Some(citizen.id()),
+                "Bakery",
+            )
+            .unwrap();
+        let mut citizen = citizen.with_map(map).unwrap();
+        citizen.refresh_production_targets(true).unwrap();
+        assert_eq!(
+            citizen
+                .production_targets()
+                .unwrap()
+                .remaining_batches(Recipe::BakeRolls),
+            12
+        );
+        citizen = citizen.with_good(Good::BreadRoll, 120).unwrap();
+        let execution = ActivePlan {
+            plan: empty_plan(),
+            action_index: 0,
+            elapsed_ms: 0,
+        };
+        execution.prepare_replan(&mut citizen).unwrap();
+        assert_eq!(
+            citizen
+                .production_targets()
+                .unwrap()
+                .remaining_batches(Recipe::BakeRolls),
+            0
+        );
+    }
 
     #[test]
     fn worker_count_reserves_four_threads_with_a_minimum_of_two() {

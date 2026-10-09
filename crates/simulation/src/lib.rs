@@ -705,16 +705,17 @@ impl Citizen {
             .ok_or(SimulationError::MissingProperty)
     }
 
-    pub fn available_recipes(&self) -> impl Iterator<Item = production::Recipe> + '_ {
+    pub(crate) fn available_production_recipes(
+        &self,
+    ) -> impl Iterator<Item = production::Recipe> + '_ {
         production::Recipe::ALL.into_iter().filter(|recipe| {
-            !matches!(
-                recipe,
-                production::Recipe::GrowWheat
-                    | production::Recipe::GrowFlax
-                    | production::Recipe::GrowCabbage
-            ) && recipe.duration_ms(self).is_ok()
-                && self.production_place(*recipe).is_ok()
+            recipe.duration_ms(self).is_ok() && self.production_place(*recipe).is_ok()
         })
+    }
+
+    pub fn available_recipes(&self) -> impl Iterator<Item = production::Recipe> + '_ {
+        self.available_production_recipes()
+            .filter(|recipe| production::crop_kind(*recipe).is_none())
     }
 
     pub fn production_targets(&self) -> Option<&production::ProductionTargets> {
@@ -2090,7 +2091,7 @@ impl Universe {
             .ok_or(SimulationError::AgentNotFound)?
             .clone();
         let AgentKind::Citizen(citizen) = &mut agent.kind;
-        citizen.refresh_production_targets(false)?;
+        citizen.refresh_production_targets(true)?;
         let updated = agent.start_planning()?;
         let mut universe = self.clone();
         let AgentKind::Citizen(citizen) = &updated.kind;
@@ -2364,11 +2365,11 @@ mod tests {
                 .production_targets()
                 .unwrap()
                 .remaining_batches(recipe),
-            1
+            24
         );
         let started = source.start_action(CitizenAction::Produce(recipe)).unwrap();
         let refreshed = production::ProductionTargets::calculate(&started, 0).unwrap();
-        assert_eq!(refreshed.remaining_batches(recipe), 1);
+        assert_eq!(refreshed.remaining_batches(recipe), 25);
         let predicted = started.advance_predicted(ACTION_DURATION_MS).unwrap();
         let actual = started.advance(ACTION_DURATION_MS).unwrap();
         for completed in [&predicted, &actual] {
@@ -2377,7 +2378,7 @@ mod tests {
                     .production_targets()
                     .unwrap()
                     .remaining_batches(recipe),
-                0
+                23
             );
             assert_eq!(completed.production_work_today_ms(), ACTION_DURATION_MS);
         }

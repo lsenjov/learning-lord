@@ -70,7 +70,7 @@ fn list(universe: Universe, id: AgentId, good: Good, grams: u64) -> Universe {
 }
 
 #[test]
-fn competing_bakers_each_consider_the_full_unmet_demand() {
+fn unmet_demand_does_not_expand_local_capacity_caps() {
     let inputs = [
         (Good::Berries, 930),
         (Good::BreadRoll, 40),
@@ -92,13 +92,13 @@ fn competing_bakers_each_consider_the_full_unmet_demand() {
     for id in [first, second] {
         assert_eq!(
             targets(&universe, id).remaining_batches(Recipe::BakeRolls),
-            12
+            8
         );
     }
 }
 
 #[test]
-fn carried_and_listed_stock_reduce_the_daily_floor() {
+fn input_free_production_keeps_a_finite_budget_when_local_stock_is_full() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Woodcutter",
@@ -108,7 +108,7 @@ fn carried_and_listed_stock_reduce_the_daily_floor() {
     );
     assert_eq!(
         targets(&universe, farmer).remaining_batches(Recipe::ChopWood),
-        10
+        12
     );
     let fully_stocked = citizen(&universe, farmer)
         .with_good(Good::Wood, 2_400)
@@ -117,13 +117,13 @@ fn carried_and_listed_stock_reduce_the_daily_floor() {
         ProductionTargets::calculate(&fully_stocked, 0)
             .unwrap()
             .remaining_batches(Recipe::ChopWood),
-        0
+        12
     );
     let listed = list(universe, farmer, Good::Wood, 200);
     assert_eq!(citizen(&listed, farmer).units(Good::Wood), 200);
     assert_eq!(
         targets(&listed, farmer).remaining_batches(Recipe::ChopWood),
-        10
+        12
     );
     let withdrawn = listed
         .start_action(farmer, CitizenAction::Withdraw(Good::Wood, 200))
@@ -132,12 +132,12 @@ fn carried_and_listed_stock_reduce_the_daily_floor() {
         .unwrap();
     assert_eq!(
         targets(&withdrawn, farmer).remaining_batches(Recipe::ChopWood),
-        10
+        12
     );
 }
 
 #[test]
-fn skill_adjusted_floor_subtracts_adas_existing_listing() {
+fn skill_adjusted_export_work_remains_available_with_existing_listings() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Ada",
@@ -154,12 +154,12 @@ fn skill_adjusted_floor_subtracts_adas_existing_listing() {
         ProductionTargets::calculate(&worker, 0)
             .unwrap()
             .remaining_batches(Recipe::ChopWood),
-        11
+        12
     );
 }
 
 #[test]
-fn completed_work_counts_as_stock_without_shrinking_the_stock_floor() {
+fn completed_free_work_remains_available_at_export_rates() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Woodcutter",
@@ -179,12 +179,12 @@ fn completed_work_counts_as_stock_without_shrinking_the_stock_floor() {
         ProductionTargets::calculate(&finished, 60 * 60_000)
             .unwrap()
             .remaining_batches(Recipe::ChopWood),
-        1
+        12
     );
 }
 
 #[test]
-fn in_progress_output_counts_toward_the_floor() {
+fn input_free_budget_counts_the_active_batch_separately() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Woodcutter",
@@ -196,11 +196,11 @@ fn in_progress_output_counts_toward_the_floor() {
         .start_action(CitizenAction::Produce(Recipe::ChopWood))
         .unwrap();
     let target = ProductionTargets::calculate(&working, 0).unwrap();
-    assert_eq!(target.remaining_batches(Recipe::ChopWood), 2);
+    assert_eq!(target.remaining_batches(Recipe::ChopWood), 13);
 }
 
 #[test]
-fn each_profitable_good_has_an_independent_twelve_hour_floor() {
+fn ingredient_budgets_use_remaining_local_capacity_for_each_profitable_recipe() {
     let (universe, baker) = producer(
         Universe::with_map(Map::default()),
         "Baker",
@@ -215,7 +215,7 @@ fn each_profitable_good_has_an_independent_twelve_hour_floor() {
         0,
     );
     let target = targets(&universe, baker);
-    assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 7);
+    assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 4);
     assert_eq!(target.remaining_batches(Recipe::BakeRolls), 12);
     let worker = citizen(&universe, baker);
     let work: u64 = target
@@ -223,7 +223,7 @@ fn each_profitable_good_has_an_independent_twelve_hour_floor() {
         .filter(|(recipe, _)| matches!(recipe, Recipe::BakeRolls | Recipe::BakeBerryPie))
         .map(|(recipe, count)| count * recipe.duration_ms(worker).unwrap())
         .sum();
-    assert_eq!(work, 45 * 60 * 60_000 / 2);
+    assert_eq!(work, 18 * 60 * 60_000);
     let unstocked = worker.with_good(Good::BerryPie, 0).unwrap();
     let full = ProductionTargets::calculate(&unstocked, 0).unwrap();
     assert_eq!(full.remaining_batches(Recipe::BakeBerryPie), 8);
@@ -340,7 +340,7 @@ fn active_batch_uses_inputs_once_and_subtracts_its_output_from_the_target() {
         .unwrap();
     let target = ProductionTargets::calculate(&working, 0).unwrap();
     assert_eq!(target.remaining_batches(Recipe::BakeRolls), 2);
-    assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 1);
+    assert_eq!(target.remaining_batches(Recipe::BakeBerryPie), 0);
 }
 
 #[test]
@@ -411,7 +411,7 @@ fn replacement_asks_can_make_a_recipe_unprofitable_even_when_inputs_are_owned() 
 }
 
 #[test]
-fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
+fn sales_history_and_backlog_do_not_change_stock_capacity() {
     let (universe, farmer) = producer(
         Universe::with_map(Map::default()),
         "Woodcutter",
@@ -445,10 +445,10 @@ fn own_sales_and_backlog_add_and_inactive_days_reduce_the_sales_rate() {
         ProductionTargets::calculate(&worker, universe.current_time_ms())
             .unwrap()
             .remaining_batches(Recipe::ChopWood),
-        11
+        12
     );
     let later = ProductionTargets::calculate(&worker, 2 * DAY_MS).unwrap();
-    assert_eq!(later.remaining_batches(Recipe::ChopWood), 8);
+    assert_eq!(later.remaining_batches(Recipe::ChopWood), 12);
 }
 
 #[test]

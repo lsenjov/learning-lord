@@ -209,7 +209,6 @@ pub(crate) fn project(
         .ok_or(SimulationError::TimeOverflow)?;
     execution.record_elapsed(remaining)?;
     execution.finish_action();
-    citizen.refresh_production_targets(false)?;
     execution.prepare_replan(&mut citizen)?;
     Ok(Some((boundary, citizen, execution.action_index())))
 }
