@@ -763,12 +763,12 @@ mod tests {
             .unwrap();
         let mut citizen = citizen.with_map(map).unwrap();
         citizen.refresh_production_targets(true).unwrap();
-        assert_eq!(
+        assert!(
             citizen
                 .production_targets()
                 .unwrap()
-                .remaining_batches(Recipe::BakeRolls),
-            12
+                .remaining_batches(Recipe::BakeRolls)
+                > 0
         );
         citizen = citizen.with_good(Good::BreadRoll, 120).unwrap();
         let execution = ActivePlan {

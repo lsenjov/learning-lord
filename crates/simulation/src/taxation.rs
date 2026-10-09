@@ -484,6 +484,9 @@ impl Universe {
                             .ok_or(SimulationError::InventoryOverflow)?;
                         citizen.inventory.insert(good, owned);
                         citizen.tax_reserved.insert(good, reserved);
+                        citizen.production_acquisitions[good as usize] = citizen
+                            .production_acquisitions[good as usize]
+                            .min(citizen.available_units(good));
                         citizen.town_inventory.insert(good, town);
                     }
                     ReservationStock::Stored(stock) => {
@@ -668,6 +671,9 @@ impl Universe {
                     return Err(SimulationError::MissingInputs);
                 }
                 citizen.tax_reserved.insert(good, total);
+                citizen.production_acquisitions[good as usize] = citizen.production_acquisitions
+                    [good as usize]
+                    .min(citizen.available_units(good));
                 changed = true;
             }
             if rate.is_some() || owed > 0 {
@@ -956,6 +962,18 @@ mod tests {
             .unwrap();
         world.tax_production(id, place, good, units, 0).unwrap();
         (world, id, place)
+    }
+
+    #[test]
+    fn collecting_reserved_goods_preserves_acquired_usable_inputs() {
+        let (mut world, id, _) = reserved_worker(Good::Cloth, 100);
+        let AgentKind::Citizen(worker) = &mut world.agents.get_mut(&id).unwrap().kind;
+        worker.production_acquisitions[Good::Cloth as usize] = 50;
+        world.settle_tax_reservations(0).unwrap();
+        let AgentKind::Citizen(worker) = &world.agents[&id].kind;
+        assert_eq!(worker.units(Good::Cloth), 50);
+        assert_eq!(worker.available_units(Good::Cloth), 50);
+        assert_eq!(worker.production_acquisitions[Good::Cloth as usize], 50);
     }
 
     #[test]

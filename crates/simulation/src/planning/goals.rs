@@ -1034,7 +1034,7 @@ fn prepare(
     let prepared = if let CitizenAction::Produce(recipe) = action {
         prepare_inputs(
             state,
-            &recipe_requirements(&[recipe])?,
+            &recipe_requirements(&state.citizen, &[recipe])?,
             reserved_ms,
             prior_actions,
         )?
@@ -1064,25 +1064,10 @@ fn prepare(
 }
 
 fn recipe_requirements(
+    citizen: &Citizen,
     recipes: &[crate::production::Recipe],
 ) -> Result<crate::marketplace::ShoppingList, SimulationError> {
-    let mut balance = [0_i128; Good::COUNT];
-    let mut needed = [0_i128; Good::COUNT];
-    for recipe in recipes {
-        for &(good, units) in recipe.inputs() {
-            balance[good as usize] -= units as i128;
-            needed[good as usize] = needed[good as usize].max(-balance[good as usize]);
-        }
-        for &(good, units) in recipe.outputs() {
-            balance[good as usize] += units as i128;
-        }
-    }
-    crate::marketplace::ShoppingList::new(Good::ALL.into_iter().map(|good| {
-        (
-            good,
-            crate::Quantity::try_from(needed[good as usize]).unwrap_or(crate::Quantity::MAX),
-        )
-    }))
+    crate::production::recipe_requirements(citizen, recipes)
 }
 
 fn production_order(
@@ -1130,7 +1115,7 @@ fn production_order_bounded(
     preparation_limit: &mut bool,
     bounded_production: bool,
 ) -> Result<Vec<Prediction>, SimulationError> {
-    let requirements = recipe_requirements(recipes)?;
+    let requirements = recipe_requirements(&initial.citizen, recipes)?;
     let mut variants = Vec::new();
     for mut state in prepare_inputs(initial, &requirements, reserved_ms, prior_actions)? {
         let mut complete = requirements
@@ -1397,15 +1382,101 @@ pub(super) fn variants_after(
     variants_from(initial, goal, prefix.actions.len())
 }
 
-pub(super) const PRODUCTION_DURATION_MS: u64 = 2 * 60 * 60 * 1000;
+pub(super) const PRODUCTION_DURATION_MS: u64 = crate::production::PRODUCTION_BLOCK_MS;
+
+fn production_restock(
+    initial: &Prediction,
+    prior_actions: usize,
+) -> Result<Prediction, SimulationError> {
+    if initial.cooldowns.buy > 0 {
+        return Ok(initial.clone());
+    }
+    let Some(recipes) = initial.citizen.production_restock_recipes()? else {
+        return Ok(initial.clone());
+    };
+    let target = recipe_requirements(&initial.citizen, &recipes)?;
+    let demand_for = |requirements: crate::marketplace::ShoppingList| {
+        crate::marketplace::ShoppingList::new(requirements.items().map(|(good, units)| {
+            (
+                good,
+                units.saturating_sub(initial.citizen.usable_owned_units(good)),
+            )
+        }))
+    };
+    let demand = demand_for(target)?;
+    record_blocked_purchase(initial, demand)?;
+    let mut affordable_prefix_len = 0;
+    for length in (1..=recipes.len()).rev() {
+        let requirements = recipe_requirements(&initial.citizen, &recipes[..length])?;
+        let list = demand_for(requirements)?;
+        let citizen = &initial.citizen;
+        let available = list
+            .items()
+            .all(|(good, units)| citizen.market().available_units(citizen.id(), good) >= units);
+        let position = if requirements.items().any(|(good, units)| {
+            units > citizen.available_units(good) && citizen.withdrawable_units(good) > 0
+        }) {
+            citizen.map().position(citizen.selling_place())
+        } else {
+            citizen.position()
+        };
+        let affordable = citizen
+            .market()
+            .estimated_purchase_cost_from(citizen.id(), &citizen.map(), position, list)
+            .is_some_and(|cost| cost <= citizen.coins());
+        if available && affordable {
+            affordable_prefix_len = length;
+            break;
+        }
+    }
+    if affordable_prefix_len == 0 {
+        return Ok(initial.clone());
+    }
+    let requirements = recipe_requirements(&initial.citizen, &recipes[..affordable_prefix_len])?;
+    let mut state = initial.clone();
+    for (good, units) in requirements.items() {
+        let listed = units
+            .saturating_sub(state.citizen.available_units(good))
+            .min(state.citizen.withdrawable_units(good));
+        if listed == 0 {
+            continue;
+        }
+        let Some(withdrawn) = order_variants(
+            &state,
+            CitizenAction::Withdraw(good, listed),
+            0.0,
+            0,
+            prior_actions,
+        )?
+        .pop() else {
+            return Ok(initial.clone());
+        };
+        state = withdrawn;
+    }
+    let list = crate::marketplace::ShoppingList::new(requirements.items().map(|(good, units)| {
+        (
+            good,
+            units.saturating_sub(state.citizen.available_units(good)),
+        )
+    }))?;
+    if list.items().next().is_none() {
+        return Ok(state);
+    }
+    // Buying a complete recipe prefix protects the next job's inputs before stocking later jobs.
+    Ok(
+        shopping_trip_with_demand(&state, list, demand, 0, prior_actions)?
+            .pop()
+            .unwrap_or_else(|| initial.clone()),
+    )
+}
 
 pub(super) fn production_prefixes(
     initial: Prediction,
     prior_actions: usize,
     diagnostics: &mut [super::ProductionDecision],
 ) -> Result<Vec<Prediction>, SimulationError> {
-    let mut state = initial.clone();
-    let mut segment_start = initial.clone();
+    let mut state = production_restock(&initial, prior_actions)?;
+    let mut segment_start = state.clone();
     let mut order = Vec::new();
     while state.elapsed_ms < PRODUCTION_DURATION_MS {
         let farm_actions = state.citizen.farming_actions();
@@ -2369,7 +2440,14 @@ mod tests {
                 _ => None,
             })
             .sum();
-        assert_eq!(flour_bought, bread_batches * 100);
+        assert!(flour_bought > bread_batches * 100);
+        assert_eq!(
+            flour_bought,
+            worker
+                .production_restock_requirements()
+                .unwrap()
+                .units(Good::Flour)
+        );
         let mut replay = initial;
         for &action in &candidate.actions {
             replay = replay.perform(action, 0).unwrap().unwrap();
@@ -2377,6 +2455,99 @@ mod tests {
         assert_eq!(candidate.elapsed_ms, replay.elapsed_ms);
         assert_eq!(candidate.action_durations_ms, replay.action_durations_ms);
         assert_eq!(candidate.citizen.coins(), replay.citizen.coins());
+    }
+
+    #[test]
+    fn production_restock_skips_covered_blocks_and_buys_a_working_day() {
+        let worker = bread_only(buying_baker(2000));
+        let target = worker.production_restock_requirements().unwrap();
+        let initial = Prediction::new(&worker, Cooldowns::default());
+        let bought = production_restock(&initial, 0).unwrap();
+        for (good, units) in target.items() {
+            assert!(bought.citizen.available_units(good) >= units);
+        }
+        assert_eq!(
+            bought
+                .actions
+                .iter()
+                .filter(|action| matches!(action, CitizenAction::BuyAt { .. }))
+                .count(),
+            1
+        );
+        let recipes =
+            crate::production::projected_recipes(&worker, PRODUCTION_DURATION_MS).unwrap();
+        let requirements = recipe_requirements(&worker, &recipes).unwrap();
+        let mut covered = worker;
+        for (good, units) in requirements.items() {
+            covered = covered.with_good(good, units).unwrap();
+        }
+        let untouched =
+            production_restock(&Prediction::new(&covered, Cooldowns::default()), 0).unwrap();
+        assert!(untouched.actions.is_empty());
+        assert_eq!(untouched.citizen.coins(), covered.coins());
+    }
+
+    #[test]
+    fn production_restock_keeps_a_complete_prefix_when_stock_is_limited() {
+        let worker = bread_only(buying_baker(200));
+        let bought =
+            production_restock(&Prediction::new(&worker, Cooldowns::default()), 0).unwrap();
+        assert_eq!(bought.citizen.available_units(Good::Flour), 200);
+        assert!(
+            bought
+                .actions
+                .iter()
+                .all(|action| !matches!(action, CitizenAction::Produce(_)))
+        );
+        let candidate =
+            production_prefixes(Prediction::new(&worker, Cooldowns::default()), 0, &mut [])
+                .unwrap()
+                .pop()
+                .unwrap();
+        assert!(candidate.actions.iter().any(|action| matches!(
+            action,
+            CitizenAction::Produce(crate::production::Recipe::BakeRolls)
+        )));
+    }
+
+    #[test]
+    fn production_restock_withdraws_owned_inputs_before_spending_a_limited_budget() {
+        let mut worker = bread_only(buying_baker(2000));
+        let market_place = worker.selling_place();
+        let mut market = worker.market().clone();
+        market
+            .list(worker.id(), market_place, Good::Flour, 100)
+            .unwrap();
+        worker = worker.with_market(market);
+        let recipes =
+            crate::production::projected_recipes(&worker, PRODUCTION_DURATION_MS).unwrap();
+        let requirements = recipe_requirements(&worker, &recipes).unwrap();
+        let demand =
+            crate::marketplace::ShoppingList::new(requirements.items().map(|(good, units)| {
+                (good, units.saturating_sub(worker.usable_owned_units(good)))
+            }))
+            .unwrap();
+        let coins = worker
+            .market()
+            .estimated_purchase_cost_from(worker.id(), &worker.map(), worker.position(), demand)
+            .unwrap();
+        worker = worker.with_coins(coins).unwrap();
+        let bought =
+            production_restock(&Prediction::new(&worker, Cooldowns::default()), 0).unwrap();
+        assert!(matches!(
+            bought.actions.first(),
+            Some(CitizenAction::Withdraw(Good::Flour, 100))
+        ));
+        for (good, units) in requirements.items() {
+            assert!(bought.citizen.available_units(good) >= units);
+        }
+        assert!(
+            bought.citizen.available_units(Good::Flour)
+                < worker
+                    .production_restock_requirements()
+                    .unwrap()
+                    .units(Good::Flour)
+        );
     }
 
     #[test]
@@ -2447,7 +2618,7 @@ mod tests {
         use crate::production::Recipe;
         let mut recipes = vec![Recipe::MakeClothingBlock; 8];
         recipes.push(Recipe::AssembleGarment);
-        let requirements = recipe_requirements(&recipes).unwrap();
+        let requirements = recipe_requirements(&Citizen::new(0.0).unwrap(), &recipes).unwrap();
         assert_eq!(requirements.units(Good::Cloth), 200);
         assert_eq!(requirements.units(Good::FlaxBlock), 0);
     }

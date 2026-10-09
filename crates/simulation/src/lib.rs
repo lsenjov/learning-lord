@@ -255,6 +255,7 @@ pub struct Citizen {
     starting_role: Option<StartingRole>,
     skills: [Option<u64>; production::Skill::COUNT],
     production_targets: Option<production::ProductionTargets>,
+    production_acquisitions: [Quantity; Good::COUNT],
     work_period: u64,
     work_ms: u64,
     coins: Coins,
@@ -310,6 +311,7 @@ impl Citizen {
             starting_role: None,
             skills: [None; production::Skill::COUNT],
             production_targets: None,
+            production_acquisitions: [0; Good::COUNT],
             work_period: 0,
             work_ms: 0,
             coins: 0,
@@ -464,7 +466,7 @@ impl Citizen {
             return Err(SimulationError::MissingInputs);
         }
         let mut citizen = self.clone();
-        citizen.inventory.insert(good, units);
+        citizen.set_inventory_units(good, units);
         Ok(citizen)
     }
     pub fn berries_units(&self) -> Quantity {
@@ -730,6 +732,71 @@ impl Citizen {
         }
     }
 
+    pub(crate) fn withdrawable_units(&self, good: Good) -> Quantity {
+        self.market
+            .orders()
+            .filter(|order| {
+                order.seller == marketplace::MarketParty::Citizen(self.id)
+                    && order.place == self.selling_place()
+                    && order.good == good
+            })
+            .map(|order| order.units)
+            .sum()
+    }
+
+    pub(crate) fn usable_owned_units(&self, good: Good) -> Quantity {
+        self.available_units(good)
+            .saturating_add(self.withdrawable_units(good))
+    }
+
+    pub(crate) fn production_restock_recipes(
+        &self,
+    ) -> Result<Option<Vec<production::Recipe>>, SimulationError> {
+        let preferred = production::projected_recipes(self, production::PRODUCTION_BLOCK_MS)?;
+        let threshold = production::recipe_requirements(self, &preferred)?;
+        if threshold
+            .items()
+            .all(|(good, units)| self.usable_owned_units(good) >= units)
+        {
+            return Ok(None);
+        }
+        production::projected_recipes(self, production::DAILY_CAPACITY_MS).map(Some)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn production_restock_requirements(
+        &self,
+    ) -> Result<marketplace::ShoppingList, SimulationError> {
+        self.production_restock_recipes()?.map_or_else(
+            || Ok(marketplace::ShoppingList::default()),
+            |recipes| production::recipe_requirements(self, &recipes),
+        )
+    }
+
+    fn set_inventory_units(&mut self, good: Good, units: Quantity) {
+        self.inventory.insert(good, units);
+        self.production_acquisitions[good as usize] =
+            self.production_acquisitions[good as usize].min(self.available_units(good));
+    }
+
+    fn retain_production_input(
+        &mut self,
+        good: Good,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        if self.production_targets.is_some()
+            && self
+                .available_recipes()
+                .any(|recipe| recipe.inputs().iter().any(|&(input, _)| input == good))
+        {
+            self.production_acquisitions[good as usize] = self.production_acquisitions
+                [good as usize]
+                .checked_add(units)
+                .ok_or(SimulationError::InventoryOverflow)?;
+        }
+        Ok(())
+    }
+
     fn production_ingredient_reserve(&self) -> Result<[Quantity; Good::COUNT], SimulationError> {
         let active = self.active_action.and_then(|active| match active.action {
             CitizenAction::Produce(recipe) => Some(recipe),
@@ -737,15 +804,15 @@ impl Citizen {
         });
         let mut reserve = [0_u64; Good::COUNT];
         if let Some(targets) = &self.production_targets {
-            for (recipe, count) in targets.batches() {
-                let future = count.saturating_sub(u64::from(active == Some(recipe)));
-                for &(good, units) in recipe.inputs() {
-                    reserve[good as usize] = reserve[good as usize].max(
-                        units
-                            .checked_mul(future)
-                            .ok_or(SimulationError::InventoryOverflow)?,
-                    );
-                }
+            let mut future = targets.projected_order.clone();
+            if let Some(recipe) = active
+                && let Some(index) = future.iter().position(|&planned| planned == recipe)
+            {
+                future.remove(index);
+            }
+            let requirements = production::recipe_requirements(self, &future)?;
+            for (good, units) in requirements.items() {
+                reserve[good as usize] = units;
             }
         }
         if let Some(recipe) = active {
@@ -754,6 +821,10 @@ impl Citizen {
                     .checked_add(units)
                     .ok_or(SimulationError::InventoryOverflow)?;
             }
+        }
+        for good in Good::ALL {
+            reserve[good as usize] = reserve[good as usize]
+                .max(self.production_acquisitions[good as usize].min(self.available_units(good)));
         }
         Ok(reserve)
     }
@@ -779,14 +850,36 @@ impl Citizen {
     }
 
     pub fn purchase_shortages(&self) -> Result<marketplace::ShoppingList, SimulationError> {
-        let mut needed = self.production_ingredient_reserve()?;
-        for good in Good::ALL {
-            let held = self
-                .available_units(good)
-                .checked_add(self.market.listed_units(self.id, good))
-                .ok_or(SimulationError::InventoryOverflow)?;
-            needed[good as usize] = needed[good as usize].saturating_sub(held);
+        let Some(targets) = &self.production_targets else {
+            return Ok(marketplace::ShoppingList::default());
+        };
+        let mut duration = 0;
+        let prefix: Vec<_> = targets
+            .projected_order
+            .iter()
+            .copied()
+            .take_while(|recipe| {
+                if duration >= production::PRODUCTION_BLOCK_MS {
+                    return false;
+                }
+                duration += recipe.duration_ms(self).unwrap_or(0);
+                true
+            })
+            .collect();
+        let threshold = production::recipe_requirements(self, &prefix)?;
+        if threshold
+            .items()
+            .all(|(good, units)| self.usable_owned_units(good) >= units)
+        {
+            return Ok(marketplace::ShoppingList::default());
         }
+        let requirements = production::recipe_requirements(self, &targets.projected_order)?;
+        let needed = std::array::from_fn::<_, { Good::COUNT }, _>(|index| {
+            let good = Good::ALL[index];
+            requirements
+                .units(good)
+                .saturating_sub(self.usable_owned_units(good))
+        });
         marketplace::ShoppingList::new(
             Good::ALL
                 .into_iter()
@@ -906,18 +999,14 @@ impl Citizen {
             return Err(SimulationError::MissingInputs);
         }
         for good in Good::FOOD {
-            citizen
-                .inventory
-                .insert(good, self.units(good) - meal_units[good as usize]);
+            citizen.set_inventory_units(good, self.units(good) - meal_units[good as usize]);
         }
         let drink_units = if matches!(action, CitizenAction::Eat | CitizenAction::Drink) {
             self.drink_units()
         } else {
             0
         };
-        citizen
-            .inventory
-            .insert(Good::Water, self.units(Good::Water) - drink_units);
+        citizen.set_inventory_units(Good::Water, self.units(Good::Water) - drink_units);
         if action == CitizenAction::Eat {
             citizen.last_meal_started_ms = Some(self.market_time_ms);
         }
@@ -1101,7 +1190,7 @@ impl Citizen {
                             .units(Good::FlaxGarment)
                             .checked_sub(1)
                             .ok_or(SimulationError::MissingInputs)?;
-                        citizen.inventory.insert(Good::FlaxGarment, remaining);
+                        citizen.set_inventory_units(Good::FlaxGarment, remaining);
                         citizen.garment_condition = Some(1.0);
                     }
                     CitizenAction::ListExcess => {
@@ -1112,7 +1201,7 @@ impl Citizen {
                                 good,
                                 units,
                             )?;
-                            citizen.inventory.insert(good, citizen.units(good) - units);
+                            citizen.set_inventory_units(good, citizen.units(good) - units);
                         }
                     }
                     CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } => {
@@ -1132,7 +1221,7 @@ impl Citizen {
                         citizen
                             .market
                             .list(citizen.id, citizen.selling_place(), good, units)?;
-                        citizen.inventory.insert(good, citizen.units(good) - units);
+                        citizen.set_inventory_units(good, citizen.units(good) - units);
                     }
                     CitizenAction::Withdraw(good, requested) => {
                         let units = citizen.market.withdraw(
@@ -1145,7 +1234,8 @@ impl Citizen {
                             .units(good)
                             .checked_add(units)
                             .ok_or(SimulationError::WealthOverflow)?;
-                        citizen.inventory.insert(good, stock);
+                        citizen.set_inventory_units(good, stock);
+                        citizen.retain_production_input(good, units)?;
                     }
                     _ => {}
                 }
@@ -1174,7 +1264,7 @@ impl Citizen {
             if self.available_units(good) < units {
                 return Err(SimulationError::MissingInputs);
             }
-            self.inventory.insert(good, stock - units);
+            self.set_inventory_units(good, stock - units);
         }
         for &(good, units) in recipe.outputs() {
             let units = if recipe == production::Recipe::Forage && !prediction {
@@ -1187,7 +1277,7 @@ impl Citizen {
             let next = stock
                 .checked_add(units)
                 .ok_or(SimulationError::InventoryOverflow)?;
-            self.inventory.insert(good, next);
+            self.set_inventory_units(good, next);
         }
         if let Some(targets) = &mut self.production_targets {
             targets.complete(recipe);
@@ -1217,7 +1307,8 @@ impl Citizen {
             .units(good)
             .checked_add(purchase.units)
             .ok_or(SimulationError::WealthOverflow)?;
-        self.inventory.insert(good, stock);
+        self.set_inventory_units(good, stock);
+        self.retain_production_input(good, purchase.units)?;
         self.coins = self
             .coins
             .checked_sub(purchase.coins)
@@ -1546,6 +1637,8 @@ impl Universe {
             },
         );
         citizen.inventory.insert(good, next_carried);
+        citizen.production_acquisitions[good as usize] =
+            citizen.production_acquisitions[good as usize].min(citizen.available_units(good));
         universe
             .storage
             .set_units(StockKey { place, owner, good }, next_stored)?;
@@ -2281,35 +2374,27 @@ mod tests {
     }
 
     #[test]
-    fn alternative_ingredient_reserves_use_each_goods_maximum_requirement() {
+    fn mixed_ingredient_targets_share_one_working_horizon_and_retain_the_basket() {
         let worker = baker_with_targets();
         let targets = worker.production_targets().unwrap();
-        assert_eq!(targets.remaining_batches(production::Recipe::BakeRolls), 12);
-        assert_eq!(
-            targets.remaining_batches(production::Recipe::BakeBerryPie),
-            8
-        );
+        let work: u64 = targets
+            .batches()
+            .map(|(recipe, count)| recipe.duration_ms(&worker).unwrap() * count)
+            .sum();
+        assert!(work >= production::DAILY_CAPACITY_MS);
+        assert!(work < production::DAILY_CAPACITY_MS + 90 * 60_000);
+        assert!(targets.remaining_batches(production::Recipe::BakeRolls) > 0);
+        assert!(targets.remaining_batches(production::Recipe::BakeBerryPie) > 0);
         let reserve = worker.reserved_goods().unwrap();
-        assert_eq!(reserve.units(Good::Flour), 1200);
-        assert_eq!(reserve.units(Good::Wood), 300);
-        assert_eq!(reserve.units(Good::Water), 1600);
-        assert_eq!(reserve.units(Good::Berries), 800);
-        let expected = marketplace::ShoppingList::new(reserve.items().map(|(good, units)| {
-            (
-                good,
-                if good == Good::Water {
-                    units - WATER_RESERVE_GRAMS
-                } else {
-                    units
-                },
-            )
-        }))
-        .unwrap();
-        assert_eq!(worker.purchase_shortages().unwrap(), expected);
+        assert!(reserve.units(Good::Flour) < 1200);
+        let stocked = worker
+            .with_good(Good::Flour, reserve.units(Good::Flour))
+            .unwrap();
+        assert_eq!(stocked.excess_goods().unwrap().units(Good::Flour), 0);
     }
 
     #[test]
-    fn active_ingredients_are_added_after_maximizing_future_alternatives() {
+    fn active_ingredients_remain_reserved_in_addition_to_future_work() {
         let worker = baker_with_targets()
             .with_good(Good::Flour, 100)
             .unwrap()
@@ -2319,35 +2404,137 @@ mod tests {
             .unwrap()
             .with_good(Good::Berries, 100)
             .unwrap();
-        let bread = worker
-            .start_action(CitizenAction::Produce(production::Recipe::BakeRolls))
-            .unwrap();
-        assert_eq!(bread.reserved_goods().unwrap().units(Good::Flour), 1200);
-        let pie = worker
-            .start_action(CitizenAction::Produce(production::Recipe::BakeBerryPie))
-            .unwrap();
-        let reserve = pie.reserved_goods().unwrap();
-        assert_eq!(reserve.units(Good::Flour), 1300);
-        assert_eq!(reserve.units(Good::Wood), 325);
-        assert_eq!(reserve.units(Good::Water), 1650);
-        assert_eq!(reserve.units(Good::Berries), 800);
-        let shortages = pie.purchase_shortages().unwrap();
-        assert_eq!(shortages.units(Good::Flour), 1200);
-        assert_eq!(shortages.units(Good::Berries), 700);
+        let reserve = worker.reserved_goods().unwrap();
+        for recipe in [
+            production::Recipe::BakeRolls,
+            production::Recipe::BakeBerryPie,
+        ] {
+            let active = worker.start_action(CitizenAction::Produce(recipe)).unwrap();
+            assert_eq!(
+                active.reserved_goods().unwrap().units(Good::Flour),
+                reserve.units(Good::Flour)
+            );
+            assert_eq!(active.excess_goods().unwrap().units(Good::Flour), 0);
+        }
     }
 
     #[test]
-    fn shortages_deduct_carried_and_listed_stock_from_alternative_reserves() {
+    fn restock_shortages_deduct_carried_and_withdrawable_listed_stock() {
         let worker = baker_with_targets().with_good(Good::Flour, 500).unwrap();
-        let worker = worker
+        let before = worker.purchase_shortages().unwrap();
+        let listed = worker
             .start_action(CitizenAction::List(Good::Flour, 200))
             .unwrap()
             .advance(TRADE_DURATION_MS)
             .unwrap();
-        assert_eq!(worker.units(Good::Flour), 300);
-        assert_eq!(worker.market().listed_units(worker.id(), Good::Flour), 200);
-        assert_eq!(worker.reserved_goods().unwrap().units(Good::Flour), 1200);
-        assert_eq!(worker.purchase_shortages().unwrap().units(Good::Flour), 700);
+        assert_eq!(listed.units(Good::Flour), 300);
+        assert_eq!(listed.withdrawable_units(Good::Flour), 200);
+        assert_eq!(listed.purchase_shortages().unwrap(), before);
+    }
+
+    #[test]
+    fn acquired_inputs_survive_changed_mix_replanning_and_repeated_excess_sales() {
+        let mut worker = baker_with_targets()
+            .with_good(Good::BreadRoll, 120)
+            .unwrap()
+            .with_good(Good::BerryPie, 16)
+            .unwrap()
+            .with_good(Good::Berries, 5520)
+            .unwrap()
+            .with_good(Good::Wood, 10000)
+            .unwrap()
+            .with_good(Good::Water, 10000)
+            .unwrap();
+        worker.tax_reserved.insert(Good::Berries, 5520);
+        let mut policy = worker.market.caravan_policy();
+        policy.exports[Good::BreadRoll as usize].allowed = false;
+        policy.exports[Good::BerryPie as usize].allowed = false;
+        worker.market.set_caravan_policy(policy).unwrap();
+        worker.refresh_production_targets(true).unwrap();
+        assert_eq!(
+            worker.production_ingredient_reserve().unwrap()[Good::Flour as usize],
+            0
+        );
+        let place = worker.selling_place();
+        worker.position = worker.map.position(place);
+        let eating = worker.start_action(CitizenAction::Eat).unwrap();
+        let mut worker = eating
+            .advance(eating.active_action().unwrap().duration_ms())
+            .unwrap();
+        assert!(
+            production::projected_recipes(&worker, production::DAILY_CAPACITY_MS)
+                .unwrap()
+                .contains(&production::Recipe::BakeRolls)
+        );
+        worker
+            .market
+            .list(AgentId(uuid::Uuid::new_v4()), place, Good::Flour, 1000)
+            .unwrap();
+        let buying = worker
+            .start_action(CitizenAction::BuyAt {
+                place,
+                list: marketplace::ShoppingList::single(Good::Flour, 100),
+            })
+            .unwrap();
+        let mut worker = buying.advance(TRADE_DURATION_MS).unwrap();
+        assert_eq!(worker.production_acquisitions[Good::Flour as usize], 100);
+        worker = worker.with_good(Good::Flour, 300).unwrap();
+        for _ in 0..2 {
+            worker = worker
+                .start_action(CitizenAction::ListExcess)
+                .unwrap()
+                .advance(TRADE_DURATION_MS)
+                .unwrap();
+            assert_eq!(worker.units(Good::Flour), 100);
+            assert_eq!(worker.production_acquisitions[Good::Flour as usize], 100);
+        }
+        worker.refresh_production_targets(true).unwrap();
+        assert_eq!(worker.excess_goods().unwrap().units(Good::Flour), 0);
+        worker = worker.with_good(Good::Wood, 25).unwrap();
+        let workshop = worker
+            .production_place(production::Recipe::BakeRolls)
+            .unwrap();
+        worker.position = worker.map.position(workshop);
+        let working = worker
+            .start_action(CitizenAction::Produce(production::Recipe::BakeRolls))
+            .unwrap();
+        let worker = working
+            .advance(working.active_action().unwrap().duration_ms())
+            .unwrap();
+        assert_eq!(worker.production_acquisitions[Good::Flour as usize], 0);
+        let worker = worker.with_good(Good::Flour, 100).unwrap();
+        assert_eq!(worker.production_acquisitions[Good::Flour as usize], 0);
+    }
+
+    #[test]
+    fn withdrawn_recipe_inputs_are_retained_and_explicit_removal_does_not_revive_them() {
+        let mut worker = baker_with_targets();
+        worker
+            .production_targets
+            .as_mut()
+            .unwrap()
+            .projected_order
+            .clear();
+        let place = worker.selling_place();
+        worker.position = worker.map.position(place);
+        worker
+            .market
+            .list(worker.id(), place, Good::Flour, 100)
+            .unwrap();
+        let worker = worker
+            .start_action(CitizenAction::Withdraw(Good::Flour, 100))
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        assert_eq!(worker.excess_goods().unwrap().units(Good::Flour), 0);
+        let worker = worker
+            .start_action(CitizenAction::List(Good::Flour, 100))
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        assert_eq!(worker.production_acquisitions[Good::Flour as usize], 0);
+        let worker = worker.with_good(Good::Flour, 100).unwrap();
+        assert_eq!(worker.excess_goods().unwrap().units(Good::Flour), 100);
     }
 
     #[test]
