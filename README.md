@@ -210,7 +210,7 @@ Production skills begin qualified with zero practice for each starting professio
 
 ## Farming
 
-Each field has twelve initially empty plots. Wheat, flax, cabbage and hops are planted with one hour of work, grow for four simulation days after planting finishes, and require two half-hour tending jobs: one completed between 24 and 48 hours after planting, the other between 48 and 72 hours. Completion at the deadline counts. Farming skills shorten the work, while growth and tending windows keep their fixed durations.
+Each field has twenty-four initially empty plots. Wheat, flax, cabbage and hops are planted with one hour of work, grow for four simulation days after planting finishes, and require two half-hour tending jobs: one completed between 24 and 48 hours after planting, the other between 48 and 72 hours. Completion at the deadline counts. Farming skills shorten the work, while growth and tending windows keep their fixed durations.
 
 A surviving wheat, flax or hops crop yields 150 g plus 225 g for each completed tending stage: 600 g with both stages and 375 g with one. Cabbage yields eight whole heads with both stages and five with one (its untended standing crop estimate is two). Missing both stages kills the crop. Harvesting takes one hour once the crop reaches 96 hours; ripe crops remain available without decay. Clearing a dead crop takes fifteen minutes. Harvested goods enter inventory and release the plot. Locations shows each plot's crop, expected yield, tending windows and readiness. Citizen actions and plans identify the field and plot being worked.
 

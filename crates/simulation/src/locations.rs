@@ -267,7 +267,7 @@ impl Map {
             if *id != place.id
                 || !place.position.valid()
                 || (place.kind == Location::Field
-                    && place.plots.len() != crate::farming::FIELD_PLOTS)
+                    && ![12, crate::farming::FIELD_PLOTS].contains(&place.plots.len()))
                 || (place.kind != Location::Field && !place.plots.is_empty())
                 || (place.kind == Location::Brewery
                     && (place.batches.len() != crate::brewing::BREWERY_SLOTS

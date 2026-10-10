@@ -5,7 +5,7 @@ use crate::{
     production::{Recipe, Skill, skill_duration_reduction},
 };
 
-pub const FIELD_PLOTS: usize = 12;
+pub const FIELD_PLOTS: usize = 24;
 pub const HOUR_MS: u64 = 3_600_000;
 pub const GROWTH_MS: u64 = 96 * HOUR_MS;
 

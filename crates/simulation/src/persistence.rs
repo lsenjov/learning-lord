@@ -51,9 +51,15 @@ impl Universe {
         if header.version != SAVE_VERSION {
             return Err(SaveError::UnsupportedVersion(header.version));
         }
-        let save: Save<Self> =
+        let mut save: Save<Self> =
             ron::from_str(input).map_err(|error| SaveError::Format(error.to_string()))?;
         save.universe.validate_save()?;
+        // Validate actions before adding plots so invalid legacy indices stay invalid.
+        expand_legacy_fields(&mut save.universe.map);
+        for (_, agent) in save.universe.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            expand_legacy_fields(&mut citizen.map);
+        }
         Ok(save.universe)
     }
 
@@ -325,6 +331,14 @@ impl Citizen {
     }
 }
 
+fn expand_legacy_fields(map: &mut crate::locations::Map) {
+    for (_, place) in map.places_mut().iter_mut() {
+        if place.kind == Location::Field && place.plots.len() == 12 {
+            place.plots.resize(crate::farming::FIELD_PLOTS, None);
+        }
+    }
+}
+
 fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result<(), SaveError> {
     let place = match action {
         CitizenAction::Travel(place)
@@ -464,6 +478,88 @@ mod tests {
             loaded.advance(123_456).unwrap(),
             world.advance(123_456).unwrap()
         );
+    }
+
+    fn resize_fields(world: &mut Universe, count: usize) {
+        let resize = |map: &mut Map| {
+            for (_, place) in map.places_mut().iter_mut() {
+                if place.kind == Location::Field {
+                    place.plots.resize(count, None);
+                }
+            }
+        };
+        resize(&mut world.map);
+        for (_, agent) in world.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            resize(&mut citizen.map);
+        }
+    }
+
+    #[test]
+    fn legacy_fields_expand_without_changing_crops_or_committed_plans() {
+        let (world, id) = Universe::with_map(Map::default())
+            .with_citizen(
+                "Hungry",
+                Citizen::with_needs(80.0, -100.0)
+                    .unwrap()
+                    .with_good(Good::BreadRoll, 10)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (mut world, field) = world.with_property(id, Location::Field).unwrap();
+        world
+            .map
+            .set_crop(
+                field,
+                11,
+                Some(crate::farming::Crop {
+                    kind: CropKind::Cabbage,
+                    planted_at_ms: 0,
+                    tended: [true, false],
+                }),
+            )
+            .unwrap();
+        let mut world = world.start_planning(id).unwrap().advance(1000).unwrap();
+        resize_fields(&mut world, 12);
+        let AgentKind::Citizen(citizen) = &world.agents[&id].kind;
+        assert!(citizen.active_plan().is_some());
+        let loaded = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+        let plots = &loaded.map.place(field).unwrap().plots;
+        assert_eq!(&plots[..12], &world.map.place(field).unwrap().plots);
+        assert_eq!(plots.len(), 24);
+        assert!(plots[12..].iter().all(Option::is_none));
+        resize_fields(&mut world, 24);
+        assert_eq!(loaded, world);
+        round_trip(&loaded);
+        assert_eq!(loaded.advance(1000).unwrap(), world.advance(1000).unwrap());
+    }
+
+    #[test]
+    fn rejects_malformed_fields_and_out_of_range_legacy_actions() {
+        let (world, id) = Universe::with_map(Map::default())
+            .with_citizen("Farmer", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (world, field) = world.with_property(id, Location::Field).unwrap();
+        for count in [0, 11, 13, 23, 25] {
+            let mut invalid = world.clone();
+            resize_fields(&mut invalid, count);
+            assert!(matches!(
+                Universe::from_save_str(&invalid.to_save_string().unwrap()),
+                Err(SaveError::InvalidState(_))
+            ));
+        }
+        let mut invalid = world.start_action(id, CitizenAction::Wait).unwrap();
+        resize_fields(&mut invalid, 12);
+        let AgentKind::Citizen(citizen) = &mut invalid.agents.get_mut(&id).unwrap().kind;
+        citizen.active_action.as_mut().unwrap().action = CitizenAction::Plant {
+            field,
+            plot: 12,
+            crop: CropKind::Wheat,
+        };
+        assert!(matches!(
+            Universe::from_save_str(&invalid.to_save_string().unwrap()),
+            Err(SaveError::InvalidState(_))
+        ));
     }
 
     #[test]

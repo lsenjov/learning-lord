@@ -1101,7 +1101,7 @@ mod tests {
             .values()
             .filter(|place| place.kind == learning_lord_simulation::locations::Location::Field)
         {
-            assert_eq!(place.plots.len(), 12);
+            assert_eq!(place.plots.len(), 24);
             assert!(place.plots.iter().all(Option::is_none));
         }
         let started = Instant::now();
