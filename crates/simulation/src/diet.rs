@@ -298,13 +298,10 @@ impl Citizen {
             })
             .sum();
         let water_value = self.prices.value(Good::Water, drink_units).unwrap_or(0.0);
-        let nutrition = self.food_nutrition();
         let garment_value = self.prices.price(Good::FlaxGarment).unwrap_or(0.0)
             * (self.garment_condition.unwrap_or(0.0) - predicted.garment_condition.unwrap_or(0.0));
         let score = predicted.needs_wellbeing()
             - (food_value + water_value + garment_value) * crate::WEALTH_WELLBEING_PER_COIN
-            + crate::food_reserve_bonus(nutrition - meal_nutrition)
-            - crate::food_reserve_bonus(nutrition)
             + crate::water_reserve_bonus((self.available_units(Good::Water) - drink_units) as f64)
             - crate::water_reserve_bonus(self.available_units(Good::Water) as f64);
         score.is_finite().then_some(score)
@@ -455,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn lightweight_meal_scores_match_full_consumption_predictions() {
+    fn meal_scores_match_consumption_predictions_without_food_reserve_changes() {
         let mut source = Citizen::with_needs(140.0, 20.0)
             .unwrap()
             .with_good(Good::BreadRoll, 10)
@@ -506,7 +503,9 @@ mod tests {
             assert!(
                 (source.meal_wellbeing(meal).unwrap()
                     + source.wealth().unwrap() * crate::WEALTH_WELLBEING_PER_COIN
-                    - predicted.personal_wellbeing().unwrap())
+                    - predicted.personal_wellbeing().unwrap()
+                    + predicted.food_reserve_wellbeing()
+                    - source.food_reserve_wellbeing())
                 .abs()
                     < 1e-10
             );

@@ -4106,6 +4106,64 @@ mod tests {
     }
 
     #[test]
+    fn listing_excess_does_not_create_a_reason_to_withdraw_the_same_rolls() {
+        let mut buyer = reserve_shopper(2299, &[])
+            .with_good(Good::BreadRoll, 53)
+            .unwrap()
+            .with_good(Good::Fish, 3)
+            .unwrap()
+            .with_good(Good::Berries, 16)
+            .unwrap()
+            .with_good(Good::Water, 400)
+            .unwrap();
+        buyer.hunger = -70.25510457735808;
+        buyer.thirst = -64.60994328703555;
+        buyer.tiredness = -11.20994328703681;
+        buyer.diet = [23.798763888888455, 37.92093749999927, 0.0, 0.0];
+        buyer.garment_condition = Some(0.9092504432870485);
+        buyer.market_time_ms = 587857009;
+        buyer.last_meal_started_ms = Some(573617806);
+        for (good, price) in [
+            (Good::BreadRoll, 2.213327433727574),
+            (Good::Fish, 7.464077507330149),
+            (Good::Berries, 109.85952772127864),
+            (Good::Water, 17.271832500000002),
+            (Good::FlaxGarment, 207.2008388340001),
+        ] {
+            buyer.prices = buyer.prices.with_price(good, price).unwrap();
+        }
+        let excess = buyer.excess_goods().unwrap().units(Good::BreadRoll);
+        assert!(excess > 0);
+        let listed = buyer
+            .start_action(CitizenAction::ListExcess)
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        assert_eq!(
+            listed.market().listed_units(listed.id(), Good::BreadRoll),
+            excess
+        );
+        assert!(listed.food_nutrition() >= crate::FOOD_RESERVE_CAP_NUTRITION);
+        let variants = variants_after(
+            &Prediction::new(&listed, Cooldowns::default()),
+            Effect::ReplenishReserves,
+        )
+        .unwrap();
+        assert!(
+            variants
+                .iter()
+                .all(|variant| !variant.actions.iter().any(|action| {
+                    matches!(action, CitizenAction::Withdraw(Good::BreadRoll, _))
+                })),
+            "{:?}",
+            variants
+                .iter()
+                .map(|variant| &variant.actions)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn diet_aware_reserves_buy_variety_with_a_week_of_rolls() {
         let mut buyer = reserve_shopper(
             1000,
@@ -4124,6 +4182,11 @@ mod tests {
         let chosen = best_variant(&buyer, Effect::ReplenishReserves, Cooldowns::default(), 0)
             .unwrap()
             .unwrap();
+        assert!(chosen.actions.iter().any(|action| matches!(
+            action,
+            CitizenAction::BuyAt { list, .. }
+                if list.units(Good::Fish) > 0 || list.units(Good::Cabbage) > 0
+        )));
         assert!(chosen.citizen.units(Good::Fish) > 0 || chosen.citizen.units(Good::Cabbage) > 0);
         assert!(chosen.citizen.food_forecast(6).benefit > buyer.food_forecast(6).benefit);
         assert_eq!(buyer, snapshot);
