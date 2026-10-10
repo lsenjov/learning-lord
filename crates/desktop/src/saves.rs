@@ -25,6 +25,16 @@ impl Default for Saves {
 }
 
 impl Saves {
+    pub fn load_latest(&mut self) -> io::Result<Option<Universe>> {
+        self.files = saved_files(&self.directory)?;
+        let Some(path) = self.files.first() else {
+            return Ok(None);
+        };
+        let universe = read_universe(path)?;
+        self.status = format!("Loaded {}", path.display());
+        Ok(Some(universe))
+    }
+
     pub fn save(&mut self, universe: &Universe, pressed_at: SystemTime) {
         self.status = match write_universe(&self.directory, universe, pressed_at) {
             Ok(path) => format!("Saved {}", path.display()),
@@ -232,6 +242,66 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn startup_without_saves_returns_none() {
+        let directory = directory();
+        let mut saves = Saves {
+            directory: directory.clone(),
+            ..default()
+        };
+        assert_eq!(saves.load_latest().unwrap(), None);
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("unfinished.pending"), "broken").unwrap();
+        assert_eq!(saves.load_latest().unwrap(), None);
+        assert!(saves.status.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_loads_newest_complete_save_and_reports_failure_without_trying_older() {
+        let directory = directory();
+        let original = Universe::default();
+        let older = write_universe(&directory, &original, UNIX_EPOCH).unwrap();
+        let loaded = crate::simulation::new_universe()
+            .unwrap()
+            .advance(1234)
+            .unwrap();
+        let newest =
+            write_universe(&directory, &loaded, UNIX_EPOCH + Duration::from_secs(1)).unwrap();
+        fs::File::open(&older)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(10))
+            .unwrap();
+        fs::File::open(&newest)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(20))
+            .unwrap();
+        fs::write(directory.join("unfinished.pending"), "broken").unwrap();
+        let mut saves = Saves {
+            directory: directory.clone(),
+            ..default()
+        };
+        assert_eq!(saves.load_latest().unwrap(), Some(loaded));
+        assert_eq!(saves.files, vec![newest.clone(), older.clone()]);
+        assert_eq!(saves.status, format!("Loaded {}", newest.display()));
+        fs::write(&newest, "broken").unwrap();
+        assert!(saves.load_latest().is_err());
+        assert_eq!(read_universe(&older).unwrap(), original);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_reports_save_directory_errors() {
+        let directory = directory();
+        fs::write(&directory, "not a directory").unwrap();
+        let mut saves = Saves {
+            directory: directory.clone(),
+            ..default()
+        };
+        assert!(saves.load_latest().is_err());
+        fs::remove_file(directory).unwrap();
     }
 
     #[test]

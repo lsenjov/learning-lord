@@ -91,7 +91,16 @@ enum Readout {
 
 fn main() -> Result<(), String> {
     let rate = simulation::update_rate()?;
-    let universe = simulation::new_universe().map_err(|error| error.to_string())?;
+    let mut saves = saves::Saves::default();
+    let universe = match saves.load_latest() {
+        Ok(Some(universe)) => universe,
+        result => {
+            if let Err(error) = result {
+                saves.status = format!("Auto-load failed: {error}. Started a new universe.");
+            }
+            simulation::new_universe().map_err(|error| error.to_string())?
+        }
+    };
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -131,7 +140,7 @@ fn main() -> Result<(), String> {
     .init_resource::<caravan_controls::State>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
-    .init_resource::<saves::Saves>()
+    .insert_resource(saves)
     .init_resource::<InputFocus>()
     .add_systems(Startup, setup)
     .add_systems(
