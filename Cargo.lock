@@ -2698,6 +2698,7 @@ name = "learning-lord"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "flate2",
  "learning-lord-simulation",
 ]
 

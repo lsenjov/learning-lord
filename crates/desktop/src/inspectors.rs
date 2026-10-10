@@ -21,6 +21,11 @@ pub fn open_windows(
     }
     for kind in windows.take_new() {
         let (title, position, size) = match kind {
+            WindowKind::Saves => (
+                "Load universe",
+                Vec2::new(140.0, 90.0),
+                Vec2::new(700.0, 460.0),
+            ),
             WindowKind::Citizens => ("Citizens", Vec2::new(32.0, 80.0), Vec2::new(960.0, 600.0)),
             WindowKind::Locations => (
                 "Locations · inventory & taxes",
@@ -77,6 +82,7 @@ pub fn open_windows(
                 }
                 WindowKind::Locations => locations::spawn(parent),
                 WindowKind::Market => market::spawn(parent),
+                WindowKind::Saves => crate::saves::spawn(parent),
             },
         );
         let order = windows.register(kind, entity, bounds);
@@ -133,6 +139,34 @@ mod tests {
         app.update();
         app.update();
         app
+    }
+
+    #[test]
+    fn saves_window_uses_the_existing_reopenable_floating_window() {
+        let mut app = app();
+        app.world_mut()
+            .resource_mut::<Windows>()
+            .open(WindowKind::Saves);
+        app.update();
+        let count = app
+            .world_mut()
+            .query::<&crate::floating_ui::FloatingWindow>()
+            .iter(app.world())
+            .filter(|window| window.0 == WindowKind::Saves)
+            .count();
+        assert_eq!(count, 1);
+        app.world_mut()
+            .resource_mut::<Windows>()
+            .open(WindowKind::Saves);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::floating_ui::FloatingWindow>()
+                .iter(app.world())
+                .filter(|window| window.0 == WindowKind::Saves)
+                .count(),
+            1
+        );
     }
 
     #[test]

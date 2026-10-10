@@ -1,13 +1,13 @@
 mod caravan_controls;
 mod citizen_history;
 mod citizens;
-mod debug_export;
 mod floating_ui;
 mod inspectors;
 mod locations;
 mod map_view;
 mod market;
 mod market_history;
+mod saves;
 mod simulation;
 
 use bevy::{
@@ -72,7 +72,8 @@ enum Control {
     Step,
     NextDay,
     Restart,
-    Export,
+    Save,
+    Load,
     Speed(u32),
 }
 
@@ -85,7 +86,7 @@ enum Readout {
     Citizen,
     Error,
     RunButton,
-    ExportStatus,
+    PersistenceStatus,
 }
 
 fn main() -> Result<(), String> {
@@ -130,7 +131,7 @@ fn main() -> Result<(), String> {
     .init_resource::<caravan_controls::State>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
-    .init_resource::<debug_export::DebugExport>()
+    .init_resource::<saves::Saves>()
     .init_resource::<InputFocus>()
     .add_systems(Startup, setup)
     .add_systems(
@@ -163,6 +164,8 @@ fn main() -> Result<(), String> {
                 caravan_controls::refresh,
                 market_history::refresh,
                 market_history::hover,
+                saves::refresh_window,
+                saves::handle_load,
             )
                 .chain(),
         )
@@ -294,14 +297,17 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
                 ..default()
             })
             .with_children(|row| {
-                for (control, label) in [(Control::Export, "Export"), (Control::Restart, "Restart")]
-                {
+                for (control, label) in [
+                    (Control::Save, "Save"),
+                    (Control::Load, "Load"),
+                    (Control::Restart, "Restart"),
+                ] {
                     row.spawn(button(control)).with_children(|b| {
                         b.spawn(text(label, 14.0, TEXT));
                     });
                 }
             });
-            hud.spawn((text("", 13.0, MUTED), Readout::ExportStatus));
+            hud.spawn((text("", 13.0, MUTED), Readout::PersistenceStatus));
         });
     commands
         .spawn((
@@ -370,7 +376,7 @@ fn apply_control(control: Control, controls: &mut Controls, worker: &SimulationW
         return;
     }
     let command = match control {
-        Control::Export => return,
+        Control::Save | Control::Load => return,
         Control::Restart => {
             controls.running = false;
             controls.speed = 1;
@@ -404,8 +410,9 @@ fn handle_controls(
     mut controls: ResMut<Controls>,
     worker: Res<SimulationWorker>,
     snapshot: Res<DisplaySnapshot>,
-    mut exporter: ResMut<debug_export::DebugExport>,
+    persistence: (ResMut<saves::Saves>, Option<ResMut<floating_ui::Windows>>),
 ) {
+    let (mut saves_state, mut windows) = persistence;
     let editing = shortcuts.editing();
     let keyboard = &shortcuts.keyboard;
     if !editing && keyboard.just_pressed(KeyCode::Space) {
@@ -423,8 +430,13 @@ fn handle_controls(
     for (entity, interaction, control) in &buttons {
         if *interaction == Interaction::Pressed {
             focus.set(entity, FocusCause::Pressed);
-            if matches!(control, Control::Export) {
-                exporter.export(&snapshot.0.universe, std::time::SystemTime::now());
+            if matches!(control, Control::Save) {
+                saves_state.save(&snapshot.0.universe, std::time::SystemTime::now());
+            } else if matches!(control, Control::Load) {
+                saves_state.refresh();
+                if let Some(windows) = windows.as_mut() {
+                    windows.open(floating_ui::WindowKind::Saves);
+                }
             } else {
                 apply_control(*control, &mut controls, &worker);
             }
@@ -872,7 +884,7 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
 
 fn refresh_display(
     controls: Res<Controls>,
-    exporter: Res<debug_export::DebugExport>,
+    saves_state: Res<saves::Saves>,
     snapshot: Res<DisplaySnapshot>,
     selection: Res<citizens::Selection>,
     mut readouts: Query<(&Readout, &mut Text)>,
@@ -893,7 +905,7 @@ fn refresh_display(
             ),
             Readout::Citizen => citizen_readout(&snapshot.0.universe, selection.0),
             Readout::Decision => decision_readout(&snapshot.0.universe, selection.0),
-            Readout::ExportStatus => exporter.status.clone(),
+            Readout::PersistenceStatus => saves_state.status.clone(),
             Readout::Error => controls.error.clone().unwrap_or_default(),
             Readout::RunButton => if controls.running { "Pause" } else { "Run" }.into(),
         };
@@ -902,7 +914,7 @@ fn refresh_display(
         }
     }
     for (control, interaction, mut color) in &mut buttons {
-        let disabled = !matches!(control, Control::Export)
+        let disabled = !matches!(control, Control::Save | Control::Load)
             && (controls.restart_pending
                 || controls.error.is_some() && !matches!(control, Control::Restart)
                 || matches!(control, Control::Step) && controls.running);
@@ -936,7 +948,7 @@ mod tests {
             .init_resource::<Controls>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<debug_export::DebugExport>()
+            .init_resource::<saves::Saves>()
             .insert_resource(locations::State::focused_fixture())
             .add_systems(Update, handle_controls);
         app.world_mut()
@@ -966,7 +978,7 @@ mod tests {
             .init_resource::<Controls>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<debug_export::DebugExport>()
+            .init_resource::<saves::Saves>()
             .insert_resource(caravan_controls::State::focused_fixture())
             .add_systems(Update, handle_controls);
         app.world_mut()
@@ -1282,7 +1294,7 @@ mod tests {
             app.insert_resource(DisplaySnapshot(worker.snapshot()))
                 .insert_resource(worker)
                 .init_resource::<Controls>()
-                .init_resource::<debug_export::DebugExport>()
+                .init_resource::<saves::Saves>()
                 .init_resource::<InputFocus>()
                 .init_resource::<ButtonInput<KeyCode>>()
                 .add_systems(Update, handle_controls);
@@ -1334,7 +1346,7 @@ mod tests {
             .init_resource::<caravan_controls::State>()
             .init_resource::<market::OrderDisplay>()
             .init_resource::<market_history::ChartDisplay>()
-            .init_resource::<debug_export::DebugExport>()
+            .init_resource::<saves::Saves>()
             .init_resource::<InputFocus>()
             .init_resource::<ButtonInput<KeyCode>>()
             .add_message::<bevy::input::mouse::MouseWheel>()
@@ -1362,7 +1374,12 @@ mod tests {
                     locations::refresh,
                     caravan_controls::refresh,
                     market_history::refresh,
-                    market_history::hover,
+                    (
+                        market_history::hover,
+                        saves::refresh_window,
+                        saves::handle_load,
+                    )
+                        .chain(),
                 )
                     .chain(),
             );
@@ -1538,31 +1555,32 @@ mod tests {
         assert_eq!(town_text.0, "Town: 0 coins");
 
         let directory = std::env::temp_dir().join(format!(
-            "learning-lord-export-ui-{}-{}",
+            "learning-lord-save-ui-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        app.world_mut()
-            .resource_mut::<debug_export::DebugExport>()
-            .directory = directory.clone();
+        app.world_mut().resource_mut::<saves::Saves>().directory = directory.clone();
         app.world_mut().resource_mut::<Controls>().error = Some("Simulation error".into());
         let expected = app.world().resource::<DisplaySnapshot>().0.universe.clone();
-        let export = buttons
+        let save_button = buttons
             .iter()
-            .find(|(_, control)| matches!(control, Control::Export))
+            .find(|(_, control)| matches!(control, Control::Save))
             .unwrap()
             .0;
         app.world_mut()
-            .entity_mut(export)
+            .entity_mut(save_button)
             .insert(Interaction::Pressed);
         app.update();
         let files: Vec<_> = std::fs::read_dir(&directory).unwrap().collect();
         assert_eq!(files.len(), 1);
-        let saved = std::fs::read_to_string(files[0].as_ref().unwrap().path()).unwrap();
-        assert!(saved.contains(&format!("{expected:#?}")));
+
+        assert_eq!(
+            saves::read_universe(&files[0].as_ref().unwrap().path()).unwrap(),
+            expected
+        );
         assert_eq!(
             app.world().resource::<DisplaySnapshot>().0.universe,
             expected
@@ -1575,10 +1593,10 @@ mod tests {
             .world_mut()
             .query::<(&Readout, &Text)>()
             .iter(app.world())
-            .find(|(readout, _)| matches!(readout, Readout::ExportStatus))
+            .find(|(readout, _)| matches!(readout, Readout::PersistenceStatus))
             .unwrap()
             .1;
-        assert!(status.0.starts_with("Exported "));
+        assert!(status.0.starts_with("Saved "));
         std::fs::remove_dir_all(directory).unwrap();
     }
 

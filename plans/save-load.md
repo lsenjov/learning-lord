@@ -17,4 +17,4 @@
 ## Progress
 
 - Step 1 complete: full-state Serde/RON snapshots preserve active plans and gathering random state; version and state checks reject malformed saves. History retention runs after transaction accounting at 04:00. Simulation unit/integration tests, strict clippy and formatting passed; independent review found no remaining issues.
-- Step 2 in progress: compressed file storage and the Save/Load UI are implemented, with desktop review and final workspace validation pending.
+- Step 2 complete: Save writes unique compressed files; Load lists them in a floating window and restores a paused universe with fresh runtime planning state. Corrupt/truncated gzip, malformed saves, interrupted replacement and stale mutations are covered. Independent desktop review found no issues. All 502 workspace tests passed (four manual probes ignored), strict scoped clippy and formatting passed, and the locked workspace build and a bounded `cargo run --locked` launch succeeded.

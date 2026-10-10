@@ -33,6 +33,7 @@ pub enum Command {
     Step,
     NextDay,
     Restart,
+    Load(Box<Universe>),
     Shutdown,
     Mutate { generation: u64, mutation: Mutation },
 }
@@ -375,6 +376,20 @@ impl WorkerState {
         if matches!(command, Command::Shutdown) {
             return None;
         }
+        if let Command::Load(universe) = command {
+            self.planner.reset();
+            self.generation += 1;
+            self.universe = *universe;
+            self.error = None;
+            self.mutation_error = None;
+            let at = at.max(self.pacing.accounted_at);
+            self.pacing.running = false;
+            self.pacing.speed = 1;
+            self.pacing.accounted_at = at;
+            self.pacing.last_update = at;
+            self.pacing.pending_simulated_ns = 0;
+            return Some(true);
+        }
         if matches!(command, Command::Restart) {
             self.planner.reset();
             self.generation += 1;
@@ -432,6 +447,7 @@ impl WorkerState {
             | Command::NextDay
             | Command::Shutdown
             | Command::Restart
+            | Command::Load(_)
             | Command::Mutate { .. } => {}
         }
         Some(true)
@@ -468,7 +484,7 @@ fn poll_cancellation(
     if deferred.iter().any(|command| {
         matches!(
             command.command,
-            Command::Restart | Command::Shutdown | Command::Mutate { .. }
+            Command::Restart | Command::Load(_) | Command::Shutdown | Command::Mutate { .. }
         )
     }) {
         return true;
@@ -478,7 +494,10 @@ fn poll_cancellation(
             Ok(command) => {
                 let interrupt = matches!(
                     command.command,
-                    Command::Restart | Command::Shutdown | Command::Mutate { .. }
+                    Command::Restart
+                        | Command::Load(_)
+                        | Command::Shutdown
+                        | Command::Mutate { .. }
                 );
                 deferred.push_back(command);
                 if interrupt {
@@ -586,6 +605,47 @@ mod tests {
             mutation_revision: 0,
             generation: 0,
         }
+    }
+
+    #[test]
+    fn load_replaces_universe_cancels_work_and_resets_pacing() {
+        let loaded = new_universe().unwrap().advance(1234).unwrap();
+        let mut state = worker_state(Universe::default());
+        state.pacing.set_speed(100, Duration::ZERO);
+        state.pacing.set_running(true, Duration::ZERO);
+        state.error = Some("previous failure".into());
+        state.mutation_error = Some("previous mutation".into());
+        let (send, receive) = mpsc::channel();
+        send.send(TimedCommand {
+            command: Command::Load(Box::new(loaded.clone())),
+            at: Instant::now(),
+        })
+        .unwrap();
+        let mut deferred = VecDeque::new();
+        assert!(poll_cancellation(&receive, &mut deferred));
+        let command = deferred.pop_front().unwrap();
+        assert!(state.apply(command.command, Duration::from_secs(1)));
+        assert_eq!(state.universe, loaded);
+        assert_eq!(state.generation, 1);
+        assert!(!state.pacing.running);
+        assert_eq!(state.pacing.speed, 1);
+        assert_eq!(state.pacing.pending_simulated_ns, 0);
+        assert_eq!(state.pacing.accounted_at, Duration::from_secs(1));
+        assert!(state.error.is_none());
+        assert!(state.mutation_error.is_none());
+        let mutation_revision = state.mutation_revision;
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::SaveTariffs {
+                    import_basis_points: 55,
+                    export_basis_points: 0,
+                },
+            },
+            Duration::from_secs(2),
+        );
+        assert_eq!(state.mutation_revision, mutation_revision);
+        assert_eq!(state.universe, loaded);
     }
 
     #[test]
@@ -817,8 +877,12 @@ mod tests {
     }
 
     #[test]
-    fn restart_and_shutdown_interrupt_waits_without_publishing_stale_advances() {
-        for interrupt in [Command::Restart, Command::Shutdown] {
+    fn replacement_and_shutdown_interrupt_waits_without_publishing_stale_advances() {
+        for interrupt in [
+            Command::Restart,
+            Command::Load(Box::new(Universe::default().advance(4321).unwrap())),
+            Command::Shutdown,
+        ] {
             let (universe, _) =
                 Universe::with_map(learning_lord_simulation::locations::Map::default())
                     .with_citizen("Ada", Citizen::new(0.0).unwrap())
@@ -857,6 +921,12 @@ mod tests {
                     assert_eq!(outcome, Some(true));
                     assert_eq!(state.generation, 1);
                     assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
+                }
+                Command::Load(universe) => {
+                    assert_eq!(outcome, Some(true));
+                    assert_eq!(state.generation, 1);
+                    assert_eq!(state.universe, *universe);
+                    assert!(!state.pacing.running);
                 }
                 Command::Shutdown => assert_eq!(outcome, None),
                 _ => unreachable!(),

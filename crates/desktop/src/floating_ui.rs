@@ -15,6 +15,7 @@ pub enum WindowKind {
     Citizens,
     Locations,
     Market,
+    Saves,
 }
 
 impl WindowKind {
@@ -345,6 +346,7 @@ impl EditorFocus<'_> {
                 WindowKind::Citizens => crate::market::View::Citizens,
                 WindowKind::Locations => crate::market::View::Locations,
                 WindowKind::Market => crate::market::View::Market,
+                WindowKind::Saves => selection.view,
             };
         }
     }

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+flate2 = "1"
 learning-lord-simulation = { path = "../simulation" }
 bevy = { version = "0.19.1", default-features = false, features = [
     "2d_bevy_render",
