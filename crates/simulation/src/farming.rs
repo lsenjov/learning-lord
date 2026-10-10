@@ -227,6 +227,100 @@ impl CitizenAction {
     }
 }
 
+impl Citizen {
+    #[cfg(test)]
+    fn next_crop_kind(&self) -> Option<CropKind> {
+        crate::production::ranked_recipes(self)
+            .into_iter()
+            .find_map(crate::production::crop_kind)
+    }
+
+    pub(crate) fn farming_actions(&self) -> Vec<CitizenAction> {
+        self.farming_actions_for(None)
+    }
+
+    pub(crate) fn farming_actions_at(&self, field: PlaceId) -> Vec<CitizenAction> {
+        self.farming_actions_for(Some(field))
+    }
+
+    fn farming_actions_for(&self, field: Option<PlaceId>) -> Vec<CitizenAction> {
+        if self.skill_practice_ms(Skill::Farming).is_none() {
+            return Vec::new();
+        }
+        let mut fields: Vec<_> = self
+            .owned_properties()
+            .filter(|place| !place.plots.is_empty() && field.is_none_or(|field| field == place.id))
+            .collect();
+        fields.sort_by_key(|place| place.id.0);
+        let mut existing = Vec::new();
+        let mut empty = Vec::new();
+        for field in fields {
+            let travel_ms = (self.position.distance(field.position)
+                * crate::locations::WALK_MS_PER_METRE)
+                .ceil() as u64;
+            let mut arrived = self.clone();
+            let Some(arrival_ms) = self.market_time_ms.checked_add(travel_ms) else {
+                continue;
+            };
+            arrived.market_time_ms = arrival_ms;
+            for (plot, crop) in field.plots.iter().enumerate() {
+                if let Some(crop) = crop {
+                    let actions = [
+                        CitizenAction::Tend {
+                            field: field.id,
+                            plot,
+                            stage: 0,
+                        },
+                        CitizenAction::Tend {
+                            field: field.id,
+                            plot,
+                            stage: 1,
+                        },
+                        CitizenAction::Harvest {
+                            field: field.id,
+                            plot,
+                        },
+                        CitizenAction::Clear {
+                            field: field.id,
+                            plot,
+                        },
+                    ];
+                    for action in actions {
+                        if arrived.farming_duration_ms(action).is_ok() {
+                            let deadline = if let CitizenAction::Tend { stage, .. } = action {
+                                crop.tend_window(stage).unwrap().1
+                            } else {
+                                u64::MAX
+                            };
+                            existing.push((deadline, action));
+                        }
+                    }
+                } else {
+                    empty.push((field.id, plot, arrival_ms));
+                }
+            }
+        }
+        existing.sort_by_key(|(deadline, _)| *deadline);
+        if !existing.is_empty() {
+            return existing.into_iter().map(|(_, action)| action).collect();
+        }
+        for (field, plot, arrival_ms) in empty {
+            let mut arrived = self.clone();
+            arrived.market_time_ms = arrival_ms;
+            let actions: Vec<_> = crate::production::ranked_recipes_at(self, Some(field))
+                .into_iter()
+                .filter_map(crate::production::crop_kind)
+                .map(|crop| CitizenAction::Plant { field, plot, crop })
+                .filter(|action| arrived.farming_duration_ms(*action).is_ok())
+                .collect();
+            if !actions.is_empty() {
+                return actions;
+            }
+        }
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn planning_candidates_commit_crop_work_and_respect_future_capacity() {
+    fn planning_candidates_commit_crop_work_and_preserve_tending() {
         let (citizen, field) = farmer();
         let citizen = citizen
             .advance(6 * HOUR_MS)
@@ -303,8 +397,6 @@ mod tests {
             assert!(planted <= FIELD_PLOTS);
         }
         assert!(planted > 0);
-        assert!(planted < FIELD_PLOTS);
-        assert!(cropped.production_work_today_ms() <= crate::production::DAILY_CAPACITY_MS);
         let now = cropped.market_time_ms;
         let first = cropped.crop(field, 0).unwrap().unwrap();
         cropped = cropped
@@ -438,10 +530,9 @@ mod tests {
     }
 
     #[test]
-    fn deadline_capacity_rejects_overlapping_work_and_time_overflow() {
+    fn overlapping_future_tending_does_not_prevent_planting() {
         let (mut citizen, field) = farmer();
-        citizen.market_time_ms = 48 * HOUR_MS - HOUR_MS / 2;
-        for plot in 0..2 {
+        for plot in 0..FIELD_PLOTS - 1 {
             citizen
                 .map
                 .set_crop(
@@ -455,9 +546,70 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(!citizen.can_support_plant(field));
+        assert!(
+            citizen
+                .farming_actions()
+                .iter()
+                .any(|action| { matches!(action, CitizenAction::Plant { .. }) })
+        );
+    }
+
+    #[test]
+    fn farming_actions_remain_available_after_daily_work_target() {
+        let (mut citizen, field) = farmer();
+        citizen.work_period = crate::production::work_period(citizen.market_time_ms);
+        citizen.work_ms = crate::production::DAILY_CAPACITY_MS + HOUR_MS;
+        assert!(citizen.production_work_today_ms() > crate::production::DAILY_CAPACITY_MS);
+        assert!(
+            citizen
+                .farming_actions()
+                .iter()
+                .any(|action| { matches!(action, CitizenAction::Plant { .. }) })
+        );
+        for (now, tended, expected) in [
+            (
+                24 * HOUR_MS,
+                [false, false],
+                CitizenAction::Tend {
+                    field,
+                    plot: 0,
+                    stage: 0,
+                },
+            ),
+            (
+                96 * HOUR_MS,
+                [true, true],
+                CitizenAction::Harvest { field, plot: 0 },
+            ),
+            (
+                96 * HOUR_MS,
+                [false, false],
+                CitizenAction::Clear { field, plot: 0 },
+            ),
+        ] {
+            citizen.market_time_ms = now;
+            citizen.work_period = crate::production::work_period(now);
+            citizen
+                .map
+                .set_crop(
+                    field,
+                    0,
+                    Some(Crop {
+                        kind: CropKind::Wheat,
+                        planted_at_ms: 0,
+                        tended,
+                    }),
+                )
+                .unwrap();
+            assert!(citizen.production_work_today_ms() > crate::production::DAILY_CAPACITY_MS);
+            assert!(citizen.farming_actions().contains(&expected));
+        }
+    }
+
+    #[test]
+    fn planting_preserves_time_overflow_safeguards() {
+        let (mut citizen, _) = farmer();
         citizen.market_time_ms = u64::MAX - HOUR_MS - 1;
-        assert!(!citizen.can_support_plant(field));
         assert!(
             citizen
                 .farming_actions()
@@ -653,218 +805,5 @@ mod tests {
                 .abs()
                 < 1e-9
         );
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Labor {
-    release: u64,
-    deadline: u64,
-    duration: u64,
-}
-
-impl Citizen {
-    fn farm_work_ms(&self, base: u64) -> Option<u64> {
-        let practice = self.skill_practice_ms(Skill::Farming)?;
-        Some((base as f64 * (1.0 - skill_duration_reduction(practice))).ceil() as u64)
-    }
-
-    #[cfg(test)]
-    fn next_crop_kind(&self) -> Option<CropKind> {
-        crate::production::ranked_recipes(self)
-            .into_iter()
-            .find_map(crate::production::crop_kind)
-    }
-
-    fn can_support_plant(&self, field: PlaceId) -> bool {
-        let Some(plant_ms) = self.farm_work_ms(HOUR_MS) else {
-            return false;
-        };
-        let Some(tend_ms) = self.farm_work_ms(HOUR_MS / 2) else {
-            return false;
-        };
-        let now = self.market_time_ms;
-        let travel_ms = (self.position.distance(self.map.position(field))
-            * crate::locations::WALK_MS_PER_METRE)
-            .ceil() as u64;
-        let Some(planted_at_ms) = now
-            .checked_add(travel_ms)
-            .and_then(|time| time.checked_add(plant_ms))
-        else {
-            return false;
-        };
-        if planted_at_ms.checked_add(GROWTH_MS).is_none() {
-            return false;
-        }
-        let mut tasks = Vec::new();
-        for place in self.owned_properties() {
-            for crop in place
-                .plots
-                .iter()
-                .flatten()
-                .copied()
-                .chain((place.id == field).then_some(Crop {
-                    kind: CropKind::Wheat,
-                    planted_at_ms,
-                    tended: [false; 2],
-                }))
-            {
-                if crop.status(now) == CropStatus::Dead {
-                    continue;
-                }
-                for stage in 0..2 {
-                    if !crop.tended[stage]
-                        && let Some((release, deadline)) = crop.tend_window(stage)
-                        && deadline >= now
-                    {
-                        tasks.push(Labor {
-                            release: release.max(now),
-                            deadline,
-                            duration: tend_ms,
-                        });
-                    }
-                }
-                let release = crop.ready_at_ms().max(now);
-                tasks.push(Labor {
-                    release,
-                    deadline: release.saturating_add(crate::marketplace::DAY_MS),
-                    duration: plant_ms,
-                });
-            }
-        }
-        tasks.push(Labor {
-            release: now,
-            deadline: planted_at_ms,
-            duration: travel_ms + plant_ms,
-        });
-        tasks.sort_by_key(|task| (task.deadline, task.release));
-        let first_day = crate::production::work_period(now);
-        let mut used = std::collections::BTreeMap::new();
-        used.insert(first_day, self.production_work_today_ms());
-        let mut fields: Vec<_> = self
-            .owned_properties()
-            .filter(|place| !place.plots.is_empty())
-            .collect();
-        fields.sort_by_key(|place| place.id.0);
-        let mut position = self.map.position(self.home);
-        let mut distance = 0.0;
-        for field in fields {
-            distance += position.distance(field.position);
-            position = field.position;
-        }
-        distance += position.distance(self.map.position(self.home));
-        let commute = (distance * crate::locations::WALK_MS_PER_METRE).ceil() as u64;
-        // Leave time for food, trading, and the daily journey home before reserving crop labor.
-        let capacity = crate::production::DAILY_CAPACITY_MS.saturating_sub(HOUR_MS + commute);
-        let mut cursor = now;
-        for task in tasks {
-            let mut remaining = task.duration;
-            let mut time = task.release.max(cursor);
-            while remaining > 0 && time < task.deadline {
-                let day = crate::production::work_period(time);
-                let day_end = crate::marketplace::UPDATE_TIME_MS
-                    .saturating_add(day.saturating_mul(crate::marketplace::DAY_MS))
-                    .min(task.deadline);
-                let spent = used.entry(day).or_insert(0_u64);
-                let available = capacity.saturating_sub(*spent).min(day_end - time);
-                let allocated = remaining.min(available);
-                *spent += allocated;
-                remaining -= allocated;
-                time = if remaining == 0 {
-                    time + allocated
-                } else {
-                    day_end
-                };
-            }
-            if remaining > 0 {
-                return false;
-            }
-            cursor = time;
-        }
-        true
-    }
-
-    pub(crate) fn farming_actions(&self) -> Vec<CitizenAction> {
-        self.farming_actions_for(None)
-    }
-
-    pub(crate) fn farming_actions_at(&self, field: PlaceId) -> Vec<CitizenAction> {
-        self.farming_actions_for(Some(field))
-    }
-
-    fn farming_actions_for(&self, field: Option<PlaceId>) -> Vec<CitizenAction> {
-        if self.skill_practice_ms(Skill::Farming).is_none() {
-            return Vec::new();
-        }
-        let mut fields: Vec<_> = self
-            .owned_properties()
-            .filter(|place| !place.plots.is_empty() && field.is_none_or(|field| field == place.id))
-            .collect();
-        fields.sort_by_key(|place| place.id.0);
-        let mut existing = Vec::new();
-        let mut empty = Vec::new();
-        for field in fields {
-            let travel_ms = (self.position.distance(field.position)
-                * crate::locations::WALK_MS_PER_METRE)
-                .ceil() as u64;
-            let mut arrived = self.clone();
-            arrived.market_time_ms = self.market_time_ms.saturating_add(travel_ms);
-            for (plot, crop) in field.plots.iter().enumerate() {
-                if let Some(crop) = crop {
-                    let actions = [
-                        CitizenAction::Tend {
-                            field: field.id,
-                            plot,
-                            stage: 0,
-                        },
-                        CitizenAction::Tend {
-                            field: field.id,
-                            plot,
-                            stage: 1,
-                        },
-                        CitizenAction::Harvest {
-                            field: field.id,
-                            plot,
-                        },
-                        CitizenAction::Clear {
-                            field: field.id,
-                            plot,
-                        },
-                    ];
-                    for action in actions {
-                        if let Ok(duration) = arrived.farming_duration_ms(action)
-                            && self
-                                .production_work_today_ms()
-                                .saturating_add(travel_ms)
-                                .saturating_add(duration)
-                                <= crate::production::DAILY_CAPACITY_MS
-                        {
-                            let deadline = if let CitizenAction::Tend { stage, .. } = action {
-                                crop.tend_window(stage).unwrap().1
-                            } else {
-                                u64::MAX
-                            };
-                            existing.push((deadline, action));
-                        }
-                    }
-                } else {
-                    empty.push((field.id, plot));
-                }
-            }
-        }
-        existing.sort_by_key(|(deadline, _)| *deadline);
-        if !existing.is_empty() {
-            return existing.into_iter().map(|(_, action)| action).collect();
-        }
-        for (field, plot) in empty {
-            if self.can_support_plant(field) {
-                return crate::production::ranked_recipes_at(self, Some(field))
-                    .into_iter()
-                    .filter_map(crate::production::crop_kind)
-                    .map(|crop| CitizenAction::Plant { field, plot, crop })
-                    .collect();
-            }
-        }
-        Vec::new()
     }
 }

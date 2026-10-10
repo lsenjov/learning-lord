@@ -19,3 +19,5 @@ Step two is complete: Locations shows all twelve plots with crop status, expecte
 - All 100 desktop tests pass. The existing town production and market transaction test now runs ten days, covering the initial seven-day food reserve and later food trades while retaining every production and trade assertion.
 - Desktop clippy and workspace formatting checks pass.
 - Native Bevy screenshots were inspected at a 1,100 by 620 logical window size: `/tmp/ll-crops-native-0.png` shows growing, ready, dead and empty plots; `/tmp/ll-crops-native-1.png` shows the remaining plots through twelve plus stock, transfers and taxes; `/tmp/ll-crops-native-2.png` shows crop action labels in the citizen sidebar and details, plus starting food. The isolated visual harness was stopped. Unsupported separators in the new plot text were replaced with ASCII characters.
+
+Follow-up: future crop-care capacity reservations and the daily farming work cutoff have been removed for now. Crop deadlines, action eligibility, and twelve-hour production stock estimates remain in place.
