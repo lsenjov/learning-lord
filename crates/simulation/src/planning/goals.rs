@@ -9,7 +9,7 @@ pub const TRADE_PLAN_COOLDOWN_MS: u64 = 2 * 60 * 60 * 1000;
 const WATER_RESERVE_REPLENISH_GRAMS: crate::Quantity = 200;
 const DRINK_PLAN_MIN_THIRST: f64 = -50.0;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {
     Food,
     Coins,

@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 pub const REPLAN_MIN_NUTRITION: f64 = 20.0;
 pub const EAT_PLAN_COOLDOWN_MS: u64 = 4 * 60 * 60 * 1000;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct GoalForecast {
     pub actions: Vec<CitizenAction>,
     pub duration_ms: u64,
@@ -16,7 +16,7 @@ pub struct GoalForecast {
     pub future_food_benefit: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ProductionLocationForecast {
     pub place: crate::locations::PlaceId,
     pub location_name: String,
@@ -25,7 +25,7 @@ pub struct ProductionLocationForecast {
     pub selected: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct GoalDecision {
     pub goal: Effect,
     pub forecast: Option<GoalForecast>,
@@ -40,7 +40,7 @@ impl GoalDecision {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ProductionInputDecision {
     pub good: crate::marketplace::Good,
     pub required_units: crate::Quantity,
@@ -48,7 +48,7 @@ pub struct ProductionInputDecision {
     pub supply_shortfall: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ProductionDecision {
     pub recipe: crate::production::Recipe,
     pub profit_per_hour: Option<f64>,
@@ -102,7 +102,7 @@ impl ProductionDecision {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct PlanningDecision {
     pub candidates: Vec<GoalDecision>,
     pub selected_goal: Effect,
@@ -112,13 +112,13 @@ pub struct PlanningDecision {
 }
 
 /// A chosen goal and its primitive actions, including prerequisites.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct PlanGoal {
     pub goal: Effect,
     pub actions: std::ops::Range<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Plan {
     actions: Vec<CitizenAction>,
     action_durations_ms: Vec<u64>,
@@ -159,7 +159,7 @@ impl Plan {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ActivePlan {
     plan: Plan,
     action_index: usize,
@@ -675,6 +675,22 @@ fn evaluate_goal(
     ))
 }
 
+impl ActivePlan {
+    pub(crate) fn validate_save(&self) -> Result<(), crate::persistence::SaveError> {
+        use crate::persistence::SaveError;
+        if self.action_index >= self.plan.actions.len()
+            || self.plan.actions.len() != self.plan.action_durations_ms.len()
+            || !self.plan.average_wellbeing.is_finite()
+            || self.plan.goals.iter().any(|goal| {
+                goal.actions.start >= goal.actions.end || goal.actions.end > self.plan.actions.len()
+            })
+        {
+            return Err(SaveError::InvalidState("invalid active plan"));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
     let production = citizen
@@ -816,7 +832,7 @@ pub(crate) fn executing_fixture(citizen: &Citizen, actions: Vec<CitizenAction>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{SeedableRng, rngs::SmallRng};
+    use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
 
     const MINUTE_MS: u64 = 60_000;
     const TWO_HOURS_MS: u64 = 2 * 60 * MINUTE_MS;
@@ -1862,7 +1878,7 @@ mod tests {
             .unwrap();
         let (source, actual) = (0..100)
             .find_map(|seed| {
-                citizen.forage_rng = SmallRng::seed_from_u64(seed);
+                citizen.forage_rng = Xoshiro256PlusPlus::seed_from_u64(seed);
                 let actual = citizen
                     .start_action(CitizenAction::Produce(crate::production::Recipe::Forage))
                     .unwrap()

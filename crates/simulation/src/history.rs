@@ -7,7 +7,7 @@ use imbl::Vector;
 
 pub const COMPLETED_DAYS: usize = 30;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct ActivityTimes {
     pub production_ms: u64,
     pub travel_ms: u64,
@@ -18,7 +18,7 @@ pub struct ActivityTimes {
     pub idle_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct DailyCitizenHistory {
     pub start_ms: u64,
     pub end_ms: u64,
@@ -72,13 +72,50 @@ impl DailyCitizenHistory {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct CitizenHistory {
     pub current: DailyCitizenHistory,
     pub completed: Vector<DailyCitizenHistory>,
 }
 
 impl CitizenHistory {
+    pub(crate) fn validate_save(&self, now: u64) -> Result<(), crate::persistence::SaveError> {
+        use crate::persistence::SaveError;
+        for day in std::iter::once(&self.current).chain(self.completed.iter()) {
+            let activity = day.activity;
+            let total = [
+                activity.production_ms,
+                activity.travel_ms,
+                activity.sleep_ms,
+                activity.trade_ms,
+                activity.eating_ms,
+                activity.drinking_ms,
+                activity.idle_ms,
+            ]
+            .into_iter()
+            .try_fold(0_u64, u64::checked_add);
+            if day.end_ms < day.start_ms
+                || day.end_ms > now
+                || day.elapsed_ms != day.end_ms - day.start_ms
+                || day.elapsed_ms > crate::marketplace::DAY_MS
+                || total != Some(day.elapsed_ms)
+                || day.food_goal_ms > day.elapsed_ms
+                || ![
+                    day.worst_hunger,
+                    day.worst_thirst,
+                    day.worst_tiredness,
+                    day.worst_clothing_need,
+                    day.mean_wellbeing,
+                ]
+                .into_iter()
+                .all(f64::is_finite)
+            {
+                return Err(SaveError::InvalidState("invalid citizen history"));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(now: u64, citizen: &Citizen) -> Self {
         Self {
             current: DailyCitizenHistory::new(now, citizen),

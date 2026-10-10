@@ -5,13 +5,14 @@ use crate::{
 };
 use imbl::{HashMap, OrdMap, Vector};
 
-pub const TAX_HISTORY_LIMIT: usize = 4096;
 const RATE_SCALE: u128 = 10_000;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
 pub struct TaxRuleId(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TaxRate(u16);
 
 impl TaxRate {
@@ -27,19 +28,19 @@ impl TaxRate {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaxScope {
     Location(PlaceId),
     LocationType(Location),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaxPayer {
     Agent(AgentId),
     LocationOwner,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum TaxKind {
     Socage { rates: HashMap<Good, TaxRate> },
     Asset { rates: HashMap<Good, TaxRate> },
@@ -47,7 +48,7 @@ pub enum TaxKind {
     FlatFee { payer: TaxPayer, coins: Coins },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct TaxRule {
     pub id: TaxRuleId,
     pub scope: TaxScope,
@@ -56,7 +57,7 @@ pub struct TaxRule {
     pub active: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum TaxAmount {
     Reservation {
         assessed: Quantity,
@@ -75,7 +76,7 @@ pub enum TaxAmount {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct TaxReceipt {
     pub time_ms: u64,
     pub rule: TaxRuleId,
@@ -85,7 +86,7 @@ pub struct TaxReceipt {
     pub amount: TaxAmount,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct AccountKey {
     pub place: PlaceId,
     pub rule: TaxRuleId,
@@ -93,7 +94,7 @@ pub(crate) struct AccountKey {
     pub good: Option<Good>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub(crate) struct TaxAccount {
     pub goods_due_scaled: u128,
     pub income_remainder: u128,
@@ -148,13 +149,13 @@ impl TaxAccount {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ReservationStock {
     Carried(AgentId, Good),
     Stored(StockKey),
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Taxation {
     pub rules: OrdMap<TaxRuleId, TaxRule>,
     pub reservations: HashMap<ReservationStock, HashMap<AccountKey, Quantity>>,
@@ -167,7 +168,15 @@ pub(crate) struct Taxation {
 impl Taxation {
     pub fn record(&mut self, receipt: TaxReceipt) {
         self.history.push_back(receipt);
-        if self.history.len() > TAX_HISTORY_LIMIT {
+    }
+
+    pub(crate) fn prune_history(&mut self, now: u64) {
+        let cutoff = now.saturating_sub(30 * crate::marketplace::DAY_MS);
+        while self
+            .history
+            .front()
+            .is_some_and(|receipt| receipt.time_ms < cutoff)
+        {
             self.history.pop_front();
         }
     }

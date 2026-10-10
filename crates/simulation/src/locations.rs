@@ -6,7 +6,7 @@ use uuid::Uuid;
 pub const MAP_HALF_SIZE_METRES: f64 = 1000.0;
 pub const WALK_MS_PER_METRE: f64 = 600.0;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
@@ -24,10 +24,10 @@ impl Position {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PlaceId(pub Uuid);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Location {
     Home,
     Field,
@@ -64,7 +64,7 @@ impl Location {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Place {
     pub id: PlaceId,
     pub kind: Location,
@@ -74,7 +74,7 @@ pub struct Place {
     pub plots: Vec<Option<crate::farming::Crop>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Map {
     places: HashMap<PlaceId, Place>,
     random_positions: bool,
@@ -246,5 +246,36 @@ impl Map {
             },
         );
         Ok((map, id))
+    }
+}
+
+impl Map {
+    pub(crate) fn validate_save(&self) -> Result<(), crate::persistence::SaveError> {
+        use crate::persistence::SaveError;
+        for (id, place) in &self.places {
+            if *id != place.id
+                || !place.position.valid()
+                || (place.kind == Location::Field
+                    && place.plots.len() != crate::farming::FIELD_PLOTS)
+                || (place.kind != Location::Field && !place.plots.is_empty())
+            {
+                return Err(SaveError::InvalidState("invalid map place"));
+            }
+        }
+        for kind in [
+            Location::Forest,
+            Location::River,
+            Location::Market,
+            Location::Warehouse,
+        ] {
+            if !self
+                .places
+                .values()
+                .any(|place| place.kind == kind && place.owner.is_none())
+            {
+                return Err(SaveError::InvalidState("missing public place"));
+            }
+        }
+        Ok(())
     }
 }

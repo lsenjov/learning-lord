@@ -6,7 +6,7 @@ pub const UPDATE_TIME_MS: u64 = 4 * 60 * 60 * 1000;
 pub const MAX_DAILY_PRICE_CHANGE: f64 = 0.10;
 pub const MIN_QUOTED_PRICE: f64 = 0.01;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Good {
     Berries,
     Wheat,
@@ -138,7 +138,7 @@ impl Good {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExportPolicy {
     pub allowed: bool,
     pub minimum_reserve: Quantity,
@@ -153,7 +153,7 @@ impl Default for ExportPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaravanPolicy {
     pub exports: [ExportPolicy; Good::COUNT],
     pub import_tariff_basis_points: u16,
@@ -182,7 +182,7 @@ impl CaravanPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct ShoppingList {
     units: [Quantity; Good::COUNT],
 }
@@ -225,7 +225,7 @@ impl ShoppingList {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Prices {
     quoted_price: [f64; Good::COUNT],
 }
@@ -300,10 +300,10 @@ impl Prices {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct OrderId(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MarketParty {
     Citizen(AgentId),
     Caravan,
@@ -318,7 +318,7 @@ impl MarketParty {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct SellOrder {
     pub id: OrderId,
     pub seller: MarketParty,
@@ -328,7 +328,7 @@ pub struct SellOrder {
     pub quoted_price: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Trade {
     pub place: PlaceId,
     pub time_ms: u64,
@@ -342,7 +342,7 @@ pub struct Trade {
     pub recipient_coins: Coins,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct DailyMarketActivity {
     pub start_ms: u64,
     pub end_ms: u64,
@@ -366,7 +366,7 @@ pub struct DailyMarketActivity {
     pub price_after: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct GoodActivity {
     pub traded_coins: Coins,
     pub caravan_listed_units: Quantity,
@@ -385,14 +385,14 @@ pub struct GoodActivity {
     pub affordable_demand_units: Quantity,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct MarketPeriod {
     pub start_ms: u64,
     pub end_ms: u64,
     pub goods: [GoodActivity; Good::COUNT],
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Market {
     pub prices: Prices,
     policy: CaravanPolicy,
@@ -1332,11 +1332,168 @@ pub(crate) fn until_update(time_ms: u64) -> u64 {
     }
 }
 
+impl Market {
+    pub(crate) fn prune_history(&mut self, now: u64) {
+        let trades_cutoff = now.saturating_sub(30 * DAY_MS);
+        while self
+            .trades
+            .front()
+            .is_some_and(|trade| trade.time_ms < trades_cutoff)
+        {
+            self.trades.pop_front();
+        }
+        let history_cutoff = now.saturating_sub(365 * DAY_MS);
+        while self
+            .history
+            .front()
+            .is_some_and(|day| day.start_ms < history_cutoff)
+        {
+            self.history.pop_front();
+        }
+    }
+
+    pub(crate) fn validate_save(&self) -> Result<(), crate::persistence::SaveError> {
+        use crate::persistence::SaveError;
+        self.policy
+            .validate()
+            .map_err(|_| SaveError::InvalidState("invalid caravan policy"))?;
+        if self
+            .import_tariff_carry
+            .into_iter()
+            .chain(self.export_tariff_carry)
+            .any(|carry| carry >= 10_000)
+            || self.orders.iter().any(|(id, order)| {
+                *id != order.id
+                    || id.0 >= self.next_order_id
+                    || !order.quoted_price.is_finite()
+                    || order.quoted_price < MIN_QUOTED_PRICE
+            })
+        {
+            return Err(SaveError::InvalidState(
+                "invalid market order or tariff carry",
+            ));
+        }
+        for good in Good::ALL {
+            self.prices
+                .with_price(good, self.prices.price(good).unwrap_or(f64::NAN))
+                .map_err(|_| SaveError::InvalidState("invalid market price"))?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
+
+    #[test]
+    fn daily_pruning_accounts_for_new_trades_before_removing_old_ones() {
+        use crate::locations::{Location, Map};
+        use crate::{AgentKind, Citizen, CitizenAction, TRADE_DURATION_MS, Universe};
+        let boundary = UPDATE_TIME_MS + 31 * DAY_MS;
+        let mut world = Universe::with_map(Map::default());
+        world.current_time_ms = boundary - 2 * TRADE_DURATION_MS;
+        world.market = Market::starting_at(world.current_time_ms);
+        let (world, seller) = world
+            .with_citizen(
+                "Seller",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_good(Good::BreadRoll, 10)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (world, buyer) = world
+            .with_citizen(
+                "Buyer",
+                Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+            )
+            .unwrap();
+        let market = world.map().public_place(Location::Market);
+        let mut world = world
+            .start_action(seller, CitizenAction::Travel(market))
+            .unwrap()
+            .start_action(seller, CitizenAction::List(Good::BreadRoll, 5))
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        world.market.trades.push_back(Trade {
+            place: market,
+            time_ms: 0,
+            buyer: MarketParty::Citizen(buyer),
+            seller: MarketParty::Citizen(seller),
+            good: Good::BreadRoll,
+            units: 1,
+            coins: 1,
+            quoted_price: 1.0,
+            tariff_coins: 0,
+            recipient_coins: 1,
+        });
+        let world = world
+            .start_action(buyer, CitizenAction::Travel(market))
+            .unwrap()
+            .start_action(
+                buyer,
+                CitizenAction::Buy(ShoppingList::single(Good::BreadRoll, 2)),
+            )
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        assert_eq!(world.current_time_ms(), boundary);
+        assert!(world.market.trades.iter().all(|trade| trade.time_ms > 0));
+        assert_eq!(
+            world
+                .citizen_history(buyer)
+                .unwrap()
+                .completed
+                .back()
+                .unwrap()
+                .bought[Good::BreadRoll as usize],
+            2
+        );
+        assert_eq!(
+            world
+                .citizen_history(seller)
+                .unwrap()
+                .completed
+                .back()
+                .unwrap()
+                .sold[Good::BreadRoll as usize],
+            2
+        );
+        let AgentKind::Citizen(citizen) = &world.agents[&buyer].kind;
+        assert_eq!(citizen.units(Good::BreadRoll), 2);
+    }
+
+    #[test]
+    fn history_retention_keeps_thirty_days_of_trades_and_365_complete_market_days() {
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market.list(seller, PLACE, Good::BreadRoll, 1000).unwrap();
+        for day in 0..=366 {
+            let boundary = UPDATE_TIME_MS + day * DAY_MS;
+            market
+                .purchase(buyer, PLACE, (Good::BreadRoll, 1), 1000, boundary, true)
+                .unwrap();
+            market.update(boundary).unwrap();
+            market.prune_history(boundary);
+        }
+        let now = UPDATE_TIME_MS + 366 * DAY_MS;
+        assert_eq!(market.trades.len(), 31);
+        assert_eq!(market.trades.front().unwrap().time_ms, now - 30 * DAY_MS);
+        assert_eq!(market.trades.back().unwrap().time_ms, now);
+        assert_eq!(market.history.len(), 365);
+        assert_eq!(market.history.front().unwrap().start_ms, now - 365 * DAY_MS);
+        assert_eq!(market.history.back().unwrap().end_ms, now);
+        assert!(market.listed_units(seller, Good::BreadRoll) > 0);
+        assert_eq!(
+            market.previous_period().unwrap().goods[Good::BreadRoll as usize].traded_units,
+            1
+        );
+    }
 
     #[test]
     fn universal_goods_block_caravans_and_keep_local_orders_purchasable() {

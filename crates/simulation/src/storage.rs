@@ -1,20 +1,20 @@
 use crate::{AgentId, Quantity, SimulationError, locations::PlaceId, marketplace::Good};
 use imbl::HashMap;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GoodsOwner {
     Agent(AgentId),
     Town,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct StockKey {
     pub place: PlaceId,
     pub owner: GoodsOwner,
     pub good: Good,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Storage {
     stock: HashMap<StockKey, Quantity>,
     totals: HashMap<(GoodsOwner, Good), Quantity>,
@@ -75,6 +75,30 @@ impl Storage {
             self.totals.remove(&(key.owner, key.good));
         } else {
             self.totals.insert((key.owner, key.good), total);
+        }
+        Ok(())
+    }
+}
+
+impl Storage {
+    pub(crate) fn validate_save(&self) -> Result<(), crate::persistence::SaveError> {
+        use crate::persistence::SaveError;
+        let mut totals = HashMap::new();
+        for (key, units) in &self.stock {
+            let total = totals.entry((key.owner, key.good)).or_insert(0_u64);
+            *total = total
+                .checked_add(*units)
+                .ok_or(SaveError::InvalidState("storage total overflow"))?;
+        }
+        if totals != self.totals
+            || self
+                .reserved
+                .iter()
+                .any(|(key, units)| *units > self.stock.get(key).copied().unwrap_or(0))
+        {
+            return Err(SaveError::InvalidState(
+                "inconsistent storage totals or reservations",
+            ));
         }
         Ok(())
     }

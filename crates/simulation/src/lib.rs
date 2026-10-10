@@ -1,6 +1,6 @@
 use imbl::HashMap;
 use marketplace::{Good, Market, Prices};
-use rand::{RngExt, rngs::SmallRng};
+use rand::{RngExt, rngs::Xoshiro256PlusPlus};
 use std::fmt;
 use uuid::Uuid;
 
@@ -17,6 +17,7 @@ pub use background::PlanningRuntime;
 pub mod diet;
 pub mod farming;
 pub mod history;
+pub mod persistence;
 pub mod production;
 
 pub type Quantity = u64;
@@ -59,10 +60,10 @@ pub const FORAGE_MIN_GRAMS: Quantity = 5;
 pub const FORAGE_MAX_GRAMS: Quantity = 15;
 pub const FORAGE_AVERAGE_GRAMS: Quantity = 10;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AgentId(pub Uuid);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Agent {
     pub name: String,
     pub kind: AgentKind,
@@ -107,12 +108,12 @@ impl Agent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum AgentKind {
     Citizen(Citizen),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum CitizenAction {
     Eat,
     Drink,
@@ -180,7 +181,7 @@ impl CitizenAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct ActiveAction {
     action: CitizenAction,
     remaining_ms: u64,
@@ -225,7 +226,7 @@ impl ActiveAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartingRole {
     Farmer,
     Miller,
@@ -250,7 +251,7 @@ impl StartingRole {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Citizen {
     hunger: f64,
     thirst: f64,
@@ -273,7 +274,7 @@ pub struct Citizen {
     work_period: u64,
     work_ms: u64,
     coins: Coins,
-    forage_rng: SmallRng,
+    forage_rng: Xoshiro256PlusPlus,
     prices: Prices,
     market: Market,
     market_time_ms: u64,
@@ -1476,7 +1477,7 @@ impl Citizen {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Universe {
     current_time_ms: u64,
     market: Market,
@@ -2117,6 +2118,8 @@ impl Universe {
                         runtime.cancel(id);
                     }
                 }
+                universe.market.prune_history(finishing_time);
+                universe.taxation.prune_history(finishing_time);
                 universe.refresh_market();
             }
             let mut new_actions = Vec::new();
@@ -2689,7 +2692,7 @@ mod tests {
     #[test]
     fn prediction_uses_average_yield_without_advancing_the_random_stream() {
         let mut citizen = Citizen::new(0.0).unwrap();
-        citizen.forage_rng = SmallRng::seed_from_u64(42);
+        citizen.forage_rng = Xoshiro256PlusPlus::seed_from_u64(42);
         let started = citizen
             .start_action(CitizenAction::Produce(crate::production::Recipe::Forage))
             .unwrap();

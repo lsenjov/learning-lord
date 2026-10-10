@@ -644,7 +644,7 @@ mod tests {
                 .with_coins(crate::production::starting_coins(role))
                 .unwrap();
             citizen.id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
-            citizen.forage_rng = rand::rngs::SmallRng::seed_from_u64(42 + index as u64);
+            citizen.forage_rng = rand::rngs::Xoshiro256PlusPlus::seed_from_u64(42 + index as u64);
             for (good, units) in crate::production::starting_inputs(role).items() {
                 citizen = citizen.with_good(good, units).unwrap();
             }
@@ -781,7 +781,7 @@ mod tests {
                 .with_coins(crate::production::starting_coins(role))
                 .unwrap();
             citizen.id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
-            citizen.forage_rng = rand::rngs::SmallRng::seed_from_u64(42 + index as u64);
+            citizen.forage_rng = rand::rngs::Xoshiro256PlusPlus::seed_from_u64(42 + index as u64);
             for (good, units) in crate::production::starting_inputs(role).items() {
                 citizen = citizen.with_good(good, units).unwrap();
             }
@@ -867,7 +867,7 @@ mod tests {
                 .with_coins(crate::production::starting_coins(role))
                 .unwrap();
             citizen.id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
-            citizen.forage_rng = rand::rngs::SmallRng::seed_from_u64(42 + index as u64);
+            citizen.forage_rng = rand::rngs::Xoshiro256PlusPlus::seed_from_u64(42 + index as u64);
             for (good, units) in crate::production::starting_inputs(role).items() {
                 citizen = citizen.with_good(good, units).unwrap();
             }

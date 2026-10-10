@@ -9,7 +9,7 @@ pub const FIELD_PLOTS: usize = 12;
 pub const HOUR_MS: u64 = 3_600_000;
 pub const GROWTH_MS: u64 = 96 * HOUR_MS;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CropKind {
     Wheat,
     Flax,
@@ -41,14 +41,14 @@ impl CropKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CropStatus {
     Growing,
     Ready,
     Dead,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Crop {
     pub kind: CropKind,
     pub planted_at_ms: u64,

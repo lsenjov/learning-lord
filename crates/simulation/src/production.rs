@@ -12,7 +12,7 @@ pub fn skill_duration_reduction(practice_ms: u64) -> f64 {
     0.5 * (2.0 * progress - progress * progress)
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Skill {
     Farming,
     Milling,
@@ -47,7 +47,7 @@ impl Skill {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Recipe {
     Forage,
     GrowWheat,
@@ -223,7 +223,7 @@ pub const MIN_LISTING_VALUE: f64 = 2.0;
 pub const URGENT_HUNGER: f64 = 20.0;
 pub const URGENT_TIREDNESS: f64 = 50.0;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ProductionTargets {
     pub calculated_at_ms: u64,
     remaining_batches: [Quantity; Recipe::COUNT],
