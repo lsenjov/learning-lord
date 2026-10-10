@@ -426,3 +426,59 @@ fn foreign_breweries_reject_preparation_and_collection() {
         Err(SimulationError::PrivateProperty)
     );
 }
+
+#[test]
+fn beer_is_not_a_substitute_for_recipe_water() {
+    let worker = Citizen::new(0.0)
+        .unwrap()
+        .with_starting_role(StartingRole::Baker)
+        .with_good(Good::Flour, 100)
+        .unwrap()
+        .with_good(Good::Wood, 25)
+        .unwrap()
+        .with_good(Good::Beer, 1000)
+        .unwrap();
+    let (world, id) = Universe::with_map(Map::default())
+        .with_citizen("Baker", worker)
+        .unwrap();
+    let (world, bakery) = world.with_property(id, Location::Bakery).unwrap();
+    let worker = citizen(&world, id);
+    assert_eq!(
+        worker.start_action(CitizenAction::ProduceAt {
+            place: bakery,
+            recipe: Recipe::BakeRolls
+        }),
+        Err(SimulationError::MissingInputs)
+    );
+    assert_eq!(worker.units(Good::Beer), 1000);
+}
+
+#[test]
+fn active_beer_meal_persists_and_resumes_identical_benefits_and_history() {
+    let worker = Citizen::new(80.0)
+        .unwrap()
+        .with_thirst(80.0)
+        .unwrap()
+        .with_good(Good::Beer, 200)
+        .unwrap()
+        .with_good(Good::BreadRoll, 4)
+        .unwrap();
+    let (world, id) = Universe::with_map(Map::default())
+        .with_citizen("Diner", worker)
+        .unwrap();
+    let started = world.start_action(id, CitizenAction::Eat).unwrap();
+    let halfway = started.advance(30_000).unwrap();
+    assert_eq!(
+        citizen(&halfway, id)
+            .active_action()
+            .unwrap()
+            .drinking_good(),
+        Good::Beer
+    );
+    let loaded = Universe::from_save_str(&halfway.to_save_string().unwrap()).unwrap();
+    assert_eq!(loaded, halfway);
+    assert_eq!(
+        loaded.advance(50_000).unwrap(),
+        halfway.advance(50_000).unwrap()
+    );
+}

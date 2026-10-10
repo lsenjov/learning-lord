@@ -30,6 +30,7 @@ pub fn category_bonus(value: f64) -> f64 {
 impl Good {
     pub fn diet_per_unit(self) -> [f64; 4] {
         match self {
+            Self::Beer => [0.0, 0.05, 0.0, 0.0],
             Self::BreadRoll => [0.0, 10.0, 0.0, 0.0],
             Self::Berries => [0.0, 0.0, 0.0, crate::BERRY_NUTRITION_PER_GRAM],
             Self::BerryPie => [0.0, 45.0, 0.0, 15.0],
@@ -81,13 +82,19 @@ impl Citizen {
     pub(crate) fn diet_rates(&self, active: Option<ActiveAction>) -> [f64; 4] {
         let decay = DIET_DECAY_PER_DAY / crate::marketplace::DAY_MS as f64;
         let mut rates = [-decay; 4];
-        if let Some(action) = active
-            && action.meal_duration_ms > action.duration_ms - action.remaining_ms
-        {
-            for good in Good::FOOD {
-                for (rate, intake) in rates.iter_mut().zip(good.diet_per_unit()) {
-                    *rate += intake * action.meal_units[good as usize] as f64
-                        / action.meal_duration_ms as f64;
+        if let Some(action) = active {
+            let elapsed = action.duration_ms - action.remaining_ms;
+            if action.meal_duration_ms > elapsed {
+                for good in Good::FOOD {
+                    for (rate, intake) in rates.iter_mut().zip(good.diet_per_unit()) {
+                        *rate += intake * action.meal_units[good as usize] as f64
+                            / action.meal_duration_ms as f64;
+                    }
+                }
+            }
+            if action.drink_duration_ms() > elapsed {
+                for (rate, intake) in rates.iter_mut().zip(action.drink_good.diet_per_unit()) {
+                    *rate += intake * action.drink_units as f64 / action.drink_duration_ms() as f64;
                 }
             }
         }
@@ -95,20 +102,30 @@ impl Citizen {
     }
 
     pub(crate) fn advance_diet(&mut self, elapsed_ms: u64, active: Option<ActiveAction>) {
-        let eating_ms = active.map_or(0, |action| {
-            elapsed_ms.min(
-                action
-                    .meal_duration_ms
-                    .saturating_sub(action.duration_ms - action.remaining_ms),
-            )
-        });
-        let rates = self.diet_rates(active);
-        let idle_ms = elapsed_ms - eating_ms;
         let decay = DIET_DECAY_PER_DAY / crate::marketplace::DAY_MS as f64;
-        for (value, rate) in self.diet.iter_mut().zip(rates) {
-            *value = ((*value + rate * eating_ms as f64).clamp(0.0, 100.0)
-                - decay * idle_ms as f64)
-                .clamp(0.0, 100.0);
+        let mut elapsed = 0;
+        while elapsed < elapsed_ms {
+            let current = active.map(|mut action| {
+                action.remaining_ms = action.remaining_ms.saturating_sub(elapsed);
+                action
+            });
+            let step = current.map_or(elapsed_ms - elapsed, |a| {
+                a.next_boundary_ms().min(elapsed_ms - elapsed)
+            });
+            if step == 0 {
+                break;
+            }
+            let rates = self.diet_rates(current);
+            for (value, rate) in self.diet.iter_mut().zip(rates) {
+                *value = (*value + rate * step as f64).clamp(0.0, 100.0);
+            }
+            elapsed += step;
+            if current.is_some_and(|a| step == a.remaining_ms) && elapsed < elapsed_ms {
+                for value in &mut self.diet {
+                    *value = (*value - decay * (elapsed_ms - elapsed) as f64).max(0.0);
+                }
+                break;
+            }
         }
     }
 
@@ -128,15 +145,17 @@ impl Citizen {
         let mut forecast = self.clone();
         forecast.active_action = None;
         forecast.active_plan = None;
-        for good in Good::FOOD {
+        for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
             forecast.inventory.insert(good, available[good as usize]);
             forecast.tax_reserved.remove(&good);
         }
         let mut retained = forecast.food_forecast(6).units;
+        retained[Good::Water as usize] = 0;
         let mut nutrition: f64 = Good::FOOD
             .into_iter()
             .map(|good| retained[good as usize] as f64 * good.nutrition_per_unit().unwrap())
-            .sum();
+            .sum::<f64>()
+            + retained[Good::Beer as usize] as f64 * 0.05;
         for good in Good::FOOD {
             let remaining = (crate::FOOD_RESERVE_CAP_NUTRITION - nutrition).max(0.0);
             let added = available[good as usize]
@@ -163,32 +182,16 @@ impl Citizen {
         let mut benefit = 0.0;
         let mut consumed_value = 0.0;
         let mut units = [0; Good::COUNT];
-        if let Some(active) = self.active_action {
-            let remaining = active
-                .meal_duration_ms
-                .saturating_sub(active.duration_ms - active.remaining_ms);
-            if remaining > 0 {
-                for (value, rate) in future.diet.iter_mut().zip(self.diet_rates(Some(active))) {
-                    let (integral, end) = diet_integral(*value, rate, remaining);
-                    benefit += integral;
-                    *value = end;
-                }
-                future.hunger += future.hunger_per_hour * remaining as f64 / 3_600_000.0
-                    - active.meal_nutrition * remaining as f64 / active.meal_duration_ms as f64;
-                consumed_value = Good::FOOD
-                    .into_iter()
-                    .map(|good| {
-                        self.prices
-                            .value(good, active.meal_units[good as usize])
-                            .unwrap_or(0.0)
-                    })
-                    .sum::<f64>()
-                    * crate::WEALTH_WELLBEING_PER_COIN
-                    * remaining as f64
-                    / active.meal_duration_ms as f64;
-                benefit -= consumed_value * 0.5 * remaining as f64;
-                elapsed = remaining;
-            }
+        if let Some(active) = self.active_action.filter(|a| {
+            matches!(
+                a.action,
+                crate::CitizenAction::Eat | crate::CitizenAction::Drink
+            )
+        }) {
+            let duration = active.remaining_ms.min(horizon);
+            benefit +=
+                future.forecast_consumption_interval(duration, Some(active), &mut consumed_value);
+            elapsed = duration;
         }
         let interval = crate::marketplace::DAY_MS / 2;
         let next_meal = self.last_meal_started_ms.map_or(0, |started| {
@@ -199,81 +202,123 @@ impl Citizen {
             if event >= horizon {
                 break;
             }
-            let waiting = event - elapsed;
-            benefit += future.forecast_diet_interval(waiting, [0; Good::COUNT], waiting)
-                - consumed_value * waiting as f64;
-            future.hunger += future.hunger_per_hour * waiting as f64 / 3_600_000.0;
-            let (meal, nutrition) = future.preferred_meal();
-            let full_duration: u64 = Good::FOOD
-                .into_iter()
-                .map(|good| meal[good as usize] * good.eating_ms_per_unit().unwrap())
-                .sum();
-            let duration = full_duration.min(horizon - event);
-            let fraction = duration as f64 / full_duration.max(1) as f64;
-            let mut meal_value = 0.0;
+            let waiting = event.saturating_sub(elapsed);
+            benefit += future.forecast_consumption_interval(waiting, None, &mut consumed_value);
+            elapsed += waiting;
+            let action = future.consumption_action(crate::CitizenAction::Eat);
+            if action.duration_ms == 0 {
+                continue;
+            }
             for good in Good::FOOD {
-                let portion = meal[good as usize];
+                let portion = action.meal_units[good as usize];
                 units[good as usize] += portion;
-                meal_value += future.prices.value(good, portion).unwrap_or(0.0)
-                    * crate::WEALTH_WELLBEING_PER_COIN;
                 future.inventory.insert(good, future.units(good) - portion);
             }
-            meal_value *= fraction;
-            benefit += future.forecast_diet_interval(duration, meal, full_duration)
-                - (consumed_value + meal_value * 0.5) * duration as f64;
-            consumed_value += meal_value;
-            future.hunger +=
-                future.hunger_per_hour * duration as f64 / 3_600_000.0 - nutrition * fraction;
-            elapsed = event + duration;
+            units[action.drink_good as usize] += action.drink_units;
+            future.inventory.insert(
+                action.drink_good,
+                future.units(action.drink_good) - action.drink_units,
+            );
+            let duration = action.duration_ms.min(horizon - elapsed);
+            benefit +=
+                future.forecast_consumption_interval(duration, Some(action), &mut consumed_value);
+            elapsed += duration;
         }
         benefit +=
-            future.forecast_diet_interval(horizon - elapsed, [0; Good::COUNT], horizon - elapsed)
-                - consumed_value * (horizon - elapsed) as f64;
+            future.forecast_consumption_interval(horizon - elapsed, None, &mut consumed_value);
         FoodForecast {
             benefit: ((benefit - passive) / horizon as f64).max(0.0),
             units,
         }
     }
 
-    fn forecast_diet_interval(
+    fn forecast_consumption_interval(
         &mut self,
         duration: u64,
-        meal: [crate::Quantity; Good::COUNT],
-        meal_duration: u64,
+        mut active: Option<ActiveAction>,
+        consumed_value: &mut f64,
     ) -> f64 {
-        if duration == 0 {
-            return 0.0;
-        }
-        let mut rates = [-DIET_DECAY_PER_DAY / crate::marketplace::DAY_MS as f64; 4];
-        for good in Good::FOOD {
-            for (rate, intake) in rates.iter_mut().zip(good.diet_per_unit()) {
-                *rate += intake * meal[good as usize] as f64 / meal_duration.max(1) as f64;
+        let mut remaining = duration;
+        let mut benefit = 0.0;
+        while remaining > 0 {
+            let step = active.map_or(remaining, |a| a.next_boundary_ms().min(remaining));
+            if step == 0 {
+                break;
             }
-        }
-        self.diet
-            .iter_mut()
-            .zip(rates)
-            .map(|(value, rate)| {
-                let (integral, end) = diet_integral(*value, rate, duration);
+            let rates = self.diet_rates(active);
+            for (value, rate) in self.diet.iter_mut().zip(rates) {
+                let (integral, end) = diet_integral(*value, rate, step);
+                benefit += integral;
                 *value = end;
-                integral
-            })
-            .sum()
+            }
+            let mut value = 0.0;
+            if let Some(action) = active {
+                let passed = action.duration_ms - action.remaining_ms;
+                let fraction = |component: u64| {
+                    step.min(component.saturating_sub(passed)) as f64 / component.max(1) as f64
+                };
+                value += Good::FOOD
+                    .into_iter()
+                    .map(|g| {
+                        self.prices
+                            .value(g, action.meal_units[g as usize])
+                            .unwrap_or(0.0)
+                    })
+                    .sum::<f64>()
+                    * fraction(action.meal_duration_ms);
+                value += self
+                    .prices
+                    .value(action.drink_good, action.drink_units)
+                    .unwrap_or(0.0)
+                    * fraction(action.drink_duration_ms());
+                self.hunger -= action.meal_nutrition * fraction(action.meal_duration_ms)
+                    + action.drink_nutrition() * fraction(action.drink_duration_ms());
+                self.thirst -=
+                    action.drink_units as f64 / 4.0 * fraction(action.drink_duration_ms());
+                active = if step == action.remaining_ms {
+                    None
+                } else {
+                    Some(ActiveAction {
+                        remaining_ms: action.remaining_ms - step,
+                        ..action
+                    })
+                };
+            }
+            value *= crate::WEALTH_WELLBEING_PER_COIN;
+            benefit -= (*consumed_value + value * 0.5) * step as f64;
+            *consumed_value += value;
+            self.hunger += self.hunger_per_hour * step as f64 / 3_600_000.0;
+            self.thirst =
+                (self.thirst + crate::THIRST_PER_HOUR * step as f64 / 3_600_000.0).max(-100.0);
+            remaining -= step;
+        }
+        benefit
     }
 
+    #[cfg(test)]
     fn meal_wellbeing(&self, meal_units: [crate::Quantity; Good::COUNT]) -> Option<f64> {
+        let (good, units) = self.preferred_drink();
+        self.consumption_wellbeing(meal_units, good, units)
+    }
+
+    pub(crate) fn consumption_wellbeing(
+        &self,
+        meal_units: [crate::Quantity; Good::COUNT],
+        drink_good: Good,
+        drink_units: crate::Quantity,
+    ) -> Option<f64> {
         let mut predicted = self.clone();
         predicted.active_action = None;
-        let mut meal_ms = 0;
-        let mut meal_nutrition = 0.0;
-        for good in Good::FOOD {
-            let units = meal_units[good as usize];
-            meal_ms += units * good.eating_ms_per_unit()?;
-            meal_nutrition += units as f64 * good.nutrition_per_unit()?;
-        }
-        let drink_units = self.drink_units();
+        let meal_duration_ms = Good::FOOD
+            .into_iter()
+            .map(|g| meal_units[g as usize] * g.eating_ms_per_unit().unwrap())
+            .sum::<u64>();
+        let meal_nutrition = Good::FOOD
+            .into_iter()
+            .map(|g| meal_units[g as usize] as f64 * g.nutrition_per_unit().unwrap())
+            .sum();
         let duration_ms =
-            meal_ms.max(drink_units * crate::DRINK_DURATION_MS / crate::DRINK_WATER_GRAMS);
+            meal_duration_ms.max(drink_units * crate::DRINK_DURATION_MS / crate::DRINK_WATER_GRAMS);
         if duration_ms == 0 {
             return None;
         }
@@ -281,10 +326,11 @@ impl Citizen {
             action: crate::CitizenAction::Eat,
             remaining_ms: duration_ms,
             duration_ms,
-            meal_duration_ms: meal_ms,
-            drink_units,
+            meal_duration_ms,
             meal_nutrition,
             meal_units,
+            drink_good,
+            drink_units,
             travel_origin: self.position,
             travel_destination: None,
         };
@@ -297,39 +343,64 @@ impl Citizen {
                     .unwrap_or(0.0)
             })
             .sum();
-        let water_value = self.prices.value(Good::Water, drink_units).unwrap_or(0.0);
+        let drink_value = self.prices.value(drink_good, drink_units).unwrap_or(0.0);
         let garment_value = self.prices.price(Good::FlaxGarment).unwrap_or(0.0)
             * (self.garment_condition.unwrap_or(0.0) - predicted.garment_condition.unwrap_or(0.0));
         let score = predicted.needs_wellbeing()
-            - (food_value + water_value + garment_value) * crate::WEALTH_WELLBEING_PER_COIN
-            + crate::water_reserve_bonus((self.available_units(Good::Water) - drink_units) as f64)
-            - crate::water_reserve_bonus(self.available_units(Good::Water) as f64);
+            - (food_value + drink_value + garment_value) * crate::WEALTH_WELLBEING_PER_COIN
+            + crate::water_reserve_bonus((self.available_drink_units() - drink_units) as f64)
+            - crate::water_reserve_bonus(self.available_drink_units() as f64);
         score.is_finite().then_some(score)
     }
 
-    pub(crate) fn preferred_meal(&self) -> ([crate::Quantity; Good::COUNT], f64) {
+    pub(crate) fn preferred_consumption(
+        &self,
+    ) -> ([crate::Quantity; Good::COUNT], f64, Good, crate::Quantity) {
         let mut candidates = Vec::new();
-        self.mixed_meals(0, [0; Good::COUNT], 0.0, &mut candidates);
-        let complete = candidates
-            .iter()
-            .any(|(_, nutrition)| *nutrition >= crate::MEAL_NOURISHMENT);
-        let partial_nutrition = candidates
-            .iter()
-            .map(|(_, nutrition)| *nutrition)
-            .fold(0.0, f64::max);
+        let has_drink = [Good::Water, Good::Beer]
+            .into_iter()
+            .any(|good| self.drink_units_for(good) > 0);
+        for drink_good in [Good::Water, Good::Beer] {
+            let drink_units = self.drink_units_for(drink_good);
+            if has_drink && drink_units == 0 {
+                continue;
+            }
+            let drink_nutrition = if drink_good == Good::Beer {
+                drink_units as f64 * 0.05
+            } else {
+                0.0
+            };
+            let mut foods = Vec::new();
+            self.mixed_meals(0, [0; Good::COUNT], drink_nutrition, &mut foods);
+            for (units, nutrition) in foods {
+                candidates.push((
+                    units,
+                    nutrition - drink_nutrition,
+                    drink_good,
+                    drink_units,
+                    nutrition,
+                ));
+            }
+        }
+        let maximum = candidates.iter().map(|c| c.4).fold(0.0, f64::max);
+        let complete = maximum >= crate::MEAL_NOURISHMENT;
         candidates
             .into_iter()
-            .filter(|(_, nutrition)| {
+            .filter(|c| {
                 if complete {
-                    *nutrition >= crate::MEAL_NOURISHMENT
+                    c.4 >= crate::MEAL_NOURISHMENT
                 } else {
-                    *nutrition == partial_nutrition
+                    c.4 == maximum
                 }
             })
-            .filter_map(|(units, nutrition)| Some((units, nutrition, self.meal_wellbeing(units)?)))
-            .max_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)))
-            .map_or(([0; Good::COUNT], 0.0), |(units, nutrition, _)| {
-                (units, nutrition)
+            .filter_map(|c| Some((c, self.consumption_wellbeing(c.0, c.2, c.3)?)))
+            .max_by(|a, b| {
+                a.1.total_cmp(&b.1)
+                    .then_with(|| a.0.0.cmp(&b.0.0))
+                    .then_with(|| (b.0.2 as usize).cmp(&(a.0.2 as usize)))
+            })
+            .map_or(([0; Good::COUNT], 0.0, Good::Water, 0), |(c, _)| {
+                (c.0, c.1, c.2, c.3)
             })
     }
 
@@ -381,6 +452,176 @@ mod tests {
 
     fn close(left: f64, right: f64) {
         assert!((left - right).abs() < 1e-9, "{left} != {right}");
+    }
+
+    #[test]
+    fn beer_drinking_progresses_nutrition_thirst_carbs_and_wealth() {
+        let source = Citizen::new(80.0)
+            .unwrap()
+            .with_thirst(80.0)
+            .unwrap()
+            .with_good(Good::Beer, 200)
+            .unwrap();
+        let started = source.start_action(CitizenAction::Drink).unwrap();
+        assert_eq!(started.units(Good::Beer), 0);
+        close(started.wealth().unwrap(), source.wealth().unwrap());
+        close(
+            started.food_reserve_wellbeing(),
+            source.food_reserve_wellbeing(),
+        );
+        close(started.drinking_water_reserve(), 200.0);
+        let half = started.advance(30_000).unwrap();
+        let elapsed_hours = 30_000.0 / 3_600_000.0;
+        close(
+            half.hunger(),
+            80.0 + crate::HUNGER_PER_HOUR * elapsed_hours - 5.0,
+        );
+        close(
+            half.thirst(),
+            80.0 + crate::THIRST_PER_HOUR * elapsed_hours - 25.0,
+        );
+        close(
+            half.diet(DietCategory::Carbs),
+            5.0 - DIET_DECAY_PER_DAY * 30_000.0 / DAY_MS as f64,
+        );
+        close(half.drinking_water_reserve(), 100.0);
+        close(
+            half.wealth().unwrap(),
+            source.wealth().unwrap() - source.prices.value(Good::Beer, 100).unwrap(),
+        );
+        let done = started.advance(60_000).unwrap();
+        assert!(done.active_action().is_none());
+        close(done.food_reserve_wellbeing(), 0.0);
+        close(done.drinking_water_reserve(), 0.0);
+    }
+
+    #[test]
+    fn beer_meals_share_forecast_selection_and_separate_component_timelines() {
+        for beer in [100, 200] {
+            let source = Citizen::new(80.0)
+                .unwrap()
+                .with_thirst(80.0)
+                .unwrap()
+                .with_good(Good::Beer, beer)
+                .unwrap()
+                .with_good(Good::BreadRoll, 10)
+                .unwrap();
+            let forecast = source.food_forecast(1);
+            let started = source.start_action(CitizenAction::Eat).unwrap();
+            let action = started.active_action().unwrap();
+            assert_eq!(action.drink_good, Good::Beer);
+            assert_eq!(action.meal_nutrition, if beer == 200 { 40.0 } else { 50.0 });
+            assert_eq!(
+                forecast.units[Good::BreadRoll as usize],
+                action.meal_units[Good::BreadRoll as usize]
+            );
+            assert_eq!(forecast.units[Good::Beer as usize], beer);
+            assert_eq!(
+                source.action_duration_ms(CitizenAction::Eat).unwrap(),
+                action.duration_ms
+            );
+            let whole = started.advance(action.duration_ms).unwrap();
+            let split = started
+                .advance(10_000)
+                .unwrap()
+                .advance(action.drink_duration_ms() - 10_000)
+                .unwrap()
+                .advance(action.duration_ms - action.drink_duration_ms())
+                .unwrap();
+            close(whole.hunger(), split.hunger());
+            close(whole.thirst(), split.thirst());
+            close(
+                whole.diet(DietCategory::Carbs),
+                split.diet(DietCategory::Carbs),
+            );
+            close(
+                whole.personal_wellbeing().unwrap(),
+                split.personal_wellbeing().unwrap(),
+            );
+            let drink_finished = started.advance(action.drink_duration_ms()).unwrap();
+            close(drink_finished.drinking_water_reserve(), 0.0);
+            let near_done = started.advance(action.duration_ms - 1).unwrap();
+            assert!(
+                (near_done.food_forecast(6).benefit - whole.food_forecast(6).benefit).abs() < 0.001
+            );
+        }
+    }
+
+    #[test]
+    fn beer_selection_considers_cost_diet_and_thirst_room() {
+        let mut source = Citizen::new(80.0)
+            .unwrap()
+            .with_thirst(80.0)
+            .unwrap()
+            .with_good(Good::BreadRoll, 10)
+            .unwrap()
+            .with_good(Good::Water, 200)
+            .unwrap()
+            .with_good(Good::Beer, 200)
+            .unwrap();
+        source.prices = source.prices.with_price(Good::Beer, 100.0).unwrap();
+        assert_eq!(
+            source.consumption_action(CitizenAction::Eat).drink_good,
+            Good::Water
+        );
+        source.prices = source.prices.with_price(Good::Beer, 0.01).unwrap();
+        assert_eq!(
+            source.consumption_action(CitizenAction::Eat).drink_good,
+            Good::Beer
+        );
+        source.thirst = -100.0;
+        assert_eq!(source.consumption_action(CitizenAction::Eat).drink_units, 0);
+        assert_eq!(
+            source.consumption_action(CitizenAction::Eat).meal_nutrition,
+            50.0
+        );
+        let beer_only = Citizen::new(80.0)
+            .unwrap()
+            .with_good(Good::Beer, 10_000)
+            .unwrap();
+        assert!(!beer_only.has_complete_meal());
+    }
+
+    #[test]
+    fn beer_consumption_excludes_tax_and_town_stock_and_retains_shared_reserves() {
+        let mut source = Citizen::new(80.0)
+            .unwrap()
+            .with_thirst(80.0)
+            .unwrap()
+            .with_good(Good::Beer, 250)
+            .unwrap();
+        source.tax_reserved.insert(Good::Beer, 200);
+        source.town_inventory.insert(Good::Beer, 1000);
+        let started = source.start_action(CitizenAction::Drink).unwrap();
+        assert_eq!(started.active_action().unwrap().drink_units, 50);
+        assert_eq!(started.units(Good::Beer), 200);
+        assert_eq!(started.town_inventory[&Good::Beer], 1000);
+        close(started.drinking_water_reserve(), 50.0);
+        let reserves = source.reserved_goods().unwrap();
+        assert!(reserves.units(Good::Beer) <= 50);
+        source.tax_reserved.insert(Good::Beer, 250);
+        assert!(
+            source
+                .start_action(CitizenAction::Drink)
+                .unwrap()
+                .active_action()
+                .is_none()
+        );
+        close(source.drinking_water_reserve(), 0.0);
+        let mixed = Citizen::new(80.0)
+            .unwrap()
+            .with_good(Good::BreadRoll, 30)
+            .unwrap()
+            .with_good(Good::Water, 200)
+            .unwrap()
+            .with_good(Good::Beer, 200)
+            .unwrap();
+        let retained = mixed.reserved_goods().unwrap();
+        assert_eq!(
+            retained.units(Good::Water) + retained.units(Good::Beer),
+            400
+        );
+        assert_eq!(retained.units(Good::Beer), 200);
     }
 
     #[test]
@@ -493,6 +734,7 @@ mod tests {
                 duration_ms: duration,
                 remaining_ms: duration,
                 meal_duration_ms: meal_ms,
+                drink_good: Good::Water,
                 drink_units: drink,
                 meal_nutrition: nutrition,
                 meal_units: meal,

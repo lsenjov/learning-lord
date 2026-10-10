@@ -295,6 +295,8 @@ impl Citizen {
                 || active.remaining_ms == 0
                 || active.remaining_ms > active.duration_ms
                 || active.meal_duration_ms > active.duration_ms
+                || !matches!(active.drink_good, Good::Water | Good::Beer)
+                || active.drink_units > crate::DRINK_WATER_GRAMS
                 || !active.meal_nutrition.is_finite()
                 || active.meal_nutrition < 0.0
                 || !active.travel_origin.valid()
@@ -689,6 +691,7 @@ mod tests {
             duration_ms: 1,
             remaining_ms: 2,
             meal_duration_ms: 0,
+            drink_good: Good::Water,
             drink_units: 0,
             meal_nutrition: 0.0,
             meal_units: [0; Good::COUNT],

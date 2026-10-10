@@ -193,6 +193,7 @@ pub struct ActiveAction {
     remaining_ms: u64,
     duration_ms: u64,
     meal_duration_ms: u64,
+    drink_good: Good,
     drink_units: Quantity,
     meal_nutrition: f64,
     meal_units: [Quantity; Good::COUNT],
@@ -221,6 +222,27 @@ impl ActiveAction {
         .min()
         .unwrap_or(self.remaining_ms)
         .min(self.remaining_ms)
+    }
+
+    pub fn drinking_good(&self) -> Good {
+        self.drink_good
+    }
+
+    fn drink_duration_ms(&self) -> u64 {
+        self.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS
+    }
+
+    fn drink_nutrition(&self) -> f64 {
+        if self.drink_good == Good::Beer {
+            self.drink_units as f64 * 0.05
+        } else {
+            0.0
+        }
+    }
+
+    fn remaining_fraction(&self, duration: u64) -> f64 {
+        duration.saturating_sub(self.duration_ms - self.remaining_ms) as f64
+            / duration.max(1) as f64
     }
 
     pub fn drinking_units(&self) -> Quantity {
@@ -402,19 +424,66 @@ impl Citizen {
         Ok(citizen)
     }
 
-    fn drink_units(&self) -> Quantity {
-        self.available_units(Good::Water)
+    fn drink_units_for(&self, good: Good) -> Quantity {
+        self.available_units(good)
             .min(DRINK_WATER_GRAMS)
             .min(((self.thirst + 100.0).max(0.0) * 4.0).floor() as Quantity)
     }
 
-    fn meal_duration_ms(&self) -> u64 {
-        self.meal()
-            .0
-            .iter()
-            .enumerate()
-            .map(|(index, units)| units * Good::ALL[index].eating_ms_per_unit().unwrap_or(0))
-            .sum()
+    #[cfg(test)]
+    fn drink_units(&self) -> Quantity {
+        self.preferred_drink().1
+    }
+
+    pub(crate) fn available_drink_units(&self) -> Quantity {
+        self.available_units(Good::Water)
+            .saturating_add(self.available_units(Good::Beer))
+    }
+
+    fn preferred_drink(&self) -> (Good, Quantity) {
+        [Good::Water, Good::Beer]
+            .into_iter()
+            .map(|good| (good, self.drink_units_for(good)))
+            .max_by(|a, b| {
+                self.consumption_wellbeing([0; Good::COUNT], a.0, a.1)
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .total_cmp(
+                        &self
+                            .consumption_wellbeing([0; Good::COUNT], b.0, b.1)
+                            .unwrap_or(f64::NEG_INFINITY),
+                    )
+                    .then_with(|| (b.0 as usize).cmp(&(a.0 as usize)))
+            })
+            .unwrap()
+    }
+
+    fn consumption_action(&self, action: CitizenAction) -> ActiveAction {
+        let (meal_units, meal_nutrition, drink_good, drink_units) = if action == CitizenAction::Eat
+        {
+            self.preferred_consumption()
+        } else if action == CitizenAction::Drink {
+            let (good, units) = self.preferred_drink();
+            ([0; Good::COUNT], 0.0, good, units)
+        } else {
+            ([0; Good::COUNT], 0.0, Good::Water, 0)
+        };
+        let meal_duration_ms = Good::FOOD
+            .into_iter()
+            .map(|good| meal_units[good as usize] * good.eating_ms_per_unit().unwrap())
+            .sum::<u64>();
+        let duration_ms = meal_duration_ms.max(drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS);
+        ActiveAction {
+            action,
+            remaining_ms: duration_ms,
+            duration_ms,
+            meal_duration_ms,
+            drink_good,
+            drink_units,
+            meal_nutrition,
+            meal_units,
+            travel_origin: self.position,
+            travel_destination: None,
+        }
     }
 
     pub fn hunger(&self) -> f64 {
@@ -603,7 +672,7 @@ impl Citizen {
             if drink_duration > 0 {
                 wealth += self
                     .prices
-                    .value(Good::Water, active.drink_units)
+                    .value(active.drink_good, active.drink_units)
                     .unwrap_or(0.0)
                     * drink_duration.saturating_sub(elapsed) as f64
                     / drink_duration as f64;
@@ -655,15 +724,9 @@ impl Citizen {
                 .distance(self.accessible_place(destination)?.position)
                 * WALK_MS_PER_METRE)
                 .ceil() as u64,
-            CitizenAction::Eat => {
-                let meal = self.meal_duration_ms();
-                if meal == 0 {
-                    0
-                } else {
-                    meal.max(self.drink_units() * DRINK_DURATION_MS / DRINK_WATER_GRAMS)
-                }
+            CitizenAction::Eat | CitizenAction::Drink => {
+                self.consumption_action(action).duration_ms
             }
-            CitizenAction::Drink => self.drink_units() * DRINK_DURATION_MS / DRINK_WATER_GRAMS,
             CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
                 if matches!(
                     recipe,
@@ -708,22 +771,20 @@ impl Citizen {
         Good::FOOD
             .into_iter()
             .map(|good| self.units(good) as f64 * good.nutrition_per_unit().unwrap())
-            .sum()
+            .sum::<f64>()
+            + self.available_units(Good::Beer) as f64 * 0.05
     }
 
     pub fn available_food_nutrition(&self) -> f64 {
         Good::FOOD
             .into_iter()
             .map(|good| self.available_units(good) as f64 * good.nutrition_per_unit().unwrap())
-            .sum()
+            .sum::<f64>()
+            + self.drink_units_for(Good::Beer) as f64 * 0.05
     }
 
     pub fn has_complete_meal(&self) -> bool {
         self.available_food_nutrition() >= MEAL_NOURISHMENT
-    }
-
-    fn meal(&self) -> ([Quantity; Good::COUNT], f64) {
-        self.preferred_meal()
     }
 
     pub fn skill_practice_ms(&self, skill: production::Skill) -> Option<u64> {
@@ -958,11 +1019,20 @@ impl Citizen {
                 .saturating_sub(reserve[index])
         });
         let food = self.retained_food(available);
-        for good in Good::FOOD {
+        for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
             reserve[good as usize] += food[good as usize];
         }
+        let mut retained_drinks =
+            food[Good::Water as usize].saturating_add(food[Good::Beer as usize]);
+        for good in [Good::Water, Good::Beer] {
+            let additional = available[good as usize]
+                .saturating_sub(food[good as usize])
+                .min(WATER_RESERVE_GRAMS.saturating_sub(retained_drinks));
+            reserve[good as usize] += additional;
+            retained_drinks += additional;
+        }
         reserve[Good::Water as usize] = reserve[Good::Water as usize]
-            .checked_add(WATER_RESERVE_GRAMS)
+            .checked_add(WATER_RESERVE_GRAMS.saturating_sub(retained_drinks))
             .ok_or(SimulationError::InventoryOverflow)?;
         marketplace::ShoppingList::new(
             Good::ALL
@@ -1090,21 +1160,17 @@ impl Citizen {
             self.accessible_place(id)?;
         }
         let mut citizen = self.clone();
-        let (meal_units, meal_nutrition) = if action == CitizenAction::Eat {
-            self.meal()
-        } else {
-            ([0; Good::COUNT], 0.0)
-        };
-        let meal_duration_ms: u64 = Good::FOOD
-            .into_iter()
-            .map(|good| meal_units[good as usize] * good.eating_ms_per_unit().unwrap())
-            .sum();
-        let duration_ms = if action == CitizenAction::Eat {
-            if meal_duration_ms == 0 {
-                0
-            } else {
-                meal_duration_ms.max(self.drink_units() * DRINK_DURATION_MS / DRINK_WATER_GRAMS)
-            }
+        let consumption = self.consumption_action(action);
+        let ActiveAction {
+            meal_units,
+            meal_nutrition,
+            meal_duration_ms,
+            drink_good,
+            drink_units,
+            ..
+        } = consumption;
+        let duration_ms = if matches!(action, CitizenAction::Eat | CitizenAction::Drink) {
+            consumption.duration_ms
         } else {
             self.action_duration_ms(action)?
         };
@@ -1130,12 +1196,7 @@ impl Citizen {
         for good in Good::FOOD {
             citizen.set_inventory_units(good, self.units(good) - meal_units[good as usize]);
         }
-        let drink_units = if matches!(action, CitizenAction::Eat | CitizenAction::Drink) {
-            self.drink_units()
-        } else {
-            0
-        };
-        citizen.set_inventory_units(Good::Water, self.units(Good::Water) - drink_units);
+        citizen.set_inventory_units(drink_good, self.units(drink_good) - drink_units);
         if action == CitizenAction::Eat {
             citizen.last_meal_started_ms = Some(self.market_time_ms);
         }
@@ -1148,6 +1209,7 @@ impl Citizen {
             duration_ms,
             meal_nutrition,
             meal_duration_ms,
+            drink_good,
             drink_units,
             meal_units,
             travel_origin: self.position,
@@ -1163,18 +1225,19 @@ impl Citizen {
     pub fn food_reserve_wellbeing(&self) -> f64 {
         let nutrition = self.food_nutrition()
             + self.active_action.map_or(0.0, |active| {
-                active.meal_nutrition
-                    * active
-                        .meal_duration_ms
-                        .saturating_sub(active.duration_ms - active.remaining_ms)
-                        as f64
-                    / active.meal_duration_ms.max(1) as f64
+                active.drink_nutrition() * active.remaining_fraction(active.drink_duration_ms())
+                    + active.meal_nutrition
+                        * active
+                            .meal_duration_ms
+                            .saturating_sub(active.duration_ms - active.remaining_ms)
+                            as f64
+                        / active.meal_duration_ms.max(1) as f64
             });
         food_reserve_bonus(nutrition)
     }
 
     pub fn drinking_water_reserve(&self) -> f64 {
-        self.available_units(Good::Water) as f64
+        self.available_drink_units() as f64
             + self.active_action.map_or(0.0, |active| {
                 let duration = active.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS;
                 active.drink_units as f64
@@ -1483,6 +1546,7 @@ impl Citizen {
         };
         let nourishment = active.map_or(0.0, |action| {
             action.meal_nutrition * consumed_fraction(action.meal_duration_ms, action)
+                + action.drink_nutrition() * consumed_fraction(action.drink_duration_ms(), action)
         });
         let hydration = active.map_or(0.0, |action| {
             action.drink_units as f64 / 4.0

@@ -23,4 +23,5 @@
 ## Progress
 
 - Step 1 complete: brewing lifecycle, planning, economics, persistence and brewery slot display implemented. Full simulation tests, location UI tests, formatting and strict workspace Clippy pass; independent reviews have no remaining high or medium findings.
-- Step 2 next: beer-aware drinking, meals and reserve shopping.
+- Step 2 complete: joint food/drink selection, progressive beer benefits, reserves, shopping, history and save resume implemented. Full simulation tests and strict Clippy pass; final independent review found no issues.
+- Step 3 underway: starting brewer and documentation ready; repeated town integration checks and final application verification remain.

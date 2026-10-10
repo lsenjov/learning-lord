@@ -136,8 +136,8 @@ impl CitizenHistory {
         if let Some(active) = citizen.active_action()
             && matches!(active.action(), CitizenAction::Eat | CitizenAction::Drink)
         {
-            self.current.consumed[Good::Water as usize] = self.current.consumed
-                [Good::Water as usize]
+            self.current.consumed[active.drink_good as usize] = self.current.consumed
+                [active.drink_good as usize]
                 .checked_add(active.drink_units)
                 .ok_or(SimulationError::InventoryOverflow)?;
             for good in Good::FOOD {
@@ -322,10 +322,12 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
     let reserve = |citizen: &Citizen| {
         citizen.food_nutrition()
             + citizen.active_action.map_or(0.0, |a| {
-                a.meal_nutrition
-                    * a.meal_duration_ms
-                        .saturating_sub(a.duration_ms - a.remaining_ms) as f64
-                    / a.meal_duration_ms.max(1) as f64
+                a.drink_nutrition() * a.remaining_fraction(a.drink_duration_ms())
+                    + a.meal_nutrition
+                        * a.meal_duration_ms
+                            .saturating_sub(a.duration_ms - a.remaining_ms)
+                            as f64
+                        / a.meal_duration_ms.max(1) as f64
             })
     };
     split(
@@ -384,12 +386,12 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                     / duration as f64;
                 let initial_water_ratio = duration.saturating_sub(passed) as f64 / duration as f64;
                 value += crate::water_reserve_bonus(
-                    citizen.available_units(Good::Water) as f64
+                    citizen.available_drink_units() as f64
                         + active.drink_units as f64 * water_ratio,
                 ) - citizen.water_reserve_wellbeing();
                 value += citizen
                     .prices
-                    .value(Good::Water, active.drink_units)
+                    .value(active.drink_good, active.drink_units)
                     .unwrap_or(0.0)
                     * (water_ratio - initial_water_ratio)
                     * crate::WEALTH_WELLBEING_PER_COIN;
@@ -404,7 +406,13 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                 })
                 .sum();
             value += meal_value * (ratio - initial_ratio) * crate::WEALTH_WELLBEING_PER_COIN;
-            let nutrition = citizen.food_nutrition() + active.meal_nutrition * ratio;
+            let drink_ratio =
+                (active.drink_duration_ms() as f64 - passed as f64 - elapsed as f64 * fraction)
+                    .max(0.0)
+                    / active.drink_duration_ms().max(1) as f64;
+            let nutrition = citizen.food_nutrition()
+                + active.meal_nutrition * ratio
+                + active.drink_nutrition() * drink_ratio;
             let bonus = 0.10 * nutrition.min(crate::FOOD_RESERVE_FULL_BONUS_NUTRITION)
                 + 0.02
                     * (nutrition.min(crate::FOOD_RESERVE_CAP_NUTRITION)
@@ -471,6 +479,50 @@ impl PlanningHistory {
 mod tests {
     use super::*;
     use crate::{AgentKind, TRADE_DURATION_MS, Universe, marketplace::ShoppingList};
+
+    #[test]
+    fn beer_history_counts_each_good_once_and_is_chunk_invariant() {
+        for beer in [100, 200, 1300] {
+            let citizen = Citizen::new(80.0)
+                .unwrap()
+                .with_thirst(80.0)
+                .unwrap()
+                .with_good(Good::Beer, beer)
+                .unwrap()
+                .with_good(Good::BreadRoll, 10)
+                .unwrap();
+            let (world, id) = Universe::with_map(citizen.map())
+                .with_citizen("Beer diner", citizen)
+                .unwrap();
+            let started = world.start_action(id, CitizenAction::Eat).unwrap();
+            let history = started.citizen_history(id).unwrap();
+            assert_eq!(history.current.consumed[Good::Beer as usize], beer.min(200));
+            assert_eq!(history.current.consumed[Good::Water as usize], 0);
+            let duration = if beer == 100 { 100_000 } else { 80_000 };
+            let whole = started.advance(duration).unwrap();
+            let chunks = started
+                .advance(15_000)
+                .unwrap()
+                .advance(15_000)
+                .unwrap()
+                .advance(30_000)
+                .unwrap()
+                .advance(duration - 60_000)
+                .unwrap();
+            let average = |u: &Universe| {
+                u.citizen_history(id)
+                    .unwrap()
+                    .current
+                    .average_wellbeing()
+                    .unwrap()
+            };
+            assert!((average(&whole) - average(&chunks)).abs() < 1e-10);
+            assert_eq!(
+                whole.citizen_history(id).unwrap().current.consumed[Good::Beer as usize],
+                beer.min(200)
+            );
+        }
+    }
 
     #[test]
     fn diet_history_integrates_decay_clamps_and_bonus_thresholds_exactly() {
