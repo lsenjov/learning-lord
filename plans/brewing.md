@@ -24,4 +24,5 @@
 
 - Step 1 complete: brewing lifecycle, planning, economics, persistence and brewery slot display implemented. Full simulation tests, location UI tests, formatting and strict workspace Clippy pass; independent reviews have no remaining high or medium findings.
 - Step 2 complete: joint food/drink selection, progressive beer benefits, reserves, shopping, history and save resume implemented. Full simulation tests and strict Clippy pass; final independent review found no issues.
-- Step 3 underway: starting brewer and documentation ready; repeated town integration checks and final application verification remain.
+- Step 3 complete: Hale starts with an owned brewery and four batches of ingredients; startup and documentation independently reviewed. All 530 workspace tests pass (four existing tests ignored), formatting and strict workspace Clippy pass, and a bounded `cargo run --locked` launch initialized Vulkan and opened the window.
+- An early town integration run reported `MissingInputs`. It did not recur after the subsequent reserve corrections: six independent ten-day runs and the final workspace run passed. Instrumented runs confirmed Hale collected 6,000 g and 5,000 g of beer. No speculative runtime fix or temporary diagnostic code was retained.

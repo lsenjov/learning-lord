@@ -1555,7 +1555,7 @@ mod tests {
                 .with_price(Good::Berries, 65.0)
                 .unwrap()
         );
-        assert_eq!(snapshot.universe.agents().len(), 7);
+        assert_eq!(snapshot.universe.agents().len(), 8);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);

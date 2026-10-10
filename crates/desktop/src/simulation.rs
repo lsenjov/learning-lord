@@ -266,7 +266,7 @@ impl Pacing {
     }
 }
 
-pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 7] = {
+pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 8] = {
     use learning_lord_simulation::StartingRole;
     [
         ("Ada", StartingRole::Farmer),
@@ -276,6 +276,7 @@ pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 7]
         ("Eira", StartingRole::Weaver),
         ("Finn", StartingRole::Tailor),
         ("Gita", StartingRole::Fisher),
+        ("Hale", StartingRole::Brewer),
     ]
 };
 
@@ -1054,10 +1055,10 @@ mod tests {
     }
 
     #[test]
-    fn seven_citizens_start_with_agreed_role_supplies_and_advance_without_changing_the_source() {
+    fn eight_citizens_start_with_agreed_role_supplies_and_advance_without_changing_the_source() {
         let universe = new_universe().unwrap();
         let source = universe.clone();
-        assert_eq!(universe.agents().len(), 7);
+        assert_eq!(universe.agents().len(), 8);
         assert_eq!(universe.current_time_ms(), START_TIME_MS);
         for good in Good::ALL {
             let expected = if good == Good::Berries {
@@ -1105,7 +1106,7 @@ mod tests {
         }
         let started = Instant::now();
         let next = universe.advance(STEP_MS).unwrap();
-        println!("First seven-citizen step: {:?}", started.elapsed());
+        println!("First eight-citizen step: {:?}", started.elapsed());
         assert_eq!(universe, source);
         assert_eq!(next.current_time_ms(), START_TIME_MS + STEP_MS);
         for (id, agent) in next.agents() {
@@ -1181,19 +1182,19 @@ mod tests {
     }
 
     #[test]
-    fn initial_town_has_sixteen_separated_identified_places_and_agreed_starting_roles() {
+    fn initial_town_has_eighteen_separated_identified_places_and_agreed_starting_roles() {
         use learning_lord_simulation::{AgentKind, locations::Location, marketplace::Good};
         for _ in 0..3 {
             let universe = new_universe().unwrap();
             let map = universe.map();
             let places: Vec<_> = map.places().values().collect();
-            assert_eq!(places.len(), 16);
+            assert_eq!(places.len(), 18);
             assert_eq!(
                 places
                     .iter()
                     .filter(|place| place.kind == Location::Home)
                     .count(),
-                7
+                8
             );
             assert_eq!(
                 places.iter().filter(|place| place.owner.is_none()).count(),
@@ -1265,6 +1266,34 @@ mod tests {
     }
 
     #[test]
+    fn brewer_starts_with_four_batches_and_an_empty_owned_brewery() {
+        use learning_lord_simulation::{AgentKind, brewing::BREWERY_SLOTS, locations::Location};
+        let universe = new_universe().unwrap();
+        let agent = universe
+            .agents()
+            .values()
+            .find(|agent| agent.name == "Hale")
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        for (good, expected) in [
+            (Good::Wheat, 800),
+            (Good::Hops, 80),
+            (Good::Wood, 100),
+            (Good::Water, 4000),
+        ] {
+            assert_eq!(citizen.units(good), expected);
+        }
+        assert_eq!(citizen.units(Good::Beer), 0);
+        let brewery = citizen
+            .owned_properties()
+            .find(|place| place.kind == Location::Brewery)
+            .unwrap();
+        assert_eq!(brewery.owner, Some(citizen.id()));
+        assert_eq!(brewery.batches.len(), BREWERY_SLOTS);
+        assert!(brewery.batches.iter().all(Option::is_none));
+    }
+
+    #[test]
     fn restart_replaces_universe_and_clears_error_speed_and_time_debt() {
         let universe = new_universe().unwrap().advance(STEP_MS).unwrap();
         let old_ids: Vec<_> = universe.agents().keys().copied().collect();
@@ -1283,7 +1312,7 @@ mod tests {
         state.pacing.pending_simulated_ns = 123456789;
         assert!(state.apply(Command::Restart, Duration::from_secs(10)));
         assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
-        assert_eq!(state.universe.agents().len(), 7);
+        assert_eq!(state.universe.agents().len(), 8);
         assert_eq!(state.universe.prices().price(Good::Berries), Some(65.0));
         for agent in state.universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
