@@ -124,6 +124,15 @@ impl CitizenHistory {
     }
 
     pub(crate) fn start_action(&mut self, citizen: &Citizen) -> Result<(), SimulationError> {
+        if citizen.active_action().is_some_and(|active| {
+            active.action().production_recipe() == Some(crate::production::Recipe::BrewBeer)
+        }) {
+            for &(good, units) in crate::production::Recipe::BrewBeer.inputs() {
+                self.current.consumed[good as usize] = self.current.consumed[good as usize]
+                    .checked_add(units)
+                    .ok_or(SimulationError::InventoryOverflow)?;
+            }
+        }
         if let Some(active) = citizen.active_action()
             && matches!(active.action(), CitizenAction::Eat | CitizenAction::Drink)
         {
@@ -157,7 +166,8 @@ impl CitizenHistory {
                 | CitizenAction::Plant { .. }
                 | CitizenAction::Tend { .. }
                 | CitizenAction::Harvest { .. }
-                | CitizenAction::Clear { .. },
+                | CitizenAction::Clear { .. }
+                | CitizenAction::CollectBeer { .. },
             ) => &mut self.current.activity.production_ms,
             Some(CitizenAction::Travel(_)) => &mut self.current.activity.travel_ms,
             Some(CitizenAction::Sleep) => &mut self.current.activity.sleep_ms,
@@ -212,7 +222,9 @@ impl CitizenHistory {
         }
         if active.is_some_and(|a| a.remaining_ms() == elapsed) {
             match action {
-                Some(CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. }) => {
+                Some(CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. })
+                    if recipe != crate::production::Recipe::BrewBeer =>
+                {
                     for &(good, units) in recipe.inputs() {
                         self.current.consumed[good as usize] = self.current.consumed[good as usize]
                             .checked_add(units)
@@ -229,6 +241,12 @@ impl CitizenHistory {
                             .checked_add(after.units(good) - (before.units(good) - inputs))
                             .ok_or(SimulationError::InventoryOverflow)?;
                     }
+                }
+                Some(CitizenAction::CollectBeer { .. }) => {
+                    self.current.produced[Good::Beer as usize] = self.current.produced
+                        [Good::Beer as usize]
+                        .checked_add(1000)
+                        .ok_or(SimulationError::InventoryOverflow)?;
                 }
                 Some(CitizenAction::Harvest { field, plot }) => {
                     let crop = before

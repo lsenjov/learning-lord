@@ -513,6 +513,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                 action @ (CitizenAction::Plant { .. }
                 | CitizenAction::Tend { .. }
                 | CitizenAction::Harvest { .. }
+                | CitizenAction::CollectBeer { .. }
                 | CitizenAction::Clear { .. }) => action_label(action, citizen),
                 CitizenAction::Travel(id) => {
                     format!("Walking to {}", citizen.map().place(id).unwrap().name)
@@ -707,6 +708,11 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
             crop_label(citizen, field, plot),
             citizen.map().place(field).unwrap().name,
             plot + 1
+        ),
+        CitizenAction::CollectBeer { brewery, slot } => format!(
+            "Collect beer at {} (slot {})",
+            citizen.map().place(brewery).unwrap().name,
+            slot + 1
         ),
         CitizenAction::Travel(id) => format!("Travel to {}", citizen.map().place(id).unwrap().name),
     }

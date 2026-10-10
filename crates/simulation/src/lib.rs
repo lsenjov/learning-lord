@@ -14,6 +14,7 @@ use locations::{Location, Map, PlaceId, Position, WALK_MS_PER_METRE};
 mod background;
 pub mod planning;
 pub use background::PlanningRuntime;
+pub mod brewing;
 pub mod diet;
 pub mod farming;
 pub mod history;
@@ -145,6 +146,10 @@ pub enum CitizenAction {
         field: PlaceId,
         plot: usize,
     },
+    CollectBeer {
+        brewery: PlaceId,
+        slot: usize,
+    },
     ListExcess,
     List(Good, Quantity),
     Buy(marketplace::ShoppingList),
@@ -166,6 +171,7 @@ impl CitizenAction {
 
     pub fn required_place(self, citizen: &Citizen) -> Option<PlaceId> {
         match self {
+            Self::CollectBeer { brewery, .. } => Some(brewery),
             Self::Sleep => Some(citizen.home),
             Self::Plant { field, .. }
             | Self::Tend { field, .. }
@@ -235,6 +241,7 @@ pub enum StartingRole {
     Weaver,
     Tailor,
     Fisher,
+    Brewer,
 }
 
 impl StartingRole {
@@ -247,6 +254,7 @@ impl StartingRole {
             Self::Weaver => "Weaver",
             Self::Tailor => "Tailor",
             Self::Fisher => "Fisher",
+            Self::Brewer => "Brewer",
         }
     }
 }
@@ -435,6 +443,7 @@ impl Citizen {
             StartingRole::Weaver => production::Skill::Weaving,
             StartingRole::Tailor => production::Skill::Tailoring,
             StartingRole::Fisher => production::Skill::Fishing,
+            StartingRole::Brewer => production::Skill::Brewing,
         };
         citizen.skills[skill as usize] = Some(0);
         citizen
@@ -614,6 +623,9 @@ impl Citizen {
             }
         }
         for place in self.owned_properties() {
+            wealth += place.batches.iter().flatten().count() as f64
+                * self.prices.value(Good::Beer, 1000).unwrap_or(0.0)
+                * 0.70;
             for crop in place.plots.iter().flatten() {
                 wealth += self
                     .prices
@@ -658,6 +670,7 @@ impl Citizen {
                     production::Recipe::GrowWheat
                         | production::Recipe::GrowFlax
                         | production::Recipe::GrowCabbage
+                        | production::Recipe::GrowHops
                 ) {
                     return Err(SimulationError::MissingInputs);
                 }
@@ -666,12 +679,19 @@ impl Citizen {
                 } else {
                     self.production_place(recipe)?;
                 }
-                recipe.duration_ms(self)?
+                if recipe == production::Recipe::BrewBeer {
+                    self.brewing_preparation_duration(action)?
+                } else {
+                    recipe.duration_ms(self)?
+                }
             }
             CitizenAction::Plant { .. }
             | CitizenAction::Tend { .. }
             | CitizenAction::Harvest { .. }
             | CitizenAction::Clear { .. } => self.farming_duration_ms(action)?,
+            CitizenAction::CollectBeer { brewery, slot } => {
+                self.beer_collection_duration(brewery, slot)?
+            }
             CitizenAction::Wait => ACTION_DURATION_MS,
             CitizenAction::Sleep => SLEEP_DURATION_MS,
             CitizenAction::EquipClothing => EQUIP_CLOTHING_DURATION_MS,
@@ -915,7 +935,9 @@ impl Citizen {
                 reserve[good as usize] = units;
             }
         }
-        if let Some(recipe) = active {
+        if let Some(recipe) = active
+            && recipe != production::Recipe::BrewBeer
+        {
             for &(good, units) in recipe.inputs() {
                 reserve[good as usize] = reserve[good as usize]
                     .checked_add(units)
@@ -1117,6 +1139,9 @@ impl Citizen {
         if action == CitizenAction::Eat {
             citizen.last_meal_started_ms = Some(self.market_time_ms);
         }
+        if action.production_recipe() == Some(production::Recipe::BrewBeer) {
+            citizen.start_brewing(action)?;
+        }
         citizen.active_action = Some(ActiveAction {
             action,
             remaining_ms: duration_ms,
@@ -1220,10 +1245,12 @@ impl Citizen {
                 CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
                     recipe.skill()
                 }
+                CitizenAction::CollectBeer { .. } => Some(production::Skill::Brewing),
                 action if action.crop_plot().is_some() => Some(production::Skill::Farming),
                 _ => None,
             };
             if active.action.production_recipe().is_some()
+                || matches!(active.action, CitizenAction::CollectBeer { .. })
                 || active.action.crop_plot().is_some()
                 || matches!(active.action, CitizenAction::Travel(_))
                     && citizen
@@ -1285,7 +1312,16 @@ impl Citizen {
                         )?);
                     }
                     CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
-                        citizen.complete_production(recipe, prediction)?
+                        if recipe == production::Recipe::BrewBeer {
+                            citizen.finish_preparation(
+                                active.action,
+                                self.market_time_ms
+                                    .checked_add(action_elapsed_ms)
+                                    .ok_or(SimulationError::TimeOverflow)?,
+                            )?;
+                        } else {
+                            citizen.complete_production(recipe, prediction)?;
+                        }
                     }
                     action if action.crop_plot().is_some() => {
                         let finish = self
@@ -1293,6 +1329,9 @@ impl Citizen {
                             .checked_add(action_elapsed_ms)
                             .ok_or(SimulationError::TimeOverflow)?;
                         citizen.complete_farming(action, finish)?;
+                    }
+                    CitizenAction::CollectBeer { brewery, slot } => {
+                        citizen.collect_beer(brewery, slot)?
                     }
                     CitizenAction::EquipClothing => {
                         let remaining = citizen
@@ -1674,7 +1713,9 @@ impl Universe {
         let stored = self.storage.units(place, owner, good);
         let carried = citizen.units(good);
         let reserved = match citizen.active_action.map(|active| active.action) {
-            Some(CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. }) => {
+            Some(CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. })
+                if recipe != production::Recipe::BrewBeer =>
+            {
                 recipe
                     .inputs()
                     .iter()
@@ -1976,6 +2017,7 @@ impl Universe {
                 if let Some(active) = before.active_action()
                     && active.remaining_ms() == step
                     && let Some(recipe) = active.action().production_recipe()
+                    && recipe != production::Recipe::BrewBeer
                 {
                     let place = active
                         .action()
@@ -2017,6 +2059,14 @@ impl Universe {
                     {
                         runtime.cancel(*id);
                     }
+                }
+                if let Some(active) = before.active_action()
+                    && active.remaining_ms() == step
+                    && let CitizenAction::CollectBeer { brewery, .. } = active.action()
+                    && universe.tax_production(*id, brewery, Good::Beer, 1000, finishing_time)?
+                    && let Some(runtime) = runtime.as_deref_mut()
+                {
+                    runtime.cancel(*id);
                 }
                 let new_trades: Vec<_> = universe
                     .market
@@ -2193,6 +2243,7 @@ impl Universe {
         self.market.refresh_affordability(&budgets);
         for (_, agent) in self.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.map = self.map.clone();
             citizen.market = self.market.clone();
             citizen.storage = self.storage.clone();
             citizen.prices = self.market.prices;
@@ -2205,6 +2256,16 @@ impl Universe {
             .get(&id)
             .ok_or(SimulationError::AgentNotFound)?
             .kind;
+        if let Some(active) = citizen.active_action()
+            && active.action().production_recipe() == Some(production::Recipe::BrewBeer)
+            && let Some(site) = active.action().required_place(citizen)
+        {
+            self.map
+                .places_mut()
+                .get_mut(&site)
+                .ok_or(SimulationError::PlaceNotFound)?
+                .batches = citizen.map.place(site)?.batches.clone();
+        }
         let action = citizen.active_action().map(|active| active.action());
         let action = if matches!(action, Some(CitizenAction::Travel(_))) {
             citizen.active_plan().and_then(|plan| {

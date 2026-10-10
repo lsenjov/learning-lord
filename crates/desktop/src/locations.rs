@@ -13,6 +13,7 @@ use bevy::{
 };
 use learning_lord_simulation::{
     AgentId, AgentKind, Universe,
+    brewing::Batch,
     farming::{Crop, CropStatus},
     locations::{Location, PlaceId},
     marketplace::Good,
@@ -162,13 +163,14 @@ impl State {
     }
 }
 
-const PRIVATE_TYPES: [Location; 6] = [
+const PRIVATE_TYPES: [Location; 7] = [
     Location::Home,
     Location::Field,
     Location::Mill,
     Location::Bakery,
     Location::Weavery,
     Location::Tailory,
+    Location::Brewery,
 ];
 const WEEKLY_TAX_TIME: &str = "Weekly taxes: Sunday at 04:00 | first collection Day 6";
 
@@ -177,6 +179,7 @@ fn type_name(location: Location) -> String {
         Location::Bakery => "bakeries".into(),
         Location::Weavery => "weaveries".into(),
         Location::Tailory => "tailories".into(),
+        Location::Brewery => "breweries".into(),
         _ => format!("{}s", location.name()),
     };
     format!("All {plural}")
@@ -384,6 +387,23 @@ pub(crate) fn plot_readout(plot: usize, crop: Option<Crop>, now: u64) -> String 
     )
 }
 
+pub(crate) fn batch_readout(slot: usize, batch: Option<Batch>, now: u64) -> String {
+    let stage = match batch {
+        None => "Empty".into(),
+        Some(Batch::Preparing) => "Preparing".into(),
+        Some(batch) if batch.ready(now) => "Ready".into(),
+        Some(Batch::Fermenting { ready_at_ms }) => {
+            let minutes = (ready_at_ms - now).div_ceil(60_000);
+            format!(
+                "Fermenting | {}h {:02}m remaining",
+                minutes / 60,
+                minutes % 60
+            )
+        }
+    };
+    format!("Slot {} | {stage}", slot + 1)
+}
+
 fn stocks(universe: &Universe, place: PlaceId) -> String {
     let mut lines = Vec::new();
     for (key, units) in universe
@@ -587,6 +607,12 @@ pub fn refresh(
                     details.spawn(text("FIELD PLOTS", 15.0, MUTED));
                     for (plot, crop) in place.plots.iter().enumerate() {
                         details.spawn(text(plot_readout(plot, *crop, universe.current_time_ms()), 15.0, TEXT));
+                    }
+                }
+                if place.kind == Location::Brewery {
+                    details.spawn(text("BREWERY SLOTS", 15.0, MUTED));
+                    for (slot, batch) in place.batches.iter().enumerate() {
+                        details.spawn(text(batch_readout(slot, *batch, universe.current_time_ms()), 15.0, TEXT));
                     }
                 }
                 details.spawn(text("STOCK BY OWNER", 15.0, MUTED));
@@ -1125,6 +1151,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn brewery_slots_show_each_stage_and_round_remaining_minutes_up() {
+        assert_eq!(batch_readout(0, None, 0), "Slot 1 | Empty");
+        assert_eq!(
+            batch_readout(1, Some(Batch::Preparing), 0),
+            "Slot 2 | Preparing"
+        );
+        let batch = Some(Batch::Fermenting {
+            ready_at_ms: 48 * 3_600_000,
+        });
+        assert_eq!(
+            batch_readout(2, batch, 0),
+            "Slot 3 | Fermenting | 48h 00m remaining"
+        );
+        assert_eq!(
+            batch_readout(2, batch, 1),
+            "Slot 3 | Fermenting | 48h 00m remaining"
+        );
+        assert_eq!(batch_readout(3, batch, 48 * 3_600_000), "Slot 4 | Ready");
+        assert_eq!(batch_readout(3, batch, u64::MAX), "Slot 4 | Ready");
+    }
+
+    #[test]
+    fn brewing_and_hops_have_type_scopes_and_production_tax_goods() {
+        assert!(PRIVATE_TYPES.contains(&Location::Brewery));
+        assert_eq!(type_name(Location::Brewery), "All breweries");
+        assert_eq!(tax_goods(Kind::Socage, Location::Brewery), vec![Good::Beer]);
+        assert!(tax_goods(Kind::Socage, Location::Field).contains(&Good::Hops));
+    }
+
+    #[test]
     fn cabbage_plot_yields_are_labelled_as_whole_heads() {
         use learning_lord_simulation::farming::{CropKind, HOUR_MS};
         for (tended, expected) in [([true, true], 8), ([true, false], 5)] {
@@ -1556,7 +1612,7 @@ mod tests {
         let TaxKind::Socage { rates } = tax_kind(&draft, &goods).unwrap() else {
             panic!("expected socage");
         };
-        assert_eq!(rates.len(), 3);
+        assert_eq!(rates.len(), 4);
         assert_eq!(rates[&Good::Flax].basis_points(), 500);
     }
 
@@ -1589,11 +1645,14 @@ mod tests {
             ..default()
         };
         let goods = tax_goods(Kind::Socage, Location::Field);
-        assert_eq!(goods, vec![Good::Wheat, Good::Flax, Good::Cabbage]);
+        assert_eq!(
+            goods,
+            vec![Good::Wheat, Good::Flax, Good::Cabbage, Good::Hops]
+        );
         let TaxKind::Socage { rates } = tax_kind(&draft, &goods).unwrap() else {
             panic!("expected socage");
         };
-        assert_eq!(rates.len(), 3);
+        assert_eq!(rates.len(), 4);
         assert!(rates.values().all(|rate| rate.basis_points() == 1234));
         let selected = Draft {
             rates: vec![(Good::Wheat, "5".into())],

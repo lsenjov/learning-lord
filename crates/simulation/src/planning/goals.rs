@@ -78,7 +78,8 @@ impl CitizenAction {
             | Self::Plant { .. }
             | Self::Tend { .. }
             | Self::Harvest { .. }
-            | Self::Clear { .. } => &[Production],
+            | Self::Clear { .. }
+            | Self::CollectBeer { .. } => &[Production],
             Self::Wait
             | Self::Travel(_)
             | Self::ListExcess
@@ -1175,6 +1176,12 @@ fn production_order_bounded(
                 complete = false;
                 break;
             }
+            if recipe == crate::production::Recipe::BrewBeer
+                && state.citizen.action_duration_ms(action).is_err()
+            {
+                complete = false;
+                break;
+            }
             let Some(next) = state.perform(action, prior_actions)? else {
                 complete = false;
                 break;
@@ -1524,12 +1531,28 @@ fn production_at_site(
         initial.citizen.current_time_ms(),
         Some(site),
     )?);
-    let mut state = production_restock_at(&initial, prior_actions, Some(site))?;
+    let mut state = if initial.citizen.brewing_actions_at(site).is_empty() {
+        production_restock_at(&initial, prior_actions, Some(site))?
+    } else {
+        initial.clone()
+    };
     let mut segment_start = state.clone();
     let mut order = Vec::new();
     let mut productive = false;
     while state.elapsed_ms < PRODUCTION_DURATION_MS || !productive {
         let farm_actions = state.citizen.farming_actions_at(site);
+        if let Some(action) = state.citizen.brewing_actions_at(site).first().copied()
+            && let Some(ready) = prepare(&state, action, 0.0, 0, prior_actions)?
+                .into_iter()
+                .next()
+            && let Some(next) = ready.perform(action, prior_actions)?
+        {
+            state = next;
+            segment_start = state.clone();
+            order.clear();
+            productive = true;
+            continue;
+        }
         let care = farm_actions
             .iter()
             .copied()

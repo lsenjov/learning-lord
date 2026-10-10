@@ -317,6 +317,7 @@ fn workplace(
         StartingRole::Baker => Some(Location::Bakery),
         StartingRole::Weaver => Some(Location::Weavery),
         StartingRole::Tailor => Some(Location::Tailory),
+        StartingRole::Brewer => Some(Location::Brewery),
     }
 }
 

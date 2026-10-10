@@ -14,15 +14,17 @@ pub enum CropKind {
     Wheat,
     Flax,
     Cabbage,
+    Hops,
 }
 
 impl CropKind {
-    pub const ALL: [Self; 3] = [Self::Wheat, Self::Flax, Self::Cabbage];
+    pub const ALL: [Self; 4] = [Self::Wheat, Self::Flax, Self::Cabbage, Self::Hops];
     pub fn name(self) -> &'static str {
         match self {
             Self::Wheat => "Wheat",
             Self::Flax => "Flax",
             Self::Cabbage => "Cabbage",
+            Self::Hops => "Hops",
         }
     }
     pub fn good(self) -> Good {
@@ -30,6 +32,7 @@ impl CropKind {
             Self::Wheat => Good::Wheat,
             Self::Flax => Good::Flax,
             Self::Cabbage => Good::Cabbage,
+            Self::Hops => Good::Hops,
         }
     }
     pub fn recipe(self) -> Recipe {
@@ -37,6 +40,7 @@ impl CropKind {
             Self::Wheat => Recipe::GrowWheat,
             Self::Flax => Recipe::GrowFlax,
             Self::Cabbage => Recipe::GrowCabbage,
+            Self::Hops => Recipe::GrowHops,
         }
     }
 }

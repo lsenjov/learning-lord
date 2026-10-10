@@ -21,10 +21,11 @@ pub enum Skill {
     Weaving,
     Tailoring,
     Fishing,
+    Brewing,
 }
 
 impl Skill {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 8;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Farming,
         Self::Milling,
@@ -33,6 +34,7 @@ impl Skill {
         Self::Weaving,
         Self::Tailoring,
         Self::Fishing,
+        Self::Brewing,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -43,6 +45,7 @@ impl Skill {
             Self::Weaving => "Weaving",
             Self::Tailoring => "Tailoring",
             Self::Fishing => "Fishing",
+            Self::Brewing => "Brewing",
         }
     }
 }
@@ -63,10 +66,12 @@ pub enum Recipe {
     AssembleGarment,
     CatchFish,
     GrowCabbage,
+    GrowHops,
+    BrewBeer,
 }
 
 impl Recipe {
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 16;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Forage,
         Self::GrowWheat,
@@ -82,6 +87,8 @@ impl Recipe {
         Self::AssembleGarment,
         Self::CatchFish,
         Self::GrowCabbage,
+        Self::GrowHops,
+        Self::BrewBeer,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -99,11 +106,16 @@ impl Recipe {
             Self::AssembleGarment => "Assemble garment",
             Self::CatchFish => "Catch fish",
             Self::GrowCabbage => "Grow cabbage",
+            Self::GrowHops => "Grow hops",
+            Self::BrewBeer => "Brew beer",
         }
     }
     pub fn skill(self) -> Option<Skill> {
         match self {
-            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage => Some(Skill::Farming),
+            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage | Self::GrowHops => {
+                Some(Skill::Farming)
+            }
+            Self::BrewBeer => Some(Skill::Brewing),
             Self::MillFlour => Some(Skill::Milling),
             Self::ChopWood => Some(Skill::Woodcutting),
             Self::FetchWater | Self::Forage => None,
@@ -115,7 +127,10 @@ impl Recipe {
     }
     pub fn location(self) -> Location {
         match self {
-            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage => Location::Field,
+            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage | Self::GrowHops => {
+                Location::Field
+            }
+            Self::BrewBeer => Location::Brewery,
             Self::MillFlour => Location::Mill,
             Self::ChopWood | Self::Forage => Location::Forest,
             Self::FetchWater | Self::CatchFish => Location::River,
@@ -129,10 +144,17 @@ impl Recipe {
             Self::GrowWheat
             | Self::GrowFlax
             | Self::GrowCabbage
+            | Self::GrowHops
             | Self::ChopWood
             | Self::FetchWater
             | Self::Forage
             | Self::CatchFish => &[],
+            Self::BrewBeer => &[
+                (Good::Wheat, 200),
+                (Good::Hops, 20),
+                (Good::Wood, 25),
+                (Good::Water, 1000),
+            ],
             Self::MillFlour => &[(Good::Wheat, 300)],
             Self::SpinThread => &[(Good::Flax, 200)],
             Self::WeaveCloth => &[(Good::Thread, 200)],
@@ -153,6 +175,8 @@ impl Recipe {
             Self::GrowWheat => &[(Good::Wheat, 600)],
             Self::GrowFlax => &[(Good::Flax, 600)],
             Self::GrowCabbage => &[(Good::Cabbage, 8)],
+            Self::GrowHops => &[(Good::Hops, 600)],
+            Self::BrewBeer => &[(Good::Beer, 1000)],
             Self::CatchFish => &[(Good::Fish, 1)],
             Self::SpinThread => &[(Good::Thread, 200)],
             Self::WeaveCloth => &[(Good::Cloth, 200)],
@@ -174,7 +198,10 @@ impl Recipe {
             | Self::WeaveCloth
             | Self::MakeClothingBlock
             | Self::AssembleGarment => 30 * 60_000,
-            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage => 3 * 60 * 60_000,
+            Self::GrowWheat | Self::GrowFlax | Self::GrowCabbage | Self::GrowHops => {
+                3 * 60 * 60_000
+            }
+            Self::BrewBeer => 75 * 60_000,
             Self::BakeBerryPie => 90 * 60_000,
             _ => 60 * 60_000,
         }
@@ -194,13 +221,18 @@ impl Recipe {
 
 pub fn starting_inputs(role: crate::StartingRole) -> crate::marketplace::ShoppingList {
     let recipe = match role {
+        crate::StartingRole::Brewer => Recipe::BrewBeer,
         crate::StartingRole::Miller => Recipe::MillFlour,
         crate::StartingRole::Baker => Recipe::BakeRolls,
         crate::StartingRole::Weaver => Recipe::SpinThread,
         crate::StartingRole::Tailor => Recipe::MakeClothingBlock,
         _ => return crate::marketplace::ShoppingList::default(),
     };
-    let batches = (4 * 60 * 60_000) / recipe.base_duration_ms();
+    let batches = if recipe == Recipe::BrewBeer {
+        4
+    } else {
+        (4 * 60 * 60_000) / recipe.base_duration_ms()
+    };
     crate::marketplace::ShoppingList::new(
         recipe
             .inputs()
@@ -303,6 +335,17 @@ pub(crate) fn crop_kind(recipe: Recipe) -> Option<crate::farming::CropKind> {
 }
 
 pub(crate) fn stock_cap_batches(recipe: Recipe, citizen: &Citizen) -> Option<f64> {
+    if recipe == Recipe::BrewBeer {
+        return Some(
+            citizen
+                .owned_properties()
+                .filter(|place| place.kind == Location::Brewery)
+                .map(|place| place.batches.len())
+                .sum::<usize>() as f64
+                * crate::brewing::FERMENTATION_MS as f64
+                / (crate::brewing::FERMENTATION_MS + recipe.duration_ms(citizen).ok()?) as f64,
+        );
+    }
     let days = if crop_kind(recipe).is_some() {
         crate::farming::GROWTH_MS as f64 / crate::marketplace::DAY_MS as f64
     } else {
@@ -316,6 +359,7 @@ pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
         citizen.units(good) as f64 + citizen.market().listed_units(citizen.id(), good) as f64;
     if let Some(active) = citizen.active_action()
         && let Some(recipe) = active.action().production_recipe()
+        && recipe != Recipe::BrewBeer
     {
         stock = (stock
             - recipe
@@ -337,6 +381,12 @@ pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
         && crop.good() == good
     {
         stock += crop.recipe().outputs()[0].1 as f64;
+    }
+    if good == Good::Beer {
+        stock += citizen
+            .owned_properties()
+            .map(|place| place.batches.iter().flatten().count() as f64 * 1000.0)
+            .sum::<f64>();
     }
     for place in citizen.owned_properties() {
         for crop in place
@@ -489,7 +539,7 @@ pub(crate) fn recipe_requirements_at(
             needed[good as usize] = needed[good as usize].max(-balance[good as usize]);
         }
         // Growing crops increase expected stock but cannot supply this work block.
-        if crop_kind(recipe).is_none() {
+        if crop_kind(recipe).is_none() && recipe != Recipe::BrewBeer {
             for &(good, units) in recipe.outputs() {
                 balance[good as usize] +=
                     usable_output(recipe, good, units, citizen, site, &mut tax_carry) as i128;
@@ -546,6 +596,7 @@ pub(crate) fn projected_recipes_at(
     });
     if let Some(active) = citizen.active_action()
         && let Some(recipe) = active.action().production_recipe()
+        && recipe != Recipe::BrewBeer
     {
         for &(good, units) in recipe.inputs() {
             owned[good as usize] = owned[good as usize].saturating_sub(units);
@@ -570,6 +621,11 @@ pub(crate) fn projected_recipes_at(
         .filter(|place| site.is_none_or(|site| site == place.id))
         .map(|place| place.plots.iter().filter(|plot| plot.is_none()).count())
         .sum::<usize>();
+    let mut free_brew_slots = citizen
+        .owned_properties()
+        .filter(|place| site.is_none_or(|site| site == place.id))
+        .map(|place| place.batches.iter().filter(|slot| slot.is_none()).count())
+        .sum::<usize>();
     let mut elapsed = 0;
     let mut recipes = Vec::new();
     while elapsed < horizon_ms {
@@ -579,6 +635,9 @@ pub(crate) fn projected_recipes_at(
                 site.is_none_or(|place| citizen.validate_production_site(place, recipe).is_ok())
             })
             .filter_map(|recipe| {
+                if recipe == Recipe::BrewBeer && free_brew_slots == 0 {
+                    return None;
+                }
                 if let Some(kind) = crop_kind(recipe)
                     && (empty_plots == 0 || !crop_choices.contains(&kind))
                 {
@@ -611,6 +670,9 @@ pub(crate) fn projected_recipes_at(
         };
         recipes.push(recipe);
         elapsed += duration;
+        if recipe == Recipe::BrewBeer {
+            free_brew_slots = free_brew_slots.saturating_sub(1);
+        }
         if crop_kind(recipe).is_some() {
             empty_plots = empty_plots.saturating_sub(1);
         }
@@ -652,7 +714,7 @@ pub(crate) fn projected_recipes_at(
         }
         for &(good, units) in recipe.outputs() {
             stock[good as usize] += units as f64;
-            if crop_kind(recipe).is_none() {
+            if crop_kind(recipe).is_none() && recipe != Recipe::BrewBeer {
                 owned[good as usize] = owned[good as usize]
                     .checked_add(usable_output(
                         recipe,

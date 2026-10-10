@@ -2,7 +2,7 @@ use crate::{AgentKind, Citizen, CitizenAction, Universe, locations::Location, ma
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -72,6 +72,40 @@ impl Universe {
                 ));
             }
             citizen.validate_save()?;
+            if let Some(active) = citizen.active_action() {
+                let action = active.action();
+                if action.production_recipe() == Some(crate::production::Recipe::BrewBeer) {
+                    let site = action
+                        .required_place(citizen)
+                        .ok_or(SaveError::InvalidState("missing preparation site"))?;
+                    if !self.map.place(site).is_ok_and(|place| {
+                        place.owner == Some(*id)
+                            && place.kind == Location::Brewery
+                            && place
+                                .batches
+                                .iter()
+                                .filter(|batch| **batch == Some(crate::brewing::Batch::Preparing))
+                                .count()
+                                == 1
+                    }) {
+                        return Err(SaveError::InvalidState("invalid active preparation"));
+                    }
+                }
+                if let CitizenAction::CollectBeer { brewery, slot } = action
+                    && !self.map.place(brewery).is_ok_and(|place| {
+                        place.owner == Some(*id)
+                            && place.kind == Location::Brewery
+                            && place
+                                .batches
+                                .get(slot)
+                                .copied()
+                                .flatten()
+                                .is_some_and(|batch| batch.ready(self.current_time_ms))
+                    })
+                {
+                    return Err(SaveError::InvalidState("invalid active collection"));
+                }
+            }
             self.citizen_histories[id].validate_save(self.current_time_ms)?;
         }
         for (id, rule) in &self.taxation.rules {
@@ -100,6 +134,44 @@ impl Universe {
                 || account.goods_owed().is_err()
         }) {
             return Err(SaveError::InvalidState("invalid tax account"));
+        }
+        for place in self
+            .map
+            .places()
+            .values()
+            .filter(|place| place.kind == Location::Brewery)
+        {
+            let owner = place
+                .owner
+                .ok_or(SaveError::InvalidState("unowned brewery"))?;
+            let Some(agent) = self.agents.get(&owner) else {
+                return Err(SaveError::InvalidState("missing brewery owner"));
+            };
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            let preparing = place
+                .batches
+                .iter()
+                .filter(|batch| **batch == Some(crate::brewing::Batch::Preparing))
+                .count();
+            let active_prep = citizen.active_action().is_some_and(|active| {
+                active.action().production_recipe() == Some(crate::production::Recipe::BrewBeer)
+                    && active.action().required_place(citizen) == Some(place.id)
+            });
+            if preparing != usize::from(active_prep) {
+                return Err(SaveError::InvalidState("orphan brewery preparation"));
+            }
+            if let Some(active) = citizen.active_action()
+                && let CitizenAction::CollectBeer { brewery, slot } = active.action()
+                && brewery == place.id
+                && !place
+                    .batches
+                    .get(slot)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|batch| batch.ready(self.current_time_ms))
+            {
+                return Err(SaveError::InvalidState("invalid active beer collection"));
+            }
         }
         self.validate_tax_reservations()?;
         Ok(())
@@ -256,6 +328,15 @@ fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result
         CitizenAction::Travel(place)
         | CitizenAction::BuyAt { place, .. }
         | CitizenAction::ProduceAt { place, .. } => Some(place),
+        CitizenAction::CollectBeer { brewery, slot } => {
+            if !map
+                .place(brewery)
+                .is_ok_and(|place| place.kind == Location::Brewery && slot < place.batches.len())
+            {
+                return Err(SaveError::InvalidState("invalid brewing action"));
+            }
+            Some(brewery)
+        }
         CitizenAction::Plant { field, plot, .. }
         | CitizenAction::Harvest { field, plot }
         | CitizenAction::Clear { field, plot }
@@ -292,7 +373,7 @@ mod tests {
 
     fn round_trip(world: &Universe) -> Universe {
         let encoded = world.to_save_string().unwrap();
-        assert!(encoded.contains("version: 1"));
+        assert!(encoded.contains("version: 2"));
         let loaded = Universe::from_save_str(&encoded).unwrap();
         assert_eq!(&loaded, world);
         loaded

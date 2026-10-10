@@ -22,10 +22,12 @@ pub enum Good {
     FlaxGarment,
     Fish,
     Cabbage,
+    Hops,
+    Beer,
 }
 
 impl Good {
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 16;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Berries,
         Self::Wheat,
@@ -41,6 +43,8 @@ impl Good {
         Self::FlaxGarment,
         Self::Fish,
         Self::Cabbage,
+        Self::Hops,
+        Self::Beer,
     ];
     pub const FOOD: [Self; 5] = [
         Self::Berries,
@@ -134,6 +138,8 @@ impl Good {
             Self::FlaxGarment => "Flax garment",
             Self::Fish => "Fish",
             Self::Cabbage => "Cabbage",
+            Self::Hops => "Hops",
+            Self::Beer => "Beer",
         }
     }
 }

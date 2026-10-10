@@ -35,6 +35,7 @@ pub enum Location {
     Bakery,
     Weavery,
     Tailory,
+    Brewery,
     Forest,
     River,
     Market,
@@ -50,6 +51,7 @@ impl Location {
             Self::Bakery => "bakery",
             Self::Weavery => "weavery",
             Self::Tailory => "tailory",
+            Self::Brewery => "brewery",
             Self::Forest => "Forest",
             Self::River => "River",
             Self::Market => "Market",
@@ -72,6 +74,7 @@ pub struct Place {
     pub owner: Option<AgentId>,
     pub name: String,
     pub plots: Vec<Option<crate::farming::Crop>>,
+    pub batches: Vec<Option<crate::brewing::Batch>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -167,6 +170,9 @@ impl Map {
         Ok(())
     }
 
+    pub(crate) fn places_mut(&mut self) -> &mut HashMap<PlaceId, Place> {
+        &mut self.places
+    }
     pub fn places(&self) -> &HashMap<PlaceId, Place> {
         &self.places
     }
@@ -238,6 +244,11 @@ impl Map {
                 position,
                 owner,
                 name: name.into(),
+                batches: if kind == Location::Brewery {
+                    vec![None; crate::brewing::BREWERY_SLOTS]
+                } else {
+                    Vec::new()
+                },
                 plots: if kind == Location::Field {
                     vec![None; crate::farming::FIELD_PLOTS]
                 } else {
@@ -258,6 +269,11 @@ impl Map {
                 || (place.kind == Location::Field
                     && place.plots.len() != crate::farming::FIELD_PLOTS)
                 || (place.kind != Location::Field && !place.plots.is_empty())
+                || (place.kind == Location::Brewery
+                    && (place.batches.len() != crate::brewing::BREWERY_SLOTS
+                        || place.owner.is_none()))
+                || (place.kind != Location::Brewery && !place.batches.is_empty())
+                || place.batches.iter().flatten().any(|batch| !batch.valid())
             {
                 return Err(SaveError::InvalidState("invalid map place"));
             }
