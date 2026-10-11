@@ -37,8 +37,6 @@ impl State {
 }
 #[derive(Component)]
 pub(crate) struct Content;
-#[derive(Component)]
-pub(crate) struct Membership;
 #[derive(Component, Clone, Copy)]
 pub(crate) struct ScrollPanel(pub(crate) bool);
 #[derive(Component)]
@@ -216,6 +214,7 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
         label(parent, "None");
     }
     parent.spawn(text("CARRIED SHARED GOODS", 14.0, MUTED));
+    let mut carried = false;
     for member in &household.members {
         let Some(agent) = universe.agents().get(member) else {
             continue;
@@ -228,6 +227,7 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
         if goods.is_empty() {
             continue;
         }
+        carried = true;
         row(parent, |row| {
             navigation::link(row, &agent.name, Target::Citizen(*member));
         });
@@ -244,6 +244,9 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
                 );
             });
         }
+    }
+    if !carried {
+        label(parent, "None");
     }
     parent.spawn(text("ACCESSIBLE WORKPLACES", 14.0, MUTED));
     let map = universe.map();
@@ -435,11 +438,21 @@ pub(crate) fn refresh(
                         let mut households = universe.households().values().collect::<Vec<_>>();
                         households.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
                         for household in households {
-                            navigation::link(
-                                list,
-                                &household.name,
-                                Target::Household(household.id),
-                            );
+                            list.spawn((
+                                Node::default(),
+                                BackgroundColor(if state.selected == Some(household.id) {
+                                    SELECTED
+                                } else {
+                                    PANEL
+                                }),
+                            ))
+                            .with_children(|entry| {
+                                navigation::link(
+                                    entry,
+                                    &household.name,
+                                    Target::Household(household.id),
+                                );
+                            });
                         }
                         if universe.households().is_empty() {
                             label(list, "No households");
@@ -468,38 +481,6 @@ pub(crate) fn refresh(
                             label(panel, "Select a household");
                         }
                     });
-            });
-    }
-}
-
-pub(crate) fn refresh_membership(
-    mut commands: Commands,
-    snapshot: Res<DisplaySnapshot>,
-    selection: Res<citizens::Selection>,
-    panels: Query<(Entity, Option<&Children>), With<Membership>>,
-) {
-    if !snapshot.is_changed()
-        && !selection.is_changed()
-        && panels.iter().all(|(_, children)| children.is_some())
-    {
-        return;
-    }
-    for (entity, _) in &panels {
-        commands
-            .entity(entity)
-            .despawn_children()
-            .with_children(|parent| {
-                if let Some(agent) = citizens::selected_agent(&snapshot.0.universe, selection.0) {
-                    let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
-                    if let Some(id) = citizen.household_id() {
-                        label(parent, "Household:");
-                        navigation::link(
-                            parent,
-                            &snapshot.0.universe.households()[&id].name,
-                            Target::Household(id),
-                        );
-                    }
-                }
             });
     }
 }

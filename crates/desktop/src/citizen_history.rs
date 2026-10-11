@@ -31,6 +31,9 @@ pub enum Choice {
 #[derive(Component)]
 pub struct HistoryText;
 
+#[derive(Component)]
+pub struct HistoryGoods;
+
 fn button(choice: Choice) -> impl Bundle {
     (
         Button,
@@ -106,6 +109,15 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                 },
                 HistoryText,
             ));
+            panel.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(4),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                HistoryGoods,
+            ));
         });
 }
 
@@ -173,6 +185,7 @@ pub fn handle_selection(
     }
 }
 
+#[cfg(test)]
 fn goods_label(day: &learning_lord_simulation::history::DailyCitizenHistory) -> String {
     use learning_lord_simulation::marketplace::Good;
     let mut rows = Vec::new();
@@ -200,13 +213,29 @@ fn goods_label(day: &learning_lord_simulation::history::DailyCitizenHistory) -> 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn day_label(
     day: &learning_lord_simulation::history::DailyCitizenHistory,
     partial: bool,
 ) -> String {
+    day_label_with_goods(
+        day,
+        partial,
+        &format!(
+            "GOODS\n{}\nConsumed includes recipe inputs, food and water reserved when eating or drinking starts, and equipped clothing.\n\n",
+            goods_label(day)
+        ),
+    )
+}
+
+fn day_label_with_goods(
+    day: &learning_lord_simulation::history::DailyCitizenHistory,
+    partial: bool,
+    goods: &str,
+) -> String {
     let a = day.activity;
     format!(
-        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals (includes meals) {} · overlaps activity times\n\nGOODS\n{}\nConsumed includes recipe inputs, food and water reserved when eating or drinking starts, and equipped clothing.\n\nCOINS\nEarned {}  |  Spent {}  |  Net {:+}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
+        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals (includes meals) {} · overlaps activity times\n\n{}COINS\nEarned {}  |  Spent {}  |  Net {:+}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
         crate::format_clock(day.start_ms),
         crate::format_clock(day.end_ms),
         if partial {
@@ -223,7 +252,7 @@ pub(crate) fn day_label(
         citizens::duration(a.drinking_ms),
         citizens::duration(a.idle_ms),
         citizens::duration(day.food_goal_ms),
-        goods_label(day),
+        goods,
         day.coins_earned,
         day.coins_spent,
         day.coins_earned - day.coins_spent,
@@ -239,13 +268,28 @@ pub(crate) fn day_label(
 }
 
 pub fn refresh(
-    snapshot: Res<DisplaySnapshot>,
-    citizen: Res<citizens::Selection>,
-    selection: Res<Selection>,
+    (snapshot, citizen, selection): (
+        Res<DisplaySnapshot>,
+        Res<citizens::Selection>,
+        Res<Selection>,
+    ),
     mut panels: Query<(&ViewPanel, &mut Node, &mut Visibility)>,
-    mut buttons: Query<(&Choice, &Interaction, &mut BackgroundColor)>,
+    mut buttons: Query<(&Choice, Ref<Interaction>, &mut BackgroundColor)>,
     mut readouts: Query<&mut Text, With<HistoryText>>,
+    mut commands: Commands,
+    goods_panels: Query<(Entity, Ref<HistoryGoods>)>,
+    mut goods_cache: Local<Option<Vec<(learning_lord_simulation::marketplace::Good, String)>>>,
 ) {
+    if !snapshot.is_changed()
+        && !citizen.is_changed()
+        && !selection.is_changed()
+        && !goods_panels.iter().any(|(_, panel)| panel.is_added())
+        && !buttons
+            .iter()
+            .any(|(_, interaction, _)| interaction.is_changed())
+    {
+        return;
+    }
     for (panel, mut node, mut visibility) in &mut panels {
         let visible = panel.0 == selection.view;
         let display = if visible {
@@ -302,7 +346,7 @@ pub fn refresh(
     }
     let mut value = index.map_or_else(
         || "No citizen history available.".into(),
-        |index| day_label(days[index], index + 1 == days.len()),
+        |index| day_label_with_goods(days[index], index + 1 == days.len(), ""),
     );
     if let Some(index) = index {
         let start = days[index].start_ms;
@@ -320,6 +364,51 @@ pub fn refresh(
             (day.request_ms, day.wait_ms, day.requests)
         });
         value.push_str(&format!("\nCash totals are actual trades; inventory price changes do not affect them.\n\nBACKGROUND PLANNING · REAL WALL TIME\nRequest queue + work {:.3} s  |  {} requests\nBlocked at action boundary {:.3} s\nAttributed to plan adoption day; initial startup plans excluded.", request / 1000.0, requests, wait / 1000.0));
+    }
+    use learning_lord_simulation::marketplace::Good;
+    let goods = index.map_or_else(Vec::new, |index| {
+        let day = days[index];
+        Good::ALL
+            .into_iter()
+            .filter_map(|good| {
+                let i = good as usize;
+                let units = [day.produced[i], day.bought[i], day.sold[i], day.consumed[i]];
+                units.iter().any(|units| *units != 0).then(|| {
+                    (
+                        good,
+                        format!(
+                            "produced {} · bought {} · sold {} · consumed {}",
+                            crate::quantity_label(good, units[0]),
+                            crate::quantity_label(good, units[1]),
+                            crate::quantity_label(good, units[2]),
+                            crate::quantity_label(good, units[3])
+                        ),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    if goods_cache.as_ref() != Some(&goods)
+        || goods_panels.iter().any(|(_, panel)| panel.is_added())
+    {
+        for (entity, _) in &goods_panels {
+            commands.entity(entity).despawn_children().with_children(|panel| {
+                panel.spawn(text("GOODS", 14.0, MUTED));
+                panel.spawn(text("Consumed includes recipe inputs, food and water reserved when eating or drinking starts, and equipped clothing.", 14.0, MUTED));
+                if goods.is_empty() {
+                    panel.spawn(text("No goods produced, traded or consumed yet.", 14.0, TEXT));
+                }
+                for (good, metrics) in &goods {
+                    panel.spawn(Node { flex_wrap: FlexWrap::Wrap, column_gap: px(6), ..default() }).with_children(|row| {
+                        crate::navigation::link(row, good.name(), crate::navigation::Target::Good(*good));
+                        row.spawn(text(metrics, 14.0, TEXT));
+                    });
+                }
+            });
+        }
+        if !goods_panels.is_empty() {
+            *goods_cache = Some(goods);
+        }
     }
     for mut readout in &mut readouts {
         if readout.0 != value {

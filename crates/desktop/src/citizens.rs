@@ -1,4 +1,4 @@
-use crate::{DisplaySnapshot, MUTED, PANEL, Readout, SELECTED, TEXT, action_label, text};
+use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, action_label, text};
 use bevy::{
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
@@ -70,6 +70,7 @@ pub struct DetailScroll;
 #[derive(Clone, PartialEq, Debug)]
 struct PlanRow {
     label: String,
+    fragments: Vec<crate::navigation::Fragment>,
     state: RowState,
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -195,15 +196,7 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
                     crate::citizen_history::ViewPanel(crate::citizen_history::View::Current),
                 ))
                 .with_children(|panel| {
-                    panel.spawn((text("", 17.0, TEXT), Readout::Citizen));
-                    panel.spawn((
-                        crate::collectives::Membership,
-                        Node {
-                            flex_wrap: FlexWrap::Wrap,
-                            column_gap: px(6),
-                            ..default()
-                        },
-                    ));
+                    panel.spawn(LinkedReadout::bundle(false));
                     for category in learning_lord_simulation::diet::DietCategory::ALL {
                         panel.spawn((text("", 12.0, TEXT), DietLabel(category)));
                         panel
@@ -252,7 +245,7 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
                         },
                         PlanContent,
                     ));
-                    panel.spawn((text("", 14.0, MUTED), Readout::Decision));
+                    panel.spawn(LinkedReadout::bundle(true));
                 });
             crate::citizen_history::spawn(panel);
         });
@@ -324,30 +317,6 @@ pub fn duration(ms: u64) -> String {
     )
 }
 
-pub fn location_label(citizen: &Citizen) -> String {
-    use learning_lord_simulation::CitizenAction;
-    let map = citizen.map();
-    if let Some(active) = citizen.active_action()
-        && let CitizenAction::Travel(destination) = active.action()
-    {
-        return format!("Travelling to {}", map.place(destination).unwrap().name);
-    }
-    map.places()
-        .values()
-        .filter(|place| place.position == citizen.position())
-        .min_by_key(|place| (place.id != citizen.home(), place.name.clone()))
-        .map_or_else(
-            || {
-                format!(
-                    "({:.0}, {:.0}) m",
-                    citizen.position().x,
-                    citizen.position().y
-                )
-            },
-            |place| place.name.clone(),
-        )
-}
-
 fn need_label(value: f64, sleep: bool) -> &'static str {
     if value < -100.0 {
         "Overfull"
@@ -412,6 +381,7 @@ pub(crate) fn goal_label(goal: Effect) -> &'static str {
 fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
     let Some(active) = citizen.active_plan() else {
         return vec![PlanRow {
+            fragments: vec![crate::navigation::Fragment::text("No active plan")],
             label: "No active plan".into(),
             state: RowState::Upcoming,
         }];
@@ -422,17 +392,19 @@ fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
         let total: u64 = plan.action_durations_ms()[boundary.actions.clone()]
             .iter()
             .sum();
+        let label = format!(
+            "{}{}  |  {}",
+            if goal_index == 0 {
+                ""
+            } else {
+                "Forecast after replanning: "
+            },
+            goal_label(boundary.goal),
+            duration(total)
+        );
         rows.push(PlanRow {
-            label: format!(
-                "{}{}  |  {}",
-                if goal_index == 0 {
-                    ""
-                } else {
-                    "Forecast after replanning: "
-                },
-                goal_label(boundary.goal),
-                duration(total)
-            ),
+            fragments: vec![crate::navigation::Fragment::text(&label)],
+            label,
             state: RowState::Heading,
         });
         for index in boundary.actions.clone() {
@@ -457,11 +429,14 @@ fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
             } else {
                 duration(plan.action_durations_ms()[index])
             };
+            let mut fragments = vec![crate::navigation::Fragment::text(format!(
+                "    {status:4}  "
+            ))];
+            fragments.extend(crate::navigation::action(plan.actions()[index], citizen));
+            fragments.push(crate::navigation::Fragment::text(format!("  |  {timing}")));
             rows.push(PlanRow {
-                label: format!(
-                    "    {status:4}  {}  |  {timing}",
-                    action_label(plan.actions()[index], citizen)
-                ),
+                label: crate::navigation::plain(&fragments),
+                fragments,
                 state,
             });
         }
@@ -685,13 +660,7 @@ pub fn refresh_plan(
                             RowState::Current => (15.0, Color::srgb(0.40, 0.90, 0.70)),
                             RowState::Upcoming => (14.0, TEXT),
                         };
-                        parent.spawn((
-                            text(&row.label, size, color),
-                            Node {
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                        ));
+                        crate::navigation::render(parent, &row.fragments, size, color);
                     }
                 });
         }
@@ -767,6 +736,96 @@ pub fn scroll_panels(
             }
         }
     }
+}
+
+#[derive(Component)]
+pub(crate) struct LinkedReadout {
+    decision: bool,
+    rows: Vec<Vec<crate::navigation::Fragment>>,
+}
+impl LinkedReadout {
+    fn bundle(decision: bool) -> impl Bundle {
+        (
+            Self {
+                decision,
+                rows: Vec::new(),
+            },
+            Node {
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                ..default()
+            },
+        )
+    }
+}
+pub(crate) fn refresh_linked(
+    mut commands: Commands,
+    snapshot: Res<DisplaySnapshot>,
+    selection: Res<Selection>,
+    mut panels: Query<(Entity, Ref<LinkedReadout>)>,
+) {
+    if panels.is_empty()
+        || !snapshot.is_changed()
+            && !selection.is_changed()
+            && panels.iter().all(|(_, panel)| !panel.is_added())
+    {
+        return;
+    }
+    for (entity, panel) in &mut panels {
+        let rows = if panel.decision {
+            crate::decision_rows(&snapshot.0.universe, selection.0)
+        } else {
+            crate::citizen_rows(&snapshot.0.universe, selection.0)
+        };
+        if rows == panel.rows {
+            continue;
+        }
+        let decision = panel.decision;
+        commands
+            .entity(entity)
+            .despawn_children()
+            .with_children(|parent| {
+                for row in &rows {
+                    crate::navigation::render(
+                        parent,
+                        row,
+                        if decision { 14.0 } else { 17.0 },
+                        if decision { MUTED } else { TEXT },
+                    );
+                }
+            })
+            .insert(LinkedReadout { decision, rows });
+    }
+}
+pub(crate) fn location_fragments(citizen: &Citizen) -> Vec<crate::navigation::Fragment> {
+    use crate::navigation::{self, Fragment as F};
+    if let Some(active) = citizen.active_action()
+        && let learning_lord_simulation::CitizenAction::Travel(id) = active.action()
+    {
+        return vec![
+            F::text("Location: Travelling to "),
+            navigation::place(citizen, id),
+        ];
+    }
+    let map = citizen.map();
+    let place = map
+        .places()
+        .values()
+        .filter(|place| place.position == citizen.position())
+        .min_by_key(|place| (place.id != citizen.home(), place.name.clone()));
+    vec![
+        F::text("Location: "),
+        place.map_or_else(
+            || {
+                F::text(format!(
+                    "({:.0}, {:.0}) m",
+                    citizen.position().x,
+                    citizen.position().y
+                ))
+            },
+            |place| navigation::place(citizen, place.id),
+        ),
+    ]
 }
 
 #[cfg(test)]

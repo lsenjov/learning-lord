@@ -93,7 +93,9 @@ The desktop starts paused with nine citizens: Ada and Iris the farmers, Bram the
 
 The desktop opens onto the full-screen map. Drag empty map space with the left or middle mouse button to pan, and use the wheel to zoom around the pointer. Click a citizen or location on the map to select it in its category window. The fixed bottom-left clock and time controls and the top-right treasury, Save, Load and Restart controls stay above floating windows.
 
-Use the bottom-right **Citizens**, **Locations** and **Market** buttons, or **C/M/L**, to open their windows. Drag a window by its title bar, resize an edge or corner, and close it with **X**. Clicking anywhere in a window brings it forward. Reopening a window keeps its position and size for the current session. Scroll inside the frontmost window to read longer content. Window content keeps a readable minimum width; on a smaller viewport, use horizontal scrolling or **Shift+wheel** to reach their full content.
+Use the bottom-right **Citizens**, **Collectives**, **Locations** and **Market** buttons to open their windows; **C/M/L** open Citizens, Market and Locations respectively. Drag a window by its title bar, resize an edge or corner, and close it with **X**. Clicking anywhere in a window brings it forward. Reopening a window keeps its position and size for the current session. Scroll inside the frontmost window to read longer content. Window content keeps a readable minimum width; on a smaller viewport, use horizontal scrolling or **Shift+wheel** to reach their full content.
+
+Underlined cyan entity names open or focus their existing category window: citizens, households in Collectives, goods in the Market overview, and locations. Source windows stay open. Collectives shows household members, home, shared finances, stocks, workplace owners and maintenance; Guilds and Businesses are placeholders. Unfinished tax drafts are retained separately for each location or location type, and caravan drafts remain separate for each good. Loading or restarting a universe clears drafts and repairs entity selections; the selected market good remains unchanged.
 
 Select a citizen in the scrollable left sidebar, or press **1-6** to select one of the first six citizens. The selected citizen’s details remain on the right. Locations and Market likewise keep their lists on the left and selected details on the right. Selection follows their ID across snapshots; restarting selects the new Ada. The map shows everyone, highlights the selected citizen and displays their travel route. Nearby citizen labels are offset to remain distinct. The scrollable detail panel shows inventory, exact needs, location, the goal-completion replanning boundary, saved planning scores and the active plan grouped by goal. Completed actions remain dimmed, the current action is marked **NOW**, and future actions retain predicted durations. The second goal is labelled as a forecast after replanning. Normal replanning waits for the first goal to finish; insufficient food or other failed prerequisites can trigger an earlier replan.
 
@@ -124,7 +126,7 @@ To use a different maximum automatic update rate, set a positive integer at laun
 LEARNING_LORD_MAX_UPDATES_PER_SECOND=30 cargo run --locked
 ```
 
-This changes update frequency, not simulation speed. Rendering and input remain on the UI thread; at most one simulation advance runs at a time. Close the application window normally to stop the worker after its in-progress update. Relationships are not implemented yet.
+This changes update frequency, not simulation speed. Rendering and input remain on the UI thread; at most one simulation advance runs at a time. Close the application window normally to stop the worker after its in-progress update.
 
 ## Development
 

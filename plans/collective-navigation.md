@@ -30,4 +30,6 @@
 ## Progress
 
 - Step 1 complete: Collectives, typed navigation, focus handling and draft preservation implemented and independently reviewed. Desktop tests, formatting and strict Clippy pass.
-- Step 2 in progress: extend entity links through existing views and verify the native layout.
+- Step 2 complete: typed links cover citizen details, plans, decisions and history; location stocks and taxes; and market participants, locations and recipe ingredients. Existing controls and display data are preserved.
+- Independent review found no remaining high or medium issues. The full 129-test desktop suite and an additional action-link regression pass; formatting and strict Clippy pass.
+- Native screenshots checked Collectives, citizens, plans, market listings/overview and location stocks, including resized windows. Adjusted inline spacing and used an ASCII recipe separator for the current font.

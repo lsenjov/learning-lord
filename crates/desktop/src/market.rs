@@ -6,6 +6,7 @@ use bevy::{
 };
 use learning_lord_simulation::{
     Universe,
+    locations::PlaceId,
     marketplace::{Good, GoodActivity, MarketParty},
     production::Recipe,
 };
@@ -58,13 +59,17 @@ pub enum Readout {
     Price(Good),
     Title,
     PriceNow,
-    MaterialMargins,
-    Buyers,
     Unfulfilled,
 }
 
 #[derive(Component)]
 pub struct Orders;
+
+#[derive(Component)]
+pub struct BuyerRows;
+
+#[derive(Component)]
+pub struct RecipeRows;
 
 #[derive(Resource, Default)]
 pub struct OrderDisplay(Vec<SellerOrders>);
@@ -74,6 +79,7 @@ struct SellerOrders {
     id: MarketParty,
     name: String,
     location: String,
+    place: PlaceId,
     orders: Vec<(u64, u64, f64)>,
 }
 
@@ -218,19 +224,27 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                         .with_children(|content| match tab {
                             Tab::Overview => {
                                 content.spawn((text("", 16.0, TEXT), Readout::PriceNow));
-                                content.spawn((text("", 14.0, MUTED), Readout::MaterialMargins));
+                                content.spawn((
+                                    Node {
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: px(4),
+                                        ..default()
+                                    },
+                                    RecipeRows,
+                                ));
                                 crate::market_history::spawn(content);
                             }
                             Tab::Listings => {
                                 content.spawn(text("CURRENT BUY REQUESTS  |  live", 14.0, MUTED));
                                 content.spawn((text("", 14.0, MUTED), Readout::Unfulfilled));
                                 content.spawn((
-                                    text("", 14.0, TEXT),
                                     Node {
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: px(4),
                                         flex_shrink: 0.0,
                                         ..default()
                                     },
-                                    Readout::Buyers,
+                                    BuyerRows,
                                 ));
                                 content.spawn(text("CURRENT SELL ORDERS  |  live", 14.0, MUTED));
                                 content.spawn((
@@ -345,6 +359,7 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
                         .map()
                         .place(order.place)
                         .map_or_else(|_| "Unknown location".into(), |place| place.name.clone()),
+                    place: order.place,
                     orders: Vec::new(),
                 });
                 groups.len() - 1
@@ -412,6 +427,7 @@ fn order_label(good: Good, units: u64, price: f64) -> String {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn buyer_requests(universe: &Universe, good: Good) -> String {
     let market = universe.market();
     let mut buyers: Vec<_> = universe
@@ -569,14 +585,25 @@ pub fn refresh_choices(
     }
 }
 
+type MarketRows = (
+    Good,
+    Vec<(learning_lord_simulation::AgentId, String, u64, u64)>,
+    String,
+);
+type RowPanels<'w, 's> = (
+    Query<'w, 's, Entity, With<Orders>>,
+    Query<'w, 's, Entity, With<BuyerRows>>,
+    Query<'w, 's, Entity, With<RecipeRows>>,
+);
+
 pub fn refresh(
     mut commands: Commands,
     (snapshot, selection): (Res<DisplaySnapshot>, Res<Selection>),
-    mut cached: ResMut<OrderDisplay>,
+    (mut cached, mut row_cache): (ResMut<OrderDisplay>, Local<Option<MarketRows>>),
     mut panels: Query<(Ref<ViewPanel>, &mut Node, &mut Visibility), Without<TabPanel>>,
     mut tab_panels: Query<(&TabPanel, &mut Node, &mut Visibility), Without<ViewPanel>>,
     mut readouts: Query<(&Readout, &mut Text)>,
-    orders: Query<Entity, With<Orders>>,
+    (orders, buyers, recipes): RowPanels,
 ) {
     let added = panels.iter().any(|(panel, _, _)| panel.is_added());
     if !snapshot.is_changed() && !selection.is_changed() && !added {
@@ -615,10 +642,8 @@ pub fn refresh(
                     format!("{price}\n{margins}")
                 }
             }
-            Readout::MaterialMargins => material_margins(universe, selection.good(), true),
             Readout::Title => selection.good().name().into(),
             Readout::PriceNow => price_details(universe, selection.good()),
-            Readout::Buyers => buyer_requests(universe, selection.good()),
             Readout::Unfulfilled => format!(
                 "Affordable unfulfilled demand: {}",
                 crate::quantity_label(
@@ -631,6 +656,126 @@ pub fn refresh(
         if value.0 != next {
             value.0 = next;
         }
+    }
+    let good = selection.good();
+    let buyer_key = universe
+        .agents()
+        .iter()
+        .filter_map(|(id, agent)| {
+            let units = universe.market().requested(*id).units(good);
+            (units > 0).then(|| {
+                (
+                    *id,
+                    agent.name.clone(),
+                    units,
+                    universe.market().affordable_request(*id).units(good),
+                )
+            })
+        })
+        .collect();
+    let row_key = (good, buyer_key, material_margins(universe, good, true));
+    if row_cache.as_ref() != Some(&row_key) || added {
+        for entity in &buyers {
+            commands
+                .entity(entity)
+                .despawn_children()
+                .with_children(|content| {
+                    let mut requested: Vec<_> = universe
+                        .agents()
+                        .iter()
+                        .filter(|(id, _)| universe.market().requested(**id).units(good) > 0)
+                        .collect();
+                    requested
+                        .sort_by(|a, b| a.1.name.cmp(&b.1.name).then_with(|| a.0.0.cmp(&b.0.0)));
+                    if requested.is_empty() {
+                        content.spawn(text("No current buy requests for this good.", 14.0, TEXT));
+                    }
+                    for (id, agent) in &requested {
+                        crate::navigation::link(
+                            content,
+                            &agent.name,
+                            crate::navigation::Target::Citizen(**id),
+                        );
+                        if requested
+                            .iter()
+                            .filter(|(_, other)| other.name == agent.name)
+                            .count()
+                            > 1
+                        {
+                            content.spawn(text(format!("Buyer {}", id.0), 12.0, MUTED));
+                        }
+                        content.spawn(text(
+                            format!(
+                                "{} requested  |  {} affordable",
+                                crate::quantity_label(
+                                    good,
+                                    universe.market().requested(**id).units(good)
+                                ),
+                                crate::quantity_label(
+                                    good,
+                                    universe.market().affordable_request(**id).units(good)
+                                )
+                            ),
+                            14.0,
+                            TEXT,
+                        ));
+                    }
+                });
+        }
+        for entity in &recipes {
+            commands
+                .entity(entity)
+                .despawn_children()
+                .with_children(|content| {
+                    content.spawn(text(material_margins(universe, good, true), 14.0, MUTED));
+                    for recipe in Recipe::ALL
+                        .into_iter()
+                        .filter(|recipe| !recipe.inputs().is_empty())
+                        .filter(|recipe| recipe.outputs().iter().any(|&(output, _)| output == good))
+                    {
+                        content
+                            .spawn(Node {
+                                flex_wrap: FlexWrap::Wrap,
+                                column_gap: px(6),
+                                ..default()
+                            })
+                            .with_children(|row| {
+                                row.spawn(text(format!("{}:", recipe.name()), 14.0, MUTED));
+                                for (index, &(input, units)) in recipe.inputs().iter().enumerate() {
+                                    if index > 0 {
+                                        row.spawn(text("+", 14.0, MUTED));
+                                    }
+                                    crate::navigation::link(
+                                        row,
+                                        format!(
+                                            "{} {}",
+                                            crate::quantity_label(input, units),
+                                            input.name()
+                                        ),
+                                        crate::navigation::Target::Good(input),
+                                    );
+                                }
+                                row.spawn(text("->", 14.0, MUTED));
+                                for (index, &(output, units)) in recipe.outputs().iter().enumerate()
+                                {
+                                    if index > 0 {
+                                        row.spawn(text("+", 14.0, MUTED));
+                                    }
+                                    crate::navigation::link(
+                                        row,
+                                        format!(
+                                            "{} {}",
+                                            crate::quantity_label(output, units),
+                                            output.name()
+                                        ),
+                                        crate::navigation::Target::Good(output),
+                                    );
+                                }
+                            });
+                    }
+                });
+        }
+        *row_cache = Some(row_key);
     }
     let groups = seller_orders(universe, selection.good());
     if groups != cached.0 || cached.is_added() || added {
@@ -651,8 +796,26 @@ pub fn refresh(
                                 ..default()
                             })
                             .with_children(|seller| {
-                                seller.spawn(text(&group.name, 16.0, TEXT));
-                                seller.spawn(text(&group.location, 14.0, MUTED));
+                                match group.id {
+                                    MarketParty::Citizen(id) => crate::navigation::link(
+                                        seller,
+                                        &group.name,
+                                        crate::navigation::Target::Citizen(id),
+                                    ),
+                                    MarketParty::Household(id) => crate::navigation::link(
+                                        seller,
+                                        &group.name,
+                                        crate::navigation::Target::Household(id),
+                                    ),
+                                    MarketParty::Caravan => {
+                                        seller.spawn(text(&group.name, 16.0, TEXT));
+                                    }
+                                }
+                                crate::navigation::link(
+                                    seller,
+                                    &group.location,
+                                    crate::navigation::Target::Location(group.place),
+                                );
                                 if let Some(id) = group.id.citizen()
                                     && groups
                                         .iter()
@@ -1015,16 +1178,34 @@ mod tests {
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe.clone();
         app.update();
         let displayed = |app: &mut App| {
-            app.world_mut()
-                .query::<(&Readout, &Text)>()
-                .iter(app.world())
-                .find(|(readout, _)| matches!(readout, Readout::Buyers))
-                .unwrap()
-                .1
-                .0
-                .clone()
+            fn labels(world: &World, entity: Entity, values: &mut Vec<String>) {
+                if let Some(value) = world.get::<Text>(entity) {
+                    values.push(value.0.clone());
+                }
+                if let Some(children) = world.get::<Children>(entity) {
+                    for child in children {
+                        labels(world, *child, values);
+                    }
+                }
+            }
+            let entity = app
+                .world_mut()
+                .query_filtered::<Entity, With<BuyerRows>>()
+                .single(app.world())
+                .unwrap();
+            let mut values = Vec::new();
+            labels(app.world(), entity, &mut values);
+            values.join("\n")
         };
-        assert_eq!(displayed(&mut app), expected);
+        assert_eq!(displayed(&mut app), expected.replace("\n\n", "\n"));
+        let targets = app
+            .world_mut()
+            .query::<&crate::navigation::Target>()
+            .iter(app.world())
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(targets.contains(&crate::navigation::Target::Citizen(funded)));
+        assert!(targets.contains(&crate::navigation::Target::Citizen(cashless)));
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe
             .with_purchase_request(cashless, ShoppingList::default())
             .unwrap();

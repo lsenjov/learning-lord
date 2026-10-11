@@ -83,9 +83,7 @@ enum Control {
 enum Readout {
     Clock,
     Town,
-    Decision,
     Status,
-    Citizen,
     Error,
     RunButton,
     PersistenceStatus,
@@ -166,13 +164,13 @@ fn main() -> Result<(), String> {
                 citizens::refresh_cards,
                 citizens::refresh_diet,
                 citizens::refresh_plan,
+                citizens::refresh_linked,
                 citizens::scroll_panels,
             )
                 .chain(),
             (
                 citizen_history::refresh,
                 collectives::refresh,
-                collectives::refresh_membership,
                 map_view::refresh,
                 market::refresh_choices,
                 market::refresh,
@@ -474,71 +472,19 @@ fn format_clock(time_ms: u64) -> String {
     )
 }
 
-fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::AgentId>) -> String {
+fn citizen_rows(
+    universe: &Universe,
+    id: Option<learning_lord_simulation::AgentId>,
+) -> Vec<Vec<navigation::Fragment>> {
+    use navigation::{Fragment as F, Target};
     let Some(agent) = citizens::selected_agent(universe, id) else {
-        return "No citizens".into();
+        return vec![vec![F::text("No citizens")]];
     };
     let AgentKind::Citizen(citizen) = &agent.kind;
     let wellbeing = citizen
         .personal_wellbeing()
         .map(|score| format!("{:.1}", if score == 0.0 { 0.0 } else { score }))
         .unwrap_or_else(|error| error.to_string());
-    let action = citizen
-        .active_action()
-        .map(|active| {
-            let name = match active.action() {
-                CitizenAction::Eat if active.drinking_units() > 0 => "Eating & drinking".into(),
-                CitizenAction::Eat => "Eating".into(),
-                CitizenAction::Drink => "Drinking".into(),
-                CitizenAction::Wait => "Waiting".into(),
-                CitizenAction::Sleep => "Sleeping".into(),
-                CitizenAction::EquipClothing => "Equipping clothing".into(),
-                CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage)
-                | CitizenAction::ProduceAt {
-                    recipe: learning_lord_simulation::production::Recipe::Forage,
-                    ..
-                } => "Foraging".into(),
-                CitizenAction::BuyFood(good) => format!("Buying {}", good.name().to_lowercase()),
-                CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
-                    recipe.name().into()
-                }
-                CitizenAction::ListExcess => "List excess goods".into(),
-                CitizenAction::List(good, units) => {
-                    format!("Listing {} {}", quantity_label(good, units), good.name())
-                }
-                CitizenAction::Buy(list) => format!("Buying {}", shopping_list_label(list)),
-                CitizenAction::BuyAt { place, list } => format!(
-                    "Buying {} at {}",
-                    shopping_list_label(list),
-                    citizen.map().place(place).unwrap().name
-                ),
-                CitizenAction::Withdraw(good, units) => {
-                    format!(
-                        "Withdrawing {} {}",
-                        quantity_label(good, units),
-                        good.name()
-                    )
-                }
-                action @ (CitizenAction::Plant { .. }
-                | CitizenAction::CollectStored { .. }
-                | CitizenAction::DepositStored { .. }
-                | CitizenAction::Tend { .. }
-                | CitizenAction::Harvest { .. }
-                | CitizenAction::CollectBeer { .. }
-                | CitizenAction::Clear { .. }) => action_label(action, citizen),
-                CitizenAction::Travel(id) => {
-                    format!("Walking to {}", citizen.map().place(id).unwrap().name)
-                }
-            };
-            let seconds = active.remaining_ms().div_ceil(1000);
-            format!(
-                "{name} | {:02}:{:02}:{:02} remaining",
-                seconds / 3600,
-                seconds / 60 % 60,
-                seconds % 60
-            )
-        })
-        .unwrap_or_else(|| "Idle".into());
     let replanning = citizen
         .active_plan()
         .map(|active| {
@@ -554,32 +500,6 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
     let role = citizen
         .starting_role()
         .map_or_else(String::new, |role| format!(" | {}", role.name()));
-    let inventory = Good::ALL
-        .into_iter()
-        .filter(|good| citizen.units(*good) != 0 || citizen.town_carried_units(*good) != 0)
-        .map(|good| {
-            format!(
-                "{}: {} available | {} tax reserved | {} town-owned",
-                good.name(),
-                quantity_label(
-                    good,
-                    citizen
-                        .units(good)
-                        .saturating_sub(citizen.tax_reserved_units(good))
-                ),
-                quantity_label(good, citizen.tax_reserved_units(good)),
-                quantity_label(good, citizen.town_carried_units(good))
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut properties = citizen
-        .owned_properties()
-        .filter(|place| place.owner == Some(citizen.id()))
-        .map(|place| place.name.as_str())
-        .collect::<Vec<_>>();
-    properties.sort();
-    let properties = properties.join(", ");
     let skills = learning_lord_simulation::production::Skill::ALL
         .into_iter()
         .filter_map(|skill| {
@@ -599,7 +519,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         || "None".into(),
         |condition| format!("{:.1}%", condition * 100.0),
     );
-    let household = household_readout(universe, citizen);
+
     let decision = citizen
         .decision_score()
         .map_or_else(|error| error.to_string(), |score| format!("{score:.1}"));
@@ -608,9 +528,8 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
     } else {
         citizen.coins()
     };
-    format!(
-        "{}{role}\n{inventory}\nPersonal coins: {} | Personal wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Personal wellbeing: {wellbeing} | Decision score: {decision}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nDrinking reserves: {:.0} g | Reserve wellbeing: +{:.2}\nDiet wellbeing: +{:.2} | Each category decays 50/day; +5 at 50, +7 at 100\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{household}\n{skills}",
-        agent.name,
+    let metrics = format!(
+        "Personal coins: {} | Personal wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Personal wellbeing: {wellbeing} | Decision score: {decision}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nDrinking reserves: {:.0} g | Reserve wellbeing: +{:.2}\nDiet wellbeing: +{:.2} | Each category decays 50/day; +5 at 50, +7 at 100",
         coins,
         citizen
             .wealth()
@@ -644,86 +563,140 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         citizen.drinking_water_reserve(),
         citizen.water_reserve_wellbeing(),
         citizen.dietary_wellbeing(),
-        citizens::location_label(citizen)
-    )
+    );
+    let mut rows = vec![vec![
+        F::entity(&agent.name, Target::Citizen(citizen.id())),
+        F::text(role),
+    ]];
+    for good in Good::ALL {
+        if citizen.units(good) == 0 && citizen.town_carried_units(good) == 0 {
+            continue;
+        }
+        rows.push(vec![
+            F::good(good),
+            F::text(format!(
+                ": {} available | {} tax reserved | {} town-owned",
+                quantity_label(
+                    good,
+                    citizen
+                        .units(good)
+                        .saturating_sub(citizen.tax_reserved_units(good))
+                ),
+                quantity_label(good, citizen.tax_reserved_units(good)),
+                quantity_label(good, citizen.town_carried_units(good))
+            )),
+        ]);
+    }
+    rows.extend(metrics.lines().map(|line| vec![F::text(line)]));
+    rows.push(citizens::location_fragments(citizen));
+    if let Some(active) = citizen.active_action() {
+        let mut action = navigation::active_action(&active, citizen);
+        action.push(F::text(format!(
+            " | {} remaining",
+            citizens::duration(active.remaining_ms())
+        )));
+        rows.push(action);
+    } else {
+        rows.push(vec![F::text("Idle")]);
+    }
+    rows.push(vec![F::text(replanning)]);
+    let mut owned = vec![F::text("Owns: ")];
+    let mut properties = citizen.owned_properties().collect::<Vec<_>>();
+    properties.sort_by(|a, b| a.name.cmp(&b.name));
+    for (index, place) in properties.iter().enumerate() {
+        if index > 0 {
+            owned.push(F::text(", "));
+        }
+        owned.push(F::entity(&place.name, Target::Location(place.id)));
+    }
+    rows.push(owned);
+    rows.extend(household_rows(universe, citizen));
+    rows.extend(skills.lines().map(|line| vec![F::text(line)]));
+    rows
 }
 
-fn household_readout(universe: &Universe, citizen: &Citizen) -> String {
-    let maintenance = citizen.maintenance();
-    let maintenance = [
-        ("Replenishment", &maintenance.replenishment),
-        ("Listing excess", &maintenance.listing),
-    ]
-    .map(|(label, task)| {
-        let claimant = task
-            .claimant
-            .map_or_else(|| "None".into(), |id| locations::name(universe, id));
-        format!(
-            "{label}: {} cooldown remaining | Committed worker: {claimant}",
-            citizens::duration(task.remaining_ms(universe.current_time_ms()))
-        )
-    })
-    .join("\n");
-    let workplace = citizen.designated_workplace().map_or_else(
-        || "None".into(),
-        |place| {
-            universe
-                .map()
-                .place(place)
-                .map_or_else(|error| error.to_string(), |place| place.name.clone())
-        },
+fn household_rows(universe: &Universe, citizen: &Citizen) -> Vec<Vec<navigation::Fragment>> {
+    use navigation::{Fragment as F, Target};
+    if let Some(id) = citizen.household_id() {
+        let household = &universe.households()[&id];
+        let wealth = universe
+            .household_wealth(id)
+            .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}"));
+        return vec![
+            vec![F::text("Household: "), navigation::account(universe, id)],
+            vec![F::text(format!(
+                "Shared coins: {} | Shared wealth: {wealth} coins",
+                household.coins
+            ))],
+        ];
+    }
+    let mut workplace = vec![F::text("Independent | Designated workplace: ")];
+    workplace.push(
+        citizen
+            .designated_workplace()
+            .map_or_else(|| F::text("None"), |id| navigation::place(citizen, id)),
     );
-    let Some(id) = citizen.household_id() else {
-        let mut stocks = universe
-            .storage()
-            .stock()
-            .iter()
-            .filter(|(key, units)| {
-                let owned = key.owner == citizen.goods_owner();
-                let town_here = key.owner == learning_lord_simulation::storage::GoodsOwner::Town
-                    && citizen
-                        .owned_properties()
-                        .any(|place| place.id == key.place);
-                **units > 0 && (owned || town_here)
-            })
-            .map(|(key, units)| {
-                let place = universe
-                    .map()
-                    .place(key.place)
-                    .map_or_else(|error| error.to_string(), |place| place.name.clone());
-                let town = key.owner == learning_lord_simulation::storage::GoodsOwner::Town;
-                format!(
-                    "{place} | {}: {} stored | {} tax reserved | {} town-owned",
-                    key.good.name(),
-                    quantity_label(key.good, if town { 0 } else { *units }),
-                    quantity_label(
-                        key.good,
-                        universe
-                            .storage()
-                            .reserved_units(key.place, key.owner, key.good)
-                    ),
-                    quantity_label(key.good, if town { *units } else { 0 })
-                )
-            })
-            .collect::<Vec<_>>();
-        stocks.sort();
-        return format!(
-            "Independent | Designated workplace: {workplace}\nStored stocks by location:\n{}\nMaintenance (6-hour cooldown):\n{maintenance}",
-            if stocks.is_empty() {
-                "None".into()
-            } else {
-                stocks.join("\n")
-            }
-        );
-    };
-    let household = &universe.households()[&id];
-    let wealth = universe
-        .household_wealth(id)
-        .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}"));
-    format!(
-        "Shared coins: {} | Shared wealth: {wealth} coins",
-        household.coins
-    )
+    let mut rows = vec![workplace, vec![F::text("Stored stocks by location:")]];
+    let mut stocks = universe
+        .storage()
+        .stock()
+        .iter()
+        .filter(|(key, units)| {
+            **units > 0
+                && (key.owner == citizen.goods_owner()
+                    || key.owner == learning_lord_simulation::storage::GoodsOwner::Town
+                        && citizen
+                            .owned_properties()
+                            .any(|place| place.id == key.place))
+        })
+        .collect::<Vec<_>>();
+    stocks.sort_by_key(|(key, _)| (key.place.0, key.good.name()));
+    if stocks.is_empty() {
+        rows.push(vec![F::text("None")]);
+    }
+    for (key, units) in stocks {
+        let town = key.owner == learning_lord_simulation::storage::GoodsOwner::Town;
+        rows.push(vec![
+            navigation::place(citizen, key.place),
+            F::text(" | "),
+            F::entity(key.good.name(), Target::Good(key.good)),
+            F::text(format!(
+                ": {} stored | {} tax reserved | {} town-owned",
+                quantity_label(key.good, if town { 0 } else { *units }),
+                quantity_label(
+                    key.good,
+                    universe
+                        .storage()
+                        .reserved_units(key.place, key.owner, key.good)
+                ),
+                quantity_label(key.good, if town { *units } else { 0 })
+            )),
+        ]);
+    }
+    rows.push(vec![F::text("Maintenance (6-hour cooldown):")]);
+    for (name, task) in [
+        ("Replenishment", &citizen.maintenance().replenishment),
+        ("Listing excess", &citizen.maintenance().listing),
+    ] {
+        rows.push(vec![
+            F::text(format!(
+                "{name}: {} cooldown remaining | Committed worker: ",
+                citizens::duration(task.remaining_ms(universe.current_time_ms()))
+            )),
+            task.claimant
+                .map_or_else(|| F::text("None"), |id| navigation::account(universe, id)),
+        ]);
+    }
+    rows
+}
+
+#[cfg(test)]
+fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::AgentId>) -> String {
+    citizen_rows(universe, id)
+        .iter()
+        .map(|row| navigation::plain(row))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn quantity_label(good: Good, units: u64) -> String {
@@ -739,13 +712,6 @@ fn quantity_label(good: Good, units: u64) -> String {
         good.unit_name()
     };
     format!("{units} {unit}")
-}
-
-fn shopping_list_label(list: learning_lord_simulation::marketplace::ShoppingList) -> String {
-    list.items()
-        .map(|(good, units)| format!("{} {}", quantity_label(good, units), good.name()))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn crop_label(
@@ -779,83 +745,11 @@ fn crop_label(
         .unwrap_or("crop")
 }
 
-fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citizen) -> String {
-    match action {
-        CitizenAction::Eat => "Eat".into(),
-        CitizenAction::Drink => "Drink".into(),
-        CitizenAction::Wait => "Wait".into(),
-        CitizenAction::Sleep => "Sleep".into(),
-        CitizenAction::EquipClothing => "Equip clothing".into(),
-        CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage)
-        | CitizenAction::ProduceAt {
-            recipe: learning_lord_simulation::production::Recipe::Forage,
-            ..
-        } => "Forage".into(),
-        CitizenAction::BuyFood(good) => format!("Buy {}", good.name().to_lowercase()),
-        CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
-            recipe.name().into()
-        }
-        CitizenAction::ListExcess => "List excess goods".into(),
-        CitizenAction::List(good, units) => {
-            format!("List {} {}", quantity_label(good, units), good.name())
-        }
-        CitizenAction::Buy(list) => format!("Buy {}", shopping_list_label(list)),
-        CitizenAction::BuyAt { place, list } => format!(
-            "Buy {} at {}",
-            shopping_list_label(list),
-            citizen.map().place(place).unwrap().name
-        ),
-        CitizenAction::Withdraw(good, units) => {
-            format!("Withdraw {} {}", quantity_label(good, units), good.name())
-        }
-        CitizenAction::CollectStored { place, list } => format!(
-            "Collect {} from {}",
-            shopping_list_label(list),
-            citizen.map().place(place).unwrap().name
-        ),
-        CitizenAction::DepositStored { place, list } => format!(
-            "Deposit {} at {}",
-            shopping_list_label(list),
-            citizen.map().place(place).unwrap().name
-        ),
-        CitizenAction::Plant { field, plot, crop } => format!(
-            "Plant {} at {}, plot {}",
-            crop.name(),
-            citizen.map().place(field).unwrap().name,
-            plot + 1
-        ),
-        CitizenAction::Tend { field, plot, stage } => format!(
-            "Tend {} at {}, plot {} (stage {})",
-            crop_label(citizen, field, plot),
-            citizen.map().place(field).unwrap().name,
-            plot + 1,
-            stage + 1
-        ),
-        CitizenAction::Harvest { field, plot } => format!(
-            "Harvest {} at {}, plot {}",
-            crop_label(citizen, field, plot),
-            citizen.map().place(field).unwrap().name,
-            plot + 1
-        ),
-        CitizenAction::Clear { field, plot } => format!(
-            "Clear {} at {}, plot {}",
-            crop_label(citizen, field, plot),
-            citizen.map().place(field).unwrap().name,
-            plot + 1
-        ),
-        CitizenAction::CollectBeer { brewery, slot } => format!(
-            "Collect beer at {} (slot {})",
-            citizen.map().place(brewery).unwrap().name,
-            slot + 1
-        ),
-        CitizenAction::Travel(id) => format!("Travel to {}", citizen.map().place(id).unwrap().name),
-    }
+fn action_label(action: CitizenAction, citizen: &Citizen) -> String {
+    navigation::plain(&navigation::action(action, citizen))
 }
-
-fn sequence_readout(
-    actions: &[CitizenAction],
-    citizen: &learning_lord_simulation::Citizen,
-) -> String {
+#[cfg(test)]
+fn sequence_readout(actions: &[CitizenAction], citizen: &Citizen) -> String {
     let mut labels = Vec::new();
     let mut index = 0;
     while index < actions.len() {
@@ -866,7 +760,7 @@ fn sequence_readout(
             .count();
         let label = action_label(action, citizen);
         labels.push(if count == 1 {
-            label.to_string()
+            label
         } else {
             format!("{label} x{count}")
         });
@@ -874,65 +768,50 @@ fn sequence_readout(
     }
     labels.join(" > ")
 }
-
-fn forecast_readout(
-    forecast: &learning_lord_simulation::planning::GoalForecast,
-    citizen: &Citizen,
-) -> Vec<String> {
-    let seconds = forecast.duration_ms.div_ceil(1000);
-    vec![
-        format!(
-            "{:02}:{:02}:{:02} | Goal avg {:.2} | Plan avg {:.2} | Future food +{:.2}",
-            seconds / 3600,
-            seconds / 60 % 60,
-            seconds % 60,
-            forecast.average_wellbeing,
-            forecast.full_plan_wellbeing,
-            forecast.future_food_benefit
-        ),
-        sequence_readout(&forecast.actions, citizen),
-    ]
-}
-
+#[cfg(test)]
 fn production_location_readout(
     candidate: &learning_lord_simulation::planning::ProductionLocationForecast,
     citizen: &Citizen,
 ) -> Vec<String> {
-    let marker = if candidate.selected {
-        " [chosen location]"
-    } else if candidate.best_for_goal {
-        " [best production option]"
-    } else {
-        ""
-    };
-    let mut lines = vec![format!("{}{}", candidate.location_name, marker)];
-    if let Some(forecast) = &candidate.forecast {
-        lines.extend(forecast_readout(forecast, citizen));
-    } else {
-        lines.push("Unavailable: No executable production sequence at this location.".into());
-    }
-    lines
+    production_location_rows(candidate, citizen)
+        .iter()
+        .map(|row| navigation::plain(row))
+        .collect()
 }
 
-fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::AgentId>) -> String {
+fn decision_rows(
+    universe: &Universe,
+    id: Option<learning_lord_simulation::AgentId>,
+) -> Vec<Vec<navigation::Fragment>> {
     use learning_lord_simulation::planning::goals::Effect;
+    use navigation::Fragment as F;
     let Some(agent) = citizens::selected_agent(universe, id) else {
-        return "Last planning decision\nNo citizen selected".into();
+        return vec![
+            vec![F::text("Last planning decision")],
+            vec![F::text("No citizen selected")],
+        ];
     };
     let AgentKind::Citizen(citizen) = &agent.kind;
     let Some(decision) = citizen
         .active_plan()
         .and_then(|active| active.plan().decision())
     else {
-        return "Last planning decision\nNo planning decision yet".into();
+        return vec![
+            vec![F::text("Last planning decision")],
+            vec![F::text("No planning decision yet")],
+        ];
     };
-    let mut lines = vec![
-        "Last planning decision".to_string(),
-        format!(
-            "Prices used: berries {:.3} coins/kg",
-            decision.prices.price(Good::Berries).unwrap()
-        ),
-    ];
+    let mut lines = RichRows(vec![
+        vec![F::text("Last planning decision")],
+        vec![
+            F::text("Prices used: "),
+            F::entity("berries", navigation::Target::Good(Good::Berries)),
+            F::text(format!(
+                " {:.3} coins/kg",
+                decision.prices.price(Good::Berries).unwrap()
+            )),
+        ],
+    ]);
     for candidate in &decision.candidates {
         let name = match candidate.goal {
             Effect::ReduceHunger => "Hunger",
@@ -952,10 +831,10 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
         lines.push(format!("\n{name}{selected}"));
         if !candidate.production_locations.is_empty() {
             for location in &candidate.production_locations {
-                lines.extend(production_location_readout(location, citizen));
+                lines.extend(production_location_rows(location, citizen));
             }
         } else if let Some(forecast) = &candidate.forecast {
-            lines.extend(forecast_readout(forecast, citizen));
+            lines.extend(forecast_rows(forecast, citizen));
         } else {
             lines.push(format!(
                 "Unavailable: {}",
@@ -964,8 +843,8 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
         }
     }
     if !decision.production.is_empty() {
-        lines.push("\nProduction recipes | last decision snapshot".into());
-        lines.push("Inputs and targets below are from that decision, not current inventory.\nFeasibility reflects recorded root sequences and completed forecasts, including later goals; ordered prefixes can skip a recipe.".into());
+        lines.push("\nProduction recipes | last decision snapshot");
+        lines.push("Inputs and targets below are from that decision, not current inventory.\nFeasibility reflects recorded root sequences and completed forecasts, including later goals; ordered prefixes can skip a recipe.");
         for recipe in &decision.production {
             let profit = recipe
                 .profit_per_hour
@@ -980,24 +859,27 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
                 target
             ));
             if recipe.inputs.is_empty() {
-                lines.push("Inputs per batch: none".into());
+                lines.push("Inputs per batch: none");
             } else {
                 for input in &recipe.inputs {
-                    lines.push(format!(
-                        "Inputs per batch — {}: {} / {} carried | {} missing{}",
-                        input.good.name(),
-                        quantity_label(input.good, input.carried_units),
-                        quantity_label(input.good, input.required_units),
-                        quantity_label(
-                            input.good,
-                            input.required_units.saturating_sub(input.carried_units)
-                        ),
-                        if input.supply_shortfall {
-                            " | insufficient accessible supplies"
-                        } else {
-                            ""
-                        }
-                    ));
+                    lines.push(vec![
+                        F::text("Inputs per batch — "),
+                        F::good(input.good),
+                        F::text(format!(
+                            ": {} / {} carried | {} missing{}",
+                            quantity_label(input.good, input.carried_units),
+                            quantity_label(input.good, input.required_units),
+                            quantity_label(
+                                input.good,
+                                input.required_units.saturating_sub(input.carried_units)
+                            ),
+                            if input.supply_shortfall {
+                                " | insufficient accessible supplies"
+                            } else {
+                                ""
+                            }
+                        )),
+                    ]);
                 }
             }
             let status = if recipe.selected {
@@ -1019,23 +901,22 @@ fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::Ag
             } else {
                 "No sequence found; recipe not reached in production prefixes or production goal not compared."
             };
-            lines.push(status.into());
+            lines.push(status);
             if recipe.preparation_limit_observed {
-                lines.push("Observed exclusion: a tested prefix reached the four-hour preparation limit before a production step.".into());
+                lines.push("Observed exclusion: a tested prefix reached the four-hour preparation limit before a production step.");
             }
         }
     }
     lines.push(
-        "\nChosen by full-plan time-weighted action endpoint averages.\nEach sequence leads to its goal's best full plan.\nGoal avg scores only the sequence shown.\nRepeated gathering segments form one order.".into(),
+        "\nChosen by full-plan time-weighted action endpoint averages.\nEach sequence leads to its goal's best full plan.\nGoal avg scores only the sequence shown.\nRepeated gathering segments form one order.",
     );
-    lines.join("\n")
+    lines.0
 }
 
 fn refresh_display(
     controls: Res<Controls>,
     saves_state: Res<saves::Saves>,
     snapshot: Res<DisplaySnapshot>,
-    selection: Res<citizens::Selection>,
     mut readouts: Query<(&Readout, &mut Text)>,
     mut buttons: Query<(&Control, &Interaction, &mut BackgroundColor)>,
 ) {
@@ -1052,8 +933,6 @@ fn refresh_display(
                 },
                 controls.speed
             ),
-            Readout::Citizen => citizen_readout(&snapshot.0.universe, selection.0),
-            Readout::Decision => decision_readout(&snapshot.0.universe, selection.0),
             Readout::PersistenceStatus => saves_state.status.clone(),
             Readout::Error => controls.error.clone().unwrap_or_default(),
             Readout::RunButton => if controls.running { "Pause" } else { "Run" }.into(),
@@ -1081,6 +960,98 @@ fn refresh_display(
         };
         color.set_if_neq(BackgroundColor(next));
     }
+}
+
+struct RichRows(Vec<Vec<navigation::Fragment>>);
+struct RichRow(Vec<navigation::Fragment>);
+impl From<String> for RichRow {
+    fn from(value: String) -> Self {
+        Self(vec![navigation::Fragment::text(value)])
+    }
+}
+impl From<&str> for RichRow {
+    fn from(value: &str) -> Self {
+        Self(vec![navigation::Fragment::text(value)])
+    }
+}
+impl From<Vec<navigation::Fragment>> for RichRow {
+    fn from(value: Vec<navigation::Fragment>) -> Self {
+        Self(value)
+    }
+}
+impl RichRows {
+    fn push(&mut self, value: impl Into<RichRow>) {
+        self.0.push(value.into().0);
+    }
+    fn extend(&mut self, rows: Vec<Vec<navigation::Fragment>>) {
+        self.0.extend(rows);
+    }
+}
+fn forecast_rows(
+    forecast: &learning_lord_simulation::planning::GoalForecast,
+    citizen: &Citizen,
+) -> Vec<Vec<navigation::Fragment>> {
+    use navigation::Fragment as F;
+    let mut actions = Vec::new();
+    let mut index = 0;
+    while index < forecast.actions.len() {
+        let action = forecast.actions[index];
+        let count = forecast.actions[index..]
+            .iter()
+            .take_while(|&&next| next == action)
+            .count();
+        if !actions.is_empty() {
+            actions.push(F::text(" > "));
+        }
+        actions.extend(navigation::action(action, citizen));
+        if count > 1 {
+            actions.push(F::text(format!(" x{count}")));
+        }
+        index += count;
+    }
+    vec![
+        vec![F::text(format!(
+            "{} | Goal avg {:.2} | Plan avg {:.2} | Future food +{:.2}",
+            citizens::duration(forecast.duration_ms),
+            forecast.average_wellbeing,
+            forecast.full_plan_wellbeing,
+            forecast.future_food_benefit
+        ))],
+        actions,
+    ]
+}
+fn production_location_rows(
+    candidate: &learning_lord_simulation::planning::ProductionLocationForecast,
+    citizen: &Citizen,
+) -> Vec<Vec<navigation::Fragment>> {
+    use navigation::{Fragment as F, Target};
+    let marker = if candidate.selected {
+        " [chosen location]"
+    } else if candidate.best_for_goal {
+        " [best production option]"
+    } else {
+        ""
+    };
+    let mut rows = vec![vec![
+        F::entity(&candidate.location_name, Target::Location(candidate.place)),
+        F::text(marker),
+    ]];
+    if let Some(forecast) = &candidate.forecast {
+        rows.extend(forecast_rows(forecast, citizen));
+    } else {
+        rows.push(vec![F::text(
+            "Unavailable: No executable production sequence at this location.",
+        )]);
+    }
+    rows
+}
+#[cfg(test)]
+fn decision_readout(universe: &Universe, id: Option<learning_lord_simulation::AgentId>) -> String {
+    decision_rows(universe, id)
+        .iter()
+        .map(|row| navigation::plain(row))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

@@ -149,6 +149,262 @@ pub(crate) fn window_kind(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Fragment {
+    pub(crate) label: String,
+    pub(crate) target: Option<Target>,
+}
+impl Fragment {
+    pub(crate) fn text(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            target: None,
+        }
+    }
+    pub(crate) fn entity(label: impl Into<String>, target: Target) -> Self {
+        Self {
+            label: label.into(),
+            target: Some(target),
+        }
+    }
+    pub(crate) fn good(good: Good) -> Self {
+        Self::entity(good.name(), Target::Good(good))
+    }
+}
+pub(crate) fn plain(fragments: &[Fragment]) -> String {
+    fragments.iter().map(|part| part.label.as_str()).collect()
+}
+pub(crate) fn render(
+    parent: &mut ChildSpawnerCommands,
+    fragments: &[Fragment],
+    size: f32,
+    color: Color,
+) {
+    parent
+        .spawn(Node {
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: px(3),
+            flex_shrink: 0.0,
+            align_items: AlignItems::Baseline,
+            ..default()
+        })
+        .with_children(|row| {
+            for fragment in fragments {
+                if let Some(target) = fragment.target {
+                    row.spawn((
+                        Button,
+                        target,
+                        Node {
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                    ))
+                    .with_children(|button| {
+                        button.spawn((
+                            text(&fragment.label, size, Color::srgb(0.40, 0.80, 0.91)),
+                            Underline,
+                        ));
+                    });
+                } else {
+                    row.spawn(text(&fragment.label, size, color));
+                }
+            }
+        });
+}
+pub(crate) fn account(universe: &learning_lord_simulation::Universe, id: AgentId) -> Fragment {
+    Fragment::entity(
+        crate::locations::name(universe, id),
+        if universe.households().contains_key(&id) {
+            Target::Household(id)
+        } else {
+            Target::Citizen(id)
+        },
+    )
+}
+pub(crate) fn place(citizen: &learning_lord_simulation::Citizen, id: PlaceId) -> Fragment {
+    Fragment::entity(
+        citizen
+            .map()
+            .place(id)
+            .map_or_else(|_| "Unknown location".into(), |place| place.name.clone()),
+        Target::Location(id),
+    )
+}
+pub(crate) fn shopping(list: learning_lord_simulation::marketplace::ShoppingList) -> Vec<Fragment> {
+    let mut fragments = Vec::new();
+    for good in Good::ALL {
+        let units = list.units(good);
+        if units == 0 {
+            continue;
+        }
+        if !fragments.is_empty() {
+            fragments.push(Fragment::text(", "));
+        }
+        fragments.push(Fragment::text(format!(
+            "{} ",
+            crate::quantity_label(good, units)
+        )));
+        fragments.push(Fragment::good(good));
+    }
+    if fragments.is_empty() {
+        fragments.push(Fragment::text("nothing"));
+    }
+    fragments
+}
+pub(crate) fn action(
+    action: learning_lord_simulation::CitizenAction,
+    citizen: &learning_lord_simulation::Citizen,
+) -> Vec<Fragment> {
+    use learning_lord_simulation::CitizenAction as A;
+    match action {
+        A::BuyFood(good) => vec![Fragment::text("Buy "), Fragment::good(good)],
+        A::List(good, units) | A::Withdraw(good, units) => vec![
+            Fragment::text(format!(
+                "{} {} ",
+                if matches!(action, A::List(..)) {
+                    "List"
+                } else {
+                    "Withdraw"
+                },
+                crate::quantity_label(good, units)
+            )),
+            Fragment::good(good),
+        ],
+        A::Buy(list) => {
+            let mut row = vec![Fragment::text("Buy ")];
+            row.extend(shopping(list));
+            row
+        }
+        A::BuyAt { place: id, list }
+        | A::CollectStored { place: id, list }
+        | A::DepositStored { place: id, list } => {
+            let mut row = vec![Fragment::text(match action {
+                A::BuyAt { .. } => "Buy ",
+                A::CollectStored { .. } => "Collect ",
+                _ => "Deposit ",
+            })];
+            row.extend(shopping(list));
+            row.push(Fragment::text(
+                if matches!(action, A::CollectStored { .. }) {
+                    " from "
+                } else {
+                    " at "
+                },
+            ));
+            row.push(place(citizen, id));
+            row
+        }
+        A::Travel(id) => vec![Fragment::text("Travel to "), place(citizen, id)],
+        A::ProduceAt { recipe, place: id } => vec![
+            Fragment::text(format!("{} at ", recipe.name())),
+            place(citizen, id),
+        ],
+        A::Plant { field, plot, crop } => vec![
+            Fragment::text("Plant "),
+            Fragment::entity(crop.name(), Target::Good(crop.good())),
+            Fragment::text(" at "),
+            place(citizen, field),
+            Fragment::text(format!(", plot {}", plot + 1)),
+        ],
+        A::Tend { field, plot, .. } | A::Harvest { field, plot } | A::Clear { field, plot } => {
+            let verb = match action {
+                A::Tend { .. } => "Tend",
+                A::Harvest { .. } => "Harvest",
+                _ => "Clear",
+            };
+            let name = crate::crop_label(citizen, field, plot);
+            let crop = citizen
+                .map()
+                .place(field)
+                .ok()
+                .and_then(|p| p.plots.get(plot).copied().flatten())
+                .map(|crop| crop.kind)
+                .or_else(|| {
+                    citizen.active_plan().and_then(|active| {
+                        active
+                            .plan()
+                            .actions()
+                            .iter()
+                            .find_map(|action| match action {
+                                A::Plant {
+                                    field: target,
+                                    plot: target_plot,
+                                    crop,
+                                } if *target == field && *target_plot == plot => Some(*crop),
+                                _ => None,
+                            })
+                    })
+                });
+            let crop_fragment = crop.map_or_else(
+                || Fragment::text(name),
+                |crop| Fragment::entity(name, Target::Good(crop.good())),
+            );
+            let mut row = vec![
+                Fragment::text(format!("{verb} ")),
+                crop_fragment,
+                Fragment::text(" at "),
+                place(citizen, field),
+                Fragment::text(format!(", plot {}", plot + 1)),
+            ];
+            if let A::Tend { stage, .. } = action {
+                row.push(Fragment::text(format!(" (stage {})", stage + 1)));
+            }
+            row
+        }
+        A::CollectBeer { brewery, slot } => vec![
+            Fragment::text("Collect "),
+            Fragment::good(Good::Beer),
+            Fragment::text(" at "),
+            place(citizen, brewery),
+            Fragment::text(format!(" (slot {})", slot + 1)),
+        ],
+        A::Eat => vec![Fragment::text("Eat")],
+        A::Drink => vec![Fragment::text("Drink")],
+        A::Wait => vec![Fragment::text("Wait")],
+        A::Sleep => vec![Fragment::text("Sleep")],
+        A::EquipClothing => vec![Fragment::text("Equip clothing")],
+        A::ListExcess => vec![Fragment::text("List excess goods")],
+        A::Produce(recipe) => vec![Fragment::text(
+            if recipe == learning_lord_simulation::production::Recipe::Forage {
+                "Forage"
+            } else {
+                recipe.name()
+            },
+        )],
+    }
+}
+pub(crate) fn active_action(
+    active: &learning_lord_simulation::ActiveAction,
+    citizen: &learning_lord_simulation::Citizen,
+) -> Vec<Fragment> {
+    use learning_lord_simulation::{CitizenAction as A, production::Recipe};
+    let label = match active.action() {
+        A::Eat if active.drinking_units() > 0 => Some("Eating & drinking"),
+        A::Eat => Some("Eating"),
+        A::Drink => Some("Drinking"),
+        A::Wait => Some("Waiting"),
+        A::Sleep => Some("Sleeping"),
+        A::EquipClothing => Some("Equipping clothing"),
+        A::Produce(Recipe::Forage)
+        | A::ProduceAt {
+            recipe: Recipe::Forage,
+            ..
+        } => Some("Foraging"),
+        _ => None,
+    };
+    label.map_or_else(
+        || action(active.action(), citizen),
+        |label| {
+            let mut row = vec![Fragment::text(label)];
+            if let A::ProduceAt { place: id, .. } = active.action() {
+                row.push(Fragment::text(" at "));
+                row.push(place(citizen, id));
+            }
+            row
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +484,30 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn action_fragments_link_each_good_and_the_explicit_site() {
+        use learning_lord_simulation::{CitizenAction, marketplace::ShoppingList};
+        let universe = crate::simulation::new_universe().unwrap();
+        let learning_lord_simulation::AgentKind::Citizen(citizen) =
+            &universe.agents().values().next().unwrap().kind;
+        let site = citizen.home();
+        let row = action(
+            CitizenAction::BuyAt {
+                place: site,
+                list: ShoppingList::new([(Good::Wheat, 25), (Good::Water, 50)]).unwrap(),
+            },
+            citizen,
+        );
+        let targets = row
+            .iter()
+            .filter_map(|fragment| fragment.target)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 3);
+        assert!(targets.contains(&Target::Good(Good::Wheat)));
+        assert!(targets.contains(&Target::Good(Good::Water)));
+        assert!(targets.contains(&Target::Location(site)));
     }
 
     #[test]

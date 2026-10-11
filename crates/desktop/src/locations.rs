@@ -368,13 +368,6 @@ pub(crate) fn name(universe: &Universe, id: AgentId) -> String {
         .map_or_else(|| "Unknown citizen".into(), |agent| agent.name.clone())
 }
 
-fn owner_name(universe: &Universe, owner: GoodsOwner) -> String {
-    match owner {
-        GoodsOwner::Town => "Town".into(),
-        GoodsOwner::Agent(id) | GoodsOwner::Household(id) => name(universe, id),
-    }
-}
-
 pub(crate) fn place_owner(
     universe: &Universe,
     place: &learning_lord_simulation::locations::Place,
@@ -448,57 +441,13 @@ pub(crate) fn batch_readout(slot: usize, batch: Option<Batch>, now: u64) -> Stri
     format!("Slot {} | {stage}", slot + 1)
 }
 
+#[cfg(test)]
 fn stocks(universe: &Universe, place: PlaceId) -> String {
-    let mut lines = Vec::new();
-    for (key, units) in universe
-        .storage()
-        .stock()
+    stock_rows(universe, place)
         .iter()
-        .filter(|(key, _)| key.place == place)
-    {
-        lines.push(format!(
-            "{} | {} | {} available | {} tax reserved",
-            owner_name(universe, key.owner),
-            key.good.name(),
-            crate::quantity_label(
-                key.good,
-                units.saturating_sub(
-                    universe
-                        .storage()
-                        .reserved_units(place, key.owner, key.good)
-                )
-            ),
-            crate::quantity_label(
-                key.good,
-                universe
-                    .storage()
-                    .reserved_units(place, key.owner, key.good)
-            )
-        ));
-    }
-    for order in universe
-        .market()
-        .orders()
-        .filter(|order| order.place == place)
-    {
-        lines.push(format!(
-            "{} | {} | {} sale escrow",
-            match order.seller {
-                learning_lord_simulation::marketplace::MarketParty::Citizen(id)
-                | learning_lord_simulation::marketplace::MarketParty::Household(id) =>
-                    name(universe, id),
-                learning_lord_simulation::marketplace::MarketParty::Caravan => "Caravan".into(),
-            },
-            order.good.name(),
-            crate::quantity_label(order.good, order.units)
-        ));
-    }
-    lines.sort();
-    if lines.is_empty() {
-        "No stored goods or sale escrow.".into()
-    } else {
-        lines.join("\n")
-    }
+        .map(|row| crate::navigation::plain(row))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(crate) fn kind_label(kind: &TaxKind) -> &'static str {
@@ -510,67 +459,13 @@ pub(crate) fn kind_label(kind: &TaxKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn treasury(universe: &Universe) -> String {
-    let mut lines = vec![format!("Town treasury: {} coins", universe.town_treasury())];
-    for rule in universe.tax_rules().values() {
-        let independent = universe.agents().iter().filter_map(|(id, agent)| {
-            let AgentKind::Citizen(citizen) = &agent.kind;
-            citizen.household_id().is_none().then_some(id)
-        });
-        for id in independent.chain(universe.households().keys()) {
-            let owed = universe.tax_arrears(rule.id, *id);
-            if owed > 0 {
-                lines.push(format!(
-                    "{} owes {owed} coins | {}{}",
-                    name(universe, *id),
-                    rule.name,
-                    if rule.active { "" } else { " (retired)" }
-                ));
-            }
-        }
-    }
-    if lines.len() == 1 {
-        lines.push("No coin arrears.".into());
-    }
-    for receipt in universe.tax_history().iter().rev().take(12) {
-        let amount = match receipt.amount {
-            TaxAmount::Coins {
-                assessed,
-                paid,
-                arrears,
-            } => format!("{assessed} coins assessed, {paid} paid, {arrears} owed"),
-            TaxAmount::Reservation {
-                assessed,
-                reserved,
-                outstanding,
-            } => format!(
-                "{}: {assessed} units assessed, {reserved} reserved, {outstanding} outstanding",
-                receipt.good.map_or("Goods", |good| good.name())
-            ),
-            TaxAmount::Goods {
-                assessed,
-                collected,
-                outstanding,
-            } => format!(
-                "{}: {assessed} units assessed, {collected} collected, {outstanding} owed",
-                receipt.good.map_or("Goods", |good| good.name())
-            ),
-        };
-        lines.push(format!(
-            "{} | {} | {} | {} | {amount}",
-            crate::format_clock(receipt.time_ms),
-            universe
-                .tax_rules()
-                .get(&receipt.rule)
-                .map_or("Retired rule", |rule| rule.name.as_str()),
-            name(universe, receipt.payer),
-            universe
-                .map()
-                .place(receipt.place)
-                .map_or("Unknown location", |place| place.name.as_str())
-        ));
-    }
-    lines.join("\n")
+    treasury_rows(universe)
+        .iter()
+        .map(|row| crate::navigation::plain(row))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn refresh(
@@ -656,11 +551,18 @@ pub fn refresh(
                 if state.location_type.is_none() && let Some(place) = place {
                 let place_id = place.id;
                 details.spawn(text(&place.name, 23.0, TEXT));
-                details.spawn(text(format!("Owner: {}", place_owner(universe, place)), 15.0, MUTED));
+                let owner = if place.kind.is_town_owned() { crate::navigation::Fragment::text("Town") } else { place.owner.map_or_else(|| crate::navigation::Fragment::text("Public"), |id| crate::navigation::account(universe, id)) };
+                crate::navigation::render(details, &[crate::navigation::Fragment::text("Owner: "), owner], 15.0, MUTED);
                 if place.kind == Location::Field {
                     details.spawn(text("FIELD PLOTS", 15.0, MUTED));
                     for (plot, crop) in place.plots.iter().enumerate() {
-                        details.spawn(text(plot_readout(plot, *crop, universe.current_time_ms()), 15.0, TEXT));
+                        let now = universe.current_time_ms();
+                        if let Some(crop) = crop {
+                            use crate::navigation::{Fragment as F, Target};
+                            let status = match crop.status(now) { CropStatus::Growing => "Growing", CropStatus::Ready => "Ready", CropStatus::Dead => "Dead" };
+                            crate::navigation::render(details, &[F::text(format!("Plot {} | ", plot+1)), F::entity(crop.kind.name(), Target::Good(crop.kind.good())), F::text(format!(" | {status} | Expected {} {}", crop.expected_yield(now), crop.kind.good().unit_name()))], 15.0, TEXT);
+                            details.spawn(text(plot_readout(plot, Some(*crop), now).lines().skip(1).collect::<Vec<_>>().join("\n"), 15.0, TEXT));
+                        } else { details.spawn(text(plot_readout(plot, None, now), 15.0, TEXT)); }
                     }
                 }
                 if place.kind == Location::Brewery {
@@ -670,7 +572,7 @@ pub fn refresh(
                     }
                 }
                 details.spawn(text("STOCK BY OWNER", 15.0, MUTED));
-                details.spawn(text(stocks(universe, place_id), 15.0, TEXT));
+                for row in stock_rows(universe, place_id) { crate::navigation::render(details, &row, 15.0, TEXT); }
                 details.spawn(text("LOCAL TRANSFERS", 15.0, MUTED));
                 details.spawn(text("Citizen must be at this location and stationary. Working ingredients remain reserved.", 13.0, MUTED));
                 row(details, |row| {
@@ -697,12 +599,11 @@ pub fn refresh(
                     for rule in rules {
                         let inherited = rule.scope != scope;
                         details.spawn(text(format!("{} | {} | {}", rule.name, kind_label(&rule.kind), if inherited { "Inherited from location type" } else if state.location_type.is_some() { "Shared type rule" } else { "Individual rule" }), 16.0, TEXT));
-                        details.spawn(text(match &rule.kind {
-                            TaxKind::FlatFee { payer, coins } => format!("{} coins weekly · {}", coins, match payer { TaxPayer::Agent(id) => name(universe, *id), TaxPayer::LocationOwner => "Property owner".into() }),
-                            TaxKind::Socage { rates } | TaxKind::Asset { rates } | TaxKind::Income { rates } => {
-                                let mut rates: Vec<_> = rates.iter().map(|(good, rate)| format!("{}: {:.2}%", good.name(), f64::from(rate.basis_points()) / 100.0)).collect(); rates.sort(); rates.join(" · ")
-                            }
-                        }, 14.0, MUTED));
+                        use crate::navigation::{Fragment as F};
+                        match &rule.kind {
+                            TaxKind::FlatFee {payer, coins} => { let payer = match payer { TaxPayer::Agent(id) => crate::navigation::account(universe, *id), TaxPayer::LocationOwner => F::text("Property owner") }; crate::navigation::render(details, &[F::text(format!("{coins} coins weekly · ")), payer], 14.0, MUTED); }
+                            TaxKind::Socage {rates} | TaxKind::Asset {rates} | TaxKind::Income {rates} => { let mut rates = rates.iter().collect::<Vec<_>>(); rates.sort_by_key(|(good, _)| good.name()); let mut fragments = Vec::new(); for (good, rate) in rates { if !fragments.is_empty() { fragments.push(F::text(" · ")); } fragments.push(F::good(*good)); fragments.push(F::text(format!(": {:.2}%", f64::from(rate.basis_points()) / 100.0))); } crate::navigation::render(details, &fragments, 14.0, MUTED); }
+                        }
                         row(details, |row| {
                             if inherited {
                                 if let TaxScope::LocationType(kind) = rule.scope { button(row, "View type to edit", Choice::LocationType(kind), false); }
@@ -716,7 +617,7 @@ pub fn refresh(
                 }
                 if let Some(error) = state.error.as_ref().or(snapshot.0.mutation_error.as_ref()) { details.spawn(text(error, 14.0, Color::srgb(1.0, 0.55, 0.48))); }
                 details.spawn(text("TREASURY & COLLECTIONS", 15.0, MUTED));
-                details.spawn(text(treasury(universe), 14.0, TEXT));
+                for row in treasury_rows(universe) { crate::navigation::render(details, &row, 14.0, TEXT); }
             });
     });
     state.dirty = false;
@@ -1198,6 +1099,140 @@ pub(crate) fn stop_editing(state: &mut State) {
     if state.field.take().is_some() {
         state.dirty = true;
     }
+}
+
+fn stock_rows(universe: &Universe, place: PlaceId) -> Vec<Vec<crate::navigation::Fragment>> {
+    use crate::navigation::{self as nav, Fragment as F};
+    let mut rows = Vec::new();
+    for (key, units) in universe
+        .storage()
+        .stock()
+        .iter()
+        .filter(|(key, _)| key.place == place)
+    {
+        let owner = match key.owner {
+            GoodsOwner::Town => F::text("Town"),
+            GoodsOwner::Agent(id) | GoodsOwner::Household(id) => nav::account(universe, id),
+        };
+        let reserved = universe
+            .storage()
+            .reserved_units(place, key.owner, key.good);
+        rows.push(vec![
+            owner,
+            F::text(" | "),
+            F::good(key.good),
+            F::text(format!(
+                " | {} available | {} tax reserved",
+                crate::quantity_label(key.good, units.saturating_sub(reserved)),
+                crate::quantity_label(key.good, reserved)
+            )),
+        ]);
+    }
+    for order in universe
+        .market()
+        .orders()
+        .filter(|order| order.place == place)
+    {
+        let owner = match order.seller {
+            learning_lord_simulation::marketplace::MarketParty::Caravan => F::text("Caravan"),
+            learning_lord_simulation::marketplace::MarketParty::Citizen(id)
+            | learning_lord_simulation::marketplace::MarketParty::Household(id) => {
+                nav::account(universe, id)
+            }
+        };
+        rows.push(vec![
+            owner,
+            F::text(" | "),
+            F::good(order.good),
+            F::text(format!(
+                " | {} sale escrow",
+                crate::quantity_label(order.good, order.units)
+            )),
+        ]);
+    }
+    rows.sort_by_key(|row| nav::plain(row));
+    if rows.is_empty() {
+        rows.push(vec![F::text("No stored goods or sale escrow.")]);
+    }
+    rows
+}
+fn treasury_rows(universe: &Universe) -> Vec<Vec<crate::navigation::Fragment>> {
+    use crate::navigation::{self as nav, Fragment as F, Target};
+    let mut rows = vec![vec![F::text(format!(
+        "Town treasury: {} coins",
+        universe.town_treasury()
+    ))]];
+    for rule in universe.tax_rules().values() {
+        let independent = universe.agents().iter().filter_map(|(id, agent)| {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            citizen.household_id().is_none().then_some(id)
+        });
+        for id in independent.chain(universe.households().keys()) {
+            let owed = universe.tax_arrears(rule.id, *id);
+            if owed > 0 {
+                rows.push(vec![
+                    nav::account(universe, *id),
+                    F::text(format!(
+                        " owes {owed} coins | {}{}",
+                        rule.name,
+                        if rule.active { "" } else { " (retired)" }
+                    )),
+                ]);
+            }
+        }
+    }
+    if rows.len() == 1 {
+        rows.push(vec![F::text("No coin arrears.")]);
+    }
+    for receipt in universe.tax_history().iter().rev().take(12) {
+        let mut amount = Vec::new();
+        if let Some(good) = receipt.good {
+            amount.push(F::good(good));
+            amount.push(F::text(": "));
+        }
+        amount.push(F::text(match receipt.amount {
+            TaxAmount::Coins {
+                assessed,
+                paid,
+                arrears,
+            } => format!("{assessed} coins assessed, {paid} paid, {arrears} owed"),
+            TaxAmount::Reservation {
+                assessed,
+                reserved,
+                outstanding,
+            } => {
+                format!("{assessed} units assessed, {reserved} reserved, {outstanding} outstanding")
+            }
+            TaxAmount::Goods {
+                assessed,
+                collected,
+                outstanding,
+            } => format!("{assessed} units assessed, {collected} collected, {outstanding} owed"),
+        }));
+        let mut row = vec![
+            F::text(format!(
+                "{} | {} | ",
+                crate::format_clock(receipt.time_ms),
+                universe
+                    .tax_rules()
+                    .get(&receipt.rule)
+                    .map_or("Retired rule", |rule| rule.name.as_str())
+            )),
+            nav::account(universe, receipt.payer),
+            F::text(" | "),
+            F::entity(
+                universe
+                    .map()
+                    .place(receipt.place)
+                    .map_or("Unknown location".into(), |place| place.name.clone()),
+                Target::Location(receipt.place),
+            ),
+            F::text(" | "),
+        ];
+        row.extend(amount);
+        rows.push(row);
+    }
+    rows
 }
 
 #[cfg(test)]
