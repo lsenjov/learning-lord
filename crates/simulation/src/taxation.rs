@@ -319,7 +319,7 @@ impl Universe {
         if let TaxKind::FlatFee { payer, coins } = rule.kind {
             match (rule.scope, payer) {
                 (TaxScope::Location(_), TaxPayer::Agent(payer)) => {
-                    if !self.agents.contains_key(&payer) {
+                    if self.account_coins(payer).is_err() {
                         return Err(SimulationError::AgentNotFound);
                     }
                 }

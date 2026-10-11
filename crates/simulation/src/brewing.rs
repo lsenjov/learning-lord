@@ -58,7 +58,7 @@ impl Citizen {
         if place.kind != Location::Brewery {
             return Err(SimulationError::MissingProperty);
         }
-        if !place.owner.is_some_and(|owner| self.may_use_owner(owner)) {
+        if !self.may_use_place(place) {
             return Err(SimulationError::PrivateProperty);
         }
         place
@@ -166,9 +166,7 @@ impl Citizen {
         let Ok(place) = self.map.place(brewery) else {
             return Vec::new();
         };
-        if !place.owner.is_some_and(|owner| self.may_use_owner(owner))
-            || place.kind != Location::Brewery
-        {
+        if !self.may_use_place(place) || place.kind != Location::Brewery {
             return Vec::new();
         }
         place

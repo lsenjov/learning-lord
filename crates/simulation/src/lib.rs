@@ -17,6 +17,7 @@ pub use background::PlanningRuntime;
 pub mod brewing;
 pub mod diet;
 pub mod farming;
+pub mod guilds;
 pub mod history;
 pub mod household_history;
 pub mod households;
@@ -298,6 +299,8 @@ impl StartingRole {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Citizen {
     household: Option<households::HouseholdContext>,
+    guilds: HashMap<AgentId, guilds::GuildAccess>,
+    workshop_fees: HashMap<AgentId, guilds::WorkshopFeeAccount>,
     maintenance: maintenance::MaintenanceState,
     claimed_crop_plots: Vec<(PlaceId, usize)>,
     designated_workplace: Option<PlaceId>,
@@ -375,6 +378,8 @@ impl Citizen {
             site_socage_rates: HashMap::new(),
             storage: Storage::default(),
             household: None,
+            guilds: HashMap::new(),
+            workshop_fees: HashMap::new(),
             maintenance: maintenance::MaintenanceState::default(),
             claimed_crop_plots: Vec::new(),
             designated_workplace: None,
@@ -565,7 +570,7 @@ impl Citizen {
         self.map
             .places()
             .values()
-            .filter(|place| place.owner.is_some_and(|owner| self.may_use_owner(owner)))
+            .filter(|place| self.may_use_place(place))
     }
     pub fn units(&self, good: Good) -> Quantity {
         self.inventory.get(&good).copied().unwrap_or(0)
@@ -703,7 +708,7 @@ impl Citizen {
     }
 
     pub(crate) fn economic_wealth(&self) -> Result<f64, SimulationError> {
-        let mut wealth = self.coins as f64
+        let mut wealth = self.coins as f64 - self.workshop_fee_liability()
             + self.prices.value(Good::FlaxGarment, 1).unwrap_or(0.0)
                 * self.garment_condition.unwrap_or(0.0);
         for good in Good::ALL {
@@ -772,9 +777,7 @@ impl Citizen {
 
     fn accessible_place(&self, id: PlaceId) -> Result<&locations::Place, SimulationError> {
         let place = self.map.place(id)?;
-        if place.kind == Location::Home
-            && place.owner.is_some_and(|owner| !self.may_use_owner(owner))
-        {
+        if place.kind == Location::Home && !self.may_use_place(place) {
             return Err(SimulationError::PrivateProperty);
         }
         Ok(place)
@@ -905,8 +908,7 @@ impl Citizen {
     ) -> Result<(), SimulationError> {
         let place = self.map.place(place)?;
         if place.kind != recipe.location()
-            || (!place.kind.is_public()
-                && !place.owner.is_some_and(|owner| self.may_use_owner(owner)))
+            || (!place.kind.is_public() && !self.may_use_place(place))
             || (place.kind.is_public() && place.owner.is_some())
         {
             return Err(SimulationError::MissingProperty);
@@ -1441,6 +1443,17 @@ impl Citizen {
         if let Some(mut active) = citizen.active_action {
             let action_elapsed_ms = elapsed_ms.min(active.remaining_ms);
             citizen.advance_needs(action_elapsed_ms, Some(active))?;
+            if active.action.production_recipe().is_some() {
+                let place = active
+                    .action
+                    .required_place(&citizen)
+                    .ok_or(SimulationError::MissingProperty)?;
+                if let Some((payee, paid)) =
+                    citizen.accrue_workshop_fee(place, action_elapsed_ms)?
+                {
+                    payments.push((payee, paid));
+                }
+            }
             let work_skill = match active.action {
                 CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
                     recipe.skill()
@@ -1764,6 +1777,8 @@ pub struct Universe {
     household_histories: HashMap<AgentId, household_history::HouseholdHistory>,
     storage: Storage,
     households: HashMap<AgentId, households::Household>,
+    guilds: HashMap<AgentId, guilds::Guild>,
+    workshop_fees: HashMap<(AgentId, AgentId), guilds::WorkshopFeeAccount>,
     town_treasury: Coins,
     taxation: taxation::Taxation,
 }
@@ -1779,6 +1794,8 @@ impl Default for Universe {
             household_histories: HashMap::new(),
             storage: Storage::default(),
             households: HashMap::new(),
+            guilds: HashMap::new(),
+            workshop_fees: HashMap::new(),
             town_treasury: 0,
             taxation: taxation::Taxation::default(),
         }
@@ -2064,6 +2081,9 @@ impl Universe {
         if self.agents.contains_key(&id) {
             return Err(SimulationError::AgentAlreadyExists);
         }
+        if !citizen.guilds.is_empty() || !citizen.workshop_fees.is_empty() {
+            return Err(SimulationError::InvalidOwnership);
+        }
         if citizen.tax_reserved.values().any(|units| *units > 0) {
             return Err(SimulationError::ReservedCitizenImport);
         }
@@ -2238,6 +2258,13 @@ impl Universe {
                 citizen.storage = universe.storage.clone();
                 citizen.prices = universe.market.prices;
                 citizen.market_time_ms = universe.current_time_ms;
+                citizen.workshop_fees = universe
+                    .workshop_fees
+                    .iter()
+                    .filter_map(|((payer, payee), fee)| {
+                        (*payer == citizen.economic_id()).then_some((*payee, *fee))
+                    })
+                    .collect();
                 let action_before = citizen.clone();
                 let execution = citizen.active_plan.take();
                 let (updated, payments) =
@@ -2287,6 +2314,22 @@ impl Universe {
                     universe.households.get_mut(&account).unwrap().coins = citizen.coins;
                 }
                 universe.market = citizen.market.clone();
+                let payer = citizen.economic_id();
+                for (payee, fee) in &citizen.workshop_fees {
+                    universe.workshop_fees.insert((payer, *payee), *fee);
+                }
+                if let Some(history) = universe.household_histories.get_mut(&payer) {
+                    let paid = payments
+                        .iter()
+                        .filter(|(payee, _)| universe.guilds.contains_key(payee))
+                        .try_fold(0i64, |total, (_, paid)| total.checked_add(*paid))
+                        .ok_or(SimulationError::WealthOverflow)?;
+                    history.current.workshop_fees_paid = history
+                        .current
+                        .workshop_fees_paid
+                        .checked_add(paid)
+                        .ok_or(SimulationError::WealthOverflow)?;
+                }
                 if lost_shared_input {
                     universe.cancel_maintenance(*id)?;
                     if let Some(runtime) = runtime.as_deref_mut() {
@@ -2431,6 +2474,7 @@ impl Universe {
             }
             universe.record_household_contributions(&histories_before)?;
             universe.record_household_events(trades_before, taxes_before)?;
+            universe.settle_workshop_fees()?;
             universe.refresh_household_history(finishing_time, true)?;
             universe.current_time_ms = finishing_time;
             for (_, agent) in universe.agents.iter_mut() {
@@ -2498,6 +2542,7 @@ impl Universe {
                     }
                 }
                 universe.record_household_events(trades_before, taxes_before)?;
+                universe.settle_workshop_fees()?;
                 universe.market.prune_history(finishing_time);
                 universe.taxation.prune_history(finishing_time);
                 universe.refresh_market();
@@ -2674,6 +2719,13 @@ impl Universe {
                 }
                 citizen.maintenance = household.maintenance;
             }
+            citizen.workshop_fees = self
+                .workshop_fees
+                .iter()
+                .filter_map(|((payer, payee), fee)| {
+                    (*payer == citizen.economic_id()).then_some((*payee, *fee))
+                })
+                .collect();
             citizen.incoming_supplies.clear();
             for ((account, worker, place), list) in &incoming {
                 if *account == citizen.economic_id() && *worker != citizen.id {

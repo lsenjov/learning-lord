@@ -75,6 +75,9 @@ impl Universe {
         &self.households
     }
     pub(crate) fn economic_id(&self, worker: AgentId) -> Result<AgentId, SimulationError> {
+        if self.guilds.contains_key(&worker) || self.households.contains_key(&worker) {
+            return Ok(worker);
+        }
         let AgentKind::Citizen(citizen) = &self
             .agents
             .get(&worker)
@@ -85,13 +88,16 @@ impl Universe {
     pub(crate) fn account_owner(&self, account: AgentId) -> Result<GoodsOwner, SimulationError> {
         if self.households.contains_key(&account) {
             Ok(GoodsOwner::Household(account))
-        } else if self.agents.contains_key(&account) {
+        } else if self.agents.contains_key(&account) || self.guilds.contains_key(&account) {
             Ok(GoodsOwner::Agent(account))
         } else {
             Err(SimulationError::AgentNotFound)
         }
     }
     pub(crate) fn account_coins(&self, account: AgentId) -> Result<Coins, SimulationError> {
+        if let Some(guild) = self.guilds.get(&account) {
+            return Ok(guild.coins);
+        }
         if let Some(household) = self.households.get(&account) {
             return Ok(household.coins);
         }
@@ -107,7 +113,9 @@ impl Universe {
         account: AgentId,
         coins: Coins,
     ) -> Result<(), SimulationError> {
-        if let Some(household) = self.households.get_mut(&account) {
+        if let Some(guild) = self.guilds.get_mut(&account) {
+            guild.coins = coins;
+        } else if let Some(household) = self.households.get_mut(&account) {
             household.coins = coins;
         } else {
             let AgentKind::Citizen(citizen) = &mut self
@@ -191,6 +199,13 @@ impl Universe {
                 .get(id)
                 .ok_or(SimulationError::AgentNotFound)?
                 .kind;
+            if self
+                .workshop_fees
+                .iter()
+                .any(|((payer, _), fee)| *payer == *id && (fee.unpaid > 0 || fee.remainder > 0))
+            {
+                return Err(SimulationError::InvalidOwnership);
+            }
             if citizen.household.is_some()
                 || citizen.active_action.is_some()
                 || citizen.active_plan.is_some()
@@ -212,6 +227,9 @@ impl Universe {
         }
         let id = AgentId(uuid::Uuid::new_v4());
         let mut universe = self.clone();
+        universe
+            .workshop_fees
+            .retain(|(payer, _), _| !members.contains(payer));
         universe.households.insert(
             id,
             Household {
@@ -466,6 +484,9 @@ impl Citizen {
 }
 impl Universe {
     pub(crate) fn account_workers(&self, account: AgentId) -> Vec<AgentId> {
+        if self.guilds.contains_key(&account) {
+            return Vec::new();
+        }
         self.households
             .get(&account)
             .map_or_else(|| vec![account], |household| household.members.clone())

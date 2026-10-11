@@ -455,14 +455,22 @@ pub(crate) fn recipe_profit_for_site(
         citizen,
         site,
         stock_fraction(recipe, citizen)? >= 1.0,
-    )? - input_value(recipe, citizen, &owned)?;
+    )? - input_value(recipe, citizen, &owned)?
+        - citizen.workshop_fee_cost(
+            site.or_else(|| citizen.production_place(recipe).ok()),
+            recipe.duration_ms(citizen).ok()?,
+        );
     profit.is_finite().then_some(profit)
 }
 
 fn recipe_profit_at(recipe: Recipe, citizen: &Citizen, export: bool) -> Option<f64> {
     let owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
-    let profit =
-        output_value(recipe, citizen, None, export)? - input_value(recipe, citizen, &owned)?;
+    let profit = output_value(recipe, citizen, None, export)?
+        - input_value(recipe, citizen, &owned)?
+        - citizen.workshop_fee_cost(
+            citizen.production_place(recipe).ok(),
+            recipe.duration_ms(citizen).ok()?,
+        );
     profit.is_finite().then_some(profit)
 }
 
@@ -650,7 +658,11 @@ pub(crate) fn projected_recipes_at(
                     .max_by(f64::total_cmp)?;
                 let fraction = batches / cap;
                 let profit = output_value(recipe, citizen, site, fraction >= 1.0)?
-                    - input_value(recipe, &quoted, &owned)?;
+                    - input_value(recipe, &quoted, &owned)?
+                    - citizen.workshop_fee_cost(
+                        site.or_else(|| citizen.production_place(recipe).ok()),
+                        recipe.duration_ms(citizen).ok()?,
+                    );
                 let duration = recipe.duration_ms(citizen).ok()?;
                 if horizon_ms == DAILY_CAPACITY_MS && duration > horizon_ms.saturating_sub(elapsed)
                 {

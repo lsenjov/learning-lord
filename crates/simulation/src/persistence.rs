@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 4;
+pub const SAVE_VERSION: u32 = 5;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -134,6 +134,7 @@ impl Universe {
         self.market.validate_save()?;
         self.storage.validate_save()?;
         self.validate_households()?;
+        self.validate_guilds()?;
         self.validate_household_histories()?;
         self.validate_work_reservations()?;
         if self.town_treasury < 0 {
@@ -154,9 +155,7 @@ impl Universe {
                         .required_place(citizen)
                         .ok_or(SaveError::InvalidState("missing preparation site"))?;
                     if !self.map.place(site).is_ok_and(|place| {
-                        place
-                            .owner
-                            .is_some_and(|owner| citizen.may_use_owner(owner))
+                        citizen.may_use_place(place)
                             && place.kind == Location::Brewery
                             && place
                                 .batches
@@ -170,9 +169,7 @@ impl Universe {
                 }
                 if let CitizenAction::CollectBeer { brewery, slot } = action
                     && !self.map.place(brewery).is_ok_and(|place| {
-                        place
-                            .owner
-                            .is_some_and(|owner| citizen.may_use_owner(owner))
+                        citizen.may_use_place(place)
                             && place.kind == Location::Brewery
                             && place
                                 .batches
@@ -223,7 +220,7 @@ impl Universe {
             let owner = place
                 .owner
                 .ok_or(SaveError::InvalidState("unowned brewery"))?;
-            if !self.agents.contains_key(&owner) {
+            if !self.agents.contains_key(&owner) && !self.guilds.contains_key(&owner) {
                 return Err(SaveError::InvalidState("missing brewery owner"));
             }
             let preparing = place

@@ -128,7 +128,7 @@ impl Citizen {
     }
     pub fn crop(&self, field: PlaceId, plot: usize) -> Result<Option<Crop>, SimulationError> {
         let place = self.map.place(field)?;
-        if !place.owner.is_some_and(|owner| self.may_use_owner(owner)) {
+        if !self.may_use_place(place) {
             return Err(SimulationError::PrivateProperty);
         }
         place
