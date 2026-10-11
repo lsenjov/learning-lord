@@ -17,6 +17,7 @@ pub use background::PlanningRuntime;
 pub mod brewing;
 pub mod diet;
 pub mod farming;
+pub mod guild_history;
 pub mod guilds;
 pub mod history;
 pub mod household_history;
@@ -1775,6 +1776,7 @@ pub struct Universe {
     agents: HashMap<AgentId, Agent>,
     citizen_histories: HashMap<AgentId, history::CitizenHistory>,
     household_histories: HashMap<AgentId, household_history::HouseholdHistory>,
+    guild_histories: HashMap<AgentId, guild_history::GuildHistory>,
     storage: Storage,
     households: HashMap<AgentId, households::Household>,
     guilds: HashMap<AgentId, guilds::Guild>,
@@ -1792,6 +1794,7 @@ impl Default for Universe {
             agents: HashMap::new(),
             citizen_histories: HashMap::new(),
             household_histories: HashMap::new(),
+            guild_histories: HashMap::new(),
             storage: Storage::default(),
             households: HashMap::new(),
             guilds: HashMap::new(),
@@ -1923,6 +1926,7 @@ impl Universe {
             .set_units(StockKey { place, owner, good }, units)?;
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
+        universe.refresh_guild_history(universe.current_time_ms, false);
         if let GoodsOwner::Agent(id) = owner {
             let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
             citizen.wealth()?;
@@ -2060,6 +2064,7 @@ impl Universe {
             .set_units(StockKey { place, owner, good }, next_stored)?;
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
+        universe.refresh_guild_history(universe.current_time_ms, false);
         Ok(universe)
     }
 
@@ -2337,11 +2342,29 @@ impl Universe {
                     }
                 }
                 for (seller, coins) in payments {
+                    universe.record_guild_payment(seller, coins)?;
                     let balance = universe
                         .account_coins(seller)?
                         .checked_add(coins)
                         .ok_or(SimulationError::WealthOverflow)?;
                     universe.set_account_coins(seller, balance)?;
+                }
+                if let Some(active) = action_before.active_action()
+                    && active.action().production_recipe().is_some()
+                {
+                    let place = active
+                        .action()
+                        .required_place(&action_before)
+                        .ok_or(SimulationError::MissingProperty)?;
+                    let old = &histories_before[id].current;
+                    let new = &universe.citizen_histories[id].current;
+                    let produced = std::array::from_fn(|i| new.produced[i] - old.produced[i]);
+                    universe.record_guild_work(
+                        *id,
+                        place,
+                        step.min(active.remaining_ms()),
+                        produced,
+                    )?;
                 }
                 let before = &action_before;
                 if let Some(active) = before
@@ -2474,8 +2497,10 @@ impl Universe {
             }
             universe.record_household_contributions(&histories_before)?;
             universe.record_household_events(trades_before, taxes_before)?;
+            universe.record_guild_taxes(taxes_before)?;
             universe.settle_workshop_fees()?;
             universe.refresh_household_history(finishing_time, true)?;
+            universe.refresh_guild_history(finishing_time, true);
             universe.current_time_ms = finishing_time;
             for (_, agent) in universe.agents.iter_mut() {
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
@@ -2542,6 +2567,7 @@ impl Universe {
                     }
                 }
                 universe.record_household_events(trades_before, taxes_before)?;
+                universe.record_guild_taxes(taxes_before)?;
                 universe.settle_workshop_fees()?;
                 universe.market.prune_history(finishing_time);
                 universe.taxation.prune_history(finishing_time);
@@ -2628,6 +2654,7 @@ impl Universe {
             universe.record_household_contributions(&histories_before)?;
         }
         universe.refresh_household_history(universe.current_time_ms, false)?;
+        universe.refresh_guild_history(universe.current_time_ms, false);
         Ok(Some(universe))
     }
 
@@ -2916,6 +2943,7 @@ impl Universe {
         universe.register_action_request(id)?;
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
+        universe.refresh_guild_history(universe.current_time_ms, false);
         Ok(universe)
     }
 
@@ -2943,6 +2971,7 @@ impl Universe {
         universe.register_action_request(id)?;
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
+        universe.refresh_guild_history(universe.current_time_ms, false);
         Ok(universe)
     }
 }

@@ -41,7 +41,11 @@ impl WorkshopFeeAccount {
     pub fn liability(self) -> f64 {
         self.unpaid as f64 + self.remainder as f64 / FEE_HOUR_MS as f64
     }
-    fn accrue(&mut self, hourly_fee: Coins, elapsed_ms: u64) -> Result<(), SimulationError> {
+    pub(crate) fn accrue(
+        &mut self,
+        hourly_fee: Coins,
+        elapsed_ms: u64,
+    ) -> Result<(), SimulationError> {
         let numerator = u128::from(self.remainder) + (hourly_fee as u128) * u128::from(elapsed_ms);
         let whole = Coins::try_from(numerator / u128::from(FEE_HOUR_MS))
             .map_err(|_| SimulationError::WealthOverflow)?;
@@ -162,6 +166,10 @@ impl Universe {
                 hourly_fee,
             },
         );
+        universe.guild_histories.insert(
+            id,
+            crate::guild_history::GuildHistory::new(universe.current_time_ms, 0),
+        );
         for workshop in workshops {
             universe.map.places_mut().get_mut(workshop).unwrap().owner = Some(id);
         }
@@ -193,6 +201,7 @@ impl Universe {
             self.set_account_coins(payer, coins - paid)?;
             self.set_account_coins(payee, balance)?;
             self.workshop_fees.get_mut(&key).unwrap().unpaid -= paid;
+            self.record_guild_payment(payee, paid)?;
             if let Some(history) = self.household_histories.get_mut(&payer) {
                 history.current.workshop_fees_paid = history
                     .current
@@ -436,6 +445,7 @@ mod tests {
             .unwrap()
             .advance(duration - 1234)
             .unwrap();
+        assert_eq!(once.guild_history(guild), split.guild_history(guild));
         assert_eq!(once.workshop_fees, split.workshop_fees);
         assert_eq!(once.guilds[&guild].coins, split.guilds[&guild].coins);
         let fee = once.workshop_fees[&(first, guild)];
@@ -443,6 +453,10 @@ mod tests {
         assert_eq!(fee.unpaid, 0);
         assert_eq!(once.guilds[&guild].coins, (duration / FEE_HOUR_MS) as Coins);
         let idle = once.advance(FEE_HOUR_MS).unwrap();
+        assert_eq!(
+            idle.guild_history(guild).unwrap().current.contributions,
+            once.guild_history(guild).unwrap().current.contributions
+        );
         assert_eq!(idle.workshop_fees, once.workshop_fees);
         let AgentKind::Citizen(before) = &started.agents[&first].kind;
         let predicted = before.advance_predicted(duration).unwrap();
@@ -484,10 +498,19 @@ mod tests {
         assert!(
             (forgiven.wealth().unwrap() - citizen.wealth().unwrap() - fee.liability()).abs() < 1e-9
         );
+        let day = &world.guild_history(guild).unwrap().current;
+        assert_eq!(day.fees_accrued, fee);
+        assert_eq!(day.closing_outstanding[&first], fee);
+        assert_eq!(day.payments_received, 0);
         let restored = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
         assert_eq!(restored, world);
         world.set_account_coins(first, 10).unwrap();
         world.settle_workshop_fees().unwrap();
+        world.refresh_guild_history(world.current_time_ms, false);
+        let day = &world.guild_history(guild).unwrap().current;
+        assert_eq!(day.payments_received, fee.unpaid);
+        assert_eq!(day.closing_outstanding[&first].remainder, fee.remainder);
+        assert_eq!(day.fees_accrued, fee);
         assert_eq!(world.guilds[&guild].coins, fee.unpaid);
         assert_eq!(world.workshop_fees[&(first, guild)].unpaid, 0);
         assert_eq!(
@@ -622,6 +645,7 @@ mod tests {
                 .unwrap()
                 .advance(duration - duration / 3)
                 .unwrap();
+            assert_eq!(once.guild_history(guild), split.guild_history(guild));
             assert_eq!(once.workshop_fees, split.workshop_fees);
             assert_eq!(once.guilds[&guild].coins, split.guilds[&guild].coins);
             let fee = once.workshop_fees[&(account, guild)];
@@ -641,6 +665,221 @@ mod tests {
                 once
             );
         }
+    }
+
+    #[test]
+    fn historical_individual_debt_remains_valid_after_household_formation() {
+        let (mut world, first, second, place, guild) = workshop(0);
+        world.guilds.get_mut(&guild).unwrap().hourly_fee = FEE_HOUR_MS as Coins;
+        for id in [first, second] {
+            let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&id).unwrap().kind;
+            citizen.guilds.get_mut(&guild).unwrap().hourly_fee = FEE_HOUR_MS as Coins;
+        }
+        world = start(world, first, place);
+        let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
+        let duration = citizen.active_action().unwrap().remaining_ms();
+        world = world.advance(duration).unwrap();
+        let boundary = crate::marketplace::UPDATE_TIME_MS;
+        world = world.advance(boundary - world.current_time_ms).unwrap();
+        assert_eq!(
+            world
+                .guild_history(guild)
+                .unwrap()
+                .completed
+                .back()
+                .unwrap()
+                .closing_outstanding[&first]
+                .unpaid,
+            duration as Coins
+        );
+        world.set_account_coins(first, duration as Coins).unwrap();
+        world = world.advance(1).unwrap();
+        assert_eq!(
+            world.workshop_fees[&(first, guild)],
+            WorkshopFeeAccount::default()
+        );
+        let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
+        let (world, _) = world
+            .with_household("Family", citizen.home(), &[first, second])
+            .unwrap();
+        assert_eq!(
+            Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
+            world
+        );
+    }
+
+    #[test]
+    fn guild_history_records_only_partial_work_when_advancement_is_interrupted() {
+        let (world, first, _, place, guild) = workshop(10);
+        let world = start(world, first, place).advance(1234).unwrap();
+        let history = world.guild_history(guild).unwrap().clone();
+        assert_eq!(
+            history.current.contributions[&(first, place)].production_ms,
+            1234
+        );
+        assert_eq!(
+            history.current.contributions[&(first, place)].produced,
+            [0; Good::COUNT]
+        );
+        let mut calls = 0;
+        let result = world
+            .advance_internal(FEE_HOUR_MS, None, &mut || {
+                calls += 1;
+                calls > 2
+            })
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(world.guild_history(guild), Some(&history));
+    }
+
+    #[test]
+    fn caravan_repayment_after_four_closes_old_debt_and_records_payment_in_new_day() {
+        let (world, first, _, place, guild) = workshop(0);
+        let mut world = world.with_prices(
+            crate::marketplace::Prices::default()
+                .with_price(Good::Cloth, Good::Cloth.export_threshold() * 0.5)
+                .unwrap(),
+        );
+        for _ in 0..3 {
+            world = start(world, first, place);
+            let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
+            world = world
+                .advance(citizen.active_action().unwrap().remaining_ms())
+                .unwrap();
+        }
+        let unpaid = world.workshop_fees[&(first, guild)].unpaid;
+        assert!(unpaid > 0);
+        let world = world
+            .start_action(first, CitizenAction::List(Good::Cloth, 200))
+            .unwrap()
+            .advance(crate::TRADE_DURATION_MS)
+            .unwrap();
+        let boundary = crate::marketplace::UPDATE_TIME_MS;
+        let before = world.advance(boundary - world.current_time_ms - 1).unwrap();
+        let after = before.advance(1).unwrap();
+        let history = after.guild_history(guild).unwrap();
+        assert_eq!(history.completed.back().unwrap().payments_received, 0);
+        assert_eq!(history.current.opening_outstanding[&first].unpaid, unpaid);
+        assert_eq!(history.current.payments_received, unpaid);
+        assert_eq!(history.current.closing_outstanding[&first].unpaid, 0);
+        assert_eq!(history.current.fees_accrued, WorkshopFeeAccount::default());
+        assert_eq!(
+            Universe::from_save_str(&after.to_save_string().unwrap()).unwrap(),
+            after
+        );
+    }
+
+    #[test]
+    fn guild_history_records_weekly_property_expense_on_closing_day() {
+        use crate::taxation::{TaxKind, TaxPayer, TaxScope};
+        let (mut world, _, _, _, guild) = workshop(10);
+        world.guilds.get_mut(&guild).unwrap().coins = 10;
+        world
+            .guild_histories
+            .insert(guild, crate::guild_history::GuildHistory::new(0, 10));
+        let (world, _) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Weavery),
+                "Rent",
+                TaxKind::FlatFee {
+                    payer: TaxPayer::LocationOwner,
+                    coins: 2,
+                },
+            )
+            .unwrap();
+        let settlement = crate::calendar::next_weekly_settlement(0).unwrap();
+        let world = world.advance(settlement).unwrap();
+        let history = world.guild_history(guild).unwrap();
+        let paid: Coins = history
+            .completed
+            .iter()
+            .map(|day| day.expenses_paid)
+            .sum::<Coins>()
+            + history.current.expenses_paid;
+        assert_eq!(paid, 2);
+        assert_eq!(history.completed.back().unwrap().expenses_paid, 2);
+        assert_eq!(history.current.expenses_paid, 0);
+        assert_eq!(history.current.closing_coins, 8);
+        assert_eq!(
+            Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
+            world
+        );
+    }
+
+    #[test]
+    fn guild_history_rejects_corrupted_accounting_and_activity() {
+        let (world, first, _, place, guild) = workshop(10);
+        let started = start(world, first, place);
+        let AgentKind::Citizen(citizen) = &started.agents[&first].kind;
+        let world = started
+            .advance(citizen.active_action().unwrap().remaining_ms())
+            .unwrap();
+        for corrupt in 0..5 {
+            let mut broken = world.clone();
+            let day = &mut broken.guild_histories.get_mut(&guild).unwrap().current;
+            match corrupt {
+                0 => day.payments_received += 1,
+                1 => day.fees_accrued.remainder += 1,
+                2 => day.closing_outstanding.clear(),
+                3 => {
+                    day.contributions
+                        .get_mut(&(first, place))
+                        .unwrap()
+                        .production_ms += 1
+                }
+                _ => day.end_ms += 1,
+            }
+            assert!(Universe::from_save_str(&broken.to_save_string().unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn guild_history_splits_work_at_four_and_retains_completed_days() {
+        let (world, first, _, place, guild) = workshop(10);
+        let boundary = crate::production::period_start(1);
+        let world = world.advance(boundary - 1000).unwrap();
+        let started = start(world, first, place);
+        let AgentKind::Citizen(citizen) = &started.agents[&first].kind;
+        let duration = citizen.active_action().unwrap().remaining_ms();
+        let whole = started.advance(duration).unwrap();
+        let split = started
+            .advance(1000)
+            .unwrap()
+            .advance(duration - 1000)
+            .unwrap();
+        assert_eq!(whole.guild_history(guild), split.guild_history(guild));
+        let history = whole.guild_history(guild).unwrap();
+        let closed = history.completed.back().unwrap();
+        assert_eq!(closed.contributions[&(first, place)].production_ms, 1000);
+        assert_eq!(
+            closed.contributions[&(first, place)].produced,
+            [0; Good::COUNT]
+        );
+        let current = &history.current.contributions[&(first, place)];
+        assert_eq!(current.production_ms, duration - 1000);
+        for &(good, units) in Recipe::WeaveCloth.outputs() {
+            assert_eq!(current.produced[good as usize], units);
+        }
+        assert_eq!(
+            Universe::from_save_str(&whole.to_save_string().unwrap()).unwrap(),
+            whole
+        );
+        let mut retained = whole;
+        for period in 2..=368 {
+            retained.current_time_ms = crate::production::period_start(period);
+            retained.refresh_guild_history(retained.current_time_ms, true);
+        }
+        assert_eq!(retained.guild_history(guild).unwrap().completed.len(), 365);
+        assert_eq!(
+            retained
+                .guild_history(guild)
+                .unwrap()
+                .completed
+                .front()
+                .unwrap()
+                .start_ms,
+            crate::production::period_start(3)
+        );
     }
 
     #[test]
