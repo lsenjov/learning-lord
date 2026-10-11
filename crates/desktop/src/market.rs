@@ -16,6 +16,7 @@ pub enum View {
     Citizens,
     Market,
     Locations,
+    Collectives,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -292,6 +293,7 @@ pub fn handle_selection(
                     View::Citizens => crate::floating_ui::WindowKind::Citizens,
                     View::Market => crate::floating_ui::WindowKind::Market,
                     View::Locations => crate::floating_ui::WindowKind::Locations,
+                    View::Collectives => crate::floating_ui::WindowKind::Collectives,
                 });
             }
         }

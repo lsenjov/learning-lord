@@ -196,6 +196,14 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
                 ))
                 .with_children(|panel| {
                     panel.spawn((text("", 17.0, TEXT), Readout::Citizen));
+                    panel.spawn((
+                        crate::collectives::Membership,
+                        Node {
+                            flex_wrap: FlexWrap::Wrap,
+                            column_gap: px(6),
+                            ..default()
+                        },
+                    ));
                     for category in learning_lord_simulation::diet::DietCategory::ALL {
                         panel.spawn((text("", 12.0, TEXT), DietLabel(category)));
                         panel

@@ -1,12 +1,14 @@
 mod caravan_controls;
 mod citizen_history;
 mod citizens;
+mod collectives;
 mod floating_ui;
 mod inspectors;
 mod locations;
 mod map_view;
 mod market;
 mod market_history;
+mod navigation;
 mod saves;
 mod simulation;
 
@@ -132,6 +134,7 @@ fn main() -> Result<(), String> {
     .init_resource::<map_view::MapViewport>()
     .init_resource::<Controls>()
     .init_resource::<citizens::Selection>()
+    .init_resource::<collectives::State>()
     .init_resource::<citizens::RosterState>()
     .init_resource::<citizens::PlanDisplay>()
     .init_resource::<citizen_history::Selection>()
@@ -155,6 +158,8 @@ fn main() -> Result<(), String> {
                 citizens::handle_selection,
                 citizen_history::handle_selection,
                 market::handle_selection,
+                collectives::handle,
+                navigation::handle,
                 map_view::interaction,
                 inspectors::open_windows,
                 refresh_display,
@@ -166,6 +171,8 @@ fn main() -> Result<(), String> {
                 .chain(),
             (
                 citizen_history::refresh,
+                collectives::refresh,
+                collectives::refresh_membership,
                 map_view::refresh,
                 market::refresh_choices,
                 market::refresh,
@@ -335,6 +342,7 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
         .with_children(|row| {
             for (kind, label) in [
                 (floating_ui::WindowKind::Citizens, "Citizens"),
+                (floating_ui::WindowKind::Collectives, "Collectives"),
                 (floating_ui::WindowKind::Locations, "Locations"),
                 (floating_ui::WindowKind::Market, "Market"),
             ] {
@@ -344,6 +352,7 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
                     market::Choice::View(match kind {
                         floating_ui::WindowKind::Citizens => market::View::Citizens,
                         floating_ui::WindowKind::Locations => market::View::Locations,
+                        floating_ui::WindowKind::Collectives => market::View::Collectives,
                         _ => market::View::Market,
                     }),
                     Node {
@@ -708,54 +717,12 @@ fn household_readout(universe: &Universe, citizen: &Citizen) -> String {
         );
     };
     let household = &universe.households()[&id];
-    let members = household
-        .members
-        .iter()
-        .map(|id| locations::name(universe, *id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let home = universe
-        .map()
-        .place(household.home)
-        .map_or_else(|error| error.to_string(), |place| place.name.clone());
     let wealth = universe
         .household_wealth(id)
         .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}"));
-    let mut stocks = universe
-        .storage()
-        .stock()
-        .iter()
-        .filter(|(key, units)| {
-            key.owner == learning_lord_simulation::storage::GoodsOwner::Household(id) && **units > 0
-        })
-        .map(|(key, units)| {
-            let place = universe
-                .map()
-                .place(key.place)
-                .map_or_else(|error| error.to_string(), |place| place.name.clone());
-            format!(
-                "{place} | {}: {} stored | {} tax reserved",
-                key.good.name(),
-                quantity_label(key.good, *units),
-                quantity_label(
-                    key.good,
-                    universe
-                        .storage()
-                        .reserved_units(key.place, key.owner, key.good)
-                )
-            )
-        })
-        .collect::<Vec<_>>();
-    stocks.sort();
     format!(
-        "Household: {} | Members: {members}\nShared home: {home} | Designated workplace: {workplace}\nShared coins: {} | Shared wealth: {wealth} coins\nShared stocks by location:\n{}\nMaintenance (6-hour cooldown):\n{maintenance}",
-        household.name,
-        household.coins,
-        if stocks.is_empty() {
-            "None".into()
-        } else {
-            stocks.join("\n")
-        }
+        "Shared coins: {} | Shared wealth: {wealth} coins",
+        household.coins
     )
 }
 
@@ -1134,15 +1101,7 @@ mod tests {
         assert!(readout.contains("Personal coins: 0 | Personal wealth:"));
         assert!(readout.contains("Personal wellbeing:"));
         assert!(readout.contains("Decision score:"));
-        assert!(readout.contains("Members: Ada, Iris"));
-        assert!(readout.contains("Shared home: Ada's home"));
-        assert!(readout.contains("Designated workplace: Ada's field"));
         assert!(readout.contains("Shared coins: 6000 | Shared wealth:"));
-        assert!(
-            readout.contains("Ada's home | Bread rolls: 140 rolls stored"),
-            "{readout}"
-        );
-        assert!(readout.contains("Maintenance (6-hour cooldown):"));
         assert!(citizen.decision_score().unwrap() > citizen.personal_wellbeing().unwrap());
     }
 

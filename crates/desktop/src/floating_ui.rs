@@ -13,6 +13,7 @@ const MIN_SIZE: Vec2 = Vec2::new(320.0, 240.0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowKind {
     Citizens,
+    Collectives,
     Locations,
     Market,
     Saves,
@@ -95,6 +96,9 @@ pub struct Windows {
 }
 
 impl Windows {
+    pub(crate) fn is_open(&self, kind: WindowKind) -> bool {
+        self.entries.get(&kind).is_some_and(|entry| entry.open)
+    }
     pub fn open(&mut self, kind: WindowKind) {
         if !self.pending.contains(&kind) {
             self.pending.push(kind);
@@ -346,6 +350,7 @@ impl EditorFocus<'_> {
                 WindowKind::Citizens => crate::market::View::Citizens,
                 WindowKind::Locations => crate::market::View::Locations,
                 WindowKind::Market => crate::market::View::Market,
+                WindowKind::Collectives => crate::market::View::Collectives,
                 WindowKind::Saves => selection.view,
             };
         }
@@ -377,6 +382,14 @@ pub(crate) struct WindowInput<'w, 's> {
         With<bevy::window::PrimaryWindow>,
     >,
     mouse: Res<'w, ButtonInput<MouseButton>>,
+    links: Query<
+        'w,
+        's,
+        (Entity, &'static Interaction, &'static InheritedVisibility),
+        With<crate::navigation::Target>,
+    >,
+    parents: Query<'w, 's, &'static ChildOf>,
+    roots: Query<'w, 's, &'static FloatingWindow>,
     buttons: Query<'w, 's, (&'static Interaction, &'static Open), Changed<Interaction>>,
     close: Query<'w, 's, (&'static Interaction, &'static Close), Changed<Interaction>>,
     hud: Query<
@@ -492,7 +505,21 @@ pub fn interact(
             Some(resize_edges(windows.entries[&kind].bounds, cursor?))
         })
         .unwrap_or_default();
-    let icon = CursorIcon::System(resize_cursor(edges));
+    let icon = CursorIcon::System(
+        if !edges.any()
+            && windows.gesture.is_none()
+            && input.links.iter().any(|(entity, interaction, visibility)| {
+                visibility.get()
+                    && *interaction != Interaction::None
+                    && crate::navigation::window_kind(entity, &input.parents, &input.roots)
+                        == capture.hovered
+            })
+        {
+            SystemCursorIcon::Pointer
+        } else {
+            resize_cursor(edges)
+        },
+    );
     if cursor_icon != Some(&icon) {
         commands.entity(window_entity).insert(icon);
     }

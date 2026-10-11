@@ -110,6 +110,8 @@ pub struct State {
     place: Option<PlaceId>,
     location_type: Option<Location>,
     draft: Option<Draft>,
+    drafts: Vec<(TaxScope, Draft)>,
+    pending_scope: Option<TaxScope>,
     field: Option<Field>,
     citizen: Option<AgentId>,
     good: Option<Good>,
@@ -122,6 +124,13 @@ pub struct State {
 }
 
 impl State {
+    pub(crate) fn selected_place(&self) -> Option<PlaceId> {
+        if self.location_type.is_none() {
+            self.place
+        } else {
+            None
+        }
+    }
     #[cfg(test)]
     pub fn pending_fixture() -> Self {
         Self {
@@ -190,6 +199,38 @@ impl State {
         self.location_type
             .map(TaxScope::LocationType)
             .or_else(|| self.place.map(TaxScope::Location))
+    }
+
+    fn select_scope(&mut self, scope: Option<TaxScope>) {
+        if self.scope() != scope {
+            if let Some(previous) = self.scope() {
+                self.drafts.retain(|(saved, _)| *saved != previous);
+                if let Some(draft) = self.draft.take() {
+                    self.drafts.push((previous, draft));
+                }
+            }
+            self.draft = scope.and_then(|scope| {
+                self.drafts
+                    .iter()
+                    .position(|(saved, _)| *saved == scope)
+                    .map(|index| self.drafts.remove(index).1)
+            });
+        }
+        match scope {
+            Some(TaxScope::Location(place)) => {
+                self.place = Some(place);
+                self.location_type = None;
+            }
+            Some(TaxScope::LocationType(kind)) => self.location_type = Some(kind),
+            None => self.location_type = None,
+        }
+        self.field = None;
+        self.error = None;
+        self.dirty = true;
+    }
+
+    pub(crate) fn select_place(&mut self, place: PlaceId) {
+        self.select_scope(Some(TaxScope::Location(place)));
     }
 
     fn location_kind(&self, universe: &Universe) -> Option<Location> {
@@ -551,9 +592,14 @@ pub fn refresh(
         .is_some_and(|(revision, _)| snapshot.0.mutation_revision > revision)
     {
         let (_, saved) = state.awaiting_mutation.take().unwrap();
+        let scope = state.pending_scope.take().or_else(|| state.scope());
         if saved && snapshot.0.mutation_error.is_none() {
-            state.draft = None;
-            state.field = None;
+            if scope == state.scope() {
+                state.draft = None;
+                state.field = None;
+            } else if let Some(scope) = scope {
+                state.drafts.retain(|(saved, _)| *saved != scope);
+            }
         }
         state.dirty = true;
     }
@@ -904,22 +950,20 @@ pub fn handle(
                 if let Some(windows) = windows.as_mut() {
                     windows.open(crate::floating_ui::WindowKind::Locations);
                 }
-                state.place = Some(place);
-                state.location_type = None;
-                state.draft = None;
+                state.select_place(place);
                 None
             }
             Choice::IndividualPlaces => {
-                state.location_type = None;
-                state.draft = None;
+                let scope = state.place.map(TaxScope::Location);
+                state.select_scope(scope);
                 None
             }
             Choice::LocationTypes | Choice::LocationType(_) => {
-                state.location_type = Some(match *choice {
+                let kind = match *choice {
                     Choice::LocationType(kind) => kind,
                     _ => Location::Home,
-                });
-                state.draft = None;
+                };
+                state.select_scope(Some(TaxScope::LocationType(kind)));
                 None
             }
             Choice::New => {
@@ -1080,6 +1124,7 @@ pub fn handle(
                 state.error = Some("Another change is saving. Try again when it finishes.".into());
                 continue;
             }
+            state.pending_scope = state.scope();
             state.awaiting_mutation =
                 Some((snapshot.0.mutation_revision, matches!(choice, Choice::Save)));
             if let Err(error) = worker.send(Command::Mutate {
@@ -1088,6 +1133,7 @@ pub fn handle(
             }) {
                 state.error = Some(error);
                 state.awaiting_mutation = None;
+                state.pending_scope = None;
             }
         }
     }
@@ -1157,6 +1203,63 @@ pub(crate) fn stop_editing(state: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switching_scopes_preserves_drafts_and_clears_focus() {
+        let universe = Universe::default();
+        let place = *universe.map().places().keys().next().unwrap();
+        let mut state = State::default();
+        state.select_place(place);
+        state.draft = Some(Draft {
+            name: "Place draft".into(),
+            ..default()
+        });
+        state.field = Some(Field::Name);
+        state.select_scope(Some(TaxScope::LocationType(Location::Field)));
+        assert!(!state.editing());
+        assert!(state.draft.is_none());
+        state.draft = Some(Draft {
+            name: "Type draft".into(),
+            ..default()
+        });
+        state.select_place(place);
+        assert_eq!(state.draft.as_ref().unwrap().name, "Place draft");
+        state.select_scope(Some(TaxScope::LocationType(Location::Field)));
+        assert_eq!(state.draft.as_ref().unwrap().name, "Type draft");
+        state.select_scope(Some(TaxScope::LocationType(Location::Field)));
+        assert_eq!(state.draft.as_ref().unwrap().name, "Type draft");
+    }
+
+    #[test]
+    fn save_acknowledgment_clears_only_originating_scope() {
+        let universe = Universe::default();
+        let place = *universe.map().places().keys().next().unwrap();
+        let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
+        let mut snapshot = worker.snapshot();
+        snapshot.mutation_revision = 1;
+        let mut state = State::default();
+        state.select_place(place);
+        state.draft = Some(Draft {
+            name: "Saved".into(),
+            ..default()
+        });
+        state.pending_scope = state.scope();
+        state.awaiting_mutation = Some((0, true));
+        state.select_scope(Some(TaxScope::LocationType(Location::Field)));
+        state.draft = Some(Draft {
+            name: "Unsaved".into(),
+            ..default()
+        });
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(snapshot))
+            .insert_resource(state)
+            .add_systems(Update, refresh);
+        app.update();
+        let mut state = app.world_mut().resource_mut::<State>();
+        assert_eq!(state.draft.as_ref().unwrap().name, "Unsaved");
+        state.select_place(place);
+        assert!(state.draft.is_none());
+    }
 
     #[test]
     fn treasury_reports_household_arrears_once() {

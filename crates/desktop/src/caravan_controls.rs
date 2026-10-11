@@ -412,6 +412,23 @@ mod tests {
         }
     }
     #[test]
+    fn switching_goods_preserves_each_reserve_and_clears_focus() {
+        let mut app = app();
+        press(&mut app, Choice::Field(FieldKind::Reserve));
+        app.world_mut().resource_mut::<State>().drafts[Good::Flour as usize].reserve = "123".into();
+        app.world_mut().resource_mut::<market::Selection>().good = Some(Good::BreadRoll);
+        app.update();
+        assert!(!app.world().resource::<State>().editing());
+        app.world_mut().resource_mut::<State>().drafts[Good::BreadRoll as usize].reserve =
+            "7".into();
+        app.world_mut().resource_mut::<market::Selection>().good = Some(Good::Flour);
+        app.update();
+        let state = app.world().resource::<State>();
+        assert_eq!(state.drafts[Good::Flour as usize].reserve, "123");
+        assert_eq!(state.drafts[Good::BreadRoll as usize].reserve, "7");
+    }
+
+    #[test]
     fn unavailable_good_controls_ignore_clicks_and_keep_tariffs_editable() {
         let mut app = app();
         app.world_mut().resource_mut::<market::Selection>().good = Some(Good::Berries);

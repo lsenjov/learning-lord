@@ -1,5 +1,5 @@
 use crate::{
-    citizens,
+    citizens, collectives,
     floating_ui::{Bounds, WindowKind, Windows},
     locations, market,
 };
@@ -27,6 +27,11 @@ pub fn open_windows(
                 Vec2::new(700.0, 460.0),
             ),
             WindowKind::Citizens => ("Citizens", Vec2::new(32.0, 80.0), Vec2::new(960.0, 600.0)),
+            WindowKind::Collectives => (
+                "Collectives",
+                Vec2::new(60.0, 70.0),
+                Vec2::new(960.0, 600.0),
+            ),
             WindowKind::Locations => (
                 "Locations · inventory & taxes",
                 Vec2::new(100.0, 60.0),
@@ -80,6 +85,7 @@ pub fn open_windows(
                             citizens::spawn_details(row);
                         });
                 }
+                WindowKind::Collectives => collectives::spawn(parent),
                 WindowKind::Locations => locations::spawn(parent),
                 WindowKind::Market => market::spawn(parent),
                 WindowKind::Saves => crate::saves::spawn(parent),
@@ -182,6 +188,35 @@ mod tests {
         assert_eq!(
             app.world().resource::<market::Selection>().view,
             market::View::Market
+        );
+    }
+
+    #[test]
+    fn collectives_focus_releases_editors_and_does_not_activate_market_arrows() {
+        let mut app = app();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<bevy::input_focus::InputFocus>()
+            .insert_resource(locations::State::focused_fixture())
+            .add_systems(Update, market::handle_selection);
+        app.world_mut()
+            .resource_mut::<Windows>()
+            .open(WindowKind::Collectives);
+        app.update();
+        assert!(!app.world().resource::<locations::State>().editing());
+        assert_eq!(
+            app.world().resource::<market::Selection>().view,
+            market::View::Collectives
+        );
+        let before = app.world().resource::<market::Selection>().good;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowDown);
+        app.update();
+        assert_eq!(app.world().resource::<market::Selection>().good, before);
+        assert!(
+            !app.world()
+                .resource::<Windows>()
+                .is_open(WindowKind::Market)
         );
     }
 
