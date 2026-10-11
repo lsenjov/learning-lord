@@ -511,6 +511,8 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
                     )
                 }
                 action @ (CitizenAction::Plant { .. }
+                | CitizenAction::CollectStored { .. }
+                | CitizenAction::DepositStored { .. }
                 | CitizenAction::Tend { .. }
                 | CitizenAction::Harvest { .. }
                 | CitizenAction::CollectBeer { .. }
@@ -684,6 +686,16 @@ fn action_label(action: CitizenAction, citizen: &learning_lord_simulation::Citiz
         CitizenAction::Withdraw(good, units) => {
             format!("Withdraw {} {}", quantity_label(good, units), good.name())
         }
+        CitizenAction::CollectStored { place, list } => format!(
+            "Collect {} from {}",
+            shopping_list_label(list),
+            citizen.map().place(place).unwrap().name
+        ),
+        CitizenAction::DepositStored { place, list } => format!(
+            "Deposit {} at {}",
+            shopping_list_label(list),
+            citizen.map().place(place).unwrap().name
+        ),
         CitizenAction::Plant { field, plot, crop } => format!(
             "Plant {} at {}, plot {}",
             crop.name(),

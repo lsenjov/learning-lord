@@ -158,6 +158,14 @@ pub enum CitizenAction {
         list: marketplace::ShoppingList,
     },
     Withdraw(Good, Quantity),
+    CollectStored {
+        place: PlaceId,
+        list: marketplace::ShoppingList,
+    },
+    DepositStored {
+        place: PlaceId,
+        list: marketplace::ShoppingList,
+    },
     Travel(PlaceId),
 }
 
@@ -180,7 +188,9 @@ impl CitizenAction {
             Self::Produce(recipe) => citizen.production_place(recipe).ok(),
             Self::ProduceAt { place, .. } => Some(place),
             Self::BuyFood(_) | Self::Buy(..) => Some(citizen.map.public_place(Location::Market)),
-            Self::BuyAt { place, .. } => Some(place),
+            Self::BuyAt { place, .. }
+            | Self::CollectStored { place, .. }
+            | Self::DepositStored { place, .. } => Some(place),
             Self::ListExcess | Self::List(..) | Self::Withdraw(..) => Some(citizen.selling_place()),
             _ => None,
         }
@@ -763,7 +773,9 @@ impl Citizen {
             | CitizenAction::List(..)
             | CitizenAction::Buy(..)
             | CitizenAction::BuyAt { .. }
-            | CitizenAction::Withdraw(..) => TRADE_DURATION_MS,
+            | CitizenAction::Withdraw(..)
+            | CitizenAction::CollectStored { .. }
+            | CitizenAction::DepositStored { .. } => TRADE_DURATION_MS,
         })
     }
 
@@ -898,6 +910,12 @@ impl Citizen {
     pub(crate) fn usable_owned_units(&self, good: Good) -> Quantity {
         self.available_units(good)
             .saturating_add(self.withdrawable_units(good))
+            .saturating_add(
+                self.stored_sources(good)
+                    .iter()
+                    .map(|(_, units)| *units)
+                    .fold(0_u64, u64::saturating_add),
+            )
     }
 
     #[cfg(test)]
@@ -1159,6 +1177,21 @@ impl Citizen {
         if let CitizenAction::Travel(id) = action {
             self.accessible_place(id)?;
         }
+        if let CitizenAction::CollectStored { place, list }
+        | CitizenAction::DepositStored { place, list } = action
+        {
+            self.accessible_place(place)?;
+            for (good, units) in list.items() {
+                let available = if matches!(action, CitizenAction::CollectStored { .. }) {
+                    self.stored_available_units(place, good)
+                } else {
+                    self.available_units(good)
+                };
+                if units > available {
+                    return Err(SimulationError::MissingInputs);
+                }
+            }
+        }
         let mut citizen = self.clone();
         let consumption = self.consumption_action(action);
         let ActiveAction {
@@ -1361,6 +1394,14 @@ impl Citizen {
 
             if active.remaining_ms == 0 {
                 match active.action {
+                    CitizenAction::CollectStored { place, list }
+                    | CitizenAction::DepositStored { place, list } => {
+                        citizen.transfer_stored_action(
+                            place,
+                            list,
+                            matches!(active.action, CitizenAction::DepositStored { .. }),
+                        )?;
+                    }
                     CitizenAction::BuyFood(good) => {
                         let units = ((MEAL_NOURISHMENT - citizen.available_food_nutrition())
                             .max(0.0)
@@ -2046,6 +2087,7 @@ impl Universe {
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
                 citizen.map = universe.map.clone();
                 citizen.market = universe.market.clone();
+                citizen.storage = universe.storage.clone();
                 citizen.prices = universe.market.prices;
                 citizen.market_time_ms = universe.current_time_ms;
                 let execution = citizen.active_plan.take();
@@ -2065,6 +2107,7 @@ impl Universe {
                     citizen.active_plan = Some(execution);
                 }
                 universe.map = citizen.map.clone();
+                universe.storage = citizen.storage.clone();
                 universe.market = citizen.market.clone();
                 for (seller, coins) in payments {
                     let seller = universe

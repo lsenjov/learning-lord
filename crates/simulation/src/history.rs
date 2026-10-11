@@ -179,7 +179,9 @@ impl CitizenHistory {
                 | CitizenAction::BuyAt { .. }
                 | CitizenAction::ListExcess
                 | CitizenAction::List(..)
-                | CitizenAction::Withdraw(..),
+                | CitizenAction::Withdraw(..)
+                | CitizenAction::CollectStored { .. }
+                | CitizenAction::DepositStored { .. },
             ) => &mut self.current.activity.trade_ms,
             _ => &mut self.current.activity.idle_ms,
         };

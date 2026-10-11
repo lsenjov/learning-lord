@@ -86,7 +86,9 @@ impl CitizenAction {
             | Self::List(..)
             | Self::Buy(..)
             | Self::BuyAt { .. }
-            | Self::Withdraw(..) => &[],
+            | Self::Withdraw(..)
+            | Self::CollectStored { .. }
+            | Self::DepositStored { .. } => &[],
         }
     }
 
@@ -1313,6 +1315,34 @@ fn prepare_drinks(
     Ok(variants)
 }
 
+fn collect_stored_inputs(
+    initial: &Prediction,
+    good: Good,
+    units: crate::Quantity,
+    reserved_ms: u64,
+    prior_actions: usize,
+) -> Result<Option<Prediction>, SimulationError> {
+    let mut state = initial.clone();
+    for (place, available) in state.citizen.stored_sources(good) {
+        let collected = units
+            .saturating_sub(state.citizen.available_units(good))
+            .min(available);
+        if collected == 0 {
+            break;
+        }
+        let action = CitizenAction::CollectStored {
+            place,
+            list: crate::marketplace::ShoppingList::single(good, collected),
+        };
+        let Some(next) = order_variants(&state, action, 0.0, reserved_ms, prior_actions)?.pop()
+        else {
+            return Ok(None);
+        };
+        state = next;
+    }
+    Ok(Some(state))
+}
+
 fn prepare_inputs(
     state: &Prediction,
     requirements: &crate::marketplace::ShoppingList,
@@ -1326,13 +1356,17 @@ fn prepare_inputs(
             if current.elapsed_ms + reserved_ms > GOAL_HORIZON_MS {
                 continue;
             }
+            let Some(mut current) =
+                collect_stored_inputs(&current, good, units, reserved_ms, prior_actions)?
+            else {
+                continue;
+            };
             let missing = units.saturating_sub(current.citizen.available_units(good));
             if missing == 0 {
                 next_states.push(current);
                 continue;
             }
             let listed = withdrawable_units(&current.citizen, good).min(missing);
-            let mut current = current;
             if listed > 0 {
                 let action = CitizenAction::Withdraw(good, listed);
                 let mut retrieved =
@@ -1544,6 +1578,10 @@ fn production_restock_at(
     )?;
     let mut state = initial.clone();
     for (good, units) in requirements.items() {
+        let Some(collected) = collect_stored_inputs(&state, good, units, 0, prior_actions)? else {
+            return Ok(initial.clone());
+        };
+        state = collected;
         let listed = units
             .saturating_sub(state.citizen.available_units(good))
             .min(state.citizen.withdrawable_units(good));
@@ -3103,6 +3141,67 @@ mod tests {
                 .any(|action| action.production_recipe()
                     == Some(crate::production::Recipe::BakeRolls))
         );
+    }
+
+    #[test]
+    fn fully_stored_production_inputs_are_collected_without_market_purchases() {
+        use crate::storage::{GoodsOwner, StockKey};
+        let mut worker = bread_only(buying_baker(2000)).with_coins(0).unwrap();
+        for (good, units) in [(Good::Flour, 2000), (Good::Wood, 2000), (Good::Water, 2000)] {
+            worker.set_inventory_units(good, 0);
+            let key = StockKey {
+                place: worker.home(),
+                owner: GoodsOwner::Agent(worker.id()),
+                good,
+            };
+            worker.storage.set_units(key, units).unwrap();
+        }
+        let site = worker
+            .production_place(crate::production::Recipe::BakeRolls)
+            .unwrap();
+        let candidate = site_candidate(&worker, site);
+        assert!(
+            candidate
+                .actions
+                .iter()
+                .any(|action| matches!(action, CitizenAction::CollectStored { .. }))
+        );
+        assert!(
+            candidate
+                .actions
+                .iter()
+                .any(|action| action.production_recipe()
+                    == Some(crate::production::Recipe::BakeRolls))
+        );
+        assert!(
+            candidate.actions.iter().all(|action| !matches!(
+                action,
+                CitizenAction::Buy(..) | CitizenAction::BuyAt { .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn production_restock_collects_stored_inputs_before_buying() {
+        use crate::storage::{GoodsOwner, StockKey};
+        let mut worker = bread_only(buying_baker(2000));
+        let place = worker.home();
+        let key = StockKey {
+            place,
+            owner: GoodsOwner::Agent(worker.id()),
+            good: Good::Flour,
+        };
+        worker.storage.set_units(key, 100).unwrap();
+        let snapshot = worker.clone();
+        let stocked =
+            production_restock(&Prediction::new(&worker, Cooldowns::default()), 0).unwrap();
+        assert!(stocked.actions.iter().any(|action| matches!(action, CitizenAction::CollectStored { place: source, list } if *source == place && list.units(Good::Flour) == 100)));
+        assert_eq!(
+            stocked.citizen.stored_available_units(place, Good::Flour),
+            0
+        );
+        assert!(stocked.citizen.available_units(Good::Flour) >= 100);
+        assert_eq!(worker, snapshot);
     }
 
     #[test]

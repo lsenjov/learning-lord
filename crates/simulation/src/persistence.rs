@@ -409,7 +409,9 @@ fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result
     let place = match action {
         CitizenAction::Travel(place)
         | CitizenAction::BuyAt { place, .. }
-        | CitizenAction::ProduceAt { place, .. } => Some(place),
+        | CitizenAction::ProduceAt { place, .. }
+        | CitizenAction::CollectStored { place, .. }
+        | CitizenAction::DepositStored { place, .. } => Some(place),
         CitizenAction::CollectBeer { brewery, slot } => {
             if !map
                 .place(brewery)
