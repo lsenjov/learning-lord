@@ -29,5 +29,6 @@
 
 ## Progress
 
-- Step 1 implemented and independently reviewed, including a fresh review after fixes. Eight guild regression tests pass; the simulation suite passed before those additions.
-- Step 2 implemented and independently reviewed. The desktop suite passed 134 tests; final workspace checks include the navigation scroll-reset fix.
+- Step 1 complete and committed as `a014171`; independent review and fresh review after fixes passed. Eight guild regression tests cover access, stock ownership, exact fee carry, shared accounts, debt settlement, tax ownership, persistence and prototype boundaries.
+- Step 2 complete; independent review and fresh review after navigation/documentation fixes passed.
+- Final checks passed: locked workspace tests, workspace build, strict Clippy for all targets, formatting and diff checks. Save format is version 5; earlier saves remain unsupported under the existing policy.

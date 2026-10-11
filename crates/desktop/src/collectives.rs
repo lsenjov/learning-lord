@@ -18,6 +18,7 @@ pub(crate) enum Tab {
 pub(crate) struct State {
     tab: Tab,
     selected: Option<AgentId>,
+    selected_guild: Option<AgentId>,
     generation: u64,
     revision: Option<u64>,
     dirty: bool,
@@ -27,6 +28,19 @@ pub(crate) struct State {
     history_record: Option<learning_lord_simulation::household_history::DailyHouseholdHistory>,
 }
 impl State {
+    pub(crate) fn tab(&self) -> Tab {
+        self.tab
+    }
+    pub(crate) fn selected_guild(&self) -> Option<AgentId> {
+        self.selected_guild
+    }
+    pub(crate) fn select_guild(&mut self, id: AgentId) {
+        if self.tab != Tab::Guilds || self.selected_guild != Some(id) {
+            self.tab = Tab::Guilds;
+            self.selected_guild = Some(id);
+            self.dirty = true;
+        }
+    }
     pub(crate) fn selected(&self) -> Option<AgentId> {
         self.selected
     }
@@ -167,6 +181,18 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
             household.coins
         ),
     );
+    let fees_owed: f64 = universe
+        .workshop_fee_accounts()
+        .iter()
+        .filter(|((payer, _), _)| *payer == id)
+        .map(|(_, fees)| fees.liability())
+        .sum();
+    if fees_owed > 0.0 {
+        label(
+            parent,
+            format!("Workshop fees owed: {fees_owed:.3} coins (including fractional carry)"),
+        );
+    }
     parent.spawn(text("SHARED STOCKS BY LOCATION", 14.0, MUTED));
     let mut places = universe
         .storage()
@@ -279,9 +305,16 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
         .values()
         .filter(|place| {
             place.kind != Location::Home
-                && place
-                    .owner
-                    .is_some_and(|owner| household.members.contains(&owner))
+                && place.owner.is_some_and(|owner| {
+                    household.members.contains(&owner)
+                        || universe.guilds().get(&owner).is_some_and(|guild| {
+                            guild.workshops.contains(&place.id)
+                                && guild
+                                    .members
+                                    .iter()
+                                    .any(|member| household.members.contains(member))
+                        })
+                })
         })
         .collect::<Vec<_>>();
     workplaces.sort_by_key(|place| place.id.0);
@@ -290,11 +323,7 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
             place_link(row, universe, place.id);
             label(row, "| Owner:");
             if let Some(owner) = place.owner {
-                navigation::link(
-                    row,
-                    locations::name(universe, owner),
-                    Target::Citizen(owner),
-                );
+                navigation::render(row, &[navigation::account(universe, owner)], 14.0, TEXT);
             }
         });
     }
@@ -325,6 +354,129 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
             }
         });
     }
+}
+
+fn guild_content(
+    parent: &mut ChildSpawnerCommands,
+    universe: &Universe,
+    selected: Option<AgentId>,
+    offsets: [Vec2; 2],
+) {
+    parent
+        .spawn((
+            Node {
+                width: px(230),
+                flex_shrink: 0.0,
+                min_height: px(0),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition(offsets[0]),
+            RelativeCursorPosition::default(),
+            ScrollPanel(false),
+        ))
+        .with_children(|list| {
+            let mut guilds = universe.guilds().values().collect::<Vec<_>>();
+            guilds.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
+            for guild in guilds {
+                list.spawn((
+                    Node::default(),
+                    BackgroundColor(if selected == Some(guild.id) {
+                        SELECTED
+                    } else {
+                        PANEL
+                    }),
+                ))
+                .with_children(|entry| {
+                    navigation::link(entry, &guild.name, Target::Guild(guild.id))
+                });
+            }
+            if universe.guilds().is_empty() {
+                label(list, "No guilds");
+            }
+        });
+    parent
+        .spawn((
+            Node {
+                flex_grow: 1.0,
+                flex_basis: px(0),
+                min_width: px(0),
+                min_height: px(0),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition(offsets[1]),
+            RelativeCursorPosition::default(),
+            ScrollPanel(true),
+        ))
+        .with_children(|panel| {
+            let Some(guild) = selected.and_then(|id| universe.guilds().get(&id)) else {
+                label(panel, "Select a guild");
+                return;
+            };
+            panel.spawn(text(&guild.name, 18.0, TEXT));
+            label(
+                panel,
+                format!(
+                    "Guild coins: {} | Workshop fee: {} coin per production hour",
+                    guild.coins, guild.hourly_fee
+                ),
+            );
+            let mut accounts = universe
+                .workshop_fee_accounts()
+                .iter()
+                .filter(|((_, payee), _)| *payee == guild.id)
+                .collect::<Vec<_>>();
+            accounts.sort_by_key(|((payer, _), _)| payer.0);
+            let owed: f64 = accounts.iter().map(|(_, fees)| fees.liability()).sum();
+            label(
+                panel,
+                format!("Workshop fees owed: {owed:.3} coins (including fractional carry)"),
+            );
+            for ((payer, _), fees) in accounts {
+                row(panel, |row| {
+                    navigation::render(row, &[navigation::account(universe, *payer)], 14.0, TEXT);
+                    label(
+                        row,
+                        format!(
+                            "owes {} coins | Fractional carry {:.3} coins",
+                            fees.unpaid,
+                            fees.liability() - fees.unpaid as f64
+                        ),
+                    );
+                });
+            }
+            label(panel, "Members keep separate accounts and own their goods.");
+            row(panel, |row| {
+                label(row, "Members:");
+                for member in &guild.members {
+                    navigation::link(
+                        row,
+                        locations::name(universe, *member),
+                        Target::Citizen(*member),
+                    );
+                }
+            });
+            panel.spawn(text(
+                "SHARED WORKSHOPS · INDIVIDUALLY OWNED STOCKS",
+                14.0,
+                MUTED,
+            ));
+            for place in &guild.workshops {
+                place_link(panel, universe, *place);
+                let mut rows = crate::locations::stock_rows(universe, *place);
+                if rows.is_empty() {
+                    label(panel, "No workshop stocks");
+                }
+                for fragments in rows.drain(..) {
+                    navigation::render(panel, &fragments, 14.0, TEXT);
+                }
+            }
+        });
 }
 
 pub(crate) fn refresh(
@@ -363,7 +515,38 @@ pub(crate) fn refresh(
     {
         state.selected = universe.households().keys().copied().min_by_key(|id| id.0);
     }
-    let display_key = if state.history_view == household_history::View::History {
+    if state
+        .selected_guild
+        .is_none_or(|id| !universe.guilds().contains_key(&id))
+    {
+        state.selected_guild = universe.guilds().keys().copied().min_by_key(|id| id.0);
+    }
+    let display_key = if state.tab == Tab::Guilds {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            universe.workshop_fee_accounts(),
+            state.selected_guild,
+            universe.guilds(),
+            universe
+                .guilds()
+                .values()
+                .flat_map(|guild| guild.workshops.iter())
+                .map(|place| (*place, crate::locations::stock_rows(universe, *place)))
+                .collect::<Vec<_>>(),
+            universe.market().orders().collect::<Vec<_>>(),
+            universe
+                .map()
+                .places()
+                .values()
+                .map(|p| (p.id, &p.name, p.owner))
+                .collect::<Vec<_>>(),
+            universe
+                .agents()
+                .iter()
+                .map(|(id, a)| (id, &a.name))
+                .collect::<Vec<_>>()
+        )
+    } else if state.history_view == household_history::View::History {
         format!(
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             state.tab,
@@ -404,11 +587,13 @@ pub(crate) fn refresh(
     };
     let selected_key = state
         .selected
-        .filter(|_| state.history_view == household_history::View::Current)
+        .filter(|_| {
+            state.tab == Tab::Households && state.history_view == household_history::View::Current
+        })
         .map(|id| {
             let h = &universe.households()[&id];
             format!(
-                "{:?}|{:?}|{}|{}|{:?}|{:?}",
+                "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}",
                 universe.household_wealth(id),
                 h.members
                     .iter()
@@ -433,16 +618,28 @@ pub(crate) fn refresh(
                     .map()
                     .places()
                     .values()
-                    .filter(|place| place.owner.is_some_and(|owner| h.members.contains(&owner)))
+                    .filter(
+                        |place| place.owner.is_some_and(|owner| h.members.contains(&owner)
+                            || universe.guilds().get(&owner).is_some_and(|guild| guild
+                                .workshops
+                                .contains(&place.id)
+                                && guild
+                                    .members
+                                    .iter()
+                                    .any(|member| h.members.contains(member))))
+                    )
                     .map(|place| (place.id, &place.name, place.owner, place.kind))
                     .collect::<Vec<_>>(),
-                h.maintenance
+                h.maintenance,
+                universe.workshop_fee_accounts()
             )
         })
         .unwrap_or_default();
     let record = state
         .selected
-        .filter(|_| state.history_view == household_history::View::History)
+        .filter(|_| {
+            state.tab == Tab::Households && state.history_view == household_history::View::History
+        })
         .and_then(|id| {
             household_history::selected_record(universe, id, state.history_view, state.history_day)
         });
@@ -484,6 +681,10 @@ pub(crate) fn refresh(
             .entity(entity)
             .despawn_children()
             .with_children(|parent| {
+                if state.tab == Tab::Guilds {
+                    guild_content(parent, universe, state.selected_guild, offsets);
+                    return;
+                }
                 if state.tab != Tab::Households {
                     label(
                         parent,
@@ -583,6 +784,73 @@ pub(crate) fn refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guild_details_keep_owners_separate_and_reset_selection() {
+        let worker = crate::simulation::SimulationWorker::spawn(
+            crate::simulation::new_universe().unwrap(),
+            60.try_into().unwrap(),
+        );
+        let snapshot = worker.snapshot();
+        let guild = snapshot.universe.guilds().values().next().unwrap();
+        let id = guild.id;
+        let members = guild.members.clone();
+        let mut state = State::default();
+        state.select_guild(id);
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(snapshot))
+            .insert_resource(state)
+            .add_systems(Update, refresh);
+        app.world_mut().spawn((Content, Node::default()));
+        app.update();
+        let labels = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "Weavers’ Guild",
+            "Guild coins: 0",
+            "1 coin per production hour",
+            "Eira",
+            "Jori",
+            "INDIVIDUALLY OWNED STOCKS",
+        ] {
+            assert!(labels.contains(expected), "missing {expected}: {labels}");
+        }
+        let links = app
+            .world_mut()
+            .query::<&Target>()
+            .iter(app.world())
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(links.contains(&Target::Guild(id)));
+        for member in members {
+            assert!(links.contains(&Target::Citizen(member)));
+        }
+        let old = app
+            .world_mut()
+            .query::<Entity>()
+            .iter(app.world())
+            .collect::<Vec<_>>();
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.revision += 1;
+        app.update();
+        assert_eq!(
+            old,
+            app.world_mut()
+                .query::<Entity>()
+                .iter(app.world())
+                .collect::<Vec<_>>()
+        );
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        app.update();
+        assert_eq!(app.world().resource::<State>().tab, Tab::Households);
+    }
+
     #[test]
     fn daily_history_shows_partial_totals_and_preserves_idle_entities() {
         let worker = crate::simulation::SimulationWorker::spawn(

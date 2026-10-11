@@ -359,6 +359,9 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
 }
 
 pub(crate) fn name(universe: &Universe, id: AgentId) -> String {
+    if let Some(guild) = universe.guilds().get(&id) {
+        return guild.name.clone();
+    }
     if let Some(household) = universe.households().get(&id) {
         return format!("{} household", household.name);
     }
@@ -601,7 +604,7 @@ pub fn refresh(
                         details.spawn(text(format!("{} | {} | {}", rule.name, kind_label(&rule.kind), if inherited { "Inherited from location type" } else if state.location_type.is_some() { "Shared type rule" } else { "Individual rule" }), 16.0, TEXT));
                         use crate::navigation::{Fragment as F};
                         match &rule.kind {
-                            TaxKind::FlatFee {payer, coins} => { let payer = match payer { TaxPayer::Agent(id) => crate::navigation::account(universe, *id), TaxPayer::LocationOwner => F::text("Property owner") }; crate::navigation::render(details, &[F::text(format!("{coins} coins weekly · ")), payer], 14.0, MUTED); }
+                            TaxKind::FlatFee {payer, coins} => { let payer = match payer { TaxPayer::Agent(id) => crate::navigation::account(universe, *id), TaxPayer::LocationOwner => place.and_then(|place| place.owner).map_or_else(|| F::text("Property owner"), |id| crate::navigation::account(universe, id)) }; crate::navigation::render(details, &[F::text(format!("{coins} coins weekly · ")), payer], 14.0, MUTED); }
                             TaxKind::Socage {rates} | TaxKind::Asset {rates} | TaxKind::Income {rates} => { let mut rates = rates.iter().collect::<Vec<_>>(); rates.sort_by_key(|(good, _)| good.name()); let mut fragments = Vec::new(); for (good, rate) in rates { if !fragments.is_empty() { fragments.push(F::text(" · ")); } fragments.push(F::good(*good)); fragments.push(F::text(format!(": {:.2}%", f64::from(rate.basis_points()) / 100.0))); } crate::navigation::render(details, &fragments, 14.0, MUTED); }
                         }
                         row(details, |row| {
@@ -875,7 +878,13 @@ pub fn handle(
                 state.draft = Some(Draft {
                     name,
                     payer: state.citizen,
-                    owner_payer: state.location_type.is_some(),
+                    owner_payer: state.location_type.is_some()
+                        || state
+                            .place
+                            .and_then(|id| {
+                                universe.map().place(id).ok().and_then(|place| place.owner)
+                            })
+                            .is_some_and(|id| universe.guilds().contains_key(&id)),
                     ..default()
                 });
                 None
@@ -1101,7 +1110,10 @@ pub(crate) fn stop_editing(state: &mut State) {
     }
 }
 
-fn stock_rows(universe: &Universe, place: PlaceId) -> Vec<Vec<crate::navigation::Fragment>> {
+pub(crate) fn stock_rows(
+    universe: &Universe,
+    place: PlaceId,
+) -> Vec<Vec<crate::navigation::Fragment>> {
     use crate::navigation::{self as nav, Fragment as F};
     let mut rows = Vec::new();
     for (key, units) in universe
@@ -1167,7 +1179,10 @@ fn treasury_rows(universe: &Universe) -> Vec<Vec<crate::navigation::Fragment>> {
             let AgentKind::Citizen(citizen) = &agent.kind;
             citizen.household_id().is_none().then_some(id)
         });
-        for id in independent.chain(universe.households().keys()) {
+        for id in independent
+            .chain(universe.households().keys())
+            .chain(universe.guilds().keys())
+        {
             let owed = universe.tax_arrears(rule.id, *id);
             if owed > 0 {
                 rows.push(vec![

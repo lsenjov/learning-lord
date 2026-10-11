@@ -612,6 +612,15 @@ fn citizen_rows(
     }
     rows.push(owned);
     rows.extend(household_rows(universe, citizen));
+    for id in citizen.guild_ids() {
+        rows.push(vec![F::text("Guild: "), navigation::account(universe, id)]);
+    }
+    if citizen.workshop_fee_liability() > 0.0 {
+        rows.push(vec![F::text(format!(
+            "Workshop fees owed: {:.3} coins (including fractional carry)",
+            citizen.workshop_fee_liability()
+        ))]);
+    }
     rows.extend(skills.lines().map(|line| vec![F::text(line)]));
     rows
 }
@@ -1678,7 +1687,7 @@ mod tests {
                 .with_price(Good::Berries, 65.0)
                 .unwrap()
         );
-        assert_eq!(snapshot.universe.agents().len(), 9);
+        assert_eq!(snapshot.universe.agents().len(), 10);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);

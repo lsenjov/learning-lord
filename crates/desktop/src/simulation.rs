@@ -266,7 +266,7 @@ impl Pacing {
     }
 }
 
-pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 9] = {
+pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 10] = {
     use learning_lord_simulation::StartingRole;
     [
         ("Ada", StartingRole::Farmer),
@@ -278,6 +278,7 @@ pub const STARTING_CITIZENS: [(&str, learning_lord_simulation::StartingRole); 9]
         ("Gita", StartingRole::Fisher),
         ("Hale", StartingRole::Brewer),
         ("Iris", StartingRole::Farmer),
+        ("Jori", StartingRole::Weaver),
     ]
 };
 
@@ -298,7 +299,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         let (next, id) = universe.with_citizen(name, citizen)?;
         universe = next;
         ids.push(id);
-        if let Some(kind) = workplace(role) {
+        if let Some(kind) = workplace(role).filter(|_| name != "Jori") {
             let (next, place) = universe.with_property(id, kind)?;
             universe = next.with_designated_workplace(id, place)?;
         }
@@ -311,6 +312,12 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
             &universe.agents()[&members[0]].kind;
         universe = universe.with_household(name, first.home(), &members)?.0;
     }
+    let learning_lord_simulation::AgentKind::Citizen(eira) = &universe.agents()[&ids[4]].kind;
+    let workshop = eira.designated_workplace().unwrap();
+    universe = universe
+        .with_guild("Weavers’ Guild", &[ids[4], ids[9]], &[workshop], 1)?
+        .0;
+    universe = universe.with_designated_workplace(ids[9], workshop)?;
     universe = universe.place_starting_supplies()?;
     for id in ids {
         universe = universe.start_planning(id)?;
@@ -1066,10 +1073,10 @@ mod tests {
     }
 
     #[test]
-    fn nine_citizens_start_with_agreed_role_supplies_and_advance_without_changing_the_source() {
+    fn ten_citizens_start_with_agreed_role_supplies_and_advance_without_changing_the_source() {
         let universe = new_universe().unwrap();
         let source = universe.clone();
-        assert_eq!(universe.agents().len(), 9);
+        assert_eq!(universe.agents().len(), 10);
         assert_eq!(universe.current_time_ms(), START_TIME_MS);
         for good in Good::ALL {
             let expected = if good == Good::Berries {
@@ -1134,7 +1141,7 @@ mod tests {
         }
         let started = Instant::now();
         let next = universe.advance(STEP_MS).unwrap();
-        println!("First nine-citizen step: {:?}", started.elapsed());
+        println!("First ten-citizen step: {:?}", started.elapsed());
         assert_eq!(universe, source);
         assert_eq!(next.current_time_ms(), START_TIME_MS + STEP_MS);
         for (id, agent) in next.agents() {
@@ -1143,6 +1150,40 @@ mod tests {
             assert_ne!(agent, &source.agents()[id]);
             assert!(citizen.hunger().is_finite());
         }
+    }
+
+    #[test]
+    fn starting_weavers_share_one_guild_workshop_and_keep_separate_accounts() {
+        let universe = new_universe().unwrap();
+        assert_eq!(universe.guilds().len(), 1);
+        let guild = universe.guilds().values().next().unwrap();
+        assert_eq!(guild.coins, 0);
+        assert_eq!(guild.hourly_fee, 1);
+        assert_eq!(guild.members.len(), 2);
+        assert_eq!(guild.workshops.len(), 1);
+        let mut homes = Vec::new();
+        let mut owners = Vec::new();
+        for id in &guild.members {
+            let learning_lord_simulation::AgentKind::Citizen(citizen) = &universe.agents()[id].kind;
+            assert!(citizen.household_id().is_none());
+            assert_eq!(citizen.coins(), 3000);
+            assert_eq!(citizen.designated_workplace(), Some(guild.workshops[0]));
+            homes.push(citizen.home());
+            owners.push(citizen.goods_owner());
+            assert_eq!(
+                universe
+                    .storage()
+                    .units(guild.workshops[0], citizen.goods_owner(), Good::Flax),
+                1600
+            );
+        }
+        assert_ne!(homes[0], homes[1]);
+        assert_ne!(owners[0], owners[1]);
+        assert_eq!(universe.map().places().values().filter(|place| place.kind == learning_lord_simulation::locations::Location::Weavery).count(), 1);
+        assert_eq!(
+            universe.map().place(guild.workshops[0]).unwrap().owner,
+            Some(guild.id)
+        );
     }
 
     #[test]
@@ -1210,19 +1251,19 @@ mod tests {
     }
 
     #[test]
-    fn initial_town_has_twenty_separated_identified_places_and_agreed_starting_roles() {
+    fn initial_town_has_twenty_one_separated_identified_places_and_agreed_starting_roles() {
         use learning_lord_simulation::{AgentKind, locations::Location, marketplace::Good};
         for _ in 0..3 {
             let universe = new_universe().unwrap();
             let map = universe.map();
             let places: Vec<_> = map.places().values().collect();
-            assert_eq!(places.len(), 20);
+            assert_eq!(places.len(), 21);
             assert_eq!(
                 places
                     .iter()
                     .filter(|place| place.kind == Location::Home)
                     .count(),
-                9
+                10
             );
             assert_eq!(
                 places.iter().filter(|place| place.owner.is_none()).count(),
@@ -1235,7 +1276,10 @@ mod tests {
                     assert!(place.position.distance(other.position) >= 200.0);
                 }
                 if let Some(owner) = place.owner {
-                    assert!(universe.agents().contains_key(&owner));
+                    assert!(
+                        universe.agents().contains_key(&owner)
+                            || universe.guilds().contains_key(&owner)
+                    );
                 }
             }
             for (id, agent) in universe.agents() {
@@ -1280,11 +1324,18 @@ mod tests {
                         .owned_properties()
                         .filter(|place| place.owner == Some(*id))
                         .count(),
-                    if property.is_some() { 2 } else { 1 }
+                    if property.is_some() && citizen.guild_ids().next().is_none() {
+                        2
+                    } else {
+                        1
+                    }
                 );
                 if let Some(kind) = property {
                     let designated = citizen.designated_workplace().unwrap();
-                    assert_eq!(map.place(designated).unwrap().owner, Some(*id));
+                    assert_eq!(
+                        map.place(designated).unwrap().owner,
+                        Some(citizen.guild_ids().next().unwrap_or(*id))
+                    );
                     assert_eq!(map.place(designated).unwrap().kind, kind);
                     for (good, units) in
                         learning_lord_simulation::production::starting_inputs(role).items()
@@ -1308,7 +1359,11 @@ mod tests {
                             citizen.starting_role() == Some(*role)
                         })
                         .count(),
-                    if *role == learning_lord_simulation::StartingRole::Farmer {
+                    if matches!(
+                        *role,
+                        learning_lord_simulation::StartingRole::Farmer
+                            | learning_lord_simulation::StartingRole::Weaver
+                    ) {
                         2
                     } else {
                         1
@@ -1374,7 +1429,7 @@ mod tests {
         state.pacing.pending_simulated_ns = 123456789;
         assert!(state.apply(Command::Restart, Duration::from_secs(10)));
         assert_eq!(state.universe.current_time_ms(), START_TIME_MS);
-        assert_eq!(state.universe.agents().len(), 9);
+        assert_eq!(state.universe.agents().len(), 10);
         assert_eq!(state.universe.prices().price(Good::Berries), Some(65.0));
         for agent in state.universe.agents().values() {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;

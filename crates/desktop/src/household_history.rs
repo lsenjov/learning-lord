@@ -192,8 +192,13 @@ pub(crate) fn render(
     label(
         parent,
         format!(
-            "Opening {} | Sales receipts {} | Purchases {} | Taxes paid {} | Closing {} coins",
-            day.opening_coins, day.sales_receipts, day.purchases, day.taxes_paid, day.closing_coins
+            "Opening {} | Sales receipts {} | Purchases {} | Taxes paid {} | Workshop fees paid {} | Closing {} coins",
+            day.opening_coins,
+            day.sales_receipts,
+            day.purchases,
+            day.taxes_paid,
+            day.workshop_fees_paid,
+            day.closing_coins
         ),
     );
     parent.spawn(text("GOODS", 14.0, MUTED));

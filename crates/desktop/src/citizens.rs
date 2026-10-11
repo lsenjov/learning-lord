@@ -1025,7 +1025,7 @@ mod tests {
     fn every_citizen_is_reachable_and_restart_resets_selection() {
         let universe = simulation::new_universe().unwrap();
         let ids: Vec<_> = sorted_agents(&universe).iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids.len(), 9);
+        assert_eq!(ids.len(), 10);
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,

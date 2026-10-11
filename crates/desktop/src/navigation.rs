@@ -10,6 +10,7 @@ use learning_lord_simulation::{AgentId, locations::PlaceId, marketplace::Good};
 pub(crate) enum Target {
     Citizen(AgentId),
     Household(AgentId),
+    Guild(AgentId),
     Good(Good),
     Location(PlaceId),
 }
@@ -97,7 +98,14 @@ pub(crate) fn handle(
         let universe = &snapshot.0.universe;
         let changed = match *target {
             Target::Citizen(id) => citizens.0 != Some(id),
-            Target::Household(id) => collectives.selected() != Some(id),
+            Target::Household(id) => {
+                collectives.tab() != collectives::Tab::Households
+                    || collectives.selected() != Some(id)
+            }
+            Target::Guild(id) => {
+                collectives.tab() != collectives::Tab::Guilds
+                    || collectives.selected_guild() != Some(id)
+            }
             Target::Location(id) => locations.selected_place() != Some(id),
             Target::Good(good) => market.good != Some(good),
         };
@@ -108,6 +116,10 @@ pub(crate) fn handle(
             }
             Target::Household(id) if universe.households().contains_key(&id) => {
                 collectives.select(id);
+                WindowKind::Collectives
+            }
+            Target::Guild(id) if universe.guilds().contains_key(&id) => {
+                collectives.select_guild(id);
                 WindowKind::Collectives
             }
             Target::Location(id) if universe.map().place(id).is_ok() => {
@@ -214,7 +226,9 @@ pub(crate) fn render(
 pub(crate) fn account(universe: &learning_lord_simulation::Universe, id: AgentId) -> Fragment {
     Fragment::entity(
         crate::locations::name(universe, id),
-        if universe.households().contains_key(&id) {
+        if universe.guilds().contains_key(&id) {
+            Target::Guild(id)
+        } else if universe.households().contains_key(&id) {
             Target::Household(id)
         } else {
             Target::Citizen(id)
@@ -443,6 +457,7 @@ mod tests {
     fn typed_links_select_targets_reuse_windows_and_keep_source_open() {
         let mut app = app();
         let universe = &app.world().resource::<DisplaySnapshot>().0.universe;
+        let guild = *universe.guilds().keys().next().unwrap();
         let household = *universe.households().keys().next().unwrap();
         let member = universe.households()[&household].members[0];
         let home = universe.households()[&household].home;
@@ -451,6 +466,13 @@ mod tests {
         assert_eq!(
             app.world().resource::<collectives::State>().selected(),
             Some(household)
+        );
+        click(&mut app, Target::Guild(guild));
+        assert_eq!(
+            app.world()
+                .resource::<collectives::State>()
+                .selected_guild(),
+            Some(guild)
         );
         click(&mut app, Target::Good(Good::Wheat));
         assert_eq!(
@@ -484,6 +506,35 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn collective_tab_links_reset_detail_scroll_for_already_selected_entities() {
+        let mut app = app();
+        let universe = &app.world().resource::<DisplaySnapshot>().0.universe;
+        let household = *universe.households().keys().next().unwrap();
+        let guild = *universe.guilds().keys().next().unwrap();
+        click(&mut app, Target::Household(household));
+        for target in [Target::Guild(guild), Target::Household(household)] {
+            let mut scrolls = app
+                .world_mut()
+                .query::<(&collectives::ScrollPanel, &mut ScrollPosition)>();
+            for (panel, mut scroll) in scrolls.iter_mut(app.world_mut()) {
+                if panel.0 {
+                    scroll.0 = Vec2::new(0.0, 100.0);
+                }
+            }
+            click(&mut app, target);
+            let mut scrolls = app
+                .world_mut()
+                .query::<(&collectives::ScrollPanel, &ScrollPosition)>();
+            assert!(
+                scrolls
+                    .iter(app.world())
+                    .filter(|(panel, _)| panel.0)
+                    .all(|(_, scroll)| scroll.0 == Vec2::ZERO)
+            );
+        }
     }
 
     #[test]
