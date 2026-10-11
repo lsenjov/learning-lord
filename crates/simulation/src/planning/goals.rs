@@ -242,7 +242,11 @@ impl Prediction {
         {
             return Ok(None);
         }
-        let started = self.citizen.start_action(action)?;
+        let started = match self.citizen.start_action(action) {
+            Ok(started) => started,
+            Err(SimulationError::MissingInputs) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let Some(active) = started.active_action() else {
             return Ok(None);
         };
@@ -2115,6 +2119,82 @@ fn variants_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_brewery_production_keeps_thirst_alternatives() {
+        use crate::{brewing::Batch, locations::Location, production::Recipe};
+        let mut worker = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(crate::StartingRole::Brewer)
+            .with_thirst(80.0)
+            .unwrap();
+        for &(good, units) in Recipe::BrewBeer.inputs() {
+            worker = worker.with_good(good, units * 8).unwrap();
+        }
+        let (mut map, brewery) = worker
+            .map()
+            .with_place(
+                Location::Brewery,
+                crate::locations::Position { x: 10.0, y: 0.0 },
+                Some(worker.id()),
+                "Brewery",
+            )
+            .unwrap();
+        for slot in 0..2 {
+            map.set_batch(
+                brewery,
+                slot,
+                Some(Batch::Fermenting {
+                    ready_at_ms: crate::brewing::FERMENTATION_MS,
+                }),
+            )
+            .unwrap();
+        }
+        let worker = worker.with_map(map).unwrap();
+        let production = site_candidate(&worker, brewery);
+        assert!(
+            production
+                .citizen
+                .map()
+                .place(brewery)
+                .unwrap()
+                .batches
+                .iter()
+                .all(Option::is_some)
+        );
+        assert!(matches!(
+            production
+                .citizen
+                .start_action(CitizenAction::Produce(Recipe::BrewBeer)),
+            Err(SimulationError::MissingInputs)
+        ));
+        assert!(
+            production
+                .perform(CitizenAction::Produce(Recipe::BrewBeer), 0)
+                .unwrap()
+                .is_none()
+        );
+        let variants = variants_after(&production, Effect::ReduceThirst).unwrap();
+        assert!(variants.iter().any(|variant| {
+            variant.actions.last() == Some(&CitizenAction::Drink)
+                && variant.citizen.thirst() < production.citizen.thirst()
+        }));
+    }
+
+    #[test]
+    fn prediction_preserves_errors_other_than_missing_inputs() {
+        let mut worker = Citizen::new(0.0).unwrap();
+        let busy = worker.start_action(CitizenAction::Wait).unwrap();
+        assert!(matches!(
+            Prediction::new(&busy, Cooldowns::default()).perform(CitizenAction::Wait, 0),
+            Err(SimulationError::CitizenBusy)
+        ));
+        worker.market_time_ms = u64::MAX;
+        assert!(matches!(
+            Prediction::new(&worker, Cooldowns::default()).perform(CitizenAction::Wait, 0),
+            Err(SimulationError::TimeOverflow)
+        ));
+    }
 
     fn site_candidate(initial: &Citizen, site: crate::locations::PlaceId) -> Prediction {
         production_at_site(
