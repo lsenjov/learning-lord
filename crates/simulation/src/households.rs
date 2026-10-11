@@ -159,6 +159,7 @@ impl Universe {
         citizen.designated_workplace = Some(place);
         universe.refresh_market();
         universe.refresh_workplace_supplies()?;
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok(universe)
     }
     pub fn with_household(
@@ -256,6 +257,11 @@ impl Universe {
                 .ok_or(SimulationError::InventoryOverflow)?;
             universe.storage.set_units(household_key, total)?;
         }
+        universe.household_histories.insert(
+            id,
+            crate::household_history::HouseholdHistory::new(universe.current_time_ms, coins),
+        );
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         universe.refresh_market();
         Ok((universe, id))
     }
@@ -329,6 +335,7 @@ impl Universe {
             citizen.position = universe.map.position(citizen.home);
         }
         universe.refresh_market();
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok(universe)
     }
 }

@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 3;
+pub const SAVE_VERSION: u32 = 4;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -134,6 +134,7 @@ impl Universe {
         self.market.validate_save()?;
         self.storage.validate_save()?;
         self.validate_households()?;
+        self.validate_household_histories()?;
         self.validate_work_reservations()?;
         if self.town_treasury < 0 {
             return Err(SaveError::InvalidState("negative town treasury"));
@@ -634,7 +635,7 @@ mod tests {
 
     fn round_trip(world: &Universe) -> Universe {
         let encoded = world.to_save_string().unwrap();
-        assert!(encoded.contains("version: 3"));
+        assert!(encoded.contains(&format!("version: {SAVE_VERSION}")));
         let loaded = Universe::from_save_str(&encoded).unwrap();
         assert_eq!(&loaded, world);
         loaded

@@ -18,6 +18,7 @@ pub mod brewing;
 pub mod diet;
 pub mod farming;
 pub mod history;
+pub mod household_history;
 pub mod households;
 pub mod maintenance;
 pub mod persistence;
@@ -1760,6 +1761,7 @@ pub struct Universe {
     map: Map,
     agents: HashMap<AgentId, Agent>,
     citizen_histories: HashMap<AgentId, history::CitizenHistory>,
+    household_histories: HashMap<AgentId, household_history::HouseholdHistory>,
     storage: Storage,
     households: HashMap<AgentId, households::Household>,
     town_treasury: Coins,
@@ -1774,6 +1776,7 @@ impl Default for Universe {
             map: Map::random(),
             agents: HashMap::new(),
             citizen_histories: HashMap::new(),
+            household_histories: HashMap::new(),
             storage: Storage::default(),
             households: HashMap::new(),
             town_treasury: 0,
@@ -1902,6 +1905,7 @@ impl Universe {
             .storage
             .set_units(StockKey { place, owner, good }, units)?;
         universe.refresh_market();
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         if let GoodsOwner::Agent(id) = owner {
             let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
             citizen.wealth()?;
@@ -2038,6 +2042,7 @@ impl Universe {
             .storage
             .set_units(StockKey { place, owner, good }, next_stored)?;
         universe.refresh_market();
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok(universe)
     }
 
@@ -2218,6 +2223,8 @@ impl Universe {
                 .min(planning_boundary);
             let finishing_time = universe.current_time_ms + step;
             let trades_before = universe.market.trades().len();
+            let taxes_before = universe.taxation.history.len();
+            let histories_before = universe.citizen_histories.clone();
             let agents_before = universe.agents.clone();
             for id in &ids {
                 let agent_trades_before = universe.market.trades().len();
@@ -2422,6 +2429,9 @@ impl Universe {
                         .trade(id, trade)?;
                 }
             }
+            universe.record_household_contributions(&histories_before)?;
+            universe.record_household_events(trades_before, taxes_before)?;
+            universe.refresh_household_history(finishing_time, true)?;
             universe.current_time_ms = finishing_time;
             for (_, agent) in universe.agents.iter_mut() {
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
@@ -2435,10 +2445,12 @@ impl Universe {
                     .unwrap()
                     .close_day(finishing_time, citizen);
             }
+            let histories_before = universe.citizen_histories.clone();
             if step == until_update {
                 universe.refresh_market();
                 universe.market.update(finishing_time)?;
                 let trades_before = universe.market.trades().len();
+                let taxes_before = universe.taxation.history.len();
                 let limits = Good::ALL.map(|good| {
                     universe
                         .town_stock_total(good)
@@ -2485,6 +2497,7 @@ impl Universe {
                         }
                     }
                 }
+                universe.record_household_events(trades_before, taxes_before)?;
                 universe.market.prune_history(finishing_time);
                 universe.taxation.prune_history(finishing_time);
                 universe.refresh_market();
@@ -2567,7 +2580,9 @@ impl Universe {
                     runtime.planning_event(citizen, universe.current_time_ms)?;
                 }
             }
+            universe.record_household_contributions(&histories_before)?;
         }
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok(Some(universe))
     }
 
@@ -2837,6 +2852,7 @@ impl Universe {
         let agent = self.agents.get(&id).ok_or(SimulationError::AgentNotFound)?;
         let updated = agent.start_action(action)?;
         let mut universe = self.clone();
+        let histories_before = universe.citizen_histories.clone();
         let AgentKind::Citizen(citizen) = &updated.kind;
         universe
             .citizen_histories
@@ -2844,8 +2860,10 @@ impl Universe {
             .unwrap()
             .start_action(citizen)?;
         universe.agents.insert(id, updated);
+        universe.record_household_contributions(&histories_before)?;
         universe.register_action_request(id)?;
         universe.refresh_market();
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok(universe)
     }
 
@@ -2861,6 +2879,7 @@ impl Universe {
         citizen.refresh_production_targets(true)?;
         let updated = agent.start_planning()?;
         let mut universe = self.clone();
+        let histories_before = universe.citizen_histories.clone();
         let AgentKind::Citizen(citizen) = &updated.kind;
         universe
             .citizen_histories
@@ -2868,8 +2887,10 @@ impl Universe {
             .unwrap()
             .start_action(citizen)?;
         universe.agents.insert(id, updated);
+        universe.record_household_contributions(&histories_before)?;
         universe.register_action_request(id)?;
         universe.refresh_market();
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok(universe)
     }
 }
