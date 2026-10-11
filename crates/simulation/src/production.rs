@@ -338,7 +338,7 @@ pub(crate) fn stock_cap_batches(recipe: Recipe, citizen: &Citizen) -> Option<f64
     if recipe == Recipe::BrewBeer {
         return Some(
             citizen
-                .owned_properties()
+                .accessible_properties()
                 .filter(|place| place.kind == Location::Brewery)
                 .map(|place| place.batches.len())
                 .sum::<usize>() as f64
@@ -355,8 +355,7 @@ pub(crate) fn stock_cap_batches(recipe: Recipe, citizen: &Citizen) -> Option<f64
 }
 
 pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
-    let mut stock =
-        citizen.units(good) as f64 + citizen.market().listed_units(citizen.id(), good) as f64;
+    let mut stock = citizen.economic_owned_units(good) as f64;
     if let Some(active) = citizen.active_action()
         && let Some(recipe) = active.action().production_recipe()
         && recipe != Recipe::BrewBeer
@@ -384,11 +383,11 @@ pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
     }
     if good == Good::Beer {
         stock += citizen
-            .owned_properties()
+            .accessible_properties()
             .map(|place| place.batches.iter().flatten().count() as f64 * 1000.0)
             .sum::<f64>();
     }
-    for place in citizen.owned_properties() {
+    for place in citizen.accessible_properties() {
         for crop in place
             .plots
             .iter()
@@ -617,12 +616,12 @@ pub(crate) fn projected_recipes_at(
         })
         .collect();
     let mut empty_plots = citizen
-        .owned_properties()
+        .accessible_properties()
         .filter(|place| site.is_none_or(|site| site == place.id))
         .map(|place| place.plots.iter().filter(|plot| plot.is_none()).count())
         .sum::<usize>();
     let mut free_brew_slots = citizen
-        .owned_properties()
+        .accessible_properties()
         .filter(|place| site.is_none_or(|site| site == place.id))
         .map(|place| place.batches.iter().filter(|slot| slot.is_none()).count())
         .sum::<usize>();

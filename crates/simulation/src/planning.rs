@@ -79,8 +79,12 @@ impl ProductionDecision {
                 .map(|&(good, required_units)| {
                     let carried_units = citizen.available_units(good);
                     let obtainable = carried_units
-                        .saturating_add(citizen.market().listed_units(citizen.id(), good))
-                        .saturating_add(citizen.market().available_units(citizen.id(), good));
+                        .saturating_add(citizen.market().listed_units(citizen.market_party(), good))
+                        .saturating_add(
+                            citizen
+                                .market()
+                                .available_units(citizen.market_party(), good),
+                        );
                     let can_gather = good == crate::marketplace::Good::Berries
                         || citizen
                             .available_recipes()
@@ -128,6 +132,13 @@ pub struct Plan {
 }
 
 impl Plan {
+    pub(crate) fn maintenance_goal(&self) -> Option<Effect> {
+        self.goals
+            .first()
+            .map(|goal| goal.goal)
+            .filter(|goal| matches!(goal, Effect::ListExcess | Effect::ReplenishReserves))
+    }
+
     /// Goal boundaries in execution order.
     pub fn goals(&self) -> &[PlanGoal] {
         &self.goals
@@ -167,6 +178,10 @@ pub struct ActivePlan {
 }
 
 impl ActivePlan {
+    pub(crate) fn maintenance_goal(&self) -> Option<Effect> {
+        self.plan.maintenance_goal()
+    }
+
     pub fn plan(&self) -> &Plan {
         &self.plan
     }
@@ -234,7 +249,37 @@ impl ActivePlan {
                 .expect("a planned citizen has an active action")
                 .remaining_ms();
             let step_ms = elapsed_ms.min(remaining_ms);
+            let previous = citizen.clone();
             citizen = citizen.advance(step_ms)?;
+            if citizen.household.is_none()
+                && let Some(goal) = execution.maintenance_goal()
+            {
+                let worked = match goal {
+                    Effect::ListExcess => crate::marketplace::Good::ALL.into_iter().any(|good| {
+                        citizen.market.listed_units(citizen.market_party(), good)
+                            > previous.market.listed_units(previous.market_party(), good)
+                    }),
+                    Effect::ReplenishReserves => crate::marketplace::Good::FOOD
+                        .into_iter()
+                        .chain([
+                            crate::marketplace::Good::Water,
+                            crate::marketplace::Good::Beer,
+                        ])
+                        .any(|good| {
+                            citizen.stored_available_units(citizen.home(), good)
+                                > previous.stored_available_units(previous.home(), good)
+                        }),
+                    _ => false,
+                };
+                if worked {
+                    citizen.maintenance.record_work(goal, citizen.id);
+                }
+                if citizen.active_action().is_none() && execution.finishes_committed_goal() {
+                    citizen
+                        .maintenance
+                        .finish(goal, citizen.id, citizen.current_time_ms(), true);
+                }
+            }
             elapsed_ms -= step_ms;
             execution.elapsed_ms = execution
                 .elapsed_ms
@@ -267,6 +312,10 @@ impl ActivePlan {
 
     pub(crate) fn finish_action(&mut self) {
         self.action_index += 1;
+    }
+
+    pub(crate) fn abandon_committed_goal(&mut self) {
+        self.action_index = self.committed_actions_end();
     }
 
     pub(crate) fn resume(&mut self, citizen: Citizen) -> Result<Citizen, SimulationError> {
@@ -302,7 +351,14 @@ impl ActivePlan {
         mut citizen: Citizen,
     ) -> Result<Citizen, SimulationError> {
         while !self.needs_replan(&citizen) {
-            citizen = citizen.start_action(self.plan.actions[self.action_index])?;
+            citizen = match citizen.start_action(self.plan.actions[self.action_index]) {
+                Ok(started) => started,
+                Err(SimulationError::MissingInputs) => {
+                    self.action_index = self.committed_actions_end();
+                    return Ok(citizen);
+                }
+                Err(error) => return Err(error),
+            };
             if citizen.active_action().is_some() {
                 return Ok(citizen);
             }
@@ -312,9 +368,16 @@ impl ActivePlan {
     }
 
     pub(crate) fn first_action_valid(citizen: &Citizen, plan: &Plan) -> bool {
-        plan.actions
-            .first()
-            .is_some_and(|action| !replan_check(citizen, *action, 1))
+        if plan.maintenance_goal().is_some_and(|goal| {
+            !citizen
+                .maintenance
+                .available(goal, citizen.current_time_ms())
+        }) {
+            return false;
+        }
+        plan.actions.first().is_some_and(|action| {
+            !replan_check(citizen, *action, 0) && citizen.start_action(*action).is_ok()
+        })
     }
 
     pub(crate) fn adopt(
@@ -322,6 +385,9 @@ impl ActivePlan {
         mut citizen: Citizen,
         plan: Plan,
     ) -> Result<Citizen, SimulationError> {
+        if !Self::first_action_valid(&citizen, &plan) {
+            return Err(SimulationError::MissingInputs);
+        }
         set_production_site(&mut citizen, &plan)?;
         let Some(&action) = plan.actions.first() else {
             return Err(SimulationError::PlanningFailed);
@@ -330,6 +396,15 @@ impl ActivePlan {
         if started.active_action().is_none() {
             return Err(SimulationError::MissingInputs);
         }
+        let mut started = started;
+        if started.household.is_none()
+            && let Some(goal) = plan.maintenance_goal()
+        {
+            started.maintenance.cancel(started.id);
+            started
+                .maintenance
+                .claim(goal, started.id, started.current_time_ms());
+        }
         self.plan = plan;
         self.action_index = 0;
         self.elapsed_ms = 0;
@@ -337,15 +412,34 @@ impl ActivePlan {
     }
 
     fn start_next_action(&mut self, mut citizen: Citizen) -> Result<Citizen, SimulationError> {
+        let mut freshly_planned = false;
         loop {
             if self.needs_replan(&citizen) {
+                if citizen.household.is_none() {
+                    citizen.maintenance.cancel(citizen.id);
+                }
                 self.prepare_replan(&mut citizen)?;
                 self.plan = plan(&citizen)?;
+                freshly_planned = true;
                 set_production_site(&mut citizen, &self.plan)?;
                 self.action_index = 0;
                 self.elapsed_ms = 0;
+                if citizen.household.is_none()
+                    && let Some(goal) = self.plan.maintenance_goal()
+                {
+                    citizen
+                        .maintenance
+                        .claim(goal, citizen.id, citizen.current_time_ms());
+                }
             }
-            citizen = citizen.start_action(self.plan.actions[self.action_index])?;
+            citizen = match citizen.start_action(self.plan.actions[self.action_index]) {
+                Ok(started) => started,
+                Err(SimulationError::MissingInputs) if !freshly_planned => {
+                    self.action_index = self.committed_actions_end();
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if citizen.active_action().is_some() {
                 return Ok(citizen);
             }
@@ -463,7 +557,10 @@ pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationEr
 fn root_goals(citizen: &Citizen) -> Result<Vec<Effect>, SimulationError> {
     let clothing_choice = citizen.available_units(crate::marketplace::Good::FlaxGarment) > 0
         && citizen.clothing_need() > 0.0;
-    let standing_listing = !clothing_choice
+    let standing_listing = citizen
+        .maintenance
+        .available(Effect::ListExcess, citizen.current_time_ms())
+        && !clothing_choice
         && citizen.production_targets().is_some()
         && citizen.thirst() < crate::production::URGENT_HUNGER
         && citizen.hunger() < crate::production::URGENT_HUNGER
@@ -485,6 +582,11 @@ fn root_goals(citizen: &Citizen) -> Result<Vec<Effect>, SimulationError> {
     if clothing_choice && citizen.production_targets().is_some() {
         goals.push(Effect::ListExcess);
     }
+    goals.retain(|goal| {
+        citizen
+            .maintenance
+            .available(*goal, citizen.current_time_ms())
+    });
     Ok(goals)
 }
 
@@ -704,12 +806,11 @@ fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
     reduce_results(citizen, production, results)
 }
 
-fn ordinary_goals() -> [Effect; 6] {
+fn ordinary_goals() -> [Effect; 5] {
     [
         Effect::ReduceHunger,
         Effect::ReduceThirst,
         Effect::ReduceTiredness,
-        Effect::ReplenishReserves,
         Effect::ReduceClothingNeed,
         Effect::Production,
     ]
@@ -784,6 +885,13 @@ pub(crate) fn start(citizen: &Citizen) -> Result<Citizen, SimulationError> {
     let mut citizen = citizen.clone();
     set_production_site(&mut citizen, &plan)?;
     let mut citizen = citizen.start_action(plan.actions[0])?;
+    if citizen.household.is_none()
+        && let Some(goal) = plan.maintenance_goal()
+    {
+        citizen
+            .maintenance
+            .claim(goal, citizen.id, citizen.current_time_ms());
+    }
     citizen.active_plan = Some(ActivePlan {
         plan,
         action_index: 0,
@@ -1822,6 +1930,30 @@ mod tests {
             .advance(crate::ACTION_DURATION_MS + crate::TRADE_DURATION_MS)
             .unwrap();
         assert_eq!(after, combined);
+    }
+
+    #[test]
+    fn fresh_plan_can_start_with_a_partial_meal_below_the_replan_threshold() {
+        let citizen = Citizen::with_needs(100.0, -100.0)
+            .unwrap()
+            .with_berries(39)
+            .unwrap();
+        let mut execution = executing(&citizen, vec![CitizenAction::Wait])
+            .active_plan
+            .unwrap();
+        let partial_meal = Plan {
+            actions: vec![CitizenAction::Eat],
+            action_durations_ms: vec![39_000],
+            goals: vec![],
+            average_wellbeing: 0.0,
+            decision: None,
+        };
+        assert!(ActivePlan::first_action_valid(&citizen, &partial_meal));
+        let started = execution.adopt(citizen, partial_meal).unwrap();
+        assert_eq!(
+            started.active_action().unwrap().action(),
+            CitizenAction::Eat
+        );
     }
 
     #[test]

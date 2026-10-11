@@ -317,7 +317,10 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         });
 }
 
-fn name(universe: &Universe, id: AgentId) -> String {
+pub(crate) fn name(universe: &Universe, id: AgentId) -> String {
+    if let Some(household) = universe.households().get(&id) {
+        return format!("{} household", household.name);
+    }
     universe
         .agents()
         .get(&id)
@@ -327,7 +330,7 @@ fn name(universe: &Universe, id: AgentId) -> String {
 fn owner_name(universe: &Universe, owner: GoodsOwner) -> String {
     match owner {
         GoodsOwner::Town => "Town".into(),
-        GoodsOwner::Agent(id) => name(universe, id),
+        GoodsOwner::Agent(id) | GoodsOwner::Household(id) => name(universe, id),
     }
 }
 
@@ -440,7 +443,8 @@ fn stocks(universe: &Universe, place: PlaceId) -> String {
         lines.push(format!(
             "{} | {} | {} sale escrow",
             match order.seller {
-                learning_lord_simulation::marketplace::MarketParty::Citizen(id) =>
+                learning_lord_simulation::marketplace::MarketParty::Citizen(id)
+                | learning_lord_simulation::marketplace::MarketParty::Household(id) =>
                     name(universe, id),
                 learning_lord_simulation::marketplace::MarketParty::Caravan => "Caravan".into(),
             },
@@ -468,7 +472,11 @@ pub(crate) fn kind_label(kind: &TaxKind) -> &'static str {
 pub(crate) fn treasury(universe: &Universe) -> String {
     let mut lines = vec![format!("Town treasury: {} coins", universe.town_treasury())];
     for rule in universe.tax_rules().values() {
-        for (id, _) in universe.agents() {
+        let independent = universe.agents().iter().filter_map(|(id, agent)| {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            citizen.household_id().is_none().then_some(id)
+        });
+        for id in independent.chain(universe.households().keys()) {
             let owed = universe.tax_arrears(rule.id, *id);
             if owed > 0 {
                 lines.push(format!(
@@ -1149,6 +1157,49 @@ pub(crate) fn stop_editing(state: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn treasury_reports_household_arrears_once() {
+        use learning_lord_simulation::{Citizen, taxation::TaxPayer};
+        let (universe, first) = Universe::default()
+            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (universe, second) = universe
+            .with_citizen("Iris", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &universe.agents()[&first].kind;
+        let home = citizen.home();
+        let (universe, household) = universe
+            .with_household("Ada and Iris", home, &[first, second])
+            .unwrap();
+        let universe = universe.with_property(first, Location::Field).unwrap().0;
+        let (universe, _) = universe
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Field),
+                "Field fee",
+                TaxKind::FlatFee {
+                    payer: TaxPayer::LocationOwner,
+                    coins: 10,
+                },
+            )
+            .unwrap();
+        let universe = universe
+            .advance(learning_lord_simulation::calendar::FIRST_WEEKLY_SETTLEMENT_MS)
+            .unwrap();
+        let readout = treasury(&universe);
+        assert_eq!(
+            readout
+                .lines()
+                .filter(|line| line.contains(" owes "))
+                .count(),
+            1,
+            "{readout}"
+        );
+        assert!(
+            readout.contains(&format!("{} owes 10 coins", name(&universe, household))),
+            "{readout}"
+        );
+    }
 
     #[test]
     fn brewery_slots_show_each_stage_and_round_remaining_minutes_up() {

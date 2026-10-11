@@ -147,7 +147,12 @@ fn replenishment_above_meal_stock_chooses_an_actual_purchase_and_reports_it_duri
     let first_goal = &selected.actions()[selected.goals()[0].actions.clone()];
     assert!(matches!(
         first_goal,
-        [CitizenAction::Travel(_), CitizenAction::BuyAt { .. }]
+        [
+            CitizenAction::Travel(_),
+            CitizenAction::BuyAt { .. },
+            CitizenAction::Travel(_),
+            CitizenAction::DepositStored { .. }
+        ]
     ));
     let CitizenAction::BuyAt { list: basket, .. } = first_goal[1] else {
         unreachable!()
@@ -287,7 +292,12 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     assert!(
         matches!(
             first,
-            [CitizenAction::Travel(_), CitizenAction::BuyAt { .. }]
+            [
+                CitizenAction::Travel(_),
+                CitizenAction::BuyAt { .. },
+                CitizenAction::Travel(_),
+                CitizenAction::DepositStored { .. }
+            ]
         ),
         "{first:?}"
     );

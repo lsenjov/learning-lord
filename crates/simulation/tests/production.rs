@@ -81,7 +81,18 @@ fn every_recipe_transforms_exact_inputs_at_completion_and_preserves_partial_stoc
             assert_eq!(complete.units(good), 0);
         }
         for &(good, grams) in recipe.outputs() {
-            assert_eq!(complete.units(good), grams);
+            let place = complete.production_place(recipe).unwrap();
+            if recipe.location().is_public() {
+                assert_eq!(complete.units(good), grams);
+            } else {
+                assert_eq!(complete.units(good), 0);
+                assert_eq!(
+                    complete
+                        .storage()
+                        .units(place, complete.goods_owner(), good),
+                    grams
+                );
+            }
         }
         assert!(complete.hunger() > source.hunger());
         assert!(complete.tiredness() > source.tiredness());
@@ -166,9 +177,20 @@ fn practice_shortens_future_work_and_caps_at_half_duration() {
 
 #[test]
 fn failed_production_does_not_consume_inputs_or_change_progress() {
-    let source = worker(Recipe::BakeRolls)
-        .with_good(Good::BreadRoll, u64::MAX)
+    let source = worker(Recipe::BakeRolls);
+    let site = source.production_place(Recipe::BakeRolls).unwrap();
+    let (world, id) = Universe::with_map(source.map())
+        .with_citizen("Baker", source)
         .unwrap();
+    let world = world
+        .with_stored_good(
+            site,
+            learning_lord_simulation::storage::GoodsOwner::Agent(id),
+            Good::BreadRoll,
+            u64::MAX,
+        )
+        .unwrap();
+    let AgentKind::Citizen(source) = &world.agents()[&id].kind;
     let started = source
         .start_action(CitizenAction::Produce(Recipe::BakeRolls))
         .unwrap();

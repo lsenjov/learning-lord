@@ -58,7 +58,7 @@ impl Citizen {
         if place.kind != Location::Brewery {
             return Err(SimulationError::MissingProperty);
         }
-        if place.owner != Some(self.id) {
+        if !place.owner.is_some_and(|owner| self.may_use_owner(owner)) {
             return Err(SimulationError::PrivateProperty);
         }
         place
@@ -102,12 +102,7 @@ impl Citizen {
             .position(Option::is_none)
             .ok_or(SimulationError::MissingInputs)?;
         for &(good, units) in Recipe::BrewBeer.inputs() {
-            self.set_inventory_units(
-                good,
-                self.units(good)
-                    .checked_sub(units)
-                    .ok_or(SimulationError::MissingInputs)?,
-            );
+            self.consume_at(site, good, units)?;
         }
         self.map.set_batch(site, slot, Some(Batch::Preparing))
     }
@@ -164,19 +159,16 @@ impl Citizen {
         {
             return Err(SimulationError::MissingInputs);
         }
-        self.set_inventory_units(
-            Good::Beer,
-            self.units(Good::Beer)
-                .checked_add(BATCH_BEER_GRAMS)
-                .ok_or(SimulationError::InventoryOverflow)?,
-        );
+        self.receive_production_output(brewery, Good::Beer, 1000)?;
         self.map.set_batch(brewery, slot, None)
     }
     pub fn brewing_actions_at(&self, brewery: PlaceId) -> Vec<CitizenAction> {
         let Ok(place) = self.map.place(brewery) else {
             return Vec::new();
         };
-        if place.owner != Some(self.id) || place.kind != Location::Brewery {
+        if !place.owner.is_some_and(|owner| self.may_use_owner(owner))
+            || place.kind != Location::Brewery
+        {
             return Vec::new();
         }
         place

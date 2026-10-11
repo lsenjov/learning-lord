@@ -101,7 +101,13 @@ fn preparation_consumes_inputs_now_and_collection_alone_produces_beer() {
     assert_eq!(citizen(&half, id).units(Good::Beer), 0);
     assert!(half.map().place(site).unwrap().batches[0].is_some());
     let collected = half.advance(duration - duration / 2).unwrap();
-    assert_eq!(citizen(&collected, id).units(Good::Beer), 1000);
+    assert_eq!(citizen(&collected, id).units(Good::Beer), 0);
+    assert_eq!(
+        collected
+            .storage()
+            .units(site, citizen(&collected, id).goods_owner(), Good::Beer),
+        1000
+    );
     assert_eq!(collected.map().place(site).unwrap().batches[0], None);
     assert_eq!(
         collected.citizen_history(id).unwrap().current.produced[Good::Beer as usize],
@@ -140,7 +146,13 @@ fn slots_limit_preparation_until_a_finished_batch_is_collected() {
         },
     );
     worker = perform(worker, prep(site));
-    assert_eq!(worker.units(Good::Beer), 1000);
+    assert_eq!(worker.units(Good::Beer), 0);
+    assert_eq!(
+        worker
+            .storage()
+            .units(site, worker.goods_owner(), Good::Beer),
+        1000
+    );
 }
 #[test]
 fn skill_reduces_labor_but_never_fermentation_and_batches_are_discounted() {
@@ -221,7 +233,17 @@ fn beer_socage_uses_collection_site_and_preparation_has_no_assessment() {
         .unwrap();
     let duration = citizen(&started, id).active_action().unwrap().duration_ms();
     let done = started.advance(duration).unwrap();
-    assert_eq!(citizen(&done, id).tax_reserved_units(Good::Beer), 500);
+    assert_eq!(citizen(&done, id).tax_reserved_units(Good::Beer), 0);
+    assert_eq!(
+        done.storage()
+            .reserved_units(site, citizen(&done, id).goods_owner(), Good::Beer),
+        500
+    );
+    assert_eq!(
+        done.storage()
+            .units(site, citizen(&done, id).goods_owner(), Good::Beer),
+        1000
+    );
 }
 #[test]
 fn old_save_versions_reject_before_decoding_the_old_schema() {
@@ -270,7 +292,13 @@ fn hops_follow_the_four_day_crop_lifecycle() {
         .advance(planted + GROWTH_MS - worker.current_time_ms())
         .unwrap();
     worker = perform(worker, CitizenAction::Harvest { field, plot: 0 });
-    assert_eq!(worker.units(Good::Hops), 600);
+    assert_eq!(worker.units(Good::Hops), 0);
+    assert_eq!(
+        worker
+            .storage()
+            .units(field, worker.goods_owner(), Good::Hops),
+        600
+    );
 }
 
 #[test]

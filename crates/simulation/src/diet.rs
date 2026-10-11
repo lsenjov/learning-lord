@@ -130,7 +130,7 @@ impl Citizen {
     }
 
     pub(crate) fn planning_wellbeing(&self) -> Result<f64, crate::SimulationError> {
-        let value = self.personal_wellbeing()? + self.food_forecast(6).benefit;
+        let value = self.decision_score()? + self.food_forecast(6).benefit;
         if value.is_finite() {
             Ok(value)
         } else {
@@ -143,13 +143,16 @@ impl Citizen {
         available: [crate::Quantity; Good::COUNT],
     ) -> [crate::Quantity; Good::COUNT] {
         let mut forecast = self.clone();
+        forecast.storage = crate::storage::Storage::default();
         forecast.active_action = None;
         forecast.active_plan = None;
         for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
             forecast.inventory.insert(good, available[good as usize]);
             forecast.tax_reserved.remove(&good);
         }
-        let mut retained = forecast.food_forecast(6).units;
+        let mut retained = forecast
+            .food_forecast(6usize.saturating_mul(self.supplied_members() as usize))
+            .units;
         retained[Good::Water as usize] = 0;
         let mut nutrition: f64 = Good::FOOD
             .into_iter()
@@ -157,7 +160,9 @@ impl Citizen {
             .sum::<f64>()
             + retained[Good::Beer as usize] as f64 * 0.05;
         for good in Good::FOOD {
-            let remaining = (crate::FOOD_RESERVE_CAP_NUTRITION - nutrition).max(0.0);
+            let remaining = (crate::FOOD_RESERVE_CAP_NUTRITION * self.supplied_members() as f64
+                - nutrition)
+                .max(0.0);
             let added = available[good as usize]
                 .saturating_sub(retained[good as usize])
                 .min((remaining / good.nutrition_per_unit().unwrap()).ceil() as crate::Quantity);
@@ -212,13 +217,14 @@ impl Citizen {
             for good in Good::FOOD {
                 let portion = action.meal_units[good as usize];
                 units[good as usize] += portion;
-                future.inventory.insert(good, future.units(good) - portion);
+                future
+                    .consume_goods(good, portion)
+                    .expect("forecast consumes available food");
             }
             units[action.drink_good as usize] += action.drink_units;
-            future.inventory.insert(
-                action.drink_good,
-                future.units(action.drink_good) - action.drink_units,
-            );
+            future
+                .consume_goods(action.drink_good, action.drink_units)
+                .expect("forecast consumes available drink");
             let duration = action.duration_ms.min(horizon - elapsed);
             benefit +=
                 future.forecast_consumption_interval(duration, Some(action), &mut consumed_value);
@@ -323,6 +329,7 @@ impl Citizen {
             return None;
         }
         let action = ActiveAction {
+            stored_inputs: crate::marketplace::ShoppingList::default(),
             action: crate::CitizenAction::Eat,
             remaining_ms: duration_ms,
             duration_ms,
@@ -730,6 +737,7 @@ mod tests {
                 .insert(Good::Water, source.units(Good::Water) - drink);
             let duration = meal_ms.max(drink * crate::DRINK_DURATION_MS / crate::DRINK_WATER_GRAMS);
             let active = ActiveAction {
+                stored_inputs: crate::marketplace::ShoppingList::default(),
                 action: CitizenAction::Eat,
                 duration_ms: duration,
                 remaining_ms: duration,

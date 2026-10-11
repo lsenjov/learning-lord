@@ -4,6 +4,7 @@ use imbl::HashMap;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GoodsOwner {
     Agent(AgentId),
+    Household(AgentId),
     Town,
 }
 
@@ -19,6 +20,7 @@ pub struct Storage {
     stock: HashMap<StockKey, Quantity>,
     totals: HashMap<(GoodsOwner, Good), Quantity>,
     reserved: HashMap<StockKey, Quantity>,
+    work_reserved: HashMap<StockKey, Quantity>,
 }
 
 impl Storage {
@@ -44,6 +46,52 @@ impl Storage {
             .unwrap_or(0)
     }
 
+    pub(crate) fn work_reservations(&self) -> &HashMap<StockKey, Quantity> {
+        &self.work_reserved
+    }
+    pub(crate) fn work_reserved_units(&self, key: StockKey) -> Quantity {
+        self.work_reserved.get(&key).copied().unwrap_or(0)
+    }
+    pub(crate) fn reserve_work(
+        &mut self,
+        key: StockKey,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        let current = self.work_reserved_units(key);
+        let reserved = current
+            .checked_add(units)
+            .ok_or(SimulationError::InventoryOverflow)?;
+        if reserved
+            > self
+                .units(key.place, key.owner, key.good)
+                .saturating_sub(self.reserved_units(key.place, key.owner, key.good))
+        {
+            return Err(SimulationError::MissingInputs);
+        }
+        if reserved == 0 {
+            self.work_reserved.remove(&key);
+        } else {
+            self.work_reserved.insert(key, reserved);
+        }
+        Ok(())
+    }
+    pub(crate) fn release_work(
+        &mut self,
+        key: StockKey,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        let reserved = self
+            .work_reserved_units(key)
+            .checked_sub(units)
+            .ok_or(SimulationError::MissingInputs)?;
+        if reserved == 0 {
+            self.work_reserved.remove(&key);
+        } else {
+            self.work_reserved.insert(key, reserved);
+        }
+        Ok(())
+    }
+
     pub(crate) fn set_reserved(&mut self, key: StockKey, units: Quantity) {
         if units == 0 {
             self.reserved.remove(&key);
@@ -57,7 +105,11 @@ impl Storage {
         key: StockKey,
         units: Quantity,
     ) -> Result<(), SimulationError> {
-        if units < self.reserved_units(key.place, key.owner, key.good) {
+        if units
+            < self
+                .reserved_units(key.place, key.owner, key.good)
+                .saturating_add(self.work_reserved_units(key))
+        {
             return Err(SimulationError::MissingInputs);
         }
         let previous = self.units(key.place, key.owner, key.good);
@@ -90,7 +142,11 @@ impl Storage {
                 .checked_add(*units)
                 .ok_or(SaveError::InvalidState("storage total overflow"))?;
         }
-        if totals != self.totals
+        if self.work_reserved.iter().any(|(key, units)| {
+            units
+                .checked_add(self.reserved_units(key.place, key.owner, key.good))
+                .is_none_or(|total| total > self.units(key.place, key.owner, key.good))
+        }) || totals != self.totals
             || self
                 .reserved
                 .iter()
@@ -111,7 +167,7 @@ impl crate::Citizen {
             .stock()
             .iter()
             .filter_map(|(key, _)| {
-                if key.owner != GoodsOwner::Agent(self.id)
+                if key.owner != self.goods_owner()
                     || key.good != good
                     || self.accessible_place(key.place).is_err()
                 {
@@ -131,10 +187,14 @@ impl crate::Citizen {
     }
 
     pub fn stored_available_units(&self, place: PlaceId, good: Good) -> Quantity {
-        let owner = GoodsOwner::Agent(self.id);
+        let owner = self.goods_owner();
         self.storage
             .units(place, owner, good)
             .saturating_sub(self.storage.reserved_units(place, owner, good))
+            .saturating_sub(
+                self.storage
+                    .work_reserved_units(StockKey { place, owner, good }),
+            )
     }
 
     pub(crate) fn transfer_stored_action(
@@ -146,7 +206,7 @@ impl crate::Citizen {
         self.accessible_place(place)?;
         for (good, units) in list.items() {
             let available = if deposit {
-                self.available_units(good)
+                self.carried_available_units(good)
             } else {
                 self.stored_available_units(place, good)
             };
@@ -157,7 +217,7 @@ impl crate::Citizen {
         for (good, units) in list.items() {
             let key = StockKey {
                 place,
-                owner: GoodsOwner::Agent(self.id),
+                owner: self.goods_owner(),
                 good,
             };
             let stored = self.storage.units(place, key.owner, good);
@@ -183,6 +243,132 @@ impl crate::Citizen {
                 self.retain_production_input(good, units)?;
             }
         }
+        Ok(())
+    }
+}
+
+impl crate::Citizen {
+    pub(crate) fn colocated_storage_places(&self) -> Vec<PlaceId> {
+        let mut places: Vec<_> = self
+            .map
+            .places()
+            .values()
+            .filter(|place| {
+                self.position.distance(place.position) < 0.001
+                    && self.accessible_place(place.id).is_ok()
+            })
+            .map(|place| place.id)
+            .collect();
+        places.sort_by_key(|place| {
+            (
+                self.active_action
+                    .and_then(|active| active.action.required_place(self))
+                    != Some(*place),
+                self.designated_workplace != Some(*place),
+                self.home != *place,
+                place.0,
+            )
+        });
+        places
+    }
+    pub(crate) fn current_storage_place(&self) -> Option<PlaceId> {
+        self.colocated_storage_places().first().copied()
+    }
+    pub(crate) fn carried_available_units(&self, good: Good) -> Quantity {
+        self.units(good)
+            .saturating_sub(self.tax_reserved_units(good))
+    }
+    pub(crate) fn consume_goods(
+        &mut self,
+        good: Good,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        let carried = units.min(self.carried_available_units(good));
+        let mut stored = units - carried;
+        let places = self.colocated_storage_places();
+        if stored
+            > places
+                .iter()
+                .map(|place| self.stored_available_units(*place, good))
+                .fold(0_u64, u64::saturating_add)
+        {
+            return Err(SimulationError::MissingInputs);
+        }
+        for place in places {
+            let taken = stored.min(self.stored_available_units(place, good));
+            if taken == 0 {
+                continue;
+            }
+            let key = StockKey {
+                place,
+                owner: self.goods_owner(),
+                good,
+            };
+            self.storage
+                .set_units(key, self.storage.units(place, key.owner, good) - taken)?;
+            stored -= taken;
+        }
+        self.set_inventory_units(good, self.units(good) - carried);
+        Ok(())
+    }
+    pub(crate) fn receive_production_output(
+        &mut self,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        if self.map.place(place)?.kind.is_public() {
+            self.set_inventory_units(
+                good,
+                self.units(good)
+                    .checked_add(units)
+                    .ok_or(SimulationError::InventoryOverflow)?,
+            );
+        } else {
+            let key = StockKey {
+                place,
+                owner: self.goods_owner(),
+                good,
+            };
+            self.storage.set_units(
+                key,
+                self.storage
+                    .units(place, key.owner, good)
+                    .checked_add(units)
+                    .ok_or(SimulationError::InventoryOverflow)?,
+            )?;
+        }
+        Ok(())
+    }
+    pub(crate) fn resource_units(&self, good: Good) -> Result<Quantity, SimulationError> {
+        self.units(good)
+            .checked_add(self.storage.owned_units(self.goods_owner(), good))
+            .ok_or(SimulationError::InventoryOverflow)
+    }
+}
+
+impl crate::Citizen {
+    pub(crate) fn consume_at(
+        &mut self,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        let carried = units.min(self.carried_available_units(good));
+        let stored = units - carried;
+        if stored > self.stored_available_units(place, good) {
+            return Err(SimulationError::MissingInputs);
+        }
+        if stored > 0 {
+            let key = StockKey {
+                place,
+                owner: self.goods_owner(),
+                good,
+            };
+            self.storage
+                .set_units(key, self.storage.units(place, key.owner, good) - stored)?;
+        }
+        self.set_inventory_units(good, self.units(good) - carried);
         Ok(())
     }
 }

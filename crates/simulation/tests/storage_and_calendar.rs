@@ -271,7 +271,13 @@ fn storage_transfers_preserve_active_production_inputs_and_completion() {
         )
         .unwrap();
     assert_eq!(citizen(&finished, ada).units(Good::Wheat), 0);
-    assert!(citizen(&finished, ada).units(Good::Flour) > 0);
+    assert_eq!(citizen(&finished, ada).units(Good::Flour), 0);
+    assert!(
+        finished
+            .storage()
+            .units(mill, GoodsOwner::Agent(ada), Good::Flour)
+            > 0
+    );
     assert_eq!(
         finished
             .storage()

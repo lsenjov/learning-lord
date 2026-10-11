@@ -219,6 +219,19 @@ fn clothing_chain_keeps_exact_integer_intermediates_until_garment_completion() {
         .unwrap()
         .advance(duration)
         .unwrap();
+    let collect = CitizenAction::CollectStored {
+        place: field,
+        list: learning_lord_simulation::marketplace::ShoppingList::single(
+            Good::Flax,
+            worker.stored_available_units(field, Good::Flax),
+        ),
+    };
+    let duration = worker.action_duration_ms(collect).unwrap();
+    worker = worker
+        .start_action(collect)
+        .unwrap()
+        .advance(duration)
+        .unwrap();
     for recipe in [Recipe::SpinThread, Recipe::WeaveCloth] {
         let duration = worker
             .action_duration_ms(CitizenAction::Produce(recipe))
@@ -229,7 +242,23 @@ fn clothing_chain_keeps_exact_integer_intermediates_until_garment_completion() {
             .advance(duration)
             .unwrap();
     }
-    assert_eq!(worker.units(Good::Cloth), 200);
+    let weavery = worker.production_place(Recipe::WeaveCloth).unwrap();
+    assert_eq!(
+        worker
+            .storage()
+            .units(weavery, worker.goods_owner(), Good::Cloth),
+        200
+    );
+    let collect = CitizenAction::CollectStored {
+        place: weavery,
+        list: learning_lord_simulation::marketplace::ShoppingList::single(Good::Cloth, 200),
+    };
+    let duration = worker.action_duration_ms(collect).unwrap();
+    worker = worker
+        .start_action(collect)
+        .unwrap()
+        .advance(duration)
+        .unwrap();
     for _ in 0..8 {
         let duration = worker
             .action_duration_ms(CitizenAction::Produce(Recipe::MakeClothingBlock))
@@ -241,23 +270,35 @@ fn clothing_chain_keeps_exact_integer_intermediates_until_garment_completion() {
             .unwrap();
     }
     assert_eq!(worker.units(Good::Cloth), 0);
-    assert_eq!(worker.units(Good::FlaxBlock), 8);
+    let tailory = worker.production_place(Recipe::AssembleGarment).unwrap();
+    assert_eq!(
+        worker
+            .storage()
+            .units(tailory, worker.goods_owner(), Good::FlaxBlock),
+        8
+    );
     let duration = worker
         .action_duration_ms(CitizenAction::Produce(Recipe::AssembleGarment))
         .unwrap();
     let started = worker
         .start_action(CitizenAction::Produce(Recipe::AssembleGarment))
         .unwrap();
+    let partial = started.advance(duration - 1).unwrap();
     assert_eq!(
-        started
-            .advance(duration - 1)
-            .unwrap()
-            .units(Good::FlaxBlock),
+        partial
+            .storage()
+            .units(tailory, partial.goods_owner(), Good::FlaxBlock),
         8
     );
     let finished = started.advance(duration).unwrap();
     assert_eq!(finished.units(Good::FlaxBlock), 0);
-    assert_eq!(finished.units(Good::FlaxGarment), 1);
+    assert_eq!(finished.units(Good::FlaxGarment), 0);
+    assert_eq!(
+        finished
+            .storage()
+            .units(tailory, finished.goods_owner(), Good::FlaxGarment),
+        1
+    );
     assert_eq!(finished.units(Good::Flax), 175);
     for good in [Good::Thread, Good::Cloth] {
         assert_eq!(finished.units(good), 0);

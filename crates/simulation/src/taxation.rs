@@ -208,7 +208,7 @@ impl Universe {
 
     pub fn tax_arrears(&self, rule: TaxRuleId, payer: AgentId) -> Coins {
         self.taxation
-            .arrears(rule, payer)
+            .arrears(rule, self.economic_id(payer).unwrap_or(payer))
             .expect("validated tax account total")
     }
 
@@ -465,7 +465,7 @@ impl Universe {
                 key.place.0,
                 key.good as usize,
                 match key.owner {
-                    GoodsOwner::Agent(id) => id.0,
+                    GoodsOwner::Agent(id) | GoodsOwner::Household(id) => id.0,
                     GoodsOwner::Town => uuid::Uuid::nil(),
                 },
             ),
@@ -568,24 +568,23 @@ impl Universe {
         total
             .checked_add(assessed)
             .ok_or(SimulationError::WealthOverflow)?;
-        let account = self.taxation.accounts.entry(key).or_default();
-        let owed = account
+        let coins = self.account_coins(key.payer)?;
+        let owed = self
+            .taxation
+            .accounts
+            .entry(key)
+            .or_default()
             .arrears
             .checked_add(assessed)
             .ok_or(SimulationError::WealthOverflow)?;
-        let AgentKind::Citizen(citizen) = &mut self
-            .agents
-            .get_mut(&key.payer)
-            .ok_or(SimulationError::AgentNotFound)?
-            .kind;
-        let paid = owed.min(citizen.coins.max(0));
+        let paid = owed.min(coins.max(0));
         self.town_treasury = self
             .town_treasury
             .checked_add(paid)
             .ok_or(SimulationError::WealthOverflow)?;
-        citizen.coins -= paid;
-        account.arrears = owed - paid;
-        let arrears = account.arrears;
+        self.set_account_coins(key.payer, coins - paid)?;
+        let arrears = owed - paid;
+        self.taxation.accounts.get_mut(&key).unwrap().arrears = arrears;
         if assessed > 0 || owed > 0 {
             self.taxation.record(TaxReceipt {
                 time_ms,
@@ -605,11 +604,33 @@ impl Universe {
 
     pub(crate) fn tax_production(
         &mut self,
+        worker: AgentId,
+        place: PlaceId,
+        good: Good,
+        gross: Quantity,
+        time_ms: u64,
+    ) -> Result<bool, SimulationError> {
+        let payer = self.economic_id(worker)?;
+        let stock = if self.map.place(place)?.kind.is_public() {
+            ReservationStock::Carried(worker, good)
+        } else {
+            ReservationStock::Stored(StockKey {
+                place,
+                owner: self.account_owner(payer)?,
+                good,
+            })
+        };
+        self.tax_production_from_stock(payer, place, good, gross, time_ms, stock)
+    }
+
+    fn tax_production_from_stock(
+        &mut self,
         payer: AgentId,
         place: PlaceId,
         good: Good,
         gross: Quantity,
         time_ms: u64,
+        stock: ReservationStock,
     ) -> Result<bool, SimulationError> {
         let rules: Vec<_> = self
             .taxation
@@ -657,7 +678,6 @@ impl Universe {
             let outstanding = owed - existing - reserved;
             remaining -= reserved;
             if reserved > 0 {
-                let stock = ReservationStock::Carried(payer, good);
                 let claims = self.taxation.reservations.entry(stock).or_default();
                 let held = claims
                     .get(&key)
@@ -672,18 +692,37 @@ impl Universe {
                         .checked_add(reserved)
                         .ok_or(SimulationError::InventoryOverflow)?,
                 );
-                let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&payer).unwrap().kind;
-                let total = citizen
-                    .tax_reserved_units(good)
-                    .checked_add(reserved)
-                    .ok_or(SimulationError::InventoryOverflow)?;
-                if total > citizen.units(good) {
-                    return Err(SimulationError::MissingInputs);
+                match stock {
+                    ReservationStock::Carried(carrier, _) => {
+                        let AgentKind::Citizen(citizen) = &mut self
+                            .agents
+                            .get_mut(&carrier)
+                            .ok_or(SimulationError::AgentNotFound)?
+                            .kind;
+                        let total = citizen
+                            .tax_reserved_units(good)
+                            .checked_add(reserved)
+                            .ok_or(SimulationError::InventoryOverflow)?;
+                        if total > citizen.units(good) {
+                            return Err(SimulationError::MissingInputs);
+                        }
+                        citizen.tax_reserved.insert(good, total);
+                        citizen.production_acquisitions[good as usize] = citizen
+                            .production_acquisitions[good as usize]
+                            .min(citizen.available_units(good));
+                    }
+                    ReservationStock::Stored(stock) => {
+                        let total = self
+                            .storage
+                            .reserved_units(stock.place, stock.owner, good)
+                            .checked_add(reserved)
+                            .ok_or(SimulationError::InventoryOverflow)?;
+                        if total > self.storage.units(stock.place, stock.owner, good) {
+                            return Err(SimulationError::MissingInputs);
+                        }
+                        self.storage.set_reserved(stock, total);
+                    }
                 }
-                citizen.tax_reserved.insert(good, total);
-                citizen.production_acquisitions[good as usize] = citizen.production_acquisitions
-                    [good as usize]
-                    .min(citizen.available_units(good));
                 changed = true;
             }
             if rate.is_some() || owed > 0 {
@@ -716,7 +755,7 @@ impl Universe {
                 .town_treasury
                 .checked_add(trade.tariff_coins)
                 .ok_or(SimulationError::WealthOverflow)?;
-            let Some(seller) = trade.seller.citizen() else {
+            let Some(seller) = trade.seller.account() else {
                 continue;
             };
             let revenue = groups
@@ -793,6 +832,7 @@ impl Universe {
                             TaxPayer::Agent(id) => *id,
                             TaxPayer::LocationOwner => owner.expect("private location owner"),
                         };
+                        let payer = self.economic_id(payer)?;
                         let coins = *coins;
                         let key = AccountKey {
                             place,
@@ -812,8 +852,9 @@ impl Universe {
                             if key.place != place {
                                 continue;
                             }
-                            let GoodsOwner::Agent(payer) = key.owner else {
-                                continue;
+                            let payer = match key.owner {
+                                GoodsOwner::Agent(id) | GoodsOwner::Household(id) => id,
+                                GoodsOwner::Town => continue,
                             };
                             let total = stocks.entry((payer.0, key.good as usize)).or_default();
                             *total = total
@@ -821,7 +862,7 @@ impl Universe {
                                 .ok_or(SimulationError::InventoryOverflow)?;
                         }
                         for order in self.market.orders().filter(|order| order.place == place) {
-                            let Some(seller) = order.seller.citizen() else {
+                            let Some(seller) = order.seller.account() else {
                                 continue;
                             };
                             let total = stocks.entry((seller.0, order.good as usize)).or_default();
@@ -889,6 +930,153 @@ mod tests {
     use super::*;
     use crate::{Citizen, locations::Map};
 
+    fn household_world() -> (Universe, AgentId, AgentId, AgentId, PlaceId) {
+        let (world, first) = Universe::default()
+            .with_citizen("Ada", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .unwrap();
+        let (world, second) = world
+            .with_citizen("Ben", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .unwrap();
+        let AgentKind::Citizen(worker) = &world.agents[&first].kind;
+        let (world, household) = world
+            .with_household("Family", worker.home(), &[first, second])
+            .unwrap();
+        let (world, place) = world.with_property(first, Location::Bakery).unwrap();
+        (world, first, second, household, place)
+    }
+
+    #[test]
+    fn household_production_reserves_shared_site_stock_until_settlement() {
+        let (world, first, second, household, place) = household_world();
+        let owner = GoodsOwner::Household(household);
+        let world = world
+            .with_stored_good(place, owner, Good::BreadRoll, 10)
+            .unwrap();
+        let (mut world, rule) = world
+            .with_tax_rule(
+                place,
+                "Half",
+                TaxKind::Socage {
+                    rates: [(Good::BreadRoll, TaxRate::new(5000).unwrap())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .unwrap();
+        world
+            .tax_production(first, place, Good::BreadRoll, 5, 0)
+            .unwrap();
+        world
+            .tax_production(second, place, Good::BreadRoll, 5, 0)
+            .unwrap();
+        assert_eq!(world.storage.units(place, owner, Good::BreadRoll), 10);
+        assert_eq!(
+            world.storage.reserved_units(place, owner, Good::BreadRoll),
+            5
+        );
+        assert_eq!(world.taxation.accounts.len(), 1);
+        assert_eq!(
+            world.taxation.accounts[&AccountKey {
+                place,
+                rule,
+                payer: household,
+                good: Some(Good::BreadRoll)
+            }]
+                .goods_owed()
+                .unwrap(),
+            5
+        );
+        let settled = world
+            .advance(crate::calendar::FIRST_WEEKLY_SETTLEMENT_MS)
+            .unwrap();
+        assert_eq!(settled.storage.units(place, owner, Good::BreadRoll), 5);
+        assert_eq!(
+            settled
+                .storage
+                .units(place, GoodsOwner::Town, Good::BreadRoll),
+            5
+        );
+        assert!(settled.taxation.reservations.is_empty());
+    }
+
+    #[test]
+    fn household_property_fees_and_sales_use_one_pooled_account() {
+        use crate::marketplace::{MarketParty, Trade};
+        let (world, first, _, household, place) = household_world();
+        let (world, _) = world
+            .with_tax_rule(
+                place,
+                "Fee",
+                TaxKind::FlatFee {
+                    payer: TaxPayer::Agent(first),
+                    coins: 20,
+                },
+            )
+            .unwrap();
+        let (mut world, _) = world
+            .with_tax_rule(
+                place,
+                "Income",
+                TaxKind::Income {
+                    rates: [(Good::BreadRoll, TaxRate::new(5000).unwrap())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .unwrap();
+        world.tax_week(0).unwrap();
+        assert_eq!(world.account_coins(household).unwrap(), 180);
+        world
+            .tax_sales(
+                &[Trade {
+                    place,
+                    time_ms: 0,
+                    buyer: MarketParty::Caravan,
+                    seller: MarketParty::Household(household),
+                    good: Good::BreadRoll,
+                    units: 1,
+                    coins: 100,
+                    quoted_price: 100.0,
+                    tariff_coins: 20,
+                    recipient_coins: 80,
+                }],
+                0,
+            )
+            .unwrap();
+        assert_eq!(world.account_coins(household).unwrap(), 140);
+        assert_eq!(world.town_treasury, 80);
+        assert!(
+            world
+                .taxation
+                .accounts
+                .keys()
+                .all(|key| key.payer == household)
+        );
+    }
+
+    #[test]
+    fn household_asset_tax_assesses_shared_stock_once() {
+        let (world, _, _, household, place) = household_world();
+        let world = world
+            .with_stored_good(place, GoodsOwner::Household(household), Good::BreadRoll, 10)
+            .unwrap();
+        let expected = world.prices().value(Good::BreadRoll, 10).unwrap().floor() as Coins;
+        let (mut world, _) = world
+            .with_tax_rule(
+                place,
+                "Assets",
+                TaxKind::Asset {
+                    rates: [(Good::BreadRoll, TaxRate::new(10000).unwrap())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .unwrap();
+        world.tax_week(0).unwrap();
+        assert_eq!(world.account_coins(household).unwrap(), 200 - expected);
+        assert_eq!(world.taxation.history.len(), 1);
+    }
+
     #[test]
     fn shared_fractional_claims_stay_with_the_origin_property() {
         let (world, payer) = Universe::with_map(Map::default())
@@ -914,10 +1102,24 @@ mod tests {
             )
             .unwrap();
         world
-            .tax_production(payer, first, Good::Wheat, 1, 0)
+            .tax_production_from_stock(
+                payer,
+                first,
+                Good::Wheat,
+                1,
+                0,
+                ReservationStock::Carried(payer, Good::Wheat),
+            )
             .unwrap();
         world
-            .tax_production(payer, second, Good::Wheat, 1, 0)
+            .tax_production_from_stock(
+                payer,
+                second,
+                Good::Wheat,
+                1,
+                0,
+                ReservationStock::Carried(payer, Good::Wheat),
+            )
             .unwrap();
         assert_eq!(world.storage.units(first, GoodsOwner::Town, Good::Wheat), 0);
         assert_eq!(
@@ -925,7 +1127,14 @@ mod tests {
             0
         );
         world
-            .tax_production(payer, first, Good::Wheat, 1, 0)
+            .tax_production_from_stock(
+                payer,
+                first,
+                Good::Wheat,
+                1,
+                0,
+                ReservationStock::Carried(payer, Good::Wheat),
+            )
             .unwrap();
         assert_eq!(
             world.taxation.reserved_accounts[&AccountKey {
@@ -970,7 +1179,16 @@ mod tests {
                 },
             )
             .unwrap();
-        world.tax_production(id, place, good, units, 0).unwrap();
+        world
+            .tax_production_from_stock(
+                id,
+                place,
+                good,
+                units,
+                0,
+                ReservationStock::Carried(id, good),
+            )
+            .unwrap();
         (world, id, place)
     }
 
@@ -1010,7 +1228,11 @@ mod tests {
             .unwrap();
         let AgentKind::Citizen(worker) = &done.agents[&id].kind;
         assert_eq!(worker.units(Good::Cloth), 0);
-        assert_eq!(worker.units(Good::FlaxBlock), 1);
+        assert_eq!(
+            done.storage
+                .units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+            1
+        );
 
         let (world, id, place) = reserved_worker(Good::FlaxGarment, 2);
         let busy = world
@@ -1064,7 +1286,14 @@ mod tests {
             .unwrap();
         let mut world = world;
         world
-            .tax_production(second, origin, Good::FlaxGarment, 2, 0)
+            .tax_production_from_stock(
+                second,
+                origin,
+                Good::FlaxGarment,
+                2,
+                0,
+                ReservationStock::Carried(second, Good::FlaxGarment),
+            )
             .unwrap();
         let destination = world.map.public_place(Location::Market);
         let world = world

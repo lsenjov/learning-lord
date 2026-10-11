@@ -312,14 +312,28 @@ pub struct OrderId(pub u64);
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MarketParty {
     Citizen(AgentId),
+    Household(AgentId),
     Caravan,
 }
 
+impl From<AgentId> for MarketParty {
+    fn from(id: AgentId) -> Self {
+        Self::Citizen(id)
+    }
+}
+
 impl MarketParty {
+    pub fn account(self) -> Option<AgentId> {
+        match self {
+            Self::Citizen(id) | Self::Household(id) => Some(id),
+            Self::Caravan => None,
+        }
+    }
+
     pub fn citizen(self) -> Option<AgentId> {
         match self {
             Self::Citizen(id) => Some(id),
-            Self::Caravan => None,
+            Self::Household(_) | Self::Caravan => None,
         }
     }
 }
@@ -592,12 +606,19 @@ impl Market {
         Ok(())
     }
 
-    pub(crate) fn refresh_affordability(&mut self, budgets: &[(AgentId, Coins)]) {
+    pub(crate) fn refresh_affordability<P: Copy + Into<MarketParty>>(
+        &mut self,
+        budgets: &[(P, Coins)],
+    ) {
         let mut affordable = HashMap::new();
         for &(buyer, budget) in budgets {
+            let buyer = buyer.into();
+            let Some(account) = buyer.account() else {
+                continue;
+            };
             let mut funds = budget.max(0);
             let mut items = Vec::new();
-            for (good, requested) in self.requested(buyer).items() {
+            for (good, requested) in self.requested(account).items() {
                 if let Ok(fill) = self.fill_plan(buyer, None, good, requested, Some(funds)) {
                     funds -= fill.coins;
                     let unavailable = requested.saturating_sub(self.available_units(buyer, good));
@@ -628,7 +649,7 @@ impl Market {
             if let Ok(list) = ShoppingList::new(items)
                 && list.items().next().is_some()
             {
-                affordable.insert(buyer, list);
+                affordable.insert(account, list);
             }
         }
         self.affordable_requests = affordable;
@@ -640,25 +661,31 @@ impl Market {
     pub fn trades(&self) -> &Vector<Trade> {
         &self.trades
     }
-    pub fn listed_units(&self, owner: AgentId, good: Good) -> Quantity {
+    pub fn listed_units(&self, owner: impl Into<MarketParty>, good: Good) -> Quantity {
+        let owner = owner.into();
         self.orders()
-            .filter(|o| o.seller == MarketParty::Citizen(owner) && o.good == good)
+            .filter(|o| o.seller == owner && o.good == good)
             .map(|o| o.units)
             .sum()
     }
-    pub fn available_units(&self, buyer: AgentId, good: Good) -> Quantity {
+    pub fn available_units(&self, buyer: impl Into<MarketParty>, good: Good) -> Quantity {
+        let buyer = buyer.into();
         self.orders()
-            .filter(|o| {
-                self.purchasable(o) && o.seller != MarketParty::Citizen(buyer) && o.good == good
-            })
+            .filter(|o| self.purchasable(o) && o.seller != buyer && o.good == good)
             .map(|o| o.units)
             .sum()
     }
-    pub fn available_units_at(&self, buyer: AgentId, place: PlaceId, good: Good) -> Quantity {
+    pub fn available_units_at(
+        &self,
+        buyer: impl Into<MarketParty>,
+        place: PlaceId,
+        good: Good,
+    ) -> Quantity {
+        let buyer = buyer.into();
         self.orders()
             .filter(|order| {
                 self.purchasable(order)
-                    && order.seller != MarketParty::Citizen(buyer)
+                    && order.seller != buyer
                     && order.place == place
                     && order.good == good
             })
@@ -668,11 +695,12 @@ impl Market {
 
     pub fn purchase_cost_at(
         &self,
-        buyer: AgentId,
+        buyer: impl Into<MarketParty>,
         place: PlaceId,
         good: Good,
         requested: Quantity,
     ) -> Option<Coins> {
+        let buyer = buyer.into();
         Some(
             self.fill_plan(buyer, Some(place), good, requested, None)
                 .ok()?
@@ -689,14 +717,15 @@ impl Market {
 
     pub(crate) fn lowest_quote_at(
         &self,
-        buyer: AgentId,
+        buyer: impl Into<MarketParty>,
         place: PlaceId,
         good: Good,
     ) -> Option<f64> {
+        let buyer = buyer.into();
         self.orders()
             .filter(|order| {
                 self.purchasable(order)
-                    && order.seller != MarketParty::Citizen(buyer)
+                    && order.seller != buyer
                     && order.place == place
                     && order.good == good
             })
@@ -706,12 +735,13 @@ impl Market {
 
     pub(crate) fn nearest_purchase_place(
         &self,
-        buyer: AgentId,
+        buyer: impl Into<MarketParty>,
         map: &crate::locations::Map,
         position: crate::locations::Position,
         list: ShoppingList,
         visited: &[PlaceId],
     ) -> Option<PlaceId> {
+        let buyer = buyer.into();
         map.places()
             .values()
             .filter(|place| place.kind != crate::locations::Location::Home)
@@ -731,11 +761,12 @@ impl Market {
 
     pub(crate) fn estimated_purchase_cost_from(
         &self,
-        buyer: AgentId,
+        buyer: impl Into<MarketParty>,
         map: &crate::locations::Map,
         mut position: crate::locations::Position,
         mut remaining: ShoppingList,
     ) -> Option<Coins> {
+        let buyer = buyer.into();
         let mut visited = Vec::new();
         let mut coins: Coins = 0;
         while remaining.items().next().is_some() {
@@ -762,17 +793,24 @@ impl Market {
 
     pub fn estimated_purchase_cost(
         &self,
-        buyer: AgentId,
+        buyer: impl Into<MarketParty>,
         good: Good,
         units: Quantity,
     ) -> Option<Coins> {
+        let buyer = buyer.into();
         let available = self.available_units(buyer, good).min(units);
         let actual = self.purchase_cost(buyer, good, available)?;
         let unavailable = units - available;
         actual.checked_add(charge(self.prices.value(good, unavailable)?).ok()?)
     }
 
-    pub fn purchase_cost(&self, buyer: AgentId, good: Good, requested: Quantity) -> Option<Coins> {
+    pub fn purchase_cost(
+        &self,
+        buyer: impl Into<MarketParty>,
+        good: Good,
+        requested: Quantity,
+    ) -> Option<Coins> {
+        let buyer = buyer.into();
         Some(
             self.fill_plan(buyer, None, good, requested, None)
                 .ok()?
@@ -782,7 +820,7 @@ impl Market {
 
     fn fill_plan(
         &self,
-        buyer: AgentId,
+        buyer: MarketParty,
         place: Option<PlaceId>,
         good: Good,
         requested: Quantity,
@@ -792,7 +830,7 @@ impl Market {
             .orders()
             .filter(|o| {
                 self.purchasable(o)
-                    && o.seller != MarketParty::Citizen(buyer)
+                    && o.seller != buyer
                     && o.good == good
                     && place.is_none_or(|id| o.place == id)
             })
@@ -863,11 +901,12 @@ impl Market {
     }
     pub(crate) fn list(
         &mut self,
-        seller: AgentId,
+        seller: impl Into<MarketParty>,
         place: PlaceId,
         good: Good,
         units: Quantity,
     ) -> Result<(), SimulationError> {
+        let seller = seller.into();
         if units == 0 {
             return Ok(());
         }
@@ -892,7 +931,7 @@ impl Market {
             id,
             SellOrder {
                 id,
-                seller: MarketParty::Citizen(seller),
+                seller,
                 place,
                 good,
                 units,
@@ -903,16 +942,15 @@ impl Market {
     }
     pub(crate) fn withdraw(
         &mut self,
-        owner: AgentId,
+        owner: impl Into<MarketParty>,
         place: PlaceId,
         good: Good,
         requested: Quantity,
     ) -> Result<Quantity, SimulationError> {
+        let owner = owner.into();
         let mut orders: Vec<_> = self
             .orders()
-            .filter(|o| {
-                o.seller == MarketParty::Citizen(owner) && o.good == good && o.place == place
-            })
+            .filter(|o| o.seller == owner && o.good == good && o.place == place)
             .cloned()
             .collect();
         orders.sort_by_key(|o| o.id.0);
@@ -936,19 +974,20 @@ impl Market {
     }
     pub(crate) fn purchase(
         &mut self,
-        buyer: AgentId,
+        buyer: impl Into<MarketParty>,
         place: PlaceId,
         item: (Good, Quantity),
         budget: Coins,
         time_ms: u64,
         record: bool,
     ) -> Result<Purchase, SimulationError> {
+        let buyer = buyer.into();
         let (good, requested) = item;
         let plan = self.fill_plan(buyer, Some(place), good, requested, Some(budget))?;
         let mut payments = std::collections::BTreeMap::new();
         for (id, units, coins) in plan.fills {
             let mut order = self.orders.get(&id).unwrap().clone();
-            if let Some(seller) = order.seller.citizen() {
+            if let Some(seller) = order.seller.account() {
                 let payment = payments.entry(seller.0).or_insert(0_i64);
                 *payment = payment
                     .checked_add(coins)
@@ -996,14 +1035,14 @@ impl Market {
                 *coins_counter = coins_counter
                     .checked_add(coins)
                     .ok_or(SimulationError::WealthOverflow)?;
-                if let Some(request) = self.requests.get_mut(&buyer) {
+                if let Some(request) = buyer.account().and_then(|id| self.requests.get_mut(&id)) {
                     request.units[good as usize] =
                         request.units[good as usize].saturating_sub(units);
                 }
                 self.trades.push_back(Trade {
                     place: order.place,
                     time_ms,
-                    buyer: MarketParty::Citizen(buyer),
+                    buyer,
                     seller: order.seller,
                     good,
                     units,
@@ -1063,7 +1102,7 @@ impl Market {
             {
                 let mut sellers = std::collections::BTreeMap::<uuid::Uuid, Quantity>::new();
                 for order in self.orders().filter(|order| order.good == good) {
-                    if let Some(seller) = order.seller.citizen() {
+                    if let Some(seller) = order.seller.account() {
                         *sellers.entry(seller.0).or_default() += order.units;
                     }
                 }
@@ -1093,8 +1132,7 @@ impl Market {
                     let mut orders: Vec<_> = self
                         .orders()
                         .filter(|order| {
-                            order.seller == MarketParty::Citizen(AgentId(seller))
-                                && order.good == good
+                            order.seller.account() == Some(AgentId(seller)) && order.good == good
                         })
                         .cloned()
                         .collect();
@@ -1284,7 +1322,7 @@ impl Market {
         }
         for id in self.orders.keys().copied().collect::<Vec<_>>() {
             let order = self.orders.get_mut(&id).unwrap();
-            if order.seller.citizen().is_some() {
+            if order.seller.account().is_some() {
                 order.quoted_price = self.prices.price(order.good).unwrap();
             }
         }
@@ -1393,6 +1431,72 @@ mod tests {
     use super::*;
 
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
+
+    #[test]
+    fn household_trades_exclude_own_stock_and_round_by_owner() {
+        let seller_id = AgentId(uuid::Uuid::from_u128(1));
+        let buyer_id = AgentId(uuid::Uuid::from_u128(2));
+        let seller = MarketParty::Household(seller_id);
+        let buyer = MarketParty::Household(buyer_id);
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::Berries, 5.0).unwrap();
+        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        market.list(buyer, PLACE, Good::Berries, 500).unwrap();
+        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        market
+            .set_request(buyer_id, ShoppingList::single(Good::Berries, 200))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 1)]);
+        assert_eq!(
+            market.affordable_request(buyer_id).units(Good::Berries),
+            200
+        );
+        assert_eq!(market.available_units_at(buyer, PLACE, Good::Berries), 200);
+        assert_eq!(
+            market.purchase_cost_at(buyer, PLACE, Good::Berries, 200),
+            Some(1)
+        );
+        let purchase = market
+            .purchase(buyer, PLACE, (Good::Berries, 200), 1, 0, true)
+            .unwrap();
+        assert_eq!((purchase.units, purchase.coins), (200, 1));
+        assert_eq!(purchase.payments, vec![(seller_id, 1)]);
+        assert_eq!(market.requested(buyer_id).units(Good::Berries), 0);
+        assert_eq!(market.listed_units(buyer, Good::Berries), 500);
+        assert!(
+            market
+                .trades()
+                .iter()
+                .all(|trade| trade.buyer == buyer && trade.seller == seller)
+        );
+        assert_eq!(
+            market.withdraw(buyer, PLACE, Good::Berries, 200).unwrap(),
+            200
+        );
+    }
+
+    #[test]
+    fn caravan_exports_pay_household_accounts_and_preserve_party() {
+        let id = AgentId(uuid::Uuid::from_u128(1));
+        let seller = MarketParty::Household(id);
+        let mut market = Market::default();
+        market.prices = market
+            .prices
+            .with_price(Good::BreadRoll, Good::BreadRoll.export_threshold() * 0.5)
+            .unwrap();
+        market.list(seller, PLACE, Good::BreadRoll, 4).unwrap();
+        let payments = market.caravans(PLACE, UPDATE_TIME_MS).unwrap();
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0].0, id);
+        assert!(payments[0].1 > 0);
+        assert_eq!(market.listed_units(seller, Good::BreadRoll), 2);
+        assert!(
+            market
+                .trades()
+                .iter()
+                .all(|trade| trade.buyer == MarketParty::Caravan && trade.seller == seller)
+        );
+    }
 
     #[test]
     fn daily_pruning_accounts_for_new_trades_before_removing_old_ones() {

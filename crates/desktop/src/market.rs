@@ -335,10 +335,9 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
                                 "Caravan".into()
                             }
                         }
-                        MarketParty::Citizen(id) => universe
-                            .agents()
-                            .get(&id)
-                            .map_or_else(|| "Unknown seller".into(), |agent| agent.name.clone()),
+                        MarketParty::Citizen(id) | MarketParty::Household(id) => {
+                            crate::locations::name(universe, id)
+                        }
                     },
                     location: universe
                         .map()

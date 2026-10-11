@@ -153,6 +153,7 @@ impl CitizenHistory {
     pub(crate) fn advance(
         &mut self,
         before: &Citizen,
+        action_before: &Citizen,
         after: &Citizen,
         elapsed: u64,
         end: u64,
@@ -240,14 +241,20 @@ impl CitizenHistory {
                             .map(|(_, u)| *u)
                             .sum::<u64>();
                         self.current.produced[good as usize] = self.current.produced[good as usize]
-                            .checked_add(after.units(good) - (before.units(good) - inputs))
+                            .checked_add(
+                                after.resource_units(good)?
+                                    - (action_before.resource_units(good)? - inputs),
+                            )
                             .ok_or(SimulationError::InventoryOverflow)?;
                     }
                 }
                 Some(CitizenAction::CollectBeer { .. }) => {
                     self.current.produced[Good::Beer as usize] = self.current.produced
                         [Good::Beer as usize]
-                        .checked_add(1000)
+                        .checked_add(
+                            after.resource_units(Good::Beer)?
+                                - action_before.resource_units(Good::Beer)?,
+                        )
                         .ok_or(SimulationError::InventoryOverflow)?;
                 }
                 Some(CitizenAction::Harvest { field, plot }) => {
@@ -256,13 +263,18 @@ impl CitizenHistory {
                         .ok_or(SimulationError::MissingInputs)?;
                     let good = crop.kind.good();
                     self.current.produced[good as usize] = self.current.produced[good as usize]
-                        .checked_add(after.units(good) - before.units(good))
+                        .checked_add(
+                            after.resource_units(good)? - action_before.resource_units(good)?,
+                        )
                         .ok_or(SimulationError::InventoryOverflow)?;
                 }
                 Some(CitizenAction::EquipClothing) => {
                     self.current.consumed[Good::FlaxGarment as usize] = self.current.consumed
                         [Good::FlaxGarment as usize]
-                        .checked_add(1)
+                        .checked_add(
+                            action_before.resource_units(Good::FlaxGarment)?
+                                - after.resource_units(Good::FlaxGarment)?,
+                        )
                         .ok_or(SimulationError::InventoryOverflow)?;
                 }
                 _ => {}
@@ -577,6 +589,29 @@ mod tests {
             .average_wellbeing()
             .unwrap();
         assert!((actual - split).abs() < 1e-9, "{actual} != {split}");
+    }
+
+    #[test]
+    fn replacing_an_unworn_garment_records_the_consumed_item() {
+        let mut citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_good(Good::FlaxGarment, 1)
+            .unwrap();
+        citizen.garment_condition = Some(1.0);
+        let (world, worker) = Universe::with_map(crate::locations::Map::default())
+            .with_citizen("Tailor", citizen)
+            .unwrap();
+        let started = world
+            .start_action(worker, CitizenAction::EquipClothing)
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &started.agents()[&worker].kind;
+        let finished = started
+            .advance(citizen.active_action().unwrap().remaining_ms())
+            .unwrap();
+        assert_eq!(
+            finished.citizen_history(worker).unwrap().current.consumed[Good::FlaxGarment as usize],
+            1
+        );
     }
 
     #[test]

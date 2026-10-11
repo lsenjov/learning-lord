@@ -122,7 +122,12 @@ fn harvest_reserves_socage_on_actual_yield_and_records_crop_labor_and_output() {
         let planted_at = world.map().place(field).unwrap().plots[0]
             .unwrap()
             .planted_at_ms;
-        assert_eq!(citizen(&world, id).tax_reserved_units(Good::Wheat), 0);
+        assert_eq!(
+            world
+                .storage()
+                .reserved_units(field, citizen(&world, id).goods_owner(), Good::Wheat),
+            0
+        );
         let world = world.advance(24 * HOUR_MS).unwrap();
         let mut world = perform(
             world,
@@ -158,12 +163,25 @@ fn harvest_reserves_socage_on_actual_yield_and_records_crop_labor_and_output() {
             .unwrap();
         let world = perform(world, id, action);
         let expected = if both_tends { 600 } else { 375 };
-        assert_eq!(citizen(&world, id).units(Good::Wheat), expected);
+        assert_eq!(citizen(&world, id).units(Good::Wheat), 0);
         assert_eq!(
-            citizen(&world, id).tax_reserved_units(Good::Wheat),
+            world
+                .storage()
+                .units(field, citizen(&world, id).goods_owner(), Good::Wheat),
+            expected
+        );
+        assert_eq!(
+            world
+                .storage()
+                .reserved_units(field, citizen(&world, id).goods_owner(), Good::Wheat),
             expected / 4
         );
-        assert_eq!(predicted.units(Good::Wheat), expected);
+        assert_eq!(
+            predicted
+                .storage()
+                .units(field, predicted.goods_owner(), Good::Wheat),
+            expected
+        );
         assert_eq!(predicted.crop(field, 0).unwrap(), None);
         assert_eq!(world.map().place(field).unwrap().plots[0], None);
         let history = world.citizen_history(id).unwrap();

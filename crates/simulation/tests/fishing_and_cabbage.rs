@@ -96,7 +96,13 @@ fn cabbage_is_harvested_as_whole_heads_and_obeys_care_windows() {
             );
         } else {
             farmer = perform(farmer, CitizenAction::Harvest { field, plot: 0 });
-            assert_eq!(farmer.units(Good::Cabbage), if care == 1 { 5 } else { 8 });
+            assert_eq!(farmer.units(Good::Cabbage), 0);
+            assert_eq!(
+                farmer
+                    .storage()
+                    .units(field, farmer.goods_owner(), Good::Cabbage),
+                if care == 1 { 5 } else { 8 }
+            );
             assert_eq!(farmer.crop(field, 0).unwrap(), None);
         }
         assert!(

@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -133,6 +133,8 @@ impl Universe {
         self.map.validate_save()?;
         self.market.validate_save()?;
         self.storage.validate_save()?;
+        self.validate_households()?;
+        self.validate_work_reservations()?;
         if self.town_treasury < 0 {
             return Err(SaveError::InvalidState("negative town treasury"));
         }
@@ -151,21 +153,25 @@ impl Universe {
                         .required_place(citizen)
                         .ok_or(SaveError::InvalidState("missing preparation site"))?;
                     if !self.map.place(site).is_ok_and(|place| {
-                        place.owner == Some(*id)
+                        place
+                            .owner
+                            .is_some_and(|owner| citizen.may_use_owner(owner))
                             && place.kind == Location::Brewery
                             && place
                                 .batches
                                 .iter()
                                 .filter(|batch| **batch == Some(crate::brewing::Batch::Preparing))
                                 .count()
-                                == 1
+                                > 0
                     }) {
                         return Err(SaveError::InvalidState("invalid active preparation"));
                     }
                 }
                 if let CitizenAction::CollectBeer { brewery, slot } = action
                     && !self.map.place(brewery).is_ok_and(|place| {
-                        place.owner == Some(*id)
+                        place
+                            .owner
+                            .is_some_and(|owner| citizen.may_use_owner(owner))
                             && place.kind == Location::Brewery
                             && place
                                 .batches
@@ -216,36 +222,209 @@ impl Universe {
             let owner = place
                 .owner
                 .ok_or(SaveError::InvalidState("unowned brewery"))?;
-            let Some(agent) = self.agents.get(&owner) else {
+            if !self.agents.contains_key(&owner) {
                 return Err(SaveError::InvalidState("missing brewery owner"));
-            };
-            let AgentKind::Citizen(citizen) = &agent.kind;
+            }
             let preparing = place
                 .batches
                 .iter()
                 .filter(|batch| **batch == Some(crate::brewing::Batch::Preparing))
                 .count();
-            let active_prep = citizen.active_action().is_some_and(|active| {
-                active.action().production_recipe() == Some(crate::production::Recipe::BrewBeer)
-                    && active.action().required_place(citizen) == Some(place.id)
-            });
-            if preparing != usize::from(active_prep) {
+            let active_prep = self
+                .agents
+                .values()
+                .filter(|agent| {
+                    let AgentKind::Citizen(citizen) = &agent.kind;
+                    citizen.active_action().is_some_and(|active| {
+                        active.action().production_recipe()
+                            == Some(crate::production::Recipe::BrewBeer)
+                            && active.action().required_place(citizen) == Some(place.id)
+                    })
+                })
+                .count();
+            if preparing != active_prep {
                 return Err(SaveError::InvalidState("orphan brewery preparation"));
-            }
-            if let Some(active) = citizen.active_action()
-                && let CitizenAction::CollectBeer { brewery, slot } = active.action()
-                && brewery == place.id
-                && !place
-                    .batches
-                    .get(slot)
-                    .copied()
-                    .flatten()
-                    .is_some_and(|batch| batch.ready(self.current_time_ms))
-            {
-                return Err(SaveError::InvalidState("invalid active beer collection"));
             }
         }
         self.validate_tax_reservations()?;
+        Ok(())
+    }
+
+    fn valid_goods_owner(&self, owner: crate::storage::GoodsOwner) -> bool {
+        match owner {
+            crate::storage::GoodsOwner::Town => true,
+            crate::storage::GoodsOwner::Agent(id) => self.agents.contains_key(&id),
+            crate::storage::GoodsOwner::Household(id) => self.households.contains_key(&id),
+        }
+    }
+
+    fn validate_households(&self) -> Result<(), SaveError> {
+        use crate::marketplace::MarketParty;
+        for (id, household) in &self.households {
+            if *id != household.id
+                || self.agents.contains_key(id)
+                || household.coins < 0
+                || household.members.is_empty()
+                || !self.map.place(household.home).is_ok_and(|place| {
+                    place.kind == Location::Home
+                        && place
+                            .owner
+                            .is_some_and(|owner| household.members.contains(&owner))
+                })
+            {
+                return Err(SaveError::InvalidState(
+                    "invalid household identity or home",
+                ));
+            }
+            for (index, member) in household.members.iter().enumerate() {
+                if household.members[..index].contains(member) {
+                    return Err(SaveError::InvalidState("duplicate household member"));
+                }
+                let Some(agent) = self.agents.get(member) else {
+                    return Err(SaveError::InvalidState("missing household member"));
+                };
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                if citizen.household_id() != Some(*id)
+                    || citizen.home != household.home
+                    || citizen.coins != household.coins
+                    || citizen.maintenance != household.maintenance
+                {
+                    return Err(SaveError::InvalidState("inconsistent household member"));
+                }
+            }
+            self.validate_maintenance(*id, &household.maintenance)?;
+        }
+        for (id, agent) in &self.agents {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            if let Some(context) = &citizen.household {
+                if !context.allegiance.is_finite()
+                    || !context.other_consumption_value.is_finite()
+                    || context.other_consumption_value < 0.0
+                    || !self.households.get(&context.id).is_some_and(|household| {
+                        household.members == context.members && household.members.contains(id)
+                    })
+                {
+                    return Err(SaveError::InvalidState("invalid citizen household context"));
+                }
+            } else {
+                self.validate_maintenance(*id, &citizen.maintenance)?;
+            }
+            if citizen
+                .designated_workplace
+                .is_some_and(|place| citizen.accessible_place(place).is_err())
+            {
+                return Err(SaveError::InvalidState("inaccessible designated workplace"));
+            }
+        }
+        for (key, _) in self.storage.stock() {
+            if self.map.place(key.place).is_err() || !self.valid_goods_owner(key.owner) {
+                return Err(SaveError::InvalidState(
+                    "storage references missing owner or place",
+                ));
+            }
+        }
+        for order in self.market.orders() {
+            let valid_owner = match order.seller {
+                MarketParty::Caravan => true,
+                MarketParty::Citizen(id) => self.agents.get(&id).is_some_and(|agent| {
+                    let AgentKind::Citizen(citizen) = &agent.kind;
+                    citizen.household_id().is_none()
+                }),
+                MarketParty::Household(id) => self.households.contains_key(&id),
+            };
+            if !valid_owner || self.map.place(order.place).is_err() {
+                return Err(SaveError::InvalidState(
+                    "market references missing owner or place",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_maintenance(
+        &self,
+        owner: crate::AgentId,
+        state: &crate::maintenance::MaintenanceState,
+    ) -> Result<(), SaveError> {
+        use crate::planning::goals::Effect;
+        for (goal, task) in [
+            (Effect::ListExcess, &state.listing),
+            (Effect::ReplenishReserves, &state.replenishment),
+        ] {
+            if task
+                .completed_at_ms
+                .is_some_and(|time| time > self.current_time_ms)
+            {
+                return Err(SaveError::InvalidState(
+                    "maintenance completion is in the future",
+                ));
+            }
+            if let Some(worker) = task.claimant {
+                let valid = self.agents.get(&worker).is_some_and(|agent| {
+                    let AgentKind::Citizen(citizen) = &agent.kind;
+                    citizen.economic_id() == owner
+                        && citizen
+                            .active_plan
+                            .as_ref()
+                            .is_some_and(|plan| plan.maintenance_goal() == Some(goal))
+                });
+                if !valid || task.remaining_ms(self.current_time_ms) > 0 {
+                    return Err(SaveError::InvalidState(
+                        "invalid committed maintenance claim",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_work_reservations(&self) -> Result<(), SaveError> {
+        let mut expected = imbl::HashMap::new();
+        for agent in self.agents.values() {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            if let Some(active) = citizen.active_action {
+                for (good, units) in active.stored_inputs.items() {
+                    let Some(recipe) = active.action.production_recipe() else {
+                        return Err(SaveError::InvalidState("stored inputs without production"));
+                    };
+                    if recipe == crate::production::Recipe::BrewBeer
+                        || recipe
+                            .inputs()
+                            .iter()
+                            .find(|(input, _)| *input == good)
+                            .is_none_or(|(_, required)| units > *required)
+                    {
+                        return Err(SaveError::InvalidState(
+                            "invalid reserved production inputs",
+                        ));
+                    }
+                    let place = citizen
+                        .current_storage_place()
+                        .ok_or(SaveError::InvalidState(
+                            "production reservation outside storage",
+                        ))?;
+                    if active.action.required_place(citizen) != Some(place)
+                        || citizen.accessible_place(place).is_err()
+                    {
+                        return Err(SaveError::InvalidState(
+                            "production reservation at wrong workplace",
+                        ));
+                    }
+                    let key = crate::storage::StockKey {
+                        place,
+                        owner: citizen.goods_owner(),
+                        good,
+                    };
+                    let total = expected.entry(key).or_insert(0_u64);
+                    *total = total
+                        .checked_add(units)
+                        .ok_or(SaveError::InvalidState("production reservation overflow"))?;
+                }
+            }
+        }
+        if &expected != self.storage.work_reservations() {
+            return Err(SaveError::InvalidState("production reservation mismatch"));
+        }
         Ok(())
     }
 
@@ -253,7 +432,7 @@ impl Universe {
         use crate::taxation::ReservationStock;
         let mut arrears = imbl::HashMap::new();
         for (key, account) in &self.taxation.accounts {
-            if !self.agents.contains_key(&key.payer)
+            if self.account_owner(key.payer).is_err()
                 || self.map.place(key.place).is_err()
                 || !self.taxation.rules.contains_key(&key.rule)
             {
@@ -279,9 +458,7 @@ impl Universe {
                     (*good, citizen.tax_reserved_units(*good))
                 }
                 ReservationStock::Stored(key) => {
-                    if self.map.place(key.place).is_err()
-                        || matches!(key.owner, crate::storage::GoodsOwner::Agent(id) if !self.agents.contains_key(&id))
-                    {
+                    if self.map.place(key.place).is_err() || !self.valid_goods_owner(key.owner) {
                         return Err(SaveError::InvalidState(
                             "tax reservation has missing storage",
                         ));
@@ -457,10 +634,166 @@ mod tests {
 
     fn round_trip(world: &Universe) -> Universe {
         let encoded = world.to_save_string().unwrap();
-        assert!(encoded.contains("version: 2"));
+        assert!(encoded.contains("version: 3"));
         let loaded = Universe::from_save_str(&encoded).unwrap();
         assert_eq!(&loaded, world);
         loaded
+    }
+
+    fn household_world() -> (
+        Universe,
+        crate::AgentId,
+        crate::AgentId,
+        crate::AgentId,
+        crate::locations::PlaceId,
+    ) {
+        let (world, first) = Universe::with_map(Map::default())
+            .with_citizen(
+                "First",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(crate::StartingRole::Miller)
+                    .with_coins(100)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (world, second) = world
+            .with_citizen(
+                "Second",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(crate::StartingRole::Miller)
+                    .with_coins(200)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (world, mill) = world.with_property(first, Location::Mill).unwrap();
+        let world = world.with_designated_workplace(first, mill).unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
+        let (world, household) = world
+            .with_household("Family", citizen.home(), &[first, second])
+            .unwrap();
+        let world = world.with_designated_workplace(second, mill).unwrap();
+        (world, first, second, household, mill)
+    }
+
+    #[test]
+    fn household_round_trip_preserves_active_stored_production_and_transport() {
+        let (world, first, second, household, mill) = household_world();
+        let world = world
+            .with_stored_good(mill, GoodsOwner::Household(household), Good::Wheat, 900)
+            .unwrap();
+        let world = world
+            .start_action(first, CitizenAction::Travel(mill))
+            .unwrap()
+            .start_action(second, CitizenAction::Travel(mill))
+            .unwrap();
+        let travel_ms = [first, second]
+            .into_iter()
+            .filter_map(|id| {
+                let AgentKind::Citizen(citizen) = &world.agents[&id].kind;
+                citizen.active_action().map(|action| action.remaining_ms())
+            })
+            .max()
+            .unwrap_or(0);
+        let world = world
+            .advance(travel_ms)
+            .unwrap()
+            .start_action(
+                first,
+                CitizenAction::ProduceAt {
+                    place: mill,
+                    recipe: Recipe::MillFlour,
+                },
+            )
+            .unwrap();
+        let loaded = round_trip(&world);
+        let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
+        let duration = citizen.active_action().unwrap().remaining_ms();
+        assert_eq!(
+            loaded.advance(duration).unwrap(),
+            world.advance(duration).unwrap()
+        );
+        let world = world
+            .start_action(
+                second,
+                CitizenAction::CollectStored {
+                    place: mill,
+                    list: ShoppingList::single(Good::Wheat, 100),
+                },
+            )
+            .unwrap();
+        let loaded = round_trip(&world);
+        assert_eq!(
+            loaded.advance(crate::TRADE_DURATION_MS).unwrap(),
+            world.advance(crate::TRADE_DURATION_MS).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_inconsistent_households_work_reservations_and_maintenance() {
+        let (world, first, _, household, mill) = household_world();
+        for case in 0..6 {
+            let mut invalid = world.clone();
+            match case {
+                0 => invalid
+                    .households
+                    .get_mut(&household)
+                    .unwrap()
+                    .members
+                    .push(first),
+                1 => invalid.households.get_mut(&household).unwrap().home = mill,
+                2 => {
+                    let AgentKind::Citizen(citizen) =
+                        &mut invalid.agents.get_mut(&first).unwrap().kind;
+                    citizen.household.as_mut().unwrap().id = crate::AgentId(uuid::Uuid::new_v4());
+                }
+                3 => {
+                    invalid
+                        .storage
+                        .set_units(
+                            crate::storage::StockKey {
+                                place: mill,
+                                owner: GoodsOwner::Household(crate::AgentId(uuid::Uuid::new_v4())),
+                                good: Good::Wheat,
+                            },
+                            10,
+                        )
+                        .unwrap();
+                }
+                4 => {
+                    let key = crate::storage::StockKey {
+                        place: mill,
+                        owner: GoodsOwner::Household(household),
+                        good: Good::Wheat,
+                    };
+                    invalid.storage.set_units(key, 10).unwrap();
+                    invalid.storage.reserve_work(key, 1).unwrap();
+                }
+                _ => {
+                    invalid
+                        .households
+                        .get_mut(&household)
+                        .unwrap()
+                        .maintenance
+                        .listing
+                        .claimant = Some(first);
+                    invalid.refresh_market();
+                }
+            }
+            assert!(
+                matches!(
+                    Universe::from_save_str(&invalid.to_save_string().unwrap()),
+                    Err(SaveError::InvalidState(_))
+                ),
+                "case {case}"
+            );
+        }
+        for version in [1, 2] {
+            assert!(
+                matches!(Universe::from_save_str(&format!("(version: {version}, universe: ())")), Err(SaveError::UnsupportedVersion(value)) if value == version)
+            );
+        }
     }
 
     #[test]
@@ -893,6 +1226,7 @@ mod tests {
             drink_units: 0,
             meal_nutrition: 0.0,
             meal_units: [0; Good::COUNT],
+            stored_inputs: ShoppingList::default(),
             travel_origin: Position::default(),
             travel_destination: None,
         });

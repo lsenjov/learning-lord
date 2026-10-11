@@ -66,8 +66,20 @@ fn explicit_production_uses_the_selected_colocated_workshop_and_its_tax_rule() {
         .unwrap();
     let worker = citizen(&world, id);
     assert_eq!(worker.units(Good::Wheat), 300);
-    assert_eq!(worker.units(Good::Flour), 240);
-    assert_eq!(worker.tax_reserved_units(Good::Flour), 120);
+    assert_eq!(worker.units(Good::Flour), 0);
+    assert_eq!(
+        world
+            .storage()
+            .units(chosen, worker.goods_owner(), Good::Flour),
+        240
+    );
+    assert_eq!(worker.tax_reserved_units(Good::Flour), 0);
+    assert_eq!(
+        world
+            .storage()
+            .reserved_units(chosen, worker.goods_owner(), Good::Flour),
+        120
+    );
     assert_eq!(worker.skill_practice_ms(Skill::Milling), Some(60 * 60_000));
     let history = &world.citizen_history(id).unwrap().current;
     assert_eq!(history.activity.production_ms, 60 * 60_000);

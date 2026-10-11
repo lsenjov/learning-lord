@@ -128,7 +128,7 @@ impl Citizen {
     }
     pub fn crop(&self, field: PlaceId, plot: usize) -> Result<Option<Crop>, SimulationError> {
         let place = self.map.place(field)?;
-        if place.owner != Some(self.id) {
+        if !place.owner.is_some_and(|owner| self.may_use_owner(owner)) {
             return Err(SimulationError::PrivateProperty);
         }
         place
@@ -148,6 +148,9 @@ impl Citizen {
             CitizenAction::Clear { field, plot } => (field, plot, HOUR_MS / 4),
             _ => return Err(SimulationError::MissingProperty),
         };
+        if self.claimed_crop_plots.contains(&(field, plot)) {
+            return Err(SimulationError::MissingInputs);
+        }
         let crop = self.crop(field, plot)?;
         let practice = self
             .skill_practice_ms(Skill::Farming)
@@ -200,11 +203,7 @@ impl Citizen {
             CitizenAction::Harvest { .. } => {
                 let crop = crop.ok_or(SimulationError::MissingInputs)?;
                 let good = crop.kind.good();
-                let units = self
-                    .units(good)
-                    .checked_add(crop.expected_yield(finish))
-                    .ok_or(SimulationError::InventoryOverflow)?;
-                self.inventory.insert(good, units);
+                self.receive_production_output(field, good, crop.expected_yield(finish))?;
                 None
             }
             CitizenAction::Clear { .. } => None,
@@ -248,7 +247,7 @@ impl Citizen {
             return Vec::new();
         }
         let mut fields: Vec<_> = self
-            .owned_properties()
+            .accessible_properties()
             .filter(|place| !place.plots.is_empty() && field.is_none_or(|field| field == place.id))
             .collect();
         fields.sort_by_key(|place| place.id.0);
@@ -681,7 +680,12 @@ mod tests {
             .advance(planted + GROWTH_MS - citizen.current_time_ms())
             .unwrap();
         citizen = perform(citizen, CitizenAction::Harvest { field, plot: 0 });
-        assert_eq!(citizen.units(Good::Wheat), 600);
+        assert_eq!(
+            citizen
+                .storage
+                .units(field, citizen.goods_owner(), Good::Wheat),
+            600
+        );
         assert_eq!(citizen.crop(field, 0).unwrap(), None);
         assert!(
             citizen
