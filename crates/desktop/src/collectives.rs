@@ -1,5 +1,6 @@
 use crate::{
-    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, citizens, household_history, locations,
+    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, citizens, guild_history, household_history,
+    locations,
     navigation::{self, Target},
     text,
 };
@@ -23,6 +24,9 @@ pub(crate) struct State {
     revision: Option<u64>,
     dirty: bool,
     display_key: String,
+    guild_history_view: household_history::View,
+    guild_history_day: Option<u64>,
+    guild_history_record: Option<learning_lord_simulation::guild_history::DailyGuildHistory>,
     history_view: household_history::View,
     history_day: Option<u64>,
     history_record: Option<learning_lord_simulation::household_history::DailyHouseholdHistory>,
@@ -38,6 +42,7 @@ impl State {
         if self.tab != Tab::Guilds || self.selected_guild != Some(id) {
             self.tab = Tab::Guilds;
             self.selected_guild = Some(id);
+            self.guild_history_day = None;
             self.dirty = true;
         }
     }
@@ -104,6 +109,7 @@ pub(crate) fn handle(
     mut state: ResMut<State>,
     choices: Query<(&Interaction, &Choose), Changed<Interaction>>,
     history_choices: Query<(&Interaction, &household_history::Choice), Changed<Interaction>>,
+    guild_history_choices: Query<(&Interaction, &guild_history::Choice), Changed<Interaction>>,
     mut scrolls: Query<(&ScrollPanel, &mut ScrollPosition)>,
 ) {
     for (interaction, choice) in &history_choices {
@@ -118,6 +124,21 @@ pub(crate) fn handle(
         match choice {
             household_history::Choice::View(view) => state.history_view = *view,
             household_history::Choice::Day(day) => state.history_day = *day,
+        }
+        state.dirty = true;
+    }
+    for (interaction, choice) in &guild_history_choices {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        for (panel, mut position) in &mut scrolls {
+            if panel.0 {
+                position.0 = Vec2::ZERO;
+            }
+        }
+        match choice {
+            guild_history::Choice::View(view) => state.guild_history_view = *view,
+            guild_history::Choice::Day(day) => state.guild_history_day = *day,
         }
         state.dirty = true;
     }
@@ -359,9 +380,10 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
 fn guild_content(
     parent: &mut ChildSpawnerCommands,
     universe: &Universe,
-    selected: Option<AgentId>,
+    state: &State,
     offsets: [Vec2; 2],
 ) {
+    let selected = state.selected_guild;
     parent
         .spawn((
             Node {
@@ -418,7 +440,20 @@ fn guild_content(
                 label(panel, "Select a guild");
                 return;
             };
+            guild_history::controls(
+                panel,
+                universe,
+                guild.id,
+                state.guild_history_view,
+                state.guild_history_day,
+            );
             panel.spawn(text(&guild.name, 18.0, TEXT));
+            if state.guild_history_view == household_history::View::History {
+                if let Some(day) = &state.guild_history_record {
+                    guild_history::render(panel, universe, day, state.guild_history_day.is_none());
+                }
+                return;
+            }
             label(
                 panel,
                 format!(
@@ -521,7 +556,37 @@ pub(crate) fn refresh(
     {
         state.selected_guild = universe.guilds().keys().copied().min_by_key(|id| id.0);
     }
-    let display_key = if state.tab == Tab::Guilds {
+    let display_key = if state.tab == Tab::Guilds
+        && state.guild_history_view == household_history::View::History
+    {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            state.selected_guild,
+            universe
+                .guilds()
+                .values()
+                .map(|g| (g.id, &g.name))
+                .collect::<Vec<_>>(),
+            universe
+                .agents()
+                .iter()
+                .map(|(id, a)| (id, &a.name))
+                .collect::<Vec<_>>(),
+            universe
+                .map()
+                .places()
+                .values()
+                .map(|p| (p.id, &p.name))
+                .collect::<Vec<_>>(),
+            state
+                .selected_guild
+                .and_then(|id| universe.guild_history(id))
+                .map(|h| (
+                    h.completed.front().map(|d| d.start_ms),
+                    h.completed.back().map(|d| d.start_ms)
+                ))
+        )
+    } else if state.tab == Tab::Guilds {
         format!(
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             universe.workshop_fee_accounts(),
@@ -656,9 +721,29 @@ pub(crate) fn refresh(
     {
         state.history_day = None;
     }
+    let guild_record = state
+        .selected_guild
+        .filter(|_| {
+            state.tab == Tab::Guilds && state.guild_history_view == household_history::View::History
+        })
+        .and_then(|id| guild_history::selected_record(universe, id, state.guild_history_day));
+    let guild_history_changed = state.guild_history_record.as_ref() != guild_record;
+    if guild_history_changed {
+        state.guild_history_record = guild_record.cloned();
+    }
+    if let Some(id) = state.selected_guild
+        && state.guild_history_day.is_some_and(|start| {
+            universe
+                .guild_history(id)
+                .is_none_or(|h| !h.completed.iter().any(|d| d.start_ms == start))
+        })
+    {
+        state.guild_history_day = None;
+    }
     let display_key = display_key + &selected_key;
     state.revision = Some(snapshot.0.revision);
-    let changed = state.dirty || history_changed || state.display_key != display_key;
+    let changed =
+        state.dirty || history_changed || guild_history_changed || state.display_key != display_key;
     let mut offsets = [Vec2::ZERO; 2];
     for (panel, position) in &scrolls {
         offsets[usize::from(panel.0)] = position.0;
@@ -682,7 +767,7 @@ pub(crate) fn refresh(
             .despawn_children()
             .with_children(|parent| {
                 if state.tab == Tab::Guilds {
-                    guild_content(parent, universe, state.selected_guild, offsets);
+                    guild_content(parent, universe, &state, offsets);
                     return;
                 }
                 if state.tab != Tab::Households {
@@ -849,6 +934,87 @@ mod tests {
             .generation += 1;
         app.update();
         assert_eq!(app.world().resource::<State>().tab, Tab::Households);
+    }
+
+    #[test]
+    fn guild_history_navigation_preserves_idle_entities_and_resets_on_load() {
+        let worker = crate::simulation::SimulationWorker::spawn(
+            crate::simulation::new_universe().unwrap(),
+            60.try_into().unwrap(),
+        );
+        let snapshot = worker.snapshot();
+        let id = *snapshot.universe.guilds().keys().next().unwrap();
+        let mut state = State::default();
+        state.select_guild(id);
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(snapshot))
+            .insert_resource(state)
+            .add_systems(Update, (handle, refresh).chain());
+        app.world_mut().spawn((Content, Node::default()));
+        app.update();
+        let choice = app
+            .world_mut()
+            .query::<(Entity, &guild_history::Choice)>()
+            .iter(app.world())
+            .find(|(_, choice)| {
+                matches!(
+                    choice,
+                    guild_history::Choice::View(household_history::View::History)
+                )
+            })
+            .unwrap()
+            .0;
+        app.world_mut()
+            .entity_mut(choice)
+            .insert(Interaction::Pressed);
+        app.update();
+        assert_eq!(
+            app.world().resource::<State>().guild_history_view,
+            household_history::View::History
+        );
+        let labels = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|t| t.0.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "CURRENT DAY · partial totals",
+            "Fees accrued 0.000",
+            "Payments received 0",
+            "Expenses paid 0",
+            "No completed days yet.",
+        ] {
+            assert!(labels.contains(expected), "missing {expected}: {labels}");
+        }
+        let old = app
+            .world_mut()
+            .query::<Entity>()
+            .iter(app.world())
+            .collect::<Vec<_>>();
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.revision += 1;
+        app.update();
+        assert_eq!(
+            old,
+            app.world_mut()
+                .query::<Entity>()
+                .iter(app.world())
+                .collect::<Vec<_>>()
+        );
+        app.world_mut().resource_mut::<State>().guild_history_day = Some(999);
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.revision += 1;
+        app.update();
+        assert_eq!(app.world().resource::<State>().guild_history_day, None);
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        app.update();
+        let state = app.world().resource::<State>();
+        assert_eq!(state.tab, Tab::Households);
+        assert_eq!(state.guild_history_view, household_history::View::Current);
+        assert_eq!(state.guild_history_day, None);
     }
 
     #[test]

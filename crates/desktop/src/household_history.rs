@@ -23,7 +23,12 @@ pub(crate) enum Choice {
     Day(Option<u64>),
 }
 
-fn button(parent: &mut ChildSpawnerCommands, choice: Choice, caption: &str, selected: bool) {
+fn button<C: Component>(
+    parent: &mut ChildSpawnerCommands,
+    choice: C,
+    caption: &str,
+    selected: bool,
+) {
     parent
         .spawn((
             Button,
@@ -47,16 +52,43 @@ pub(crate) fn controls(
     view: View,
     selected: Option<u64>,
 ) {
+    let Some(history) = universe.household_history(id) else {
+        return;
+    };
+    day_controls(
+        parent,
+        view,
+        selected,
+        (history.current.start_ms, history.current.end_ms),
+        &history
+            .completed
+            .iter()
+            .map(|day| (day.start_ms, day.end_ms))
+            .collect::<Vec<_>>(),
+        Choice::View,
+        Choice::Day,
+    );
+}
+
+pub(crate) fn day_controls<C: Component>(
+    parent: &mut ChildSpawnerCommands,
+    view: View,
+    selected: Option<u64>,
+    current: (u64, u64),
+    completed: &[(u64, u64)],
+    view_choice: impl Fn(View) -> C,
+    day_choice: impl Fn(Option<u64>) -> C,
+) {
     row(parent, |row| {
         button(
             row,
-            Choice::View(View::Current),
+            view_choice(View::Current),
             "Current",
             view == View::Current,
         );
         button(
             row,
-            Choice::View(View::History),
+            view_choice(View::History),
             "Daily history",
             view == View::History,
         );
@@ -69,20 +101,15 @@ pub(crate) fn controls(
         14.0,
         MUTED,
     ));
-    let Some(history) = universe.household_history(id) else {
-        return;
-    };
-    let day = selected_record(universe, id, view, selected).unwrap();
-    let index = history
-        .completed
-        .iter()
-        .position(|record| record.start_ms == day.start_ms)
-        .unwrap_or(history.completed.len());
+    let index = selected
+        .and_then(|start| completed.iter().position(|day| day.0 == start))
+        .unwrap_or(completed.len());
+    let day = completed.get(index).copied().unwrap_or(current);
     row(parent, |row| {
         if index > 0 {
             button(
                 row,
-                Choice::Day(Some(history.completed[index - 1].start_ms)),
+                day_choice(Some(completed[index - 1].0)),
                 "Previous day",
                 false,
             );
@@ -91,23 +118,23 @@ pub(crate) fn controls(
             row,
             format!(
                 "{} to {}",
-                crate::format_clock(day.start_ms),
-                crate::format_clock(day.end_ms)
+                crate::format_clock(day.0),
+                crate::format_clock(day.1)
             ),
         );
-        if index + 1 < history.completed.len() {
+        if index + 1 < completed.len() {
             button(
                 row,
-                Choice::Day(Some(history.completed[index + 1].start_ms)),
+                day_choice(Some(completed[index + 1].0)),
                 "Next day",
                 false,
             );
         }
         if selected.is_some() {
-            button(row, Choice::Day(None), "Today / current", false);
+            button(row, day_choice(None), "Today / current", false);
         }
     });
-    if history.completed.is_empty() {
+    if completed.is_empty() {
         label(parent, "No completed days yet.");
     }
 }

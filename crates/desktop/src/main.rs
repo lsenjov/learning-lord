@@ -3,6 +3,7 @@ mod citizen_history;
 mod citizens;
 mod collectives;
 mod floating_ui;
+mod guild_history;
 mod household_history;
 mod inspectors;
 mod locations;

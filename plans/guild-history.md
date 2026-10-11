@@ -27,4 +27,4 @@
 - Tests cover exact fees and debt repayment, shared accounts, interrupted work, output across 04:00, weekly tax timing, caravan repayments, retention and save validation. A regression preserves historical payer identities after later household formation.
 - UI tests cover linked rows, day navigation, rollover/pruning, idle caching and reset behaviour. Household and guild views share day controls.
 - Locked workspace tests and build, formatting, strict all-target workspace Clippy and diff checks pass. Save format is version 6 under the existing strict compatibility policy.
-- Step 1 complete; step 2 implemented and verified, ready for its separate commit.
+- Step 1 committed as `070aa90`; step 2 complete with reviewed and verified guild history UI.
