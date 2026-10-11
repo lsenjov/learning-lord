@@ -1,5 +1,5 @@
 use crate::{
-    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, citizens, locations,
+    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, citizens, household_history, locations,
     navigation::{self, Target},
     text,
 };
@@ -22,6 +22,9 @@ pub(crate) struct State {
     revision: Option<u64>,
     dirty: bool,
     display_key: String,
+    history_view: household_history::View,
+    history_day: Option<u64>,
+    history_record: Option<learning_lord_simulation::household_history::DailyHouseholdHistory>,
 }
 impl State {
     pub(crate) fn selected(&self) -> Option<AgentId> {
@@ -31,6 +34,7 @@ impl State {
         if self.tab != Tab::Households || self.selected != Some(id) {
             self.tab = Tab::Households;
             self.selected = Some(id);
+            self.history_day = None;
             self.dirty = true;
         }
     }
@@ -85,7 +89,24 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands) {
 pub(crate) fn handle(
     mut state: ResMut<State>,
     choices: Query<(&Interaction, &Choose), Changed<Interaction>>,
+    history_choices: Query<(&Interaction, &household_history::Choice), Changed<Interaction>>,
+    mut scrolls: Query<(&ScrollPanel, &mut ScrollPosition)>,
 ) {
+    for (interaction, choice) in &history_choices {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        for (panel, mut position) in &mut scrolls {
+            if panel.0 {
+                position.0 = Vec2::ZERO;
+            }
+        }
+        match choice {
+            household_history::Choice::View(view) => state.history_view = *view,
+            household_history::Choice::Day(day) => state.history_day = *day,
+        }
+        state.dirty = true;
+    }
     for (interaction, choice) in &choices {
         if *interaction == Interaction::Pressed && state.tab != choice.0 {
             state.tab = choice.0;
@@ -94,7 +115,10 @@ pub(crate) fn handle(
     }
 }
 
-fn row(parent: &mut ChildSpawnerCommands, children: impl FnOnce(&mut ChildSpawnerCommands)) {
+pub(crate) fn row(
+    parent: &mut ChildSpawnerCommands,
+    children: impl FnOnce(&mut ChildSpawnerCommands),
+) {
     parent
         .spawn(Node {
             flex_wrap: FlexWrap::Wrap,
@@ -104,10 +128,10 @@ fn row(parent: &mut ChildSpawnerCommands, children: impl FnOnce(&mut ChildSpawne
         })
         .with_children(children);
 }
-fn label(parent: &mut ChildSpawnerCommands, value: impl Into<String>) {
+pub(crate) fn label(parent: &mut ChildSpawnerCommands, value: impl Into<String>) {
     parent.spawn(text(value, 14.0, TEXT));
 }
-fn place_link(
+pub(crate) fn place_link(
     parent: &mut ChildSpawnerCommands,
     universe: &Universe,
     id: learning_lord_simulation::locations::PlaceId,
@@ -339,16 +363,48 @@ pub(crate) fn refresh(
     {
         state.selected = universe.households().keys().copied().min_by_key(|id| id.0);
     }
-    let display_key = format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}",
-        state.tab,
-        state.selected,
-        universe.households(),
-        universe.storage().stock(),
-        universe.market().orders().collect::<Vec<_>>()
-    );
+    let display_key = if state.history_view == household_history::View::History {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            state.tab,
+            state.selected,
+            universe
+                .households()
+                .values()
+                .map(|h| (h.id, &h.name))
+                .collect::<Vec<_>>(),
+            universe
+                .agents()
+                .iter()
+                .map(|(id, agent)| (*id, &agent.name))
+                .collect::<Vec<_>>(),
+            universe
+                .map()
+                .places()
+                .values()
+                .map(|place| (place.id, &place.name))
+                .collect::<Vec<_>>(),
+            state
+                .selected
+                .and_then(|id| universe.household_history(id))
+                .map(|history| (
+                    history.completed.front().map(|day| day.start_ms),
+                    history.completed.back().map(|day| day.start_ms)
+                ))
+        )
+    } else {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            state.tab,
+            state.selected,
+            universe.households(),
+            universe.storage().stock(),
+            universe.market().orders().collect::<Vec<_>>()
+        )
+    };
     let selected_key = state
         .selected
+        .filter(|_| state.history_view == household_history::View::Current)
         .map(|id| {
             let h = &universe.households()[&id];
             format!(
@@ -384,9 +440,28 @@ pub(crate) fn refresh(
             )
         })
         .unwrap_or_default();
+    let record = state
+        .selected
+        .filter(|_| state.history_view == household_history::View::History)
+        .and_then(|id| {
+            household_history::selected_record(universe, id, state.history_view, state.history_day)
+        });
+    let history_changed = state.history_record.as_ref() != record;
+    if history_changed {
+        state.history_record = record.cloned();
+    }
+    if let Some(id) = state.selected
+        && state.history_day.is_some_and(|start| {
+            universe
+                .household_history(id)
+                .is_none_or(|history| !history.completed.iter().any(|day| day.start_ms == start))
+        })
+    {
+        state.history_day = None;
+    }
     let display_key = display_key + &selected_key;
     state.revision = Some(snapshot.0.revision);
-    let changed = state.dirty || state.display_key != display_key;
+    let changed = state.dirty || history_changed || state.display_key != display_key;
     let mut offsets = [Vec2::ZERO; 2];
     for (panel, position) in &scrolls {
         offsets[usize::from(panel.0)] = position.0;
@@ -476,7 +551,27 @@ pub(crate) fn refresh(
                     ))
                     .with_children(|panel| {
                         if let Some(id) = state.selected {
-                            details(panel, universe, id);
+                            household_history::controls(
+                                panel,
+                                universe,
+                                id,
+                                state.history_view,
+                                state.history_day,
+                            );
+                            if state.history_view == household_history::View::Current {
+                                details(panel, universe, id);
+                            }
+                            if state.history_view == household_history::View::History
+                                && let Some(day) = &state.history_record
+                            {
+                                panel.spawn(text(&universe.households()[&id].name, 18.0, TEXT));
+                                household_history::render(
+                                    panel,
+                                    universe,
+                                    day,
+                                    state.history_day.is_none(),
+                                );
+                            }
                         } else {
                             label(panel, "Select a household");
                         }
@@ -488,6 +583,70 @@ pub(crate) fn refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn daily_history_shows_partial_totals_and_preserves_idle_entities() {
+        let worker = crate::simulation::SimulationWorker::spawn(
+            crate::simulation::new_universe().unwrap(),
+            60.try_into().unwrap(),
+        );
+        let snapshot = worker.snapshot();
+        let id = *snapshot
+            .universe
+            .households()
+            .keys()
+            .min_by_key(|id| id.0)
+            .unwrap();
+        let mut state = State::default();
+        state.select(id);
+        state.history_view = household_history::View::History;
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(snapshot))
+            .insert_resource(state)
+            .add_systems(Update, refresh);
+        app.world_mut().spawn((Content, Node::default()));
+        app.update();
+        let labels = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "CURRENT DAY · partial totals",
+            "Opening 6000",
+            "Sales receipts 0",
+            "Taxes paid 0",
+            "CURRENT SUPPLIES",
+            "available",
+            "No completed days yet.",
+        ] {
+            assert!(labels.contains(expected), "missing {expected}: {labels}");
+        }
+        let old = app
+            .world_mut()
+            .query::<Entity>()
+            .iter(app.world())
+            .collect::<Vec<_>>();
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.revision += 1;
+        app.update();
+        assert_eq!(
+            old,
+            app.world_mut()
+                .query::<Entity>()
+                .iter(app.world())
+                .collect::<Vec<_>>()
+        );
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        app.update();
+        let state = app.world().resource::<State>();
+        assert_eq!(state.history_view, household_history::View::Current);
+        assert_eq!(state.history_day, None);
+    }
+
     #[test]
     fn household_details_show_shared_assets_and_actual_workplace_owners() {
         let worker = crate::simulation::SimulationWorker::spawn(

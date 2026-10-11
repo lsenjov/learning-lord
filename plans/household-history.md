@@ -29,4 +29,5 @@
 
 - Step 1 complete and independently reviewed. Daily totals, member contributions, closing stocks and save-format version 4 implemented. Six targeted accounting/retention/persistence tests and strict simulation Clippy pass.
 - Size sample: 365 varied days for one household, two members, eight active goods and sixteen stock entries per day serialize to 2,546,854 bytes of pretty RON and 126,864 bytes of gzip (level 6), approximately 124 KiB per household-year. This is a reproducible synthetic sample, not a simulated year.
-- Step 2 implemented and independently reviewed; targeted UI tests pass. Final workspace checks pending.
+- Step 2 complete and independently reviewed. Current/History views, stable day selection, linked summary rows and idle refresh guards implemented; targeted UI tests pass.
+- Final verification: full workspace tests, formatting, strict all-target workspace Clippy and the desktop build pass. No remaining high or medium review findings; cash-category documentation clarified.
