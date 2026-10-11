@@ -1,5 +1,8 @@
 use crate::{AgentKind, Citizen, CitizenAction, Universe, locations::Location, marketplace::Good};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, DeserializeSeed, MapAccess, Visitor},
+};
 use std::fmt;
 
 pub const SAVE_VERSION: u32 = 2;
@@ -33,6 +36,62 @@ struct Save<T> {
     universe: T,
 }
 
+// An untyped version scan repeatedly scans numeric RON saves; decode the envelope once.
+struct SaveLoader<'a> {
+    unsupported_version: &'a mut Option<u32>,
+}
+
+impl<'de> DeserializeSeed<'de> for SaveLoader<'_> {
+    type Value = Universe;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Universe, D::Error> {
+        deserializer.deserialize_struct("Save", &["version", "universe"], self)
+    }
+}
+
+impl<'de> Visitor<'de> for SaveLoader<'_> {
+    type Value = Universe;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a saved universe with version and universe fields")
+    }
+
+    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Universe, M::Error> {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Version,
+            Universe,
+        }
+
+        let mut version = None;
+        let mut universe = None;
+        while let Some(field) = map.next_key()? {
+            match field {
+                Field::Version => {
+                    if version.is_some() {
+                        return Err(de::Error::duplicate_field("version"));
+                    }
+                    let value = map.next_value::<u32>()?;
+                    if value != SAVE_VERSION {
+                        *self.unsupported_version = Some(value);
+                        return Err(de::Error::custom("unsupported save version"));
+                    }
+                    version = Some(value);
+                }
+                Field::Universe => {
+                    if universe.is_some() {
+                        return Err(de::Error::duplicate_field("universe"));
+                    }
+                    universe = Some(map.next_value()?);
+                }
+            }
+        }
+        version.ok_or_else(|| de::Error::missing_field("version"))?;
+        universe.ok_or_else(|| de::Error::missing_field("universe"))
+    }
+}
+
 impl Universe {
     pub fn to_save_string(&self) -> Result<String, SaveError> {
         ron::ser::to_string_pretty(
@@ -46,21 +105,28 @@ impl Universe {
     }
 
     pub fn from_save_str(input: &str) -> Result<Self, SaveError> {
-        let header: Save<serde::de::IgnoredAny> =
-            ron::from_str(input).map_err(|error| SaveError::Format(error.to_string()))?;
-        if header.version != SAVE_VERSION {
-            return Err(SaveError::UnsupportedVersion(header.version));
+        let mut unsupported_version = None;
+        let mut deserializer = ron::Deserializer::from_str(input)
+            .map_err(|error| SaveError::Format(error.to_string()))?;
+        let mut universe = SaveLoader {
+            unsupported_version: &mut unsupported_version,
         }
-        let mut save: Save<Self> =
-            ron::from_str(input).map_err(|error| SaveError::Format(error.to_string()))?;
-        save.universe.validate_save()?;
+        .deserialize(&mut deserializer)
+        .map_err(|error| match unsupported_version {
+            Some(version) => SaveError::UnsupportedVersion(version),
+            None => SaveError::Format(deserializer.span_error(error).to_string()),
+        })?;
+        deserializer
+            .end()
+            .map_err(|error| SaveError::Format(deserializer.span_error(error).to_string()))?;
+        universe.validate_save()?;
         // Validate actions before adding plots so invalid legacy indices stay invalid.
-        expand_legacy_fields(&mut save.universe.map);
-        for (_, agent) in save.universe.agents.iter_mut() {
+        expand_legacy_fields(&mut universe.map);
+        for (_, agent) in universe.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
             expand_legacy_fields(&mut citizen.map);
         }
-        Ok(save.universe)
+        Ok(universe)
     }
 
     fn validate_save(&self) -> Result<(), SaveError> {
@@ -758,6 +824,40 @@ mod tests {
                 Universe::from_save_str(&invalid.to_save_string().unwrap()),
                 Err(SaveError::InvalidState(_))
             ));
+        }
+    }
+
+    #[test]
+    fn rejects_other_versions_before_decoding_the_universe() {
+        for version in [0, SAVE_VERSION - 1, SAVE_VERSION + 1, u32::MAX] {
+            let input = format!("(version: {version}, universe: invalid old schema)");
+            assert!(matches!(
+                Universe::from_save_str(&input),
+                Err(SaveError::UnsupportedVersion(found)) if found == version
+            ));
+        }
+    }
+
+    #[test]
+    fn save_envelope_accepts_either_field_order_and_rejects_invalid_fields() {
+        let world = Universe::with_map(Map::default());
+        let universe = ron::to_string(&world).unwrap();
+        let reversed = format!("(universe: {universe}, version: {SAVE_VERSION})");
+        assert_eq!(Universe::from_save_str(&reversed).unwrap(), world);
+        for input in [
+            format!("(version: {SAVE_VERSION})"),
+            format!("(universe: {universe})"),
+            format!("(version: {SAVE_VERSION}, version: {SAVE_VERSION}, universe: {universe})"),
+            format!("(version: {SAVE_VERSION}, universe: {universe}, universe: {universe})"),
+            format!("(version: {SAVE_VERSION}, extra: 1, universe: {universe})"),
+            format!("(version: {SAVE_VERSION}, universe: {universe}) trailing"),
+            format!("(version: {SAVE_VERSION}, universe: ())"),
+            format!("(version: \"2\", universe: {universe})"),
+        ] {
+            assert!(
+                matches!(Universe::from_save_str(&input), Err(SaveError::Format(_))),
+                "accepted invalid envelope: {input}"
+            );
         }
     }
 
