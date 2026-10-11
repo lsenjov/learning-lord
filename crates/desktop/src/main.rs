@@ -552,7 +552,12 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
             format!(
                 "{}: {} available | {} tax reserved | {} town-owned",
                 good.name(),
-                quantity_label(good, citizen.available_units(good)),
+                quantity_label(
+                    good,
+                    citizen
+                        .units(good)
+                        .saturating_sub(citizen.tax_reserved_units(good))
+                ),
                 quantity_label(good, citizen.tax_reserved_units(good)),
                 quantity_label(good, citizen.town_carried_units(good))
             )
@@ -561,6 +566,7 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         .join("\n");
     let mut properties = citizen
         .owned_properties()
+        .filter(|place| place.owner == Some(citizen.id()))
         .map(|place| place.name.as_str())
         .collect::<Vec<_>>();
     properties.sort();
@@ -584,10 +590,19 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         || "None".into(),
         |condition| format!("{:.1}%", condition * 100.0),
     );
+    let household = household_readout(universe, citizen);
+    let decision = citizen
+        .decision_score()
+        .map_or_else(|error| error.to_string(), |score| format!("{score:.1}"));
+    let coins = if citizen.household_id().is_some() {
+        0
+    } else {
+        citizen.coins()
+    };
     format!(
-        "{}{role}\n{inventory}\nCoins: {} | Wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Wellbeing: {wellbeing}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nDrinking reserves: {:.0} g | Reserve wellbeing: +{:.2}\nDiet wellbeing: +{:.2} | Each category decays 50/day; +5 at 50, +7 at 100\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{skills}",
+        "{}{role}\n{inventory}\nPersonal coins: {} | Personal wealth: {} coins\nHunger: {:.1}     Thirst: {:.1}     Tiredness: {:.1}     Personal wellbeing: {wellbeing} | Decision score: {decision}\nClothing need: {:.1} | Garment condition: {garment}\nFood reserves: {:.1} nutrition | Reserve wellbeing: +{:.2}\nDrinking reserves: {:.0} g | Reserve wellbeing: +{:.2}\nDiet wellbeing: +{:.2} | Each category decays 50/day; +5 at 50, +7 at 100\nLocation: {}\n{action}\n{replanning}\nOwns: {properties}\n{household}\n{skills}",
         agent.name,
-        citizen.coins(),
+        coins,
         citizen
             .wealth()
             .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}")),
@@ -595,12 +610,152 @@ fn citizen_readout(universe: &Universe, id: Option<learning_lord_simulation::Age
         citizen.thirst(),
         citizen.tiredness(),
         citizen.clothing_need(),
-        citizen.food_nutrition(),
+        Good::FOOD
+            .into_iter()
+            .map(|good| {
+                let carried = universe
+                    .agents()
+                    .values()
+                    .filter_map(|agent| {
+                        let AgentKind::Citizen(member) = &agent.kind;
+                        (member.economic_id() == citizen.economic_id()).then_some(
+                            member
+                                .units(good)
+                                .saturating_sub(member.tax_reserved_units(good)),
+                        )
+                    })
+                    .fold(0_u64, u64::saturating_add);
+                citizen
+                    .stored_available_units(citizen.home(), good)
+                    .saturating_add(carried) as f64
+                    * good.nutrition_per_unit().unwrap()
+            })
+            .sum::<f64>(),
         citizen.food_reserve_wellbeing(),
         citizen.drinking_water_reserve(),
         citizen.water_reserve_wellbeing(),
         citizen.dietary_wellbeing(),
         citizens::location_label(citizen)
+    )
+}
+
+fn household_readout(universe: &Universe, citizen: &Citizen) -> String {
+    let maintenance = citizen.maintenance();
+    let maintenance = [
+        ("Replenishment", &maintenance.replenishment),
+        ("Listing excess", &maintenance.listing),
+    ]
+    .map(|(label, task)| {
+        let claimant = task
+            .claimant
+            .map_or_else(|| "None".into(), |id| locations::name(universe, id));
+        format!(
+            "{label}: {} cooldown remaining | Committed worker: {claimant}",
+            citizens::duration(task.remaining_ms(universe.current_time_ms()))
+        )
+    })
+    .join("\n");
+    let workplace = citizen.designated_workplace().map_or_else(
+        || "None".into(),
+        |place| {
+            universe
+                .map()
+                .place(place)
+                .map_or_else(|error| error.to_string(), |place| place.name.clone())
+        },
+    );
+    let Some(id) = citizen.household_id() else {
+        let mut stocks = universe
+            .storage()
+            .stock()
+            .iter()
+            .filter(|(key, units)| {
+                let owned = key.owner == citizen.goods_owner();
+                let town_here = key.owner == learning_lord_simulation::storage::GoodsOwner::Town
+                    && citizen
+                        .owned_properties()
+                        .any(|place| place.id == key.place);
+                **units > 0 && (owned || town_here)
+            })
+            .map(|(key, units)| {
+                let place = universe
+                    .map()
+                    .place(key.place)
+                    .map_or_else(|error| error.to_string(), |place| place.name.clone());
+                let town = key.owner == learning_lord_simulation::storage::GoodsOwner::Town;
+                format!(
+                    "{place} | {}: {} stored | {} tax reserved | {} town-owned",
+                    key.good.name(),
+                    quantity_label(key.good, if town { 0 } else { *units }),
+                    quantity_label(
+                        key.good,
+                        universe
+                            .storage()
+                            .reserved_units(key.place, key.owner, key.good)
+                    ),
+                    quantity_label(key.good, if town { *units } else { 0 })
+                )
+            })
+            .collect::<Vec<_>>();
+        stocks.sort();
+        return format!(
+            "Independent | Designated workplace: {workplace}\nStored stocks by location:\n{}\nMaintenance (6-hour cooldown):\n{maintenance}",
+            if stocks.is_empty() {
+                "None".into()
+            } else {
+                stocks.join("\n")
+            }
+        );
+    };
+    let household = &universe.households()[&id];
+    let members = household
+        .members
+        .iter()
+        .map(|id| locations::name(universe, *id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let home = universe
+        .map()
+        .place(household.home)
+        .map_or_else(|error| error.to_string(), |place| place.name.clone());
+    let wealth = universe
+        .household_wealth(id)
+        .map_or_else(|error| error.to_string(), |wealth| format!("{wealth:.3}"));
+    let mut stocks = universe
+        .storage()
+        .stock()
+        .iter()
+        .filter(|(key, units)| {
+            key.owner == learning_lord_simulation::storage::GoodsOwner::Household(id) && **units > 0
+        })
+        .map(|(key, units)| {
+            let place = universe
+                .map()
+                .place(key.place)
+                .map_or_else(|error| error.to_string(), |place| place.name.clone());
+            format!(
+                "{place} | {}: {} stored | {} tax reserved",
+                key.good.name(),
+                quantity_label(key.good, *units),
+                quantity_label(
+                    key.good,
+                    universe
+                        .storage()
+                        .reserved_units(key.place, key.owner, key.good)
+                )
+            )
+        })
+        .collect::<Vec<_>>();
+    stocks.sort();
+    format!(
+        "Household: {} | Members: {members}\nShared home: {home} | Designated workplace: {workplace}\nShared coins: {} | Shared wealth: {wealth} coins\nShared stocks by location:\n{}\nMaintenance (6-hour cooldown):\n{maintenance}",
+        household.name,
+        household.coins,
+        if stocks.is_empty() {
+            "None".into()
+        } else {
+            stocks.join("\n")
+        }
     )
 }
 
@@ -967,6 +1122,31 @@ mod tests {
     use learning_lord_simulation::Citizen;
 
     #[test]
+    fn household_details_distinguish_personal_and_shared_assets() {
+        let universe = simulation::new_universe().unwrap();
+        let (id, agent) = universe
+            .agents()
+            .iter()
+            .find(|(_, agent)| agent.name == "Ada")
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        let readout = citizen_readout(&universe, Some(*id));
+        assert!(readout.contains("Personal coins: 0 | Personal wealth:"));
+        assert!(readout.contains("Personal wellbeing:"));
+        assert!(readout.contains("Decision score:"));
+        assert!(readout.contains("Members: Ada, Iris"));
+        assert!(readout.contains("Shared home: Ada's home"));
+        assert!(readout.contains("Designated workplace: Ada's field"));
+        assert!(readout.contains("Shared coins: 6000 | Shared wealth:"));
+        assert!(
+            readout.contains("Ada's home | Bread rolls: 140 rolls stored"),
+            "{readout}"
+        );
+        assert!(readout.contains("Maintenance (6-hour cooldown):"));
+        assert!(citizen.decision_score().unwrap() > citizen.personal_wellbeing().unwrap());
+    }
+
+    #[test]
     fn typing_in_location_editor_suppresses_simulation_shortcuts() {
         let worker = SimulationWorker::spawn(Universe::default(), 60.try_into().unwrap());
         let mut app = App::new();
@@ -1214,7 +1394,7 @@ mod tests {
         let readout = citizen_readout(&universe, Some(id));
         assert!(
             readout.contains(
-                "Flax block: 0 blocks available | 1 block tax reserved | 0 blocks town-owned"
+                "Flax block: 1 block stored | 1 block tax reserved | 0 blocks town-owned"
             ),
             "{readout}"
         );
@@ -1255,7 +1435,7 @@ mod tests {
         assert!(readout.contains("Clothing need: 20.0 | Garment condition: None"));
         assert!(!readout.contains("Water: 0 g"));
         assert!(!readout.contains("Bread: 0 rolls"));
-        assert!(readout.contains("Coins: 0 | Wealth: 0.260 coins"));
+        assert!(readout.contains("Personal coins: 0 | Personal wealth: 0.260 coins"));
     }
 
     #[test]
@@ -1567,7 +1747,7 @@ mod tests {
                 .with_price(Good::Berries, 65.0)
                 .unwrap()
         );
-        assert_eq!(snapshot.universe.agents().len(), 8);
+        assert_eq!(snapshot.universe.agents().len(), 9);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);

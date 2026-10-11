@@ -489,17 +489,35 @@ pub fn refresh_cards(
             let wealth = citizen
                 .wealth()
                 .map_or_else(|e| e.to_string(), |v| format!("{v:.3}"));
+            let account = citizen.household_id().map_or_else(
+                || format!("Coins {}", citizen.coins()),
+                |id| {
+                    format!(
+                        "{} | Shared coins {} | Shared wealth {}",
+                        crate::locations::name(&snapshot.0.universe, id),
+                        citizen.coins(),
+                        snapshot.0.universe.household_wealth(id).map_or_else(
+                            |error| error.to_string(),
+                            |wealth| format!("{wealth:.3}")
+                        )
+                    )
+                },
+            );
+            let decision = citizen
+                .decision_score()
+                .map_or_else(|error| error.to_string(), |score| format!("{score:.1}"));
             let next = format!(
-                "{}{}\nCoins {}  |  Wealth {}\nWellbeing {}  |  {}",
+                "{}{}\n{}  |  Personal wealth {}\nPersonal wellbeing {} | Decision score {}\n{}",
                 agent.name,
                 if Some(*id) == selection.0 {
                     "  [selected]"
                 } else {
                     ""
                 },
-                citizen.coins(),
+                account,
                 wealth,
                 wellbeing,
+                decision,
                 action
             );
             if value.0 != next {
@@ -940,7 +958,7 @@ mod tests {
     fn every_citizen_is_reachable_and_restart_resets_selection() {
         let universe = simulation::new_universe().unwrap();
         let ids: Vec<_> = sorted_agents(&universe).iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 9);
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,

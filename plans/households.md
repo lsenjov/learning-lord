@@ -13,6 +13,7 @@
 - Replenishing and listing excess may occur only first in a goal pair. Each has a six-hour owner-wide cooldown after successful completion, with claims only for committed work.
 - Replenishment includes delivering home. Food and drink reserves cover all supplied members; workplace ingredients cover all assigned workers.
 - Employment, guilds, facility capacity and demand histories remain deferred.
+- Stored production input reservations are recorded on the active action and released on completion. A future active-action cancellation API must release those recorded quantities too; canceling a background planning job does not cancel current work. Collection and equipment races currently abandon the affected goal safely when supplies are already taken.
 
 ## Step 1: physical storage and transport
 
@@ -45,4 +46,4 @@
 - Workspace tests, final simulation tests, formatting, strict workspace Clippy and diff checks passed. Regression coverage includes stock conservation, immutable predictions, reserved stock protection and fully stored production inputs without purchasing money.
 - Step 2 implemented and independently reviewed; no remaining review findings. Household accounts, one-hop scoring, physical workplace outputs, staffing requirements and maintenance claims are integrated. Save version 3 and ownership/reservation validation moved into this step so its committed states remain saveable.
 - All simulation unit and integration tests pass. Regression coverage includes four-worker ingredient requirements, exact-site consumption, concurrent brewery saves, shared-supply contention, invalid ownership, per-member reserve scoring, purchase demand and event-time history. Strict workspace Clippy, formatting and whitespace checks pass. Fresh review confirmed shared purchases cannot spend the same account funds twice. Background planning preserves the first-action exemption from the meal replan threshold.
-- Step 3 startup and desktop integration are implemented and being checked separately; independent review and final integrated checks remain before its commit.
+- Step 3 implemented and independently reviewed with no remaining findings. The desktop starts nine citizens in two test households plus independent citizens, with supplies physically placed at home/work and shared-state readouts. Final workspace tests pass (including ten simulated days, background day jumps and save/load), along with strict workspace Clippy, formatting and whitespace checks. README documents the new ownership/storage behaviour and version 3 compatibility.
