@@ -909,7 +909,7 @@ pub fn refresh(
                                 for &(_, units, price, trial) in &group.orders {
                                     if trial {
                                         seller.spawn(text(
-                                            "PRICE TRIAL • observing local acceptance",
+                                            "CANARY • locked speculative price",
                                             13.0,
                                             Color::srgb(0.96, 0.70, 0.35),
                                         ));
@@ -1349,6 +1349,8 @@ mod tests {
             .advance(TRADE_DURATION_MS)
             .unwrap();
         let universe = universe
+            .advance(learning_lord_simulation::marketplace::UPDATE_TIME_MS)
+            .unwrap()
             .with_prices(Prices::new(2.0).unwrap())
             .start_action(first, CitizenAction::List(Good::Berries, 100))
             .unwrap()
@@ -1376,47 +1378,42 @@ mod tests {
             .iter()
             .find(|group| group.id == MarketParty::Citizen(second))
             .unwrap();
-        for (group, ordinary) in [(first_group, vec![140, 100]), (second_group, vec![290])] {
+        for group in [first_group, second_group] {
             let rate = universe
                 .market()
                 .seller_adjustment_rate(group.id.account().unwrap())
                 .unwrap();
             assert_eq!(group.adjustment_rate, Some(rate));
-            let trial = group
-                .orders
-                .iter()
-                .filter(|order| order.3)
-                .collect::<Vec<_>>();
-            assert_eq!(trial.len(), 1);
-            assert_eq!(trial[0].1, learning_lord_simulation::FORAGE_AVERAGE_GRAMS);
-            assert_eq!(trial[0].2, 1.0 + f64::from(rate) / 100.0);
-            let ordinary_orders = group
-                .orders
-                .iter()
-                .filter(|order| !order.3)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                ordinary_orders
-                    .iter()
-                    .map(|order| order.1)
-                    .collect::<Vec<_>>(),
-                ordinary
-            );
-            assert!(ordinary_orders.iter().all(|order| order.2 == 1.0));
-            assert_eq!(group.orders.len(), ordinary_orders.len() + 1);
+            assert!((group.orders[0].2 - (1.0 + f64::from(rate) / 200.0)).abs() < 1e-12);
+            assert!(group.orders.iter().all(|order| !order.3));
         }
+        assert_eq!(first_group.orders.len(), 2);
+        assert_eq!(second_group.orders.len(), 1);
+        let first_fills = first_group.orders[0].2 <= second_group.orders[0].2;
+        assert_eq!(first_group.orders[0].1, if first_fills { 150 } else { 200 });
         assert_eq!(
-            first_group.orders.iter().map(|order| order.1).sum::<u64>(),
-            250
+            second_group.orders[0].1,
+            if first_fills { 300 } else { 250 }
+        );
+        assert_eq!(first_group.orders[1].1, 100);
+        assert_eq!(
+            first_group.orders[1].2,
+            1.0 + f64::from(first_group.adjustment_rate.unwrap()) / 100.0
         );
         assert_eq!(
-            second_group.orders.iter().map(|order| order.1).sum::<u64>(),
-            300
+            groups
+                .iter()
+                .flat_map(|group| &group.orders)
+                .map(|order| order.1)
+                .sum::<u64>(),
+            550
         );
         let readout = order_text(&universe, Good::Berries);
-        assert!(readout.contains("140 g remaining  |  1.000 coins/kg"));
-        assert!(readout.contains("100 g remaining  |  1.000 coins/kg"));
-        assert!(readout.contains("290 g remaining  |  1.000 coins/kg"));
+        for group in &groups {
+            for &(_, units, quote, _) in &group.orders {
+                assert!(readout.contains(&order_label(Good::Berries, units, quote)));
+            }
+        }
         assert!(!readout.contains("reserved"));
         assert!(seller_orders(&universe, Good::Water).is_empty());
         assert_eq!(
@@ -1431,12 +1428,6 @@ mod tests {
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe;
         app.update();
         assert_eq!(app.world().resource::<OrderDisplay>().0, groups);
-        assert!(
-            app.world_mut()
-                .query::<&Text>()
-                .iter(app.world())
-                .any(|text| text.0 == order_label(Good::Berries, 140, 1.0))
-        );
         let labels = app
             .world_mut()
             .query::<&Text>()
@@ -1451,9 +1442,9 @@ mod tests {
         assert_eq!(
             labels
                 .iter()
-                .filter(|text| text.starts_with("PRICE TRIAL"))
+                .filter(|text| text.starts_with("CANARY"))
                 .count(),
-            2
+            0
         );
         assert!(
             labels
@@ -1466,8 +1457,9 @@ mod tests {
                 "Price adjustment rate: {}%",
                 group.adjustment_rate.unwrap()
             )));
-            let trial = group.orders.iter().find(|order| order.3).unwrap();
-            assert!(labels.contains(&order_label(Good::Berries, trial.1, trial.2)));
+            for order in &group.orders {
+                assert!(labels.contains(&order_label(Good::Berries, order.1, order.2)));
+            }
         }
     }
 

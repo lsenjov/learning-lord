@@ -2,6 +2,7 @@
 
 ## Status
 
+- The ordinary/trial pricing lifecycle below is superseded by `batch-pricing-and-canaries.md`; retain this document as the preceding design record.
 - Simulation and desktop implementation complete; independent pricing, trial lifecycle and UI reviews complete with findings resolved. Verification is complete.
 - Businesses and employment remain deferred in `businesses-and-employment.md`.
 - Cost accounting clarified: freeze an estimated batch cost, not the asking price. Trial asks still follow the halfway markdown rule.
