@@ -80,7 +80,8 @@ struct SellerOrders {
     name: String,
     location: String,
     place: PlaceId,
-    orders: Vec<(u64, u64, f64)>,
+    orders: Vec<(u64, u64, f64, bool)>,
+    adjustment_rate: Option<u8>,
 }
 
 #[cfg(test)]
@@ -339,7 +340,7 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
     {
         let index = groups
             .iter()
-            .position(|group| group.id == order.seller)
+            .position(|group| group.id == order.seller && group.place == order.place)
             .unwrap_or_else(|| {
                 groups.push(SellerOrders {
                     id: order.seller,
@@ -361,12 +362,19 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
                         .map_or_else(|_| "Unknown location".into(), |place| place.name.clone()),
                     place: order.place,
                     orders: Vec::new(),
+                    adjustment_rate: order
+                        .seller
+                        .account()
+                        .and_then(|account| universe.market().seller_adjustment_rate(account)),
                 });
                 groups.len() - 1
             });
-        groups[index]
-            .orders
-            .push((order.id.0, order.units, order.quoted_price));
+        groups[index].orders.push((
+            order.id.0,
+            order.units,
+            order.quoted_price,
+            universe.market().order_is_trial(order.id),
+        ));
     }
     for group in &mut groups {
         group.orders.sort_by_key(|order| order.0);
@@ -472,7 +480,7 @@ pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
     let policy = universe.caravan_policy();
     if !good.caravan_eligible() {
         return format!(
-            "Current price: {:.3} coins/{}\nCore price: {:.3} coins/{}\nCaravan trade unavailable\nTown stock: {}",
+            "Reference estimate: {:.3} coins/{}\nCore price: {:.3} coins/{}\nCaravan trade unavailable\nTown stock: {}",
             universe.prices().price(good).unwrap(),
             good.price_unit_name(),
             good.core_price(),
@@ -494,7 +502,7 @@ pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
         "Imports disabled".into()
     } else {
         format!(
-            "Import above {:.3} coins/{}",
+            "Import ask {:.3} coins/{}",
             market.effective_import_threshold(good).unwrap_or_default(),
             good.price_unit_name()
         )
@@ -509,7 +517,7 @@ pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
         )
     };
     format!(
-        "Current price: {:.3} coins/{}\nCore price: {:.3} coins/{}\n{} | {}\nCaravan asking price: {}\nTown stock: {} | Saved minimum reserve: {}",
+        "Reference estimate: {:.3} coins/{}\nCore price: {:.3} coins/{}\n{} | {}\nCaravan asking price: {}\nTown stock: {} | Saved minimum reserve: {}",
         universe.prices().price(good).unwrap(),
         good.price_unit_name(),
         good.core_price(),
@@ -523,7 +531,7 @@ pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
 }
 
 pub(super) fn trade_breakdown(good: Good, activity: GoodActivity) -> String {
-    format!(
+    let totals = format!(
         "Local trades: {} | {} coins\nExports: {} | {} gross coins entering town\nExport seller receipts: {} coins | Export tariff revenue: {} coins\nImport deliveries: {}\nBought from caravans: {} | {} gross coins spent\nImport payments leaving town: {} coins | Import tariff revenue: {} coins",
         crate::quantity_label(good, activity.local_traded_units),
         activity.local_traded_coins,
@@ -538,7 +546,47 @@ pub(super) fn trade_breakdown(good: Good, activity: GoodActivity) -> String {
             .caravan_purchased_coins
             .saturating_sub(activity.import_tariff_coins),
         activity.import_tariff_coins
-    )
+    );
+    let mut prices = Vec::new();
+    for (label, units, coins) in [
+        (
+            "Export gross paid price",
+            activity.exported_units,
+            activity.exported_coins,
+        ),
+        (
+            "Export net seller price",
+            activity.exported_units,
+            activity.exported_receipts,
+        ),
+        (
+            "Caravan purchase gross paid price",
+            activity.caravan_purchased_units,
+            activity.caravan_purchased_coins,
+        ),
+    ] {
+        if units > 0 {
+            prices.push(format!(
+                "{label}: {:.6} coins/{}",
+                coins as f64 / units as f64 * good.units_per_price_unit() as f64,
+                good.price_unit_name()
+            ));
+        }
+    }
+    if activity.imported_units > 0 {
+        prices.push(format!(
+            "Import delivery quoted value: {:.6} coins | Asking price: {:.6} coins/{}",
+            activity.imported_quoted_value,
+            activity.imported_quoted_value / activity.imported_units as f64
+                * good.units_per_price_unit() as f64,
+            good.price_unit_name()
+        ));
+    }
+    if prices.is_empty() {
+        totals
+    } else {
+        format!("{totals}\n{}", prices.join("\n"))
+    }
 }
 
 pub(crate) fn metrics(good: Good, activity: GoodActivity) -> String {
@@ -787,6 +835,32 @@ pub fn refresh(
                     if groups.is_empty() {
                         content.spawn(text("No current sell orders for this good.", 14.0, MUTED));
                     }
+                    let mut ladder: Vec<_> = groups
+                        .iter()
+                        .flat_map(|group| group.orders.iter())
+                        .collect();
+                    ladder.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+                    let mut cumulative = 0u64;
+                    let supply = ladder
+                        .into_iter()
+                        .map(|order| {
+                            cumulative = cumulative.saturating_add(order.1);
+                            format!(
+                                "{:.3} coins/{} → {} cumulative",
+                                order.2,
+                                selection.good().price_unit_name(),
+                                crate::quantity_label(selection.good(), cumulative)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !supply.is_empty() {
+                        content.spawn(text(
+                            format!("AVAILABLE SUPPLY BY ASK\n{supply}"),
+                            13.0,
+                            MUTED,
+                        ));
+                    }
                     for group in &groups {
                         content
                             .spawn(Node {
@@ -825,7 +899,23 @@ pub fn refresh(
                                 {
                                     seller.spawn(text(format!("Seller {}", id.0), 12.0, MUTED));
                                 }
-                                for &(_, units, price) in &group.orders {
+                                if let Some(rate) = group.adjustment_rate {
+                                    seller.spawn(text(
+                                        format!("Price adjustment rate: {rate}%"),
+                                        13.0,
+                                        MUTED,
+                                    ));
+                                }
+                                for &(_, units, price, trial) in &group.orders {
+                                    if trial {
+                                        seller.spawn(text(
+                                            "PRICE TRIAL • observing local acceptance",
+                                            13.0,
+                                            Color::srgb(0.96, 0.70, 0.35),
+                                        ));
+                                    } else if group.id != MarketParty::Caravan {
+                                        seller.spawn(text("Ordinary listing", 12.0, MUTED));
+                                    }
                                     seller.spawn(text(
                                         order_label(selection.good(), units, price),
                                         14.0,
@@ -858,7 +948,7 @@ fn order_text(universe: &Universe, good: Good) -> String {
                 group
                     .orders
                     .into_iter()
-                    .map(|(_, units, price)| order_label(good, units, price))
+                    .map(|(_, units, price, _)| order_label(good, units, price))
                     .collect::<Vec<_>>()
                     .join("\n")
             )
@@ -935,7 +1025,7 @@ mod tests {
                     .query::<(&Readout, &Text)>()
                     .iter(app.world())
                     .any(|(readout, text)| matches!(readout, Readout::PriceNow)
-                        && text.0.contains("Current price: 9.000 coins/roll"))
+                        && text.0.contains("Reference estimate: 9.000 coins/roll"))
             );
         }
     }
@@ -944,7 +1034,7 @@ mod tests {
     fn universal_goods_show_reference_prices_and_unavailable_caravan_trade() {
         for good in [Good::Berries, Good::Water] {
             let label = price_details(&Universe::default(), good);
-            assert!(label.contains("Current price:"));
+            assert!(label.contains("Reference estimate:"));
             assert!(label.contains("Core price:"));
             assert!(label.contains("Caravan trade unavailable"));
             assert!(!label.contains("Export below"));
@@ -960,7 +1050,7 @@ mod tests {
         policy.exports[Good::BreadRoll as usize].minimum_reserve = 7;
         let universe = Universe::default().with_caravan_policy(policy).unwrap();
         let label = price_details(&universe, Good::BreadRoll);
-        assert!(label.contains("Export below 1.003 coins/roll | Import above 12.033"));
+        assert!(label.contains("Export below 1.003 coins/roll | Import ask 12.033"));
         assert!(label.contains("Town stock: 0 rolls | Saved minimum reserve: 7 rolls"));
         policy.import_tariff_basis_points = 10_000;
         policy.export_tariff_basis_points = 10_000;
@@ -979,9 +1069,9 @@ mod tests {
         let universe = Universe::default()
             .with_prices(Prices::default().with_price(Good::BreadRoll, 1.0).unwrap());
         let label = price_details(&universe, Good::BreadRoll);
-        assert!(label.contains("Current price: 1.000 coins/roll"));
+        assert!(label.contains("Reference estimate: 1.000 coins/roll"));
         assert!(label.contains("Core price: 4.011 coins/roll"));
-        assert!(label.contains("Export below 2.006 coins/roll | Import above 6.017 coins/roll"));
+        assert!(label.contains("Export below 2.006 coins/roll | Import ask 6.017 coins/roll"));
         assert!(label.contains("Caravan asking price: 6.017 coins/roll"));
     }
 
@@ -1282,24 +1372,51 @@ mod tests {
             .iter()
             .find(|group| group.id == MarketParty::Citizen(first))
             .unwrap();
-        assert_eq!(first_group.orders.len(), 2);
-        assert_eq!(first_group.orders[0].1, 150);
-        assert_eq!(first_group.orders[0].2, 1.0);
-        assert_eq!(first_group.orders[1].1, 100);
-        assert_eq!(first_group.orders[1].2, 2.0);
-        assert_eq!(
-            groups
+        let second_group = groups
+            .iter()
+            .find(|group| group.id == MarketParty::Citizen(second))
+            .unwrap();
+        for (group, ordinary) in [(first_group, vec![140, 100]), (second_group, vec![290])] {
+            let rate = universe
+                .market()
+                .seller_adjustment_rate(group.id.account().unwrap())
+                .unwrap();
+            assert_eq!(group.adjustment_rate, Some(rate));
+            let trial = group
+                .orders
                 .iter()
-                .find(|group| group.id == MarketParty::Citizen(second))
-                .unwrap()
-                .orders[0]
-                .1,
+                .filter(|order| order.3)
+                .collect::<Vec<_>>();
+            assert_eq!(trial.len(), 1);
+            assert_eq!(trial[0].1, learning_lord_simulation::FORAGE_AVERAGE_GRAMS);
+            assert_eq!(trial[0].2, 1.0 + f64::from(rate) / 100.0);
+            let ordinary_orders = group
+                .orders
+                .iter()
+                .filter(|order| !order.3)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ordinary_orders
+                    .iter()
+                    .map(|order| order.1)
+                    .collect::<Vec<_>>(),
+                ordinary
+            );
+            assert!(ordinary_orders.iter().all(|order| order.2 == 1.0));
+            assert_eq!(group.orders.len(), ordinary_orders.len() + 1);
+        }
+        assert_eq!(
+            first_group.orders.iter().map(|order| order.1).sum::<u64>(),
+            250
+        );
+        assert_eq!(
+            second_group.orders.iter().map(|order| order.1).sum::<u64>(),
             300
         );
         let readout = order_text(&universe, Good::Berries);
-        assert!(readout.contains("150 g remaining  |  1.000 coins/kg"));
-        assert!(readout.contains("100 g remaining  |  2.000 coins/kg"));
-        assert!(readout.contains("300 g remaining  |  1.000 coins/kg"));
+        assert!(readout.contains("140 g remaining  |  1.000 coins/kg"));
+        assert!(readout.contains("100 g remaining  |  1.000 coins/kg"));
+        assert!(readout.contains("290 g remaining  |  1.000 coins/kg"));
         assert!(!readout.contains("reserved"));
         assert!(seller_orders(&universe, Good::Water).is_empty());
         assert_eq!(
@@ -1318,14 +1435,40 @@ mod tests {
             app.world_mut()
                 .query::<&Text>()
                 .iter(app.world())
-                .any(|text| text.0 == order_label(Good::Berries, 150, 1.0))
+                .any(|text| text.0 == order_label(Good::Berries, 140, 1.0))
+        );
+        let labels = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            labels
+                .iter()
+                .any(|text| text.starts_with("CURRENT SELL ORDERS"))
+        );
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|text| text.starts_with("PRICE TRIAL"))
+                .count(),
+            2
         );
         assert!(
-            app.world_mut()
-                .query::<&Text>()
-                .iter(app.world())
-                .any(|text| text.0.starts_with("CURRENT SELL ORDERS"))
+            labels
+                .iter()
+                .any(|text| text.starts_with("AVAILABLE SUPPLY BY ASK")
+                    && text.contains("550 g cumulative"))
         );
+        for group in &groups {
+            assert!(labels.contains(&format!(
+                "Price adjustment rate: {}%",
+                group.adjustment_rate.unwrap()
+            )));
+            let trial = group.orders.iter().find(|order| order.3).unwrap();
+            assert!(labels.contains(&order_label(Good::Berries, trial.1, trial.2)));
+        }
     }
 
     fn app() -> App {

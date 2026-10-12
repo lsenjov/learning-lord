@@ -8,6 +8,7 @@ use learning_lord_simulation::{
 const WINDOW: usize = 30;
 const HEIGHT: f32 = 280.0;
 const PRICE: Color = Color::srgb(0.38, 0.78, 0.91);
+const REFERENCE: Color = Color::srgb(0.65, 0.68, 0.70);
 const DEMAND: Color = Color::srgb(0.96, 0.70, 0.35);
 const STOCK: Color = Color::srgb(0.67, 0.57, 0.87);
 const EXPORT: Color = Color::srgb(0.35, 0.76, 0.49);
@@ -19,6 +20,9 @@ struct Day {
     start: u64,
     end: u64,
     price: f64,
+    reference: f64,
+    observed: bool,
+    initial: bool,
     activity: GoodActivity,
     partial: bool,
 }
@@ -55,6 +59,10 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
                 caravan_listed_units: entry.caravan_remaining_supply_units,
                 local_traded_units: entry.local_traded_units,
                 local_traded_coins: entry.local_traded_coins,
+                local_quoted_value: entry.accepted_local_price.unwrap_or(0.0)
+                    * entry.local_traded_units as f64
+                    / good.units_per_price_unit() as f64,
+                imported_quoted_value: entry.imported_quoted_value,
                 exported_units: entry.exported_units,
                 exported_coins: entry.exported_coins,
                 exported_receipts: entry.exported_receipts,
@@ -71,6 +79,9 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
             start: start.max(created),
             end,
             price,
+            reference: price,
+            observed: false,
+            initial: true,
             activity,
             partial: slot == 0,
         });
@@ -84,7 +95,48 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
         };
     }
     result.reverse();
+    let first_start = result.first().map_or(current.start_ms, |day| day.start);
+    let last_observed = market.history().iter().rev().find_map(|entry| {
+        (entry.good == good && entry.start_ms < first_start)
+            .then_some(entry.accepted_local_price)
+            .flatten()
+    });
+    let last_observed = price_before_window(
+        first_start,
+        last_observed,
+        market.last_local_price(good),
+        market.retained_local_price(good),
+    );
+    resolve_prices(&mut result, good, last_observed);
     result
+}
+
+fn price_before_window(
+    first_start: u64,
+    retained_price: Option<f64>,
+    last_observed: Option<(u64, f64)>,
+    pruned_observation: Option<(u64, f64)>,
+) -> Option<f64> {
+    retained_price.or_else(|| {
+        last_observed
+            .filter(|(observed_at, _)| *observed_at <= first_start)
+            .or_else(|| pruned_observation.filter(|(observed_at, _)| *observed_at <= first_start))
+            .map(|(_, price)| price)
+    })
+}
+
+fn resolve_prices(days: &mut [Day], good: Good, mut last_observed: Option<f64>) {
+    for day in days {
+        day.observed = day.activity.local_traded_units > 0;
+        if day.observed {
+            last_observed = Some(
+                day.activity.local_quoted_value / day.activity.local_traded_units as f64
+                    * good.units_per_price_unit() as f64,
+            );
+        }
+        day.initial = last_observed.is_none();
+        day.price = last_observed.unwrap_or(day.reference);
+    }
 }
 
 struct Scale {
@@ -96,14 +148,17 @@ struct Scale {
 }
 impl Scale {
     fn new(days: &[Day]) -> Self {
-        let price_max = days.iter().map(|day| day.price).fold(1.0, f64::max);
+        let price_max = days
+            .iter()
+            .flat_map(|day| [day.price, day.reference])
+            .fold(1.0, f64::max);
         let low = days
             .iter()
-            .map(|day| day.price / price_max)
+            .flat_map(|day| [day.price / price_max, day.reference / price_max])
             .fold(1.0, f64::min);
         let high = days
             .iter()
-            .map(|day| day.price / price_max)
+            .flat_map(|day| [day.price / price_max, day.reference / price_max])
             .fold(0.0, f64::max);
         let quantity_max = days
             .iter()
@@ -170,7 +225,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue: price | Body: red caravan purchases / grey local trades / green exports\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED));
+    parent.spawn(text("Blue: accepted local quote VWAP (dashed: carried; grey: initial reference) | Grey line: reference estimate\nGreen below wick: exports | Red above wick: import deliveries\nBody: red caravan purchases / grey local trades / green exports\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED));
     let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
@@ -307,6 +362,9 @@ pub fn refresh(
         && cached.days.iter().zip(&values).all(|(old, new)| {
             old.start == new.start
                 && old.price == new.price
+                && old.reference == new.reference
+                && old.observed == new.observed
+                && old.initial == new.initial
                 && old.activity == new.activity
                 && old.partial == new.partial
         });
@@ -367,7 +425,7 @@ fn hover_index(position: Option<Vec2>, over: bool, count: usize) -> Option<usize
 
 fn hover_label(good: Good, day: &Day) -> String {
     format!(
-        "{} to {} | {}\nPrice: {:.6} coins/{}\n{}",
+        "{} to {} | {}\n{}: {:.6} coins/{}\nReference estimate: {:.6} coins/{}\n{}",
         format_clock(day.start),
         format_clock(day.end),
         if day.partial {
@@ -375,7 +433,16 @@ fn hover_label(good: Good, day: &Day) -> String {
         } else {
             "CLOSED | quantities at close"
         },
+        if day.observed {
+            "Accepted local quote VWAP"
+        } else if day.initial {
+            "Initial reference (no local trades yet)"
+        } else {
+            "Last accepted local quote VWAP (no trades this day)"
+        },
         day.price,
+        good.price_unit_name(),
+        day.reference,
         good.price_unit_name(),
         market::metrics(good, day.activity),
     )
@@ -513,8 +580,33 @@ fn draw_chart(
                     let left = index as f32 * slot;
                     let center = left + slot / 2.0;
                     let y = scale.y(day.price);
-                    rect(plot, left, y, slot, 2.0, PRICE);
+                    rect(plot, left, scale.y(day.reference), slot, 1.0, REFERENCE);
+                    let price_color = if day.initial { REFERENCE } else { PRICE };
+                    if day.observed {
+                        rect(plot, left, y, slot, 2.0, price_color);
+                    } else {
+                        for dash in 0..3 {
+                            rect(
+                                plot,
+                                left + slot * dash as f32 / 3.0,
+                                y,
+                                slot / 6.0,
+                                2.0,
+                                price_color,
+                            );
+                        }
+                    }
                     if let Some(next) = values.get(index + 1) {
+                        let reference_y = scale.y(day.reference);
+                        let next_reference_y = scale.y(next.reference);
+                        rect(
+                            plot,
+                            left + slot,
+                            reference_y.min(next_reference_y),
+                            0.12,
+                            (reference_y - next_reference_y).abs().max(1.0),
+                            REFERENCE,
+                        );
                         let next_y = scale.y(next.price);
                         rect(
                             plot,
@@ -522,7 +614,7 @@ fn draw_chart(
                             y.min(next_y),
                             0.18,
                             (y - next_y).abs().max(2.0),
-                            PRICE,
+                            price_color,
                         );
                     }
                     let body = scale.quantity(day.activity.traded_units as f64);
@@ -543,6 +635,26 @@ fn draw_chart(
                         scale.quantity(day.activity.listed_units as f64),
                         STOCK,
                     );
+                    if day.activity.imported_units > 0 {
+                        body_mark(
+                            plot,
+                            center,
+                            top - scale.quantity(day.activity.affordable_demand_units as f64) - 7.0,
+                            slot,
+                            4.0,
+                            IMPORT,
+                        );
+                    }
+                    if day.activity.exported_units > 0 {
+                        body_mark(
+                            plot,
+                            center,
+                            y + body / 2.0 + scale.quantity(day.activity.listed_units as f64) + 3.0,
+                            slot,
+                            4.0,
+                            EXPORT,
+                        );
+                    }
                     let mut segment_top = top;
                     for (height, color) in body_segments(day.activity, body) {
                         if height > 0.0 {
@@ -569,7 +681,7 @@ fn draw_chart(
                             BorderColor::all(PRICE),
                         ));
                     }
-                    body_mark(plot, center, y, slot, 2.0, PRICE);
+                    body_mark(plot, center, y, slot, 2.0, price_color);
                     if index == 0
                         || index == values.len() - 1
                         || (values.len() > 10 && index == values.len() / 2)
@@ -605,6 +717,90 @@ mod tests {
         Citizen,
         marketplace::{Prices, ShoppingList},
     };
+
+    #[test]
+    fn pruned_observations_still_carry_without_leaking_future_quotes() {
+        let first_start = 400 * DAY_MS;
+        let seed = price_before_window(first_start, None, Some((UPDATE_TIME_MS, 12.0)), None);
+        let mut values = days(&Universe::starting_at(first_start), Good::BreadRoll);
+        resolve_prices(&mut values, Good::BreadRoll, seed);
+        assert_eq!(values[0].price, 12.0);
+        assert!(!values[0].initial);
+        assert!(!values[0].observed);
+        assert!(hover_label(Good::BreadRoll, &values[0]).contains("no trades this day"));
+        assert_eq!(
+            price_before_window(first_start, None, Some((first_start + DAY_MS, 15.0)), None),
+            None
+        );
+        assert_eq!(
+            price_before_window(first_start, None, Some((first_start, 15.0)), None),
+            Some(15.0)
+        );
+        assert_eq!(
+            price_before_window(
+                first_start,
+                Some(11.0),
+                Some((first_start + DAY_MS, 15.0)),
+                None
+            ),
+            Some(11.0)
+        );
+    }
+
+    #[test]
+    fn pruned_anchor_carries_until_a_new_trade_inside_the_window() {
+        let first_start = 400 * DAY_MS;
+        let seed = price_before_window(
+            first_start,
+            None,
+            Some((first_start + DAY_MS, 15.0)),
+            Some((UPDATE_TIME_MS, 12.0)),
+        );
+        let initial = days(&Universe::starting_at(first_start), Good::BreadRoll)[0].clone();
+        let mut values = vec![initial.clone(), initial.clone(), initial];
+        values[1].activity.local_traded_units = 1;
+        values[1].activity.local_quoted_value = 15.0;
+        resolve_prices(&mut values, Good::BreadRoll, seed);
+        assert_eq!(
+            values.iter().map(|day| day.price).collect::<Vec<_>>(),
+            [12.0, 15.0, 15.0]
+        );
+        assert!(values.iter().all(|day| !day.initial));
+        assert!(!values[0].observed);
+        assert!(values[1].observed);
+        assert!(!values[2].observed);
+        assert_eq!(
+            price_before_window(first_start, None, None, Some((first_start + 1, 12.0))),
+            None
+        );
+    }
+
+    #[test]
+    fn local_quotes_carry_across_quiet_days_and_keep_reference_separate() {
+        let initial = days(
+            &Universe::default().with_prices(Prices::new(10.0).unwrap()),
+            Good::Berries,
+        )[0]
+        .clone();
+        let mut values = vec![initial.clone(), initial.clone(), initial];
+        values[1].activity.local_traded_units = 2;
+        values[1].activity.local_quoted_value = 0.03;
+        values[2].reference = 11.25;
+        resolve_prices(&mut values, Good::Berries, None);
+        assert!(values[0].initial);
+        assert!(!values[0].observed);
+        assert_eq!(values[1].price, 15.0);
+        assert!(values[1].observed);
+        assert_eq!(values[2].price, 15.0);
+        assert_eq!(values[2].reference, 11.25);
+        assert!(!values[2].observed);
+        assert!(!values[2].initial);
+        assert!(hover_label(Good::Berries, &values[2]).contains("no trades this day"));
+        let mut window = vec![values[0].clone()];
+        resolve_prices(&mut window, Good::Berries, Some(12.0));
+        assert_eq!(window[0].price, 12.0);
+        assert!(!window[0].initial);
+    }
 
     #[test]
     fn body_segments_are_proportional_completed_trades_and_safe_at_extremes() {
@@ -666,6 +862,9 @@ mod tests {
             start: 0,
             end: UPDATE_TIME_MS,
             price: 20.0,
+            reference: 20.0,
+            observed: true,
+            initial: false,
             partial: false,
             activity: GoodActivity {
                 traded_units: 6,
