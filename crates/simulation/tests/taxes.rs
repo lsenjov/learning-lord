@@ -341,7 +341,11 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
     assert_eq!(sold.town_treasury(), 15);
     assert_eq!(sold.market().trades().back().unwrap().place, place);
     assert_eq!(citizen(&sold, buyer).units(Good::BreadRoll), 10);
+    let mut policy = before_sale.caravan_policy();
+    policy.exports[Good::BreadRoll as usize].allowed = false;
     let weekly = before_sale
+        .with_caravan_policy(policy)
+        .unwrap()
         .with_prices(
             before_sale
                 .prices()
@@ -350,6 +354,7 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
         )
         .advance(FIRST_WEEKLY_SETTLEMENT_MS - before_sale.current_time_ms())
         .unwrap();
+    assert_eq!(weekly.market().listed_units(seller, Good::BreadRoll), 10);
     let assessment_price = weekly
         .market()
         .history()

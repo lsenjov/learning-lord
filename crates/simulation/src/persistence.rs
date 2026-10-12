@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 6;
+pub const SAVE_VERSION: u32 = 7;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -138,6 +138,7 @@ impl Universe {
         self.validate_household_histories()?;
         self.validate_guild_histories()?;
         self.validate_work_reservations()?;
+        self.validate_production_trials()?;
         if self.town_treasury < 0 {
             return Err(SaveError::InvalidState("negative town treasury"));
         }
@@ -582,6 +583,10 @@ fn expand_legacy_fields(map: &mut crate::locations::Map) {
 }
 
 fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result<(), SaveError> {
+    if matches!(action, CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } if !list.validate_bounds())
+    {
+        return Err(SaveError::InvalidState("invalid purchase bounds"));
+    }
     let place = match action {
         CitizenAction::Travel(place)
         | CitizenAction::BuyAt { place, .. }

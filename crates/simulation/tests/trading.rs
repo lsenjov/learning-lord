@@ -152,21 +152,10 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
         )
         .unwrap();
     let chosen = learning_lord_simulation::planning::plan(citizen(&source, buyer)).unwrap();
-    assert_eq!(
-        &chosen.actions()[..2],
-        &[
-            CitizenAction::BuyAt {
-                place: source
-                    .map()
-                    .public_place(learning_lord_simulation::locations::Location::Market),
-                list: learning_lord_simulation::marketplace::ShoppingList::single(
-                    Good::Berries,
-                    155
-                )
-            },
-            CitizenAction::Eat
-        ]
+    assert!(
+        matches!(chosen.actions()[0], CitizenAction::BuyAt { place, list } if place == source.map().public_place(learning_lord_simulation::locations::Location::Market) && list.units(Good::Berries) == 155)
     );
+    assert_eq!(chosen.actions()[1], CitizenAction::Eat);
     assert_eq!(source.market().orders().count(), 1);
     assert!(source.market().trades().is_empty());
     let eating = source
@@ -362,21 +351,10 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
         )
         .unwrap();
     let chosen = learning_lord_simulation::planning::plan(citizen(&universe, buyer)).unwrap();
-    assert_eq!(
-        &chosen.actions()[..2],
-        &[
-            CitizenAction::BuyAt {
-                place: universe
-                    .map()
-                    .public_place(learning_lord_simulation::locations::Location::Market),
-                list: learning_lord_simulation::marketplace::ShoppingList::single(
-                    Good::Berries,
-                    155
-                )
-            },
-            CitizenAction::Eat
-        ]
+    assert!(
+        matches!(chosen.actions()[0], CitizenAction::BuyAt { place, list } if place == universe.map().public_place(learning_lord_simulation::locations::Location::Market) && list.units(Good::Berries) == 155)
     );
+    assert_eq!(chosen.actions()[1], CitizenAction::Eat);
     assert!(universe.market().trades().is_empty());
 }
 

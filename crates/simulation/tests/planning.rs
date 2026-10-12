@@ -234,7 +234,11 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
     let planned_snapshot = planned.clone();
 
     assert_eq!(planned.current_time_ms(), 0);
-    assert_eq!(planned.agents()[&other_id], original.agents()[&other_id]);
+    let mut expected_other = original.agents()[&other_id].clone();
+    let AgentKind::Citizen(other) = &mut expected_other.kind;
+    *other = other.with_market(planned.market().clone());
+    assert_eq!(planned.agents()[&other_id], expected_other);
+    assert_eq!(original.market(), snapshot.market());
     assert_eq!(planned.agents()[&id].name, "Ada");
     let directly_planned = original.agents()[&id].start_planning().unwrap();
     assert_close(

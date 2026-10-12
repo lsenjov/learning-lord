@@ -652,6 +652,23 @@ fn productive_site(actions: &[CitizenAction]) -> Option<crate::locations::PlaceI
 }
 
 fn set_production_site(citizen: &mut Citizen, plan: &Plan) -> Result<(), SimulationError> {
+    citizen.cancel_preparing_trials();
+    if let Some(goal) = plan
+        .goals
+        .first()
+        .filter(|goal| goal.goal == Effect::Production)
+    {
+        for &action in &plan.actions[goal.actions.clone()] {
+            let recipe = match action {
+                CitizenAction::Plant { crop, .. } => Some(crop.recipe()),
+                action => action.production_recipe(),
+            };
+            if let Some(recipe) = recipe {
+                citizen.claim_production_trial(recipe, action.required_place(citizen))?;
+                break;
+            }
+        }
+    }
     if let Some(site) = plan.production_site() {
         citizen.production_targets = Some(crate::production::ProductionTargets::calculate_at(
             citizen,
@@ -1793,7 +1810,14 @@ mod tests {
                             list: crate::marketplace::ShoppingList::single(
                                 crate::marketplace::Good::Berries,
                                 130,
-                            ),
+                            )
+                            .with_purchase_bounds(
+                                citizen.market(),
+                                citizen.market_party(),
+                                map.public_place(Location::Market),
+                                citizen.coins(),
+                            )
+                            .unwrap(),
                         },
                         CitizenAction::Eat,
                     ]
@@ -1867,12 +1891,12 @@ mod tests {
     }
 
     #[test]
-    fn action_starting_at_the_daily_boundary_uses_new_prices() {
+    fn action_starting_at_the_daily_boundary_uses_live_seller_quotes() {
         use crate::{
             AgentKind, Universe,
             marketplace::{Good, Prices, UPDATE_TIME_MS},
         };
-        let citizen = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_coins(200).unwrap();
         let mut market = citizen.market().clone();
         let seller = Citizen::new(0.0).unwrap().with_map(citizen.map()).unwrap();
         market
@@ -1885,6 +1909,8 @@ mod tests {
                 1000,
             )
             .unwrap();
+        let initial_quote = market.orders().next().unwrap().quoted_price;
+        market.prices = market.prices.with_price(Good::Berries, 1000.0).unwrap();
         let citizen = citizen.with_market(market.clone());
         let planned = executing(
             &citizen,
@@ -1917,11 +1943,16 @@ mod tests {
             buyer.active_action().unwrap().remaining_ms(),
             crate::TRADE_DURATION_MS
         );
+        assert_eq!(
+            boundary.market().orders().next().unwrap().quoted_price,
+            initial_quote
+        );
+        assert_eq!(buyer.prices(), boundary.prices());
         let after = boundary.advance(crate::TRADE_DURATION_MS).unwrap();
         let AgentKind::Citizen(buyer) = &after.agents()[&id].kind;
         assert_eq!(
             buyer.coins(),
-            100 - boundary
+            200 - boundary
                 .market()
                 .purchase_cost(id, Good::Berries, 155)
                 .unwrap()

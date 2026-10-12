@@ -506,6 +506,20 @@ fn output_value(
         })
         .try_fold(0.0, |sum, value| Some(sum + value?))
 }
+pub(crate) fn estimated_batch_cost(
+    recipe: Recipe,
+    citizen: &Citizen,
+    site: Option<PlaceId>,
+) -> Option<f64> {
+    let owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
+    let cost = input_value(recipe, citizen, &owned)?
+        + citizen.workshop_fee_cost(
+            site.or_else(|| citizen.production_place(recipe).ok()),
+            recipe.duration_ms(citizen).ok()?,
+        );
+    cost.is_finite().then_some(cost)
+}
+
 fn input_value(recipe: Recipe, citizen: &Citizen, owned: &[Quantity; Good::COUNT]) -> Option<f64> {
     let mut value = 0.0;
     let missing =
@@ -642,6 +656,9 @@ pub(crate) fn projected_recipes_at(
                 site.is_none_or(|place| citizen.validate_production_site(place, recipe).is_ok())
             })
             .filter_map(|recipe| {
+                if !citizen.eligible_sale_replenishment(recipe, site) {
+                    return None;
+                }
                 if recipe == Recipe::BrewBeer && free_brew_slots == 0 {
                     return None;
                 }
@@ -669,7 +686,15 @@ pub(crate) fn projected_recipes_at(
                     return None;
                 }
                 let rate = profit / duration as f64;
-                (rate > 0.0).then_some((recipe, fraction / rate, rate, duration))
+                if rate > 0.0 {
+                    Some((recipe, fraction / rate, rate, duration))
+                } else if !recipes.contains(&recipe)
+                    && citizen.eligible_production_trial(recipe, site)
+                {
+                    Some((recipe, f64::INFINITY, rate, duration))
+                } else {
+                    None
+                }
             })
             .min_by(|(a, af, ar, _), (b, bf, br, _)| {
                 af.total_cmp(bf)
@@ -754,9 +779,18 @@ pub(crate) fn ranked_recipes_at(citizen: &Citizen, site: Option<PlaceId>) -> Vec
             site.is_none_or(|place| citizen.validate_production_site(place, recipe).is_ok())
         })
         .filter_map(|recipe| {
+            if !citizen.eligible_sale_replenishment(recipe, site) {
+                return None;
+            }
             let rate = recipe_profit_for_site(recipe, citizen, site)?
                 / recipe.duration_ms(citizen).ok()? as f64;
-            (rate > 0.0).then_some((recipe, stock_fraction(recipe, citizen)? / rate, rate))
+            if rate > 0.0 {
+                Some((recipe, stock_fraction(recipe, citizen)? / rate, rate))
+            } else if citizen.eligible_production_trial(recipe, site) {
+                Some((recipe, f64::INFINITY, rate))
+            } else {
+                None
+            }
         })
         .collect();
     recipes.sort_by(|(a, af, ar), (b, bf, br)| {
@@ -1130,7 +1164,10 @@ mod tests {
             .with_good(Good::Water, 10000)
             .unwrap();
         let recipes = projected_recipes(&citizen, DAILY_CAPACITY_MS).unwrap();
-        assert_eq!(recipes, vec![Recipe::WeaveCloth; 7]);
+        assert!(recipe_profit(Recipe::SpinThread, &citizen).unwrap() < 0.0);
+        let mut expected = vec![Recipe::WeaveCloth; 7];
+        expected.extend([Recipe::SpinThread, Recipe::WeaveCloth]);
+        assert_eq!(recipes, expected);
         let covered = quoted_weaver(800);
         assert!(
             covered
@@ -1141,15 +1178,18 @@ mod tests {
                 .is_none()
         );
         let short = quoted_weaver(200);
-        // The preferred mix can use one owned batch; further imported cloth work loses money.
-        assert!(
-            projected_recipes(&short, DAILY_CAPACITY_MS)
-                .unwrap()
-                .iter()
-                .filter(|&&recipe| recipe == Recipe::WeaveCloth)
-                .count()
-                <= 1
-        );
+        let projected = projected_recipes(&short, DAILY_CAPACITY_MS).unwrap();
+        let spun = projected
+            .iter()
+            .filter(|&&recipe| recipe == Recipe::SpinThread)
+            .count();
+        let woven = projected
+            .iter()
+            .filter(|&&recipe| recipe == Recipe::WeaveCloth)
+            .count();
+        assert!(spun <= 1);
+        // Newly spun thread can fund another owned-input batch; imported thread still loses money.
+        assert!(woven <= 1 + spun);
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub mod households;
 pub mod maintenance;
 pub mod persistence;
 pub mod production;
+pub mod production_trials;
 
 pub type Quantity = u64;
 pub type Coins = i64;
@@ -320,6 +321,7 @@ pub struct Citizen {
     town_inventory: HashMap<Good, Quantity>,
     socage_rates: HashMap<(production::Recipe, Good), taxation::TaxRate>,
     site_socage_rates: HashMap<(PlaceId, Good), taxation::TaxRate>,
+    sale_income_basis_points: HashMap<(PlaceId, Good), u32>,
     storage: Storage,
     id: AgentId,
     home: PlaceId,
@@ -377,6 +379,7 @@ impl Citizen {
             town_inventory: HashMap::new(),
             socage_rates: HashMap::new(),
             site_socage_rates: HashMap::new(),
+            sale_income_basis_points: HashMap::new(),
             storage: Storage::default(),
             household: None,
             guilds: HashMap::new(),
@@ -1315,6 +1318,7 @@ impl Citizen {
         if action == CitizenAction::Eat {
             citizen.last_meal_started_ms = Some(self.market_time_ms);
         }
+        citizen.start_trial_production(action)?;
         if action.production_recipe() == Some(production::Recipe::BrewBeer) {
             citizen.start_brewing(action)?;
         }
@@ -1511,6 +1515,9 @@ impl Citizen {
             }
 
             if active.remaining_ms == 0 {
+                citizen
+                    .market
+                    .set_time(citizen.market_time_ms.saturating_add(action_elapsed_ms));
                 match active.action {
                     CitizenAction::CollectStored { place, list }
                     | CitizenAction::DepositStored { place, list } => {
@@ -1570,36 +1577,28 @@ impl Citizen {
                     }
                     CitizenAction::ListExcess => {
                         for (good, units) in citizen.excess_goods()?.items() {
-                            citizen.market.list(
-                                citizen.market_party(),
-                                citizen.selling_place(),
-                                good,
-                                units,
-                            )?;
-                            citizen.consume_goods(good, units)?;
+                            citizen.list_trial_stock(good, units)?;
                         }
                     }
                     CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } => {
                         let place = active.action.required_place(&citizen).unwrap();
+                        let mut budget = citizen.coins.min(list.spending_budget());
                         for (good, units) in list.items() {
-                            payments.extend(citizen.complete_purchase(
+                            let before = citizen.coins;
+                            payments.extend(citizen.complete_purchase_at_quote(
                                 place,
                                 good,
                                 units,
                                 record_trades,
                                 action_elapsed_ms,
+                                (budget, list.quote_ceiling(good)),
                             )?);
+                            budget -= before - citizen.coins;
                         }
                     }
                     CitizenAction::List(good, requested) => {
                         let units = requested.min(citizen.available_units(good));
-                        citizen.market.list(
-                            citizen.market_party(),
-                            citizen.selling_place(),
-                            good,
-                            units,
-                        )?;
-                        citizen.consume_goods(good, units)?;
+                        citizen.list_trial_stock(good, units)?;
                     }
                     CitizenAction::Withdraw(good, requested) => {
                         let units = citizen.market.withdraw(
@@ -1617,6 +1616,7 @@ impl Citizen {
                     }
                     _ => {}
                 }
+                citizen.complete_trial_output(active.action);
                 citizen.active_action = None;
             } else {
                 citizen.active_action = Some(active);
@@ -1629,6 +1629,7 @@ impl Citizen {
             .market_time_ms
             .checked_add(elapsed_ms)
             .ok_or(SimulationError::TimeOverflow)?;
+        citizen.reconcile_production_trials();
         Ok((citizen, payments))
     }
 
@@ -1692,11 +1693,31 @@ impl Citizen {
         record_trades: bool,
         elapsed_ms: u64,
     ) -> Result<Vec<(AgentId, Coins)>, SimulationError> {
-        let purchase = self.market.purchase(
+        self.complete_purchase_at_quote(
+            place,
+            good,
+            units,
+            record_trades,
+            elapsed_ms,
+            (self.coins, f64::MAX),
+        )
+    }
+
+    fn complete_purchase_at_quote(
+        &mut self,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+        record_trades: bool,
+        elapsed_ms: u64,
+        bounds: (Coins, f64),
+    ) -> Result<Vec<(AgentId, Coins)>, SimulationError> {
+        let (budget, ceiling) = bounds;
+        let purchase = self.market.purchase_at_quote(
             self.market_party(),
             place,
             (good, units),
-            self.coins,
+            (self.coins.min(budget), ceiling),
             self.market_time_ms
                 .checked_add(elapsed_ms)
                 .ok_or(SimulationError::TimeOverflow)?,
@@ -2260,6 +2281,7 @@ impl Universe {
                 }
                 citizen.map = universe.map.clone();
                 citizen.market = universe.market.clone();
+                citizen.market.set_time(universe.current_time_ms);
                 citizen.storage = universe.storage.clone();
                 citizen.prices = universe.market.prices;
                 citizen.market_time_ms = universe.current_time_ms;
@@ -2502,6 +2524,7 @@ impl Universe {
             universe.refresh_household_history(finishing_time, true)?;
             universe.refresh_guild_history(finishing_time, true);
             universe.current_time_ms = finishing_time;
+            universe.market.set_time(finishing_time);
             for (_, agent) in universe.agents.iter_mut() {
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
                 citizen.map = universe.map.clone();
@@ -2598,6 +2621,7 @@ impl Universe {
                 }
                 let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
                 citizen.market = universe.market.clone();
+                citizen.market.set_time(universe.current_time_ms);
                 citizen.storage = universe.storage.clone();
                 citizen.prices = universe.market.prices;
                 citizen.market_time_ms = finishing_time;
@@ -2634,6 +2658,7 @@ impl Universe {
                 }
                 let AgentKind::Citizen(before) = &agents_before[&id].kind;
                 let AgentKind::Citizen(after) = &universe.agents[&id].kind;
+                universe.market = after.market.clone();
                 if before.active_action.is_some()
                     || after.active_action.is_some()
                     || after.active_plan.is_some()
@@ -2938,6 +2963,7 @@ impl Universe {
             .get_mut(&id)
             .unwrap()
             .start_action(citizen)?;
+        universe.market = citizen.market.clone();
         universe.agents.insert(id, updated);
         universe.record_household_contributions(&histories_before)?;
         universe.register_action_request(id)?;
@@ -2966,6 +2992,7 @@ impl Universe {
             .get_mut(&id)
             .unwrap()
             .start_action(citizen)?;
+        universe.market = citizen.market.clone();
         universe.agents.insert(id, updated);
         universe.record_household_contributions(&histories_before)?;
         universe.register_action_request(id)?;

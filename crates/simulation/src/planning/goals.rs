@@ -237,6 +237,18 @@ impl Prediction {
         action: CitizenAction,
         prior_actions: usize,
     ) -> Result<Option<Self>, SimulationError> {
+        let action = match action {
+            CitizenAction::BuyAt { place, list } => CitizenAction::BuyAt {
+                place,
+                list: list.with_purchase_bounds(
+                    self.citizen.market(),
+                    self.citizen.market_party(),
+                    place,
+                    self.citizen.coins(),
+                )?,
+            },
+            action => action,
+        };
         if self.cooldowns.remaining(action) > 0
             || super::replan_check(&self.citizen, action, prior_actions + self.actions.len())
         {
@@ -1006,29 +1018,24 @@ fn record_blocked_purchase(
         return Ok(());
     }
     let citizen = &state.citizen;
-    if list.items().any(|(good, units)| {
-        units
-            > citizen
-                .market()
-                .available_units(citizen.market_party(), good)
-    }) {
-        let mut market = citizen.market().clone();
-        market.set_request(citizen.economic_id(), list)?;
-        market.refresh_affordability(&[(citizen.market_party(), citizen.coins())]);
-        let affordable = market.affordable_request(citizen.economic_id());
-        let mut blocked = state.blocked_requests.borrow_mut();
-        *blocked = crate::marketplace::ShoppingList::new(Good::ALL.into_iter().map(|good| {
-            let available = citizen
-                .market()
-                .available_units(citizen.market_party(), good);
-            let requested = if affordable.units(good) > available {
-                affordable.units(good)
-            } else {
-                0
-            };
-            (good, blocked.units(good).max(requested))
-        }))?;
+    if citizen.coins() <= 0 {
+        return Ok(());
     }
+    let filled = citizen.market().affordable_purchase_list_at(
+        citizen.market_party(),
+        None,
+        list,
+        citizen.coins(),
+    )?;
+    let mut blocked = state.blocked_requests.borrow_mut();
+    *blocked = crate::marketplace::ShoppingList::new(Good::ALL.into_iter().map(|good| {
+        let requested = if filled.units(good) < list.units(good) {
+            list.units(good)
+        } else {
+            0
+        };
+        (good, blocked.units(good).max(requested))
+    }))?;
     Ok(())
 }
 
@@ -1061,17 +1068,80 @@ fn shopping_trip_with_demand(
         return Ok(Vec::new());
     }
     record_blocked_purchase(initial, demand)?;
+    let mut places: Vec<_> = initial
+        .citizen
+        .map()
+        .places()
+        .values()
+        .filter(|place| place.kind != crate::locations::Location::Home)
+        .filter(|place| {
+            list.items().any(|(good, _)| {
+                initial.citizen.market().available_units_at(
+                    initial.citizen.market_party(),
+                    place.id,
+                    good,
+                ) > 0
+            })
+        })
+        .map(|place| place.id)
+        .collect();
+    places.sort_by_key(|place| place.0);
+    let mut variants = Vec::new();
+    for place in places {
+        variants.extend(shopping_trip_from(
+            initial,
+            list,
+            demand,
+            reserved_ms,
+            prior_actions,
+            place,
+        )?);
+    }
+    Ok(variants)
+}
+
+fn shopping_trip_from(
+    initial: &Prediction,
+    list: crate::marketplace::ShoppingList,
+    _demand: crate::marketplace::ShoppingList,
+    reserved_ms: u64,
+    prior_actions: usize,
+    first_place: crate::PlaceId,
+) -> Result<Vec<Prediction>, SimulationError> {
+    if initial.cooldowns.buy > 0 || initial.elapsed_ms + reserved_ms >= GOAL_HORIZON_MS {
+        return Ok(Vec::new());
+    }
     let mut state = initial.clone();
     let mut remaining = list;
+    let mut first = Some(first_place);
     while remaining.items().next().is_some() {
         let citizen = &state.citizen;
-        let place = citizen.market().nearest_purchase_place(
-            citizen.market_party(),
-            &citizen.map(),
-            citizen.position(),
-            remaining,
-            &[],
-        );
+        let place = first.take().or_else(|| {
+            citizen
+                .map()
+                .places()
+                .values()
+                .filter(|place| place.kind != crate::locations::Location::Home)
+                .filter(|place| {
+                    citizen
+                        .market()
+                        .affordable_purchase_list_at(
+                            citizen.market_party(),
+                            Some(place.id),
+                            remaining,
+                            citizen.coins(),
+                        )
+                        .is_ok_and(|list| list.items().next().is_some())
+                })
+                .min_by(|a, b| {
+                    citizen
+                        .position()
+                        .distance(a.position)
+                        .total_cmp(&citizen.position().distance(b.position))
+                        .then_with(|| a.id.0.cmp(&b.id.0))
+                })
+                .map(|place| place.id)
+        });
         let Some(place) = place else {
             return Ok(Vec::new());
         };
@@ -1263,6 +1333,7 @@ fn production_order_bounded(
             if food_target.is_none()
                 && crate::production::recipe_profit_for_site(recipe, &state.citizen, site)
                     .is_none_or(|profit| profit <= 0.0)
+                && !state.citizen.eligible_production_trial(recipe, site)
             {
                 complete = false;
                 break;
@@ -2880,6 +2951,96 @@ mod tests {
     }
 
     #[test]
+    fn blocked_demand_keeps_raw_quantities_for_cheaper_candidate_quotes() {
+        let citizen = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
+        let place = citizen
+            .map()
+            .public_place(crate::locations::Location::Market);
+        let mut market = citizen.market().clone();
+        market.prices = market.prices.with_price(Good::FlaxGarment, 1000.0).unwrap();
+        let list = crate::marketplace::ShoppingList::single(Good::FlaxGarment, 1);
+        let empty = Prediction::new(
+            &citizen.clone().with_market(market.clone()),
+            Cooldowns::default(),
+        );
+        shopping_trip(&empty, list, 0, 0).unwrap();
+        assert_eq!(empty.blocked_requests.borrow().units(Good::FlaxGarment), 1);
+        market
+            .list_at_quote(
+                crate::AgentId(uuid::Uuid::new_v4()),
+                place,
+                Good::FlaxGarment,
+                1,
+                1000.0,
+            )
+            .unwrap();
+        let offered = Prediction::new(&citizen.with_market(market), Cooldowns::default());
+        shopping_trip(&offered, list, 0, 0).unwrap();
+        assert_eq!(
+            offered.blocked_requests.borrow().units(Good::FlaxGarment),
+            1
+        );
+    }
+
+    #[test]
+    fn shopping_routes_skip_unaffordable_intermediate_stock() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::new(
+            Position { x: 10.0, y: 0.0 },
+            Position { x: 20.0, y: 0.0 },
+            Position::default(),
+        )
+        .unwrap();
+        let c = map.public_place(Location::River);
+        let a = map.public_place(Location::Market);
+        let b = map.public_place(Location::Forest);
+        let buyer = Citizen::new(0.0)
+            .unwrap()
+            .with_map(map.clone())
+            .unwrap()
+            .with_coins(2)
+            .unwrap();
+        let mut market = buyer.market().clone();
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        for (place, quote) in [(a, 1.0), (b, 2.0), (c, 1.0)] {
+            market
+                .list_at_quote(seller, place, Good::BreadRoll, 1, quote)
+                .unwrap();
+        }
+        let buyer = buyer.with_market(market);
+        let variants = shopping_trip(
+            &Prediction::new(&buyer, Cooldowns::default()),
+            crate::marketplace::ShoppingList::single(Good::BreadRoll, 2),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(
+            variants
+                .iter()
+                .any(|trip| trip.citizen.available_units(Good::BreadRoll) == 2
+                    && trip.citizen.coins() == 0)
+        );
+        assert!(
+            variants
+                .iter()
+                .all(|trip| !trip.actions.contains(&CitizenAction::Travel(b)))
+        );
+    }
+
+    #[test]
+    fn shopping_without_any_listings_still_records_affordable_demand() {
+        let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
+        let initial = Prediction::new(&citizen, Cooldowns::default());
+        let list = crate::marketplace::ShoppingList::single(Good::FlaxGarment, 1);
+        assert!(shopping_trip(&initial, list, 0, 0).unwrap().is_empty());
+        assert_eq!(
+            initial.blocked_requests.borrow().units(Good::FlaxGarment),
+            1
+        );
+    }
+
+    #[test]
     fn clothing_shortage_forecast_is_isolated_and_owned_garments_suppress_demand() {
         use crate::marketplace::ShoppingList;
         let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
@@ -3002,9 +3163,17 @@ mod tests {
         let initial = Prediction::new(&buyer, Cooldowns::default());
         let list =
             crate::marketplace::ShoppingList::new([(Good::Flour, 100), (Good::Wood, 25)]).unwrap();
-        let trip = shopping_trip(&initial, list, 0, 0).unwrap().pop().unwrap();
+        let trip = shopping_trip(&initial, list, 0, 0)
+            .unwrap()
+            .into_iter()
+            .find(|trip| trip.actions.first() == Some(&CitizenAction::Travel(mill)))
+            .unwrap();
         assert_eq!(
-            trip.actions,
+            trip.actions
+                .iter()
+                .copied()
+                .map(unbounded_action)
+                .collect::<Vec<_>>(),
             [
                 CitizenAction::Travel(mill),
                 CitizenAction::BuyAt {
@@ -3075,6 +3244,7 @@ mod tests {
                 trip.citizen.available_units(Good::BreadRoll) == 5
                     && trip.citizen.available_units(Good::BerryPie) == 1
                     && trip.actions.len() == 4
+                    && trip.actions.first() == Some(&CitizenAction::Travel(mill))
             })
             .unwrap();
         assert_eq!(
@@ -3103,7 +3273,7 @@ mod tests {
         initial.elapsed_ms = GOAL_HORIZON_MS - duration;
         assert!(!shopping_trip(&initial, list, 0, 0).unwrap().is_empty());
         assert!(
-            shopping_trip(&initial, list, TRADE_DURATION_MS + 1, 0)
+            shopping_trip(&initial, list, duration + 1, 0)
                 .unwrap()
                 .is_empty()
         );
@@ -3120,18 +3290,47 @@ mod tests {
         );
     }
 
-    fn food_purchase(citizen: &Citizen, good: Good) -> CitizenAction {
-        CitizenAction::BuyAt {
-            place: citizen
-                .map()
-                .public_place(crate::locations::Location::Market),
-            list: crate::marketplace::ShoppingList::single(
-                good,
-                ((MEAL_NOURISHMENT - citizen.available_food_nutrition()).max(0.0)
-                    / good.nutrition_per_unit().unwrap())
-                .ceil() as crate::Quantity,
-            ),
+    fn bounded_action(citizen: &Citizen, action: CitizenAction) -> CitizenAction {
+        match action {
+            CitizenAction::BuyAt { place, list } => CitizenAction::BuyAt {
+                place,
+                list: list
+                    .with_purchase_bounds(
+                        citizen.market(),
+                        citizen.market_party(),
+                        place,
+                        citizen.coins(),
+                    )
+                    .unwrap(),
+            },
+            action => action,
         }
+    }
+    fn unbounded_action(action: CitizenAction) -> CitizenAction {
+        match action {
+            CitizenAction::BuyAt { place, list } => CitizenAction::BuyAt {
+                place,
+                list: list.without_purchase_bounds(),
+            },
+            action => action,
+        }
+    }
+
+    fn food_purchase(citizen: &Citizen, good: Good) -> CitizenAction {
+        bounded_action(
+            citizen,
+            CitizenAction::BuyAt {
+                place: citizen
+                    .map()
+                    .public_place(crate::locations::Location::Market),
+                list: crate::marketplace::ShoppingList::single(
+                    good,
+                    ((MEAL_NOURISHMENT - citizen.available_food_nutrition()).max(0.0)
+                        / good.nutrition_per_unit().unwrap())
+                    .ceil() as crate::Quantity,
+                ),
+            },
+        )
     }
 
     fn relocate_stock(citizen: &Citizen) -> Citizen {
@@ -4395,10 +4594,11 @@ mod tests {
             assert_eq!(variant.actions.last(), Some(&CitizenAction::Eat));
             assert!(variant.citizen.hunger() < source.hunger());
         }
-        let paid = full_meals(&source.with_coins(9).unwrap());
+        let funded = source.with_coins(9).unwrap();
+        let paid = full_meals(&funded);
         assert!(
             paid.iter()
-                .any(|v| v.actions == [food_purchase(&source, Good::Berries), CitizenAction::Eat])
+                .any(|v| v.actions == [food_purchase(&funded, Good::Berries), CitizenAction::Eat])
         );
     }
 
@@ -4982,7 +5182,7 @@ mod tests {
         assert_eq!(bought.citizen.coins(), 0);
         assert_eq!(bought.actions.len(), 1);
         assert_eq!(
-            bought.actions[0],
+            unbounded_action(bought.actions[0]),
             CitizenAction::BuyAt {
                 place: buyer.map().public_place(crate::locations::Location::Market),
                 list: crate::marketplace::ShoppingList::single(Good::BreadRoll, 10),
@@ -5018,7 +5218,7 @@ mod tests {
             .unwrap();
         assert_eq!(bought.actions[0], CitizenAction::Travel(mill));
         assert_eq!(
-            bought.actions[1],
+            unbounded_action(bought.actions[1]),
             CitizenAction::BuyAt {
                 place: mill,
                 list: crate::marketplace::ShoppingList::single(Good::BreadRoll, 5),

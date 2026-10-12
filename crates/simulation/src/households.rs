@@ -217,6 +217,7 @@ impl Universe {
                 .market
                 .orders()
                 .any(|order| order.seller.account() == Some(*id))
+                || self.market.account_has_committed_production_trial(*id)
                 || self.taxation.accounts.keys().any(|key| key.payer == *id)
             {
                 return Err(SimulationError::InvalidOwnership);
@@ -227,6 +228,9 @@ impl Universe {
         }
         let id = AgentId(uuid::Uuid::new_v4());
         let mut universe = self.clone();
+        for member in members {
+            universe.market.cancel_unoffered_production_trials(*member);
+        }
         universe
             .workshop_fees
             .retain(|(payer, _), _| !members.contains(payer));

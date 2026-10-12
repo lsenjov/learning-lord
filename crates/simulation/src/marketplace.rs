@@ -1,9 +1,8 @@
 use crate::{AgentId, Coins, PlaceId, Quantity, SimulationError};
-use imbl::{HashMap, Vector};
+use imbl::{HashMap, HashSet, Vector};
 
 pub const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 pub const UPDATE_TIME_MS: u64 = 4 * 60 * 60 * 1000;
-pub const MAX_DAILY_PRICE_CHANGE: f64 = 0.10;
 pub const MIN_QUOTED_PRICE: f64 = 0.01;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -189,14 +188,22 @@ impl CaravanPolicy {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
+struct PurchaseBounds {
+    quote_ceilings: [f64; Good::COUNT],
+    spending_budget: Coins,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct ShoppingList {
     units: [Quantity; Good::COUNT],
+    purchase_bounds: Option<PurchaseBounds>,
 }
 
 impl Default for ShoppingList {
     fn default() -> Self {
         Self {
             units: [0; Good::COUNT],
+            purchase_bounds: None,
         }
     }
 }
@@ -218,6 +225,58 @@ impl ShoppingList {
         list
     }
 
+    pub(crate) fn spending_budget(self) -> Coins {
+        self.purchase_bounds
+            .map_or(Coins::MAX, |bounds| bounds.spending_budget)
+    }
+    pub(crate) fn quote_ceiling(self, good: Good) -> f64 {
+        self.purchase_bounds
+            .map_or(f64::MAX, |bounds| bounds.quote_ceilings[good as usize])
+    }
+    pub(crate) fn with_purchase_bounds(
+        mut self,
+        market: &Market,
+        buyer: MarketParty,
+        place: PlaceId,
+        budget: Coins,
+    ) -> Result<Self, SimulationError> {
+        let mut cost: Coins = 0;
+        let mut quote_ceilings = [0.0; Good::COUNT];
+        for (good, units) in self.items() {
+            let fill = market.fill_plan(buyer, Some(place), good, units, None)?;
+            quote_ceilings[good as usize] = fill
+                .fills
+                .iter()
+                .filter_map(|(id, _, _)| market.order(*id))
+                .map(|order| order.quoted_price)
+                .max_by(f64::total_cmp)
+                .unwrap_or(0.0);
+            cost = cost
+                .checked_add(fill.coins)
+                .ok_or(SimulationError::WealthOverflow)?;
+        }
+        self.purchase_bounds = Some(PurchaseBounds {
+            quote_ceilings,
+            spending_budget: cost.min(budget).max(0),
+        });
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn without_purchase_bounds(mut self) -> Self {
+        self.purchase_bounds = None;
+        self
+    }
+
+    pub(crate) fn validate_bounds(self) -> bool {
+        self.purchase_bounds.is_none_or(|bounds| {
+            bounds.spending_budget >= 0
+                && bounds
+                    .quote_ceilings
+                    .iter()
+                    .all(|price| price.is_finite() && *price >= 0.0)
+        })
+    }
     pub fn units(self, good: Good) -> Quantity {
         self.units[good as usize]
     }
@@ -350,6 +409,7 @@ pub struct SellOrder {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Trade {
+    pub order_id: OrderId,
     pub place: PlaceId,
     pub time_ms: u64,
     pub buyer: MarketParty,
@@ -364,6 +424,9 @@ pub struct Trade {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct DailyMarketActivity {
+    pub local_quoted_value: f64,
+    pub imported_quoted_value: f64,
+    pub accepted_local_price: Option<f64>,
     pub start_ms: u64,
     pub end_ms: u64,
     pub good: Good,
@@ -388,6 +451,8 @@ pub struct DailyMarketActivity {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct GoodActivity {
+    pub local_quoted_value: f64,
+    pub imported_quoted_value: f64,
     pub traded_coins: Coins,
     pub caravan_listed_units: Quantity,
     pub traded_units: Quantity,
@@ -412,8 +477,23 @@ pub struct MarketPeriod {
     pub goods: [GoodActivity; Good::COUNT],
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct SellerState {
+    pub established_price: Option<f64>,
+    pub quoted_price: f64,
+    pub first_listed_ms: u64,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Market {
+    pub(crate) production_trials: crate::production_trials::ProductionTrials,
+    seller_rates: HashMap<AgentId, u8>,
+    seller_states: HashMap<(AgentId, Good, PlaceId), SellerState>,
+    trial_orders: HashSet<OrderId>,
+    clock_ms: u64,
+    last_local_prices: [Option<(u64, f64)>; Good::COUNT],
+    retained_local_prices: [Option<(u64, f64)>; Good::COUNT],
+    demand_budgets: HashMap<AgentId, Coins>,
     pub prices: Prices,
     policy: CaravanPolicy,
     import_tariff_carry: [u16; Good::COUNT],
@@ -437,6 +517,141 @@ pub(crate) struct Purchase {
 }
 
 impl Market {
+    pub(crate) fn set_time(&mut self, time_ms: u64) {
+        self.clock_ms = time_ms;
+    }
+
+    pub fn retained_local_price(&self, good: Good) -> Option<(u64, f64)> {
+        self.retained_local_prices[good as usize]
+    }
+
+    pub fn last_local_price(&self, good: Good) -> Option<(u64, f64)> {
+        self.last_local_prices[good as usize]
+    }
+
+    pub(crate) fn ensure_seller_adjustment_rate(&mut self, account: AgentId) -> u8 {
+        let rate = account
+            .0
+            .as_bytes()
+            .iter()
+            .copied()
+            .find(|byte| *byte < 250)
+            .unwrap_or(0)
+            % 10
+            + 1;
+        *self.seller_rates.entry(account).or_insert(rate)
+    }
+
+    pub fn seller_adjustment_rate(&self, account: AgentId) -> Option<u8> {
+        self.seller_rates.get(&account).copied()
+    }
+
+    pub fn seller_state(
+        &self,
+        account: AgentId,
+        place: PlaceId,
+        good: Good,
+    ) -> Option<&SellerState> {
+        self.seller_states.get(&(account, good, place))
+    }
+
+    pub(crate) fn known_trial_price(&self, account: AgentId, place: PlaceId, good: Good) -> f64 {
+        self.seller_state(account, place, good)
+            .and_then(|state| state.established_price)
+            .unwrap_or_else(|| self.prices.price(good).unwrap())
+    }
+    pub(crate) fn establish_trial_price(
+        &mut self,
+        account: AgentId,
+        place: PlaceId,
+        good: Good,
+        quote: f64,
+    ) {
+        if let Some(state) = self.seller_states.get_mut(&(account, good, place)) {
+            state.established_price = Some(quote);
+            state.quoted_price = quote;
+        }
+    }
+    pub fn order(&self, id: OrderId) -> Option<&SellOrder> {
+        self.orders.get(&id)
+    }
+    pub fn order_is_trial(&self, id: OrderId) -> bool {
+        self.trial_orders.contains(&id)
+    }
+    pub(crate) fn mark_trial_order(&mut self, id: OrderId, trial: bool) {
+        if trial {
+            self.trial_orders.insert(id);
+        } else {
+            self.trial_orders.remove(&id);
+        }
+    }
+    pub(crate) fn set_order_price(
+        &mut self,
+        id: OrderId,
+        quote: f64,
+    ) -> Result<(), SimulationError> {
+        if !quote.is_finite() || quote < MIN_QUOTED_PRICE {
+            return Err(SimulationError::InvalidPrices);
+        }
+        if let Some(order) = self.orders.get_mut(&id) {
+            order.quoted_price = quote;
+        }
+        Ok(())
+    }
+
+    pub fn affordable_unmet_at_quote(&self, target: Good, quote: f64) -> Quantity {
+        self.requests
+            .iter()
+            .map(|(account, request)| {
+                let mut funds = self
+                    .demand_budgets
+                    .get(account)
+                    .copied()
+                    .unwrap_or(0)
+                    .max(0);
+                let party = self
+                    .orders()
+                    .find(|order| order.seller.account() == Some(*account))
+                    .map_or(MarketParty::Citizen(*account), |order| order.seller);
+                let mut wanted = 0;
+                for (good, requested) in request.items() {
+                    let ceiling = if good == target { quote } else { f64::MAX };
+                    let Ok(fill) =
+                        self.fill_plan_at_quote(party, None, good, requested, Some(funds), ceiling)
+                    else {
+                        continue;
+                    };
+                    funds -= fill.coins;
+                    let price = if good == target {
+                        quote
+                    } else {
+                        self.prices.price(good).unwrap()
+                    };
+                    let mut low = 0;
+                    let mut high = requested.saturating_sub(fill.units);
+                    while low < high {
+                        let middle = low + (high - low).div_ceil(2);
+                        if charge(middle as f64 * price / good.units_per_price_unit() as f64)
+                            .is_ok_and(|cost| cost <= funds)
+                        {
+                            low = middle;
+                        } else {
+                            high = middle - 1;
+                        }
+                    }
+                    if low > 0 {
+                        funds -= charge(low as f64 * price / good.units_per_price_unit() as f64)
+                            .unwrap();
+                    }
+                    if good == target {
+                        wanted = low;
+                    }
+                }
+                wanted
+            })
+            .sum()
+    }
+
     pub fn caravan_policy(&self) -> CaravanPolicy {
         self.policy
     }
@@ -497,6 +712,7 @@ impl Market {
             period_start_ms,
             first_period_start_ms: period_start_ms,
             started_at_ms: time_ms,
+            clock_ms: time_ms,
             ..Self::default()
         }
     }
@@ -542,6 +758,8 @@ impl Market {
             .take_while(|activity| activity.end_ms == self.period_start_ms)
         {
             goods[activity.good as usize] = GoodActivity {
+                local_quoted_value: activity.local_quoted_value,
+                imported_quoted_value: activity.imported_quoted_value,
                 traded_units: activity.traded_units,
                 traded_coins: activity.traded_coins,
                 caravan_listed_units: activity.caravan_remaining_supply_units,
@@ -611,6 +829,16 @@ impl Market {
         budgets: &[(P, Coins)],
     ) {
         let mut affordable = HashMap::new();
+        self.demand_budgets = budgets
+            .iter()
+            .filter_map(|&(party, coins)| {
+                party
+                    .into()
+                    .account()
+                    .filter(|id| self.requests.contains_key(id))
+                    .map(|id| (id, coins))
+            })
+            .collect();
         for &(buyer, budget) in budgets {
             let buyer = buyer.into();
             let Some(account) = buyer.account() else {
@@ -691,6 +919,23 @@ impl Market {
             })
             .map(|order| order.units)
             .sum()
+    }
+
+    pub(crate) fn affordable_purchase_list_at(
+        &self,
+        buyer: MarketParty,
+        place: Option<PlaceId>,
+        list: ShoppingList,
+        budget: Coins,
+    ) -> Result<ShoppingList, SimulationError> {
+        let mut remaining = budget.max(0);
+        let mut fills = Vec::new();
+        for (good, units) in list.items() {
+            let fill = self.fill_plan(buyer, place, good, units, Some(remaining))?;
+            remaining -= fill.coins;
+            fills.push((good, fill.units));
+        }
+        ShoppingList::new(fills)
     }
 
     pub fn purchase_cost_at(
@@ -826,10 +1071,23 @@ impl Market {
         requested: Quantity,
         budget: Option<Coins>,
     ) -> Result<FillPlan, SimulationError> {
+        self.fill_plan_at_quote(buyer, place, good, requested, budget, f64::MAX)
+    }
+
+    fn fill_plan_at_quote(
+        &self,
+        buyer: MarketParty,
+        place: Option<PlaceId>,
+        good: Good,
+        requested: Quantity,
+        budget: Option<Coins>,
+        ceiling: f64,
+    ) -> Result<FillPlan, SimulationError> {
         let mut orders: Vec<_> = self
             .orders()
             .filter(|o| {
                 self.purchasable(o)
+                    && o.quoted_price <= ceiling
                     && o.seller != buyer
                     && o.good == good
                     && place.is_none_or(|id| o.place == id)
@@ -910,16 +1168,36 @@ impl Market {
         if units == 0 {
             return Ok(());
         }
+        let reference = self
+            .prices
+            .price(good)
+            .ok_or(SimulationError::InvalidPrices)?;
+        let price = seller
+            .account()
+            .and_then(|account| self.seller_state(account, place, good))
+            .map_or(reference, |state| state.quoted_price);
+        self.list_at_quote(seller, place, good, units, price)?;
+        Ok(())
+    }
+
+    pub(crate) fn list_at_quote(
+        &mut self,
+        seller: impl Into<MarketParty>,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+        price: f64,
+    ) -> Result<OrderId, SimulationError> {
+        let seller = seller.into();
+        if units == 0 || !price.is_finite() || price < MIN_QUOTED_PRICE {
+            return Err(SimulationError::InvalidPrices);
+        }
         self.orders()
             .filter(|order| order.good == good)
             .map(|order| order.units)
             .try_fold(units, Quantity::checked_add)
             .ok_or(SimulationError::WealthOverflow)?;
-        let price = self
-            .prices
-            .price(good)
-            .ok_or(SimulationError::InvalidPrices)?;
-        if !self.prices.value(good, units).is_some_and(f64::is_finite) {
+        if !(units as f64 * price / good.units_per_price_unit() as f64).is_finite() {
             return Err(SimulationError::WealthOverflow);
         }
         let id = OrderId(self.next_order_id);
@@ -927,6 +1205,17 @@ impl Market {
             .next_order_id
             .checked_add(1)
             .ok_or(SimulationError::TimeOverflow)?;
+        if let Some(account) = seller.account() {
+            // UUID entropy gives forecasts the same stable policy as live execution.
+            self.ensure_seller_adjustment_rate(account);
+            self.seller_states
+                .entry((account, good, place))
+                .or_insert(SellerState {
+                    established_price: None,
+                    quoted_price: self.prices.price(good).unwrap(),
+                    first_listed_ms: self.clock_ms,
+                });
+        }
         self.orders.insert(
             id,
             SellOrder {
@@ -938,7 +1227,7 @@ impl Market {
                 quoted_price: price,
             },
         );
-        Ok(())
+        Ok(id)
     }
     pub(crate) fn withdraw(
         &mut self,
@@ -981,9 +1270,23 @@ impl Market {
         time_ms: u64,
         record: bool,
     ) -> Result<Purchase, SimulationError> {
+        self.purchase_at_quote(buyer, place, item, (budget, f64::MAX), time_ms, record)
+    }
+
+    pub(crate) fn purchase_at_quote(
+        &mut self,
+        buyer: impl Into<MarketParty>,
+        place: PlaceId,
+        item: (Good, Quantity),
+        bounds: (Coins, f64),
+        time_ms: u64,
+        record: bool,
+    ) -> Result<Purchase, SimulationError> {
         let buyer = buyer.into();
         let (good, requested) = item;
-        let plan = self.fill_plan(buyer, Some(place), good, requested, Some(budget))?;
+        let (budget, ceiling) = bounds;
+        let plan =
+            self.fill_plan_at_quote(buyer, Some(place), good, requested, Some(budget), ceiling)?;
         let mut payments = std::collections::BTreeMap::new();
         for (id, units, coins) in plan.fills {
             let mut order = self.orders.get(&id).unwrap().clone();
@@ -1010,6 +1313,10 @@ impl Market {
                     .checked_add(tariff_coins)
                     .ok_or(SimulationError::WealthOverflow)?;
                 let volume = &mut self.period_activity[good as usize];
+                if order.seller != MarketParty::Caravan {
+                    volume.local_quoted_value +=
+                        units as f64 * order.quoted_price / good.units_per_price_unit() as f64;
+                }
                 volume.traded_units = volume
                     .traded_units
                     .checked_add(units)
@@ -1040,6 +1347,7 @@ impl Market {
                         request.units[good as usize].saturating_sub(units);
                 }
                 self.trades.push_back(Trade {
+                    order_id: order.id,
                     place: order.place,
                     time_ms,
                     buyer,
@@ -1051,6 +1359,20 @@ impl Market {
                     tariff_coins,
                     recipient_coins: coins - tariff_coins,
                 });
+                if buyer != MarketParty::Caravan
+                    && !self.order_is_trial(order.id)
+                    && let Some(account) = order.seller.account()
+                    && let Some(state) = self.seller_states.get_mut(&(account, good, order.place))
+                {
+                    state.established_price = Some(order.quoted_price);
+                }
+                self.record_trial_sale(
+                    order.id,
+                    units,
+                    coins - tariff_coins,
+                    order.seller != MarketParty::Caravan,
+                    time_ms,
+                );
             }
             if order.units == 0 {
                 self.orders.remove(&id);
@@ -1091,25 +1413,20 @@ impl Market {
         export_limits: [Quantity; Good::COUNT],
     ) -> Result<Vec<(AgentId, Coins)>, SimulationError> {
         self.remove_ineligible_caravan_orders();
-        let closed = self.previous_period();
         let mut payments = std::collections::BTreeMap::<uuid::Uuid, Coins>::new();
         for good in Good::ALL {
-            let price = self.prices.price(good).unwrap();
-            if self.policy.exports[good as usize].allowed
-                && self
-                    .effective_export_threshold(good)
-                    .is_some_and(|threshold| price < threshold)
-            {
+            let export_threshold = self.effective_export_threshold(good);
+            if self.policy.exports[good as usize].allowed && export_threshold.is_some() {
                 let mut sellers = std::collections::BTreeMap::<uuid::Uuid, Quantity>::new();
-                for order in self.orders().filter(|order| order.good == good) {
+                for order in self.orders().filter(|order| {
+                    order.good == good
+                        && export_threshold.is_some_and(|threshold| order.quoted_price < threshold)
+                }) {
                     if let Some(seller) = order.seller.account() {
                         *sellers.entry(seller.0).or_default() += order.units;
                     }
                 }
                 let total: Quantity = sellers.values().sum();
-                if total == 0 {
-                    continue;
-                }
                 let target = total.div_ceil(2).min(export_limits[good as usize]);
                 let mut allocations: Vec<_> = sellers
                     .into_iter()
@@ -1132,7 +1449,10 @@ impl Market {
                     let mut orders: Vec<_> = self
                         .orders()
                         .filter(|order| {
-                            order.seller.account() == Some(AgentId(seller)) && order.good == good
+                            order.seller.account() == Some(AgentId(seller))
+                                && order.good == good
+                                && export_threshold
+                                    .is_some_and(|threshold| order.quoted_price < threshold)
                         })
                         .cloned()
                         .collect();
@@ -1193,6 +1513,7 @@ impl Market {
                             .checked_add(coins)
                             .ok_or(SimulationError::WealthOverflow)?;
                         self.trades.push_back(Trade {
+                            order_id: order.id,
                             place: order.place,
                             time_ms,
                             buyer: MarketParty::Caravan,
@@ -1204,23 +1525,19 @@ impl Market {
                             tariff_coins,
                             recipient_coins,
                         });
+                        self.record_trial_sale(order.id, units, recipient_coins, false, time_ms);
                     }
                     let payment = payments.entry(seller).or_default();
                     *payment = payment
                         .checked_add(received)
                         .ok_or(SimulationError::WealthOverflow)?;
                 }
-            } else if self
-                .effective_import_threshold(good)
-                .is_some_and(|threshold| price > threshold)
-            {
-                let wanted = closed
-                    .as_ref()
-                    .map_or(0, |period| {
-                        period.goods[good as usize].affordable_demand_units
-                    })
+            }
+            if let Some(import_quote) = self.effective_import_threshold(good) {
+                let wanted = self
+                    .affordable_unmet_at_quote(good, import_quote)
                     .div_ceil(2);
-                let units = wanted.saturating_sub(self.caravan_units(good));
+                let units = wanted;
                 if units == 0 {
                     continue;
                 }
@@ -1246,6 +1563,8 @@ impl Market {
                     },
                 );
                 self.period_activity[good as usize].imported_units = units;
+                self.period_activity[good as usize].imported_quoted_value +=
+                    units as f64 * import_quote / good.units_per_price_unit() as f64;
             }
         }
         Ok(payments
@@ -1265,11 +1584,6 @@ impl Market {
         for good in Good::ALL {
             let traded = self.period_activity[good as usize];
             let before = self.prices.price(good).unwrap();
-            let price_eligible_supply: Quantity = self
-                .orders()
-                .filter(|o| self.purchasable(o) && o.good == good && o.quoted_price <= before)
-                .map(|o| o.units)
-                .sum();
             let supply: Quantity = self
                 .orders()
                 .filter(|o| self.purchasable(o) && o.good == good)
@@ -1283,20 +1597,22 @@ impl Market {
             if traded.traded_units == 0 && traded.imported_units == 0 && supply == 0 && unmet == 0 {
                 continue;
             }
-            // Scale before adding so finite large volumes do not overflow the imbalance ratio.
-            let scale = traded.traded_units.max(price_eligible_supply).max(unmet) as f64;
-            let imbalance = if scale == 0.0 {
-                0.0
-            } else {
-                let demand = traded.traded_units as f64 / scale + unmet as f64 / scale;
-                let available =
-                    traded.traded_units as f64 / scale + price_eligible_supply as f64 / scale;
-                (demand - available) / (demand + available)
-            };
-            let after = (before * (1.0 + MAX_DAILY_PRICE_CHANGE * imbalance))
-                .clamp(MIN_QUOTED_PRICE, f64::MAX);
+            let accepted_local_price = (traded.local_traded_units > 0).then(|| {
+                (traded.local_quoted_value / traded.local_traded_units as f64
+                    * good.units_per_price_unit() as f64)
+                    .max(MIN_QUOTED_PRICE)
+            });
+            if let Some(accepted) = accepted_local_price {
+                self.last_local_prices[good as usize] = Some((boundary, accepted));
+            }
+            let after = accepted_local_price.map_or(before, |accepted| {
+                (before * 0.75 + accepted * 0.25).max(MIN_QUOTED_PRICE)
+            });
             self.prices = self.prices.with_price(good, after)?;
             self.history.push_back(DailyMarketActivity {
+                local_quoted_value: traded.local_quoted_value,
+                imported_quoted_value: traded.imported_quoted_value,
+                accepted_local_price,
                 start_ms: self.period_start_ms,
                 end_ms: boundary,
                 good,
@@ -1320,12 +1636,65 @@ impl Market {
                 price_after: after,
             });
         }
-        for id in self.orders.keys().copied().collect::<Vec<_>>() {
-            let order = self.orders.get_mut(&id).unwrap();
-            if order.seller.account().is_some() {
-                order.quoted_price = self.prices.price(order.good).unwrap();
+        self.update_production_trials(boundary);
+        let mut recent_movement =
+            std::collections::HashMap::<(AgentId, Good, PlaceId), Quantity>::new();
+        for trade in self
+            .trades
+            .iter()
+            .rev()
+            .take_while(|trade| trade.time_ms >= boundary.saturating_sub(2 * DAY_MS))
+        {
+            if let Some(account) = trade.seller.account() {
+                let movement = recent_movement
+                    .entry((account, trade.good, trade.place))
+                    .or_default();
+                *movement = movement.saturating_add(trade.units);
             }
         }
+        let keys: Vec<_> = self.seller_states.keys().copied().collect();
+        for (account, good, place) in keys {
+            let key = (account, good, place);
+            if boundary
+                < self.seller_states[&key]
+                    .first_listed_ms
+                    .saturating_add(2 * DAY_MS)
+            {
+                continue;
+            }
+            let stock: Quantity = self
+                .orders()
+                .filter(|order| {
+                    order.seller.account() == Some(account)
+                        && order.good == good
+                        && order.place == place
+                        && !self.order_is_trial(order.id)
+                })
+                .map(|order| order.units)
+                .sum();
+            if stock == 0 {
+                continue;
+            }
+            let movement = recent_movement.get(&key).copied().unwrap_or(0);
+            let markdown = f64::from(self.seller_rates[&account]) / 100.0
+                * (1.0 - movement as f64 / stock as f64).max(0.0);
+            let quote =
+                (self.seller_states[&key].quoted_price * (1.0 - markdown)).max(MIN_QUOTED_PRICE);
+            self.seller_states.get_mut(&key).unwrap().quoted_price = quote;
+            for id in self.orders.keys().copied().collect::<Vec<_>>() {
+                if self.order_is_trial(id) {
+                    continue;
+                }
+                let order = self.orders.get_mut(&id).unwrap();
+                if order.seller.account() == Some(account)
+                    && order.good == good
+                    && order.place == place
+                {
+                    order.quoted_price = quote;
+                }
+            }
+        }
+        self.clock_ms = boundary;
         self.period_activity = [GoodActivity::default(); Good::COUNT];
         self.period_start_ms = boundary;
         Ok(())
@@ -1392,12 +1761,17 @@ impl Market {
             .front()
             .is_some_and(|day| day.start_ms < history_cutoff)
         {
-            self.history.pop_front();
+            if let Some(day) = self.history.pop_front()
+                && let Some(quote) = day.accepted_local_price
+            {
+                self.retained_local_prices[day.good as usize] = Some((day.end_ms, quote));
+            }
         }
     }
 
     pub(crate) fn validate_save(&self) -> Result<(), crate::persistence::SaveError> {
         use crate::persistence::SaveError;
+        self.validate_production_trial_state()?;
         self.policy
             .validate()
             .map_err(|_| SaveError::InvalidState("invalid caravan policy"))?;
@@ -1417,6 +1791,54 @@ impl Market {
                 "invalid market order or tariff carry",
             ));
         }
+        if self
+            .seller_rates
+            .values()
+            .any(|rate| !(1..=10).contains(rate))
+            || self.seller_states.iter().any(|((account, _, _), state)| {
+                !self.seller_rates.contains_key(account)
+                    || !state.quoted_price.is_finite()
+                    || state.quoted_price < MIN_QUOTED_PRICE
+                    || state
+                        .established_price
+                        .is_some_and(|quote| !quote.is_finite() || quote < MIN_QUOTED_PRICE)
+            })
+            || self
+                .requests
+                .values()
+                .chain(self.affordable_requests.values())
+                .any(|list| !list.validate_bounds())
+        {
+            return Err(SaveError::InvalidState(
+                "invalid seller pricing state or purchase bounds",
+            ));
+        }
+        if self
+            .last_local_prices
+            .iter()
+            .chain(self.retained_local_prices.iter())
+            .flatten()
+            .any(|(_, quote)| !quote.is_finite() || *quote < MIN_QUOTED_PRICE)
+            || self.period_activity.iter().any(|activity| {
+                !activity.local_quoted_value.is_finite()
+                    || activity.local_quoted_value < 0.0
+                    || !activity.imported_quoted_value.is_finite()
+                    || activity.imported_quoted_value < 0.0
+            })
+            || self.history.iter().any(|day| {
+                day.accepted_local_price
+                    .is_some_and(|quote| !quote.is_finite() || quote < MIN_QUOTED_PRICE)
+                    || !day.local_quoted_value.is_finite()
+                    || day.local_quoted_value < 0.0
+                    || !day.imported_quoted_value.is_finite()
+                    || day.imported_quoted_value < 0.0
+            })
+            || self.demand_budgets.values().any(|budget| *budget < 0)
+        {
+            return Err(SaveError::InvalidState(
+                "invalid accepted prices or demand budgets",
+            ));
+        }
         for good in Good::ALL {
             self.prices
                 .with_price(good, self.prices.price(good).unwrap_or(f64::NAN))
@@ -1431,6 +1853,228 @@ mod tests {
     use super::*;
 
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
+
+    #[test]
+    fn ordinary_local_sales_refresh_known_price_without_repricing_stock() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::BreadRoll, 100.0).unwrap();
+        market.list(seller, PLACE, Good::BreadRoll, 1).unwrap();
+        market.establish_trial_price(seller, PLACE, Good::BreadRoll, 110.0);
+        market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 1, 80.0)
+            .unwrap();
+        market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 1), 100, 0, true)
+            .unwrap();
+        assert_eq!(
+            market.known_trial_price(seller, PLACE, Good::BreadRoll),
+            80.0
+        );
+        assert_eq!(
+            market
+                .seller_state(seller, PLACE, Good::BreadRoll)
+                .unwrap()
+                .quoted_price,
+            110.0
+        );
+        let trial = market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 1, 60.0)
+            .unwrap();
+        market.mark_trial_order(trial, true);
+        market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 1), 100, 0, true)
+            .unwrap();
+        assert_eq!(
+            market.known_trial_price(seller, PLACE, Good::BreadRoll),
+            80.0
+        );
+    }
+
+    #[test]
+    fn trial_ask_does_not_set_the_ordinary_seller_quote() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::BreadRoll, 10.0).unwrap();
+        let trial = market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 10, 11.0)
+            .unwrap();
+        market.mark_trial_order(trial, true);
+        market.list(seller, PLACE, Good::BreadRoll, 90).unwrap();
+        assert_eq!(market.order(trial).unwrap().quoted_price, 11.0);
+        assert_eq!(
+            market
+                .orders()
+                .find(|order| order.id != trial)
+                .unwrap()
+                .quoted_price,
+            10.0
+        );
+    }
+
+    #[test]
+    fn repeated_minimum_price_sales_close_with_valid_reference() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let mut market = Market::default();
+        market.prices = market
+            .prices
+            .with_price(Good::BreadRoll, MIN_QUOTED_PRICE)
+            .unwrap();
+        market.list(seller, PLACE, Good::BreadRoll, 29).unwrap();
+        for _ in 0..29 {
+            market
+                .purchase(buyer, PLACE, (Good::BreadRoll, 1), 1, 0, true)
+                .unwrap();
+        }
+        market.update(UPDATE_TIME_MS).unwrap();
+        assert_eq!(market.prices.price(Good::BreadRoll), Some(MIN_QUOTED_PRICE));
+        market.validate_save().unwrap();
+    }
+
+    #[test]
+    fn imports_do_not_subtract_existing_caravan_supply_twice() {
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let good = Good::BreadRoll;
+        let mut market = Market::default();
+        market
+            .list_at_quote(
+                MarketParty::Caravan,
+                PLACE,
+                good,
+                4,
+                good.import_threshold(),
+            )
+            .unwrap();
+        market
+            .set_request(buyer, ShoppingList::single(good, 10))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 1000)]);
+        assert_eq!(
+            market.affordable_unmet_at_quote(good, good.import_threshold()),
+            6
+        );
+        market.caravans(PLACE, 0).unwrap();
+        assert_eq!(market.caravan_units(good), 7);
+    }
+
+    #[test]
+    fn seller_quotes_wait_two_days_and_survive_restocking() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::Berries, 10.0).unwrap();
+        market.set_time(UPDATE_TIME_MS + 1);
+        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        market.update(UPDATE_TIME_MS + DAY_MS).unwrap();
+        assert_eq!(market.orders().next().unwrap().quoted_price, 10.0);
+        market.update(UPDATE_TIME_MS + 2 * DAY_MS).unwrap();
+        assert_eq!(market.orders().next().unwrap().quoted_price, 10.0);
+        market.update(UPDATE_TIME_MS + 3 * DAY_MS).unwrap();
+        assert_eq!(market.orders().next().unwrap().quoted_price, 9.9);
+        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        assert!(market.orders().all(|order| order.quoted_price == 9.9));
+        assert_eq!(
+            market
+                .seller_state(seller, PLACE, Good::Berries)
+                .unwrap()
+                .first_listed_ms,
+            UPDATE_TIME_MS + 1
+        );
+    }
+
+    #[test]
+    fn reference_uses_local_quoted_volume_including_boundary_sales() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::BreadRoll, 10.0).unwrap();
+        market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 1, 2.1)
+            .unwrap();
+        market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 3, 3.1)
+            .unwrap();
+        market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 4), 20, UPDATE_TIME_MS, true)
+            .unwrap();
+        market.update(UPDATE_TIME_MS).unwrap();
+        assert!((market.prices.price(Good::BreadRoll).unwrap() - 8.2125).abs() < 1e-12);
+        let day = market.history().back().unwrap();
+        assert_eq!(day.local_traded_coins, 12);
+        assert_eq!(day.accepted_local_price, Some(2.85));
+    }
+
+    #[test]
+    fn planned_bounds_reject_higher_quotes_and_limit_the_budget() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = MarketParty::Citizen(AgentId(uuid::Uuid::from_u128(2)));
+        let mut market = Market::default();
+        let id = market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 3, 2.0)
+            .unwrap();
+        let list = ShoppingList::single(Good::BreadRoll, 3)
+            .with_purchase_bounds(&market, buyer, PLACE, 6)
+            .unwrap();
+        market.set_order_price(id, 3.0).unwrap();
+        let fill = market
+            .purchase_at_quote(
+                buyer,
+                PLACE,
+                (Good::BreadRoll, 3),
+                (list.spending_budget(), list.quote_ceiling(Good::BreadRoll)),
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(fill.units, 0);
+        market.set_order_price(id, 1.0).unwrap();
+        let fill = market
+            .purchase_at_quote(
+                buyer,
+                PLACE,
+                (Good::BreadRoll, 3),
+                (2, list.quote_ceiling(Good::BreadRoll)),
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!((fill.units, fill.coins), (2, 2));
+    }
+
+    #[test]
+    fn caravans_filter_quotes_and_import_only_affordable_missing_supply() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let mut market = Market::default();
+        let good = Good::BreadRoll;
+        let cheap = market
+            .list_at_quote(seller, PLACE, good, 10, good.export_threshold() * 0.5)
+            .unwrap();
+        let expensive = market
+            .list_at_quote(seller, PLACE, good, 10, good.export_threshold() * 2.0)
+            .unwrap();
+        market.caravans(PLACE, 0).unwrap();
+        assert_eq!(market.order(cheap).unwrap().units, 5);
+        assert_eq!(market.order(expensive).unwrap().units, 10);
+        market
+            .set_request(buyer, ShoppingList::single(good, 10))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 1000)]);
+        assert_eq!(
+            market.affordable_unmet_at_quote(good, good.import_threshold()),
+            0
+        );
+        let mut empty = Market::default();
+        empty
+            .set_request(buyer, ShoppingList::single(good, 10))
+            .unwrap();
+        let import_price = good.import_threshold();
+        empty.refresh_affordability(&[(buyer, (import_price * 2.0).ceil() as Coins)]);
+        assert_eq!(empty.affordable_unmet_at_quote(good, import_price), 2);
+        empty.caravans(PLACE, 0).unwrap();
+        assert_eq!(empty.caravan_units(good), 1);
+    }
 
     #[test]
     fn household_trades_exclude_own_stock_and_round_by_owner() {
@@ -1530,6 +2174,7 @@ mod tests {
             .advance(TRADE_DURATION_MS)
             .unwrap();
         world.market.trades.push_back(Trade {
+            order_id: OrderId(0),
             place: market,
             time_ms: 0,
             buyer: MarketParty::Citizen(buyer),
@@ -1744,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn price_pressure_uses_only_stock_at_or_below_reference_price() {
+    fn caravan_quotes_and_unmet_demand_do_not_move_the_reference() {
         for quote in [9.0, 10.0, f64::from_bits(10.0_f64.to_bits() + 1)] {
             let buyer = AgentId(uuid::Uuid::from_u128(1));
             let mut market = Market::default();
@@ -1771,12 +2416,7 @@ mod tests {
                 .unwrap();
             market.refresh_affordability(&[(buyer, 1000)]);
             market.update(UPDATE_TIME_MS).unwrap();
-            let expected = if quote <= 10.0 {
-                9.8
-            } else {
-                10.0 * (1.0 + 0.1 / 3.0)
-            };
-            assert!((market.prices.price(Good::BreadRoll).unwrap() - expected).abs() < 1e-12);
+            assert_eq!(market.prices.price(Good::BreadRoll), Some(10.0));
             let history = market.history().back().unwrap();
             assert_eq!(
                 (
@@ -1979,7 +2619,7 @@ mod tests {
         market.refresh_affordability(&[(buyer, 1000)]);
         market.update(UPDATE_TIME_MS + DAY_MS).unwrap();
         market.caravans(PLACE, UPDATE_TIME_MS + DAY_MS).unwrap();
-        assert_eq!(market.caravan_units(Good::BreadRoll), 5);
+        assert_eq!(market.caravan_units(Good::BreadRoll), 7);
         assert!(
             market
                 .orders()
@@ -2007,7 +2647,7 @@ mod tests {
                 activity.caravan_purchased_units,
                 activity.imported_units
             ),
-            (0, 2, 0)
+            (0, 2, 2)
         );
         let before = market.clone();
         market
@@ -2089,6 +2729,7 @@ mod tests {
         assert_eq!(
             current.goods[Good::BreadRoll as usize],
             GoodActivity {
+                local_quoted_value: 2.0 * Good::BreadRoll.core_price(),
                 traded_units: 2,
                 listed_units: 8,
                 affordable_demand_units: 5,
@@ -2399,6 +3040,6 @@ mod tests {
             .unwrap();
         assert_eq!((purchase.units, purchase.coins), (0, 0));
         market.update(UPDATE_TIME_MS).unwrap();
-        assert!(market.prices.price(Good::Berries).unwrap() > 5.0);
+        assert_eq!(market.prices.price(Good::Berries), Some(5.0));
     }
 }

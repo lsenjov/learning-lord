@@ -699,9 +699,25 @@ mod tests {
             WorkshopFeeAccount::default()
         );
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        let (world, _) = world
+        assert_eq!(
+            world
+                .market
+                .production_trial(first, Good::Cloth)
+                .unwrap()
+                .phase,
+            crate::production_trials::TrialPhase::Ready
+        );
+        let cloth = citizen.resource_units(Good::Cloth).unwrap();
+        let (world, account) = world
             .with_household("Family", citizen.home(), &[first, second])
             .unwrap();
+        assert!(world.market.production_trial(first, Good::Cloth).is_none());
+        assert_eq!(
+            world
+                .storage
+                .owned_units(GoodsOwner::Household(account), Good::Cloth),
+            cloth
+        );
         assert_eq!(
             Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
             world
@@ -738,6 +754,8 @@ mod tests {
         let mut world = world.with_prices(
             crate::marketplace::Prices::default()
                 .with_price(Good::Cloth, Good::Cloth.export_threshold() * 0.5)
+                .unwrap()
+                .with_price(Good::Thread, 1.0)
                 .unwrap(),
         );
         for _ in 0..3 {
@@ -754,6 +772,17 @@ mod tests {
             .unwrap()
             .advance(crate::TRADE_DURATION_MS)
             .unwrap();
+        assert!(
+            world
+                .market
+                .orders()
+                .filter(|order| order.seller.account() == Some(first) && order.good == Good::Cloth)
+                .all(|order| order.quoted_price
+                    < world
+                        .market
+                        .effective_export_threshold(Good::Cloth)
+                        .unwrap())
+        );
         let boundary = crate::marketplace::UPDATE_TIME_MS;
         let before = world.advance(boundary - world.current_time_ms - 1).unwrap();
         let after = before.advance(1).unwrap();

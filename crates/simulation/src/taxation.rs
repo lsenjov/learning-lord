@@ -380,8 +380,30 @@ impl Universe {
                 }
             }
         }
+        let mut income = HashMap::new();
+        for place in self.map.places().values() {
+            for good in Good::ALL {
+                let total: u32 = self
+                    .taxation
+                    .rules
+                    .values()
+                    .filter(|rule| rule.active && self.tax_scope_matches(rule.scope, place.id))
+                    .filter_map(|rule| {
+                        if let TaxKind::Income { rates } = &rule.kind {
+                            rates.get(&good).map(|rate| u32::from(rate.basis_points()))
+                        } else {
+                            None
+                        }
+                    })
+                    .sum();
+                if total > 0 {
+                    income.insert((place.id, good), total);
+                }
+            }
+        }
         for (_, agent) in self.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.sale_income_basis_points = income.clone();
             let mut snapshot = HashMap::new();
             for recipe in crate::production::Recipe::ALL {
                 if let Ok(place) = citizen.production_place(recipe) {
@@ -798,6 +820,22 @@ impl Universe {
                     .entry(key)
                     .or_default()
                     .assess_income(revenue, rate)?;
+                if revenue > 0 {
+                    let mut apportioned = 0;
+                    let mut cumulative = 0_i128;
+                    for trade in trades.iter().filter(|trade| {
+                        trade.seller.account() == Some(payer)
+                            && trade.place == PlaceId(place)
+                            && trade.good == good
+                    }) {
+                        cumulative += i128::from(trade.recipient_coins);
+                        let share =
+                            (i128::from(assessed) * cumulative / i128::from(revenue)) as Coins;
+                        self.market
+                            .charge_trial_sale_tax(trade.order_id, share - apportioned);
+                        apportioned = share;
+                    }
+                }
                 if self.collect_coin_account(key, assessed, time_ms)? {
                     changed.push(payer);
                 }
@@ -1029,6 +1067,7 @@ mod tests {
         world
             .tax_sales(
                 &[Trade {
+                    order_id: crate::marketplace::OrderId(0),
                     place,
                     time_ms: 0,
                     buyer: MarketParty::Caravan,
