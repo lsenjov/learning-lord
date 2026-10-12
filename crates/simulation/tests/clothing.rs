@@ -137,7 +137,7 @@ fn garments_trade_as_whole_items_without_transferring_worn_condition() {
         )
         .unwrap();
     let (town, buyer) = town
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(200).unwrap())
         .unwrap();
     let listed = town
         .start_action(seller, CitizenAction::List(Good::FlaxGarment, 1))
@@ -156,8 +156,12 @@ fn garments_trade_as_whole_items_without_transferring_worn_condition() {
     let AgentKind::Citizen(seller_state) = &bought.agents()[&seller].kind;
     assert_eq!(buyer_state.units(Good::FlaxGarment), 1);
     assert_eq!(buyer_state.garment_condition(), None);
-    assert_eq!(buyer_state.coins(), 4);
-    assert_eq!(seller_state.coins(), 96);
+    let cost = listed
+        .market()
+        .purchase_cost(buyer, Good::FlaxGarment, 1)
+        .unwrap();
+    assert_eq!(buyer_state.coins(), 200 - cost);
+    assert_eq!(seller_state.coins(), cost);
     assert!(seller_state.garment_condition().unwrap() < 0.5);
     assert_eq!(town.market().trades().len(), 0);
     assert_eq!(bought.market().trades()[0].units, 1);

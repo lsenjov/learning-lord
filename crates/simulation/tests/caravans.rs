@@ -48,12 +48,13 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
     let after = before.advance(1).unwrap();
     assert_eq!(after.agents().len(), 1);
     assert_eq!(after.market().listed_units(seller, Good::BreadRoll), 4);
-    assert_eq!(citizen(&after, seller).coins(), 4);
-    assert_eq!(after.town_treasury(), 1);
+    let receipts = after.market().trades()[0].recipient_coins;
+    assert_eq!(citizen(&after, seller).coins(), receipts - receipts / 5);
+    assert_eq!(after.town_treasury(), receipts / 5);
     let trade = &after.market().trades()[0];
     assert_eq!(
         (trade.place, trade.buyer, trade.coins, trade.units),
-        (market, MarketParty::Caravan, 5, 5)
+        (market, MarketParty::Caravan, receipts, 5)
     );
     assert_eq!(
         after.citizen_history(seller).unwrap().current.start_ms,
@@ -373,17 +374,17 @@ fn export_tariff_grosses_up_net_receipts_and_income_tax_uses_only_receipts() {
     let trade = &after.market().trades()[0];
     assert_eq!(
         (trade.coins, trade.recipient_coins, trade.tariff_coins),
-        (8, 4, 4)
+        (10, 5, 5)
     );
     assert_eq!(citizen(&after, seller).coins(), 4);
-    assert_eq!(after.town_treasury(), 4);
+    assert_eq!(after.town_treasury(), 6);
     assert_eq!(
         trade.coins,
         citizen(&after, seller).coins() + after.town_treasury()
     );
     assert_eq!(
         after.citizen_history(seller).unwrap().current.coins_earned,
-        4
+        5
     );
     let activity = after.market().current_period().goods[Good::BreadRoll as usize];
     assert_eq!(
@@ -392,7 +393,7 @@ fn export_tariff_grosses_up_net_receipts_and_income_tax_uses_only_receipts() {
             activity.exported_receipts,
             activity.export_tariff_coins
         ),
-        (8, 4, 4)
+        (10, 5, 5)
     );
     assert_eq!(
         configured

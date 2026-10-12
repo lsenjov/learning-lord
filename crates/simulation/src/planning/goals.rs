@@ -208,6 +208,7 @@ impl Cooldowns {
 pub(super) struct Prediction {
     pub citizen: Citizen,
     pub actions: Vec<CitizenAction>,
+    pub commercial_actions: Vec<usize>,
     pub action_durations_ms: Vec<u64>,
     pub elapsed_ms: u64,
     score: WeightedWellbeing,
@@ -222,6 +223,7 @@ impl Prediction {
         Self {
             citizen: citizen.clone(),
             actions: Vec::new(),
+            commercial_actions: Vec::new(),
             action_durations_ms: Vec::new(),
             elapsed_ms: 0,
             score: WeightedWellbeing::default(),
@@ -302,6 +304,46 @@ impl Prediction {
         next.action_durations_ms.push(duration);
         next.elapsed_ms += duration;
         next.cooldowns = self.cooldowns.after(action, duration);
+        Ok(Some(next))
+    }
+
+    fn perform_commercial(
+        &self,
+        action: CitizenAction,
+        prior_actions: usize,
+    ) -> Result<Option<Self>, SimulationError> {
+        let recipe = match action {
+            CitizenAction::Plant { crop, .. } => Some(crop.recipe()),
+            action => action.production_recipe(),
+        };
+        let mut committed = self.clone();
+        if let Some(recipe) = recipe {
+            let Some(profit) = crate::production::recipe_profit_for_site(
+                recipe,
+                &committed.citizen,
+                action.required_place(&committed.citizen),
+            ) else {
+                return Ok(None);
+            };
+            if profit <= 0.0 {
+                if !committed
+                    .citizen
+                    .eligible_production_trial(recipe, action.required_place(&committed.citizen))
+                {
+                    return Ok(None);
+                }
+                committed
+                    .citizen
+                    .claim_production_trial(recipe, action.required_place(&committed.citizen))?;
+            }
+        }
+        committed.citizen.start_trial_production(action)?;
+        let Some(mut next) = committed.perform(action, prior_actions)? else {
+            return Ok(None);
+        };
+        if recipe.is_some() {
+            next.commercial_actions.push(self.actions.len());
+        }
         Ok(Some(next))
     }
 
@@ -1374,7 +1416,11 @@ fn production_order_bounded(
                 complete = false;
                 break;
             }
-            let Some(next) = state.perform(action, prior_actions)? else {
+            let Some(next) = (if food_target.is_none() {
+                state.perform_commercial(action, prior_actions)?
+            } else {
+                state.perform(action, prior_actions)?
+            }) else {
                 complete = false;
                 break;
             };
@@ -1964,7 +2010,7 @@ fn production_at_site(
                 else {
                     continue;
                 };
-                let Some(next) = ready.perform(action, prior_actions)? else {
+                let Some(next) = ready.perform_commercial(action, prior_actions)? else {
                     continue;
                 };
                 state = next;
@@ -2189,6 +2235,29 @@ fn variants_from(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capped_commercial_gathering_is_excluded_while_ingredient_gathering_remains_available() {
+        let mut citizen = crate::Citizen::new(0.0)
+            .unwrap()
+            .with_good(crate::marketplace::Good::Berries, 10_000)
+            .unwrap();
+        let mut policy = citizen.market.caravan_policy();
+        policy.exports[crate::marketplace::Good::Berries as usize].allowed = false;
+        citizen.market.set_caravan_policy(policy).unwrap();
+        let prediction = super::Prediction::new(&citizen, super::Cooldowns::default());
+        let action = crate::CitizenAction::Produce(crate::production::Recipe::Forage);
+        assert!(
+            crate::production::recipe_profit_for_site(
+                crate::production::Recipe::Forage,
+                &citizen,
+                None
+            )
+            .is_none()
+        );
+        assert!(prediction.perform_commercial(action, 0).unwrap().is_none());
+        assert!(prediction.perform(action, 0).unwrap().is_some());
+    }
+
     use super::*;
 
     #[test]
@@ -3959,13 +4028,14 @@ mod tests {
             .unwrap();
         let mut market = citizen.market().clone();
         market
-            .list(
+            .list_at_quote(
                 crate::AgentId(uuid::Uuid::new_v4()),
                 citizen
                     .map()
                     .public_place(crate::locations::Location::Market),
                 Good::Berries,
                 1000,
+                100.0,
             )
             .unwrap();
         citizen.with_market(market)
@@ -4959,7 +5029,9 @@ mod tests {
         let mut market = buyer.market().clone();
         for &(good, units, price) in listings {
             market.prices = market.prices.with_price(good, price).unwrap();
-            market.list(seller, place, good, units).unwrap();
+            market
+                .list_at_quote(seller, place, good, units, price)
+                .unwrap();
         }
         buyer.with_market(market)
     }

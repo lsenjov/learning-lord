@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn profitable_crop_mix_counts_pipeline_and_keeps_planting_past_local_caps() {
         let (mut citizen, field) = farmer();
-        citizen.prices = citizen.prices.with_price(Good::Cabbage, 100.0).unwrap();
+        citizen = citizen.with_prices(citizen.prices.with_price(Good::Cabbage, 100.0).unwrap());
         assert_eq!(citizen.next_crop_kind(), Some(CropKind::Cabbage));
         citizen = perform(
             citizen,

@@ -699,14 +699,7 @@ mod tests {
             WorkshopFeeAccount::default()
         );
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        assert_eq!(
-            world
-                .market
-                .production_trial(first, Good::Cloth)
-                .unwrap()
-                .phase,
-            crate::production_trials::TrialPhase::Ready
-        );
+        assert!(world.market.production_trial(first, Good::Cloth).is_none());
         let cloth = citizen.resource_units(Good::Cloth).unwrap();
         let (world, account) = world
             .with_household("Family", citizen.home(), &[first, second])

@@ -1318,7 +1318,6 @@ impl Citizen {
         if action == CitizenAction::Eat {
             citizen.last_meal_started_ms = Some(self.market_time_ms);
         }
-        citizen.start_trial_production(action)?;
         if action.production_recipe() == Some(production::Recipe::BrewBeer) {
             citizen.start_brewing(action)?;
         }

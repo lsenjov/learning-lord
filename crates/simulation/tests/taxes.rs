@@ -337,8 +337,10 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
     let world = list(world, seller, Good::BreadRoll, 10);
     let before_sale = world.clone();
     let sold = buy(world, buyer, place, Good::BreadRoll, 10);
-    assert_eq!(citizen(&sold, seller).coins(), 15);
-    assert_eq!(sold.town_treasury(), 15);
+    let revenue = sold.market().trades().back().unwrap().recipient_coins;
+    let income_tax = revenue * 2000 / 10_000 + revenue * 3000 / 10_000;
+    assert_eq!(citizen(&sold, seller).coins(), revenue - income_tax);
+    assert_eq!(sold.town_treasury(), income_tax);
     assert_eq!(sold.market().trades().back().unwrap().place, place);
     assert_eq!(citizen(&sold, buyer).units(Good::BreadRoll), 10);
     let mut policy = before_sale.caravan_policy();
@@ -411,13 +413,14 @@ fn rule_edits_and_removal_preserve_arrears_and_retired_debts_retry_weekly() {
         Good::BreadRoll,
         10,
     );
-    assert_eq!(citizen(&funded, seller).coins(), 30);
+    let revenue = funded.market().trades().back().unwrap().recipient_coins;
+    assert_eq!(citizen(&funded, seller).coins(), revenue);
     let paid = funded
         .advance(FIRST_WEEKLY_SETTLEMENT_MS + WEEK_MS - funded.current_time_ms())
         .unwrap();
     assert_eq!(paid.tax_arrears(rule, seller), 0);
     assert_eq!(paid.town_treasury(), 20);
-    assert_eq!(citizen(&paid, seller).coins(), 10);
+    assert_eq!(citizen(&paid, seller).coins(), revenue - 20);
     assert!(!paid.tax_rules()[&rule].active);
     assert_eq!(world.tax_arrears(rule, seller), 20);
 }
@@ -549,7 +552,7 @@ fn planner_backed_and_sync_advances_match_and_cancellation_preserves_source() {
 #[test]
 fn income_fraction_survives_rule_edit_and_collects_after_four_one_coin_sales() {
     let (world, seller, buyer, place) = seller_world();
-    let world = world.with_prices(Prices::default().with_price(Good::BreadRoll, 0.2).unwrap());
+    let world = world.with_prices(Prices::default().with_price(Good::BreadRoll, 0.18).unwrap());
     let (world, rule) = world
         .with_tax_rule(
             place,

@@ -490,7 +490,11 @@ fn output_value(
                 }
                 citizen.market().effective_export_threshold(good)?
             } else {
-                citizen.prices().price(good)?
+                citizen.market().known_trial_price(
+                    citizen.economic_id(),
+                    citizen.selling_place(),
+                    good,
+                )
             };
             Some(
                 price * units as f64 / good.units_per_price_unit() as f64
@@ -501,6 +505,14 @@ fn output_value(
                                 |place| citizen.production_socage_rate_at(place, recipe, good),
                             )
                             .basis_points(),
+                        ) / 10_000.0)
+                    * (1.0
+                        - f64::from(
+                            citizen
+                                .sale_income_basis_points
+                                .get(&(citizen.selling_place(), good))
+                                .copied()
+                                .unwrap_or(0),
                         ) / 10_000.0),
             )
         })
@@ -1020,11 +1032,12 @@ mod tests {
         let mut market = citizen.market().clone();
         market.prices = market.prices.with_price(Good::Thread, 175.5).unwrap();
         market
-            .list(
+            .list_at_quote(
                 crate::AgentId(uuid::Uuid::new_v4()),
                 citizen.selling_place(),
                 Good::Thread,
                 10000,
+                175.5,
             )
             .unwrap();
         market.prices = market

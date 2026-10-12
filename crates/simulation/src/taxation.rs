@@ -831,8 +831,11 @@ impl Universe {
                         cumulative += i128::from(trade.recipient_coins);
                         let share =
                             (i128::from(assessed) * cumulative / i128::from(revenue)) as Coins;
-                        self.market
-                            .charge_trial_sale_tax(trade.order_id, share - apportioned);
+                        self.market.charge_trial_sale_tax(
+                            trade.order_id,
+                            share - apportioned,
+                            trade.buyer != crate::marketplace::MarketParty::Caravan,
+                        );
                         apportioned = share;
                     }
                 }

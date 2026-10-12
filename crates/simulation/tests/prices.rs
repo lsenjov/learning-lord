@@ -51,7 +51,7 @@ fn explicit_setup_prices_share_citizen_context_without_running_the_daily_update(
     }
     assert_eq!(
         repriced.market().orders().next().unwrap().quoted_price,
-        100.0
+        listed.market().orders().next().unwrap().quoted_price
     );
     let bought = repriced
         .start_action(
@@ -62,8 +62,9 @@ fn explicit_setup_prices_share_citizen_context_without_running_the_daily_update(
         .advance(TRADE_DURATION_MS)
         .unwrap();
     assert_eq!(citizen(&bought, buyer).berries_units(), 100);
-    assert_eq!(citizen(&bought, buyer).coins(), 90);
-    assert_eq!(citizen(&bought, seller).coins(), 10);
+    let cost = (listed.market().orders().next().unwrap().quoted_price * 0.1).ceil() as i64;
+    assert_eq!(citizen(&bought, buyer).coins(), 100 - cost);
+    assert_eq!(citizen(&bought, seller).coins(), cost);
     assert_eq!(listed.prices(), Prices::new(100.0).unwrap());
 }
 

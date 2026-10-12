@@ -484,8 +484,16 @@ pub struct SellerState {
     pub first_listed_ms: u64,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+struct ListingBatch {
+    quantity: Quantity,
+    listed_at_ms: u64,
+    local_sales_by_price: Vec<(f64, Quantity)>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Market {
+    batches: HashMap<OrderId, ListingBatch>,
     pub(crate) production_trials: crate::production_trials::ProductionTrials,
     seller_rates: HashMap<AgentId, u8>,
     seller_states: HashMap<(AgentId, Good, PlaceId), SellerState>,
@@ -557,7 +565,7 @@ impl Market {
 
     pub(crate) fn known_trial_price(&self, account: AgentId, place: PlaceId, good: Good) -> f64 {
         self.seller_state(account, place, good)
-            .and_then(|state| state.established_price)
+            .map(|state| state.quoted_price)
             .unwrap_or_else(|| self.prices.price(good).unwrap())
     }
     pub(crate) fn establish_trial_price(
@@ -568,8 +576,8 @@ impl Market {
         quote: f64,
     ) {
         if let Some(state) = self.seller_states.get_mut(&(account, good, place)) {
-            state.established_price = Some(quote);
-            state.quoted_price = quote;
+            state.established_price = Some(state.quoted_price.max(quote));
+            state.quoted_price = state.quoted_price.max(quote);
         }
     }
     pub fn order(&self, id: OrderId) -> Option<&SellOrder> {
@@ -585,6 +593,7 @@ impl Market {
             self.trial_orders.remove(&id);
         }
     }
+    #[cfg(test)]
     pub(crate) fn set_order_price(
         &mut self,
         id: OrderId,
@@ -1172,10 +1181,12 @@ impl Market {
             .prices
             .price(good)
             .ok_or(SimulationError::InvalidPrices)?;
-        let price = seller
-            .account()
-            .and_then(|account| self.seller_state(account, place, good))
-            .map_or(reference, |state| state.quoted_price);
+        let price = if let Some(account) = seller.account() {
+            let rate = f64::from(self.ensure_seller_adjustment_rate(account)) / 100.0;
+            self.known_trial_price(account, place, good) * (1.0 + rate)
+        } else {
+            reference
+        };
         self.list_at_quote(seller, place, good, units, price)?;
         Ok(())
     }
@@ -1216,6 +1227,21 @@ impl Market {
                     first_listed_ms: self.clock_ms,
                 });
         }
+        if seller.account().is_some() {
+            self.batches.insert(
+                id,
+                ListingBatch {
+                    quantity: crate::production::Recipe::ALL
+                        .iter()
+                        .flat_map(|recipe| recipe.outputs().iter())
+                        .find_map(|&(output, quantity)| (output == good).then_some(quantity))
+                        .unwrap_or(units)
+                        .min(units),
+                    listed_at_ms: self.clock_ms,
+                    local_sales_by_price: Vec::new(),
+                },
+            );
+        }
         self.orders.insert(
             id,
             SellOrder {
@@ -1255,6 +1281,7 @@ impl Market {
             order.units -= units;
             if order.units == 0 {
                 self.orders.remove(&order.id);
+                self.batches.remove(&order.id);
             } else {
                 self.orders.insert(order.id, order);
             }
@@ -1362,20 +1389,34 @@ impl Market {
                 if buyer != MarketParty::Caravan
                     && !self.order_is_trial(order.id)
                     && let Some(account) = order.seller.account()
-                    && let Some(state) = self.seller_states.get_mut(&(account, good, order.place))
+                    && let Some(batch) = self.batches.get_mut(&order.id)
                 {
-                    state.established_price = Some(order.quoted_price);
+                    let sales = if let Some(index) = batch
+                        .local_sales_by_price
+                        .iter()
+                        .position(|(price, _)| *price == order.quoted_price)
+                    {
+                        &mut batch.local_sales_by_price[index].1
+                    } else {
+                        batch.local_sales_by_price.push((order.quoted_price, 0));
+                        &mut batch.local_sales_by_price.last_mut().unwrap().1
+                    };
+                    *sales = sales.saturating_add(units);
+                    if sales.saturating_mul(2) >= batch.quantity {
+                        self.establish_trial_price(account, order.place, good, order.quoted_price);
+                    }
                 }
                 self.record_trial_sale(
                     order.id,
                     units,
                     coins - tariff_coins,
-                    order.seller != MarketParty::Caravan,
+                    buyer != MarketParty::Caravan && order.seller != MarketParty::Caravan,
                     time_ms,
                 );
             }
             if order.units == 0 {
                 self.orders.remove(&id);
+                self.batches.remove(&id);
             } else {
                 self.orders.insert(id, order);
             }
@@ -1484,6 +1525,7 @@ impl Market {
                         order.units -= units;
                         if order.units == 0 {
                             self.orders.remove(&order.id);
+                            self.batches.remove(&order.id);
                         } else {
                             self.orders.insert(order.id, order.clone());
                         }
@@ -1655,13 +1697,6 @@ impl Market {
         let keys: Vec<_> = self.seller_states.keys().copied().collect();
         for (account, good, place) in keys {
             let key = (account, good, place);
-            if boundary
-                < self.seller_states[&key]
-                    .first_listed_ms
-                    .saturating_add(2 * DAY_MS)
-            {
-                continue;
-            }
             let stock: Quantity = self
                 .orders()
                 .filter(|order| {
@@ -1676,8 +1711,16 @@ impl Market {
                 continue;
             }
             let movement = recent_movement.get(&key).copied().unwrap_or(0);
-            let markdown = f64::from(self.seller_rates[&account]) / 100.0
-                * (1.0 - movement as f64 / stock as f64).max(0.0);
+            let markdown = if boundary
+                >= self.seller_states[&key]
+                    .first_listed_ms
+                    .saturating_add(2 * DAY_MS)
+            {
+                f64::from(self.seller_rates[&account]) / 100.0
+                    * (1.0 - movement as f64 / stock as f64).max(0.0)
+            } else {
+                0.0
+            };
             let quote =
                 (self.seller_states[&key].quoted_price * (1.0 - markdown)).max(MIN_QUOTED_PRICE);
             self.seller_states.get_mut(&key).unwrap().quoted_price = quote;
@@ -1689,11 +1732,16 @@ impl Market {
                 if order.seller.account() == Some(account)
                     && order.good == good
                     && order.place == place
+                    && self
+                        .batches
+                        .get(&id)
+                        .is_some_and(|batch| batch.listed_at_ms < boundary)
                 {
-                    order.quoted_price = quote;
+                    order.quoted_price = order.quoted_price.min((order.quoted_price + quote) / 2.0);
                 }
             }
         }
+        self.batches.retain(|id, _| self.orders.contains_key(id));
         self.clock_ms = boundary;
         self.period_activity = [GoodActivity::default(); Good::COUNT];
         self.period_start_ms = boundary;
@@ -1791,6 +1839,22 @@ impl Market {
                 "invalid market order or tariff carry",
             ));
         }
+        if self.batches.iter().any(|(id, batch)| {
+            batch.quantity == 0
+                || batch.listed_at_ms > self.clock_ms
+                || self
+                    .order(*id)
+                    .is_none_or(|order| order.seller.account().is_none())
+                || batch
+                    .local_sales_by_price
+                    .iter()
+                    .any(|(price, _)| !price.is_finite() || *price < MIN_QUOTED_PRICE)
+        }) || self
+            .orders()
+            .any(|order| order.seller.account().is_some() && !self.batches.contains_key(&order.id))
+        {
+            return Err(SaveError::InvalidState("invalid listing batch"));
+        }
         if self
             .seller_rates
             .values()
@@ -1852,10 +1916,26 @@ impl Market {
 mod tests {
     use super::*;
 
+    impl Market {
+        fn list_reference(
+            &mut self,
+            seller: impl Into<MarketParty>,
+            place: PlaceId,
+            good: Good,
+            units: Quantity,
+        ) -> Result<(), SimulationError> {
+            if units == 0 {
+                return Ok(());
+            }
+            self.list_at_quote(seller, place, good, units, self.prices.price(good).unwrap())?;
+            Ok(())
+        }
+    }
+
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
 
     #[test]
-    fn ordinary_local_sales_refresh_known_price_without_repricing_stock() {
+    fn lower_local_sales_do_not_replace_the_established_baseline() {
         let seller = AgentId(uuid::Uuid::from_u128(1));
         let buyer = AgentId(uuid::Uuid::from_u128(2));
         let mut market = Market::default();
@@ -1870,7 +1950,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             market.known_trial_price(seller, PLACE, Good::BreadRoll),
-            80.0
+            110.0
         );
         assert_eq!(
             market
@@ -1888,7 +1968,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             market.known_trial_price(seller, PLACE, Good::BreadRoll),
-            80.0
+            110.0
         );
     }
 
@@ -1909,7 +1989,7 @@ mod tests {
                 .find(|order| order.id != trial)
                 .unwrap()
                 .quoted_price,
-            10.0
+            10.1
         );
     }
 
@@ -1922,7 +2002,9 @@ mod tests {
             .prices
             .with_price(Good::BreadRoll, MIN_QUOTED_PRICE)
             .unwrap();
-        market.list(seller, PLACE, Good::BreadRoll, 29).unwrap();
+        market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 29, MIN_QUOTED_PRICE)
+            .unwrap();
         for _ in 0..29 {
             market
                 .purchase(buyer, PLACE, (Good::BreadRoll, 1), 1, 0, true)
@@ -1960,26 +2042,68 @@ mod tests {
     }
 
     #[test]
-    fn seller_quotes_wait_two_days_and_survive_restocking() {
+    fn ordinary_batches_do_not_compound_and_daily_asks_preserve_listing_age() {
         let seller = AgentId(uuid::Uuid::from_u128(1));
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::Berries, 10.0).unwrap();
         market.set_time(UPDATE_TIME_MS + 1);
         market.list(seller, PLACE, Good::Berries, 100).unwrap();
-        market.update(UPDATE_TIME_MS + DAY_MS).unwrap();
-        assert_eq!(market.orders().next().unwrap().quoted_price, 10.0);
-        market.update(UPDATE_TIME_MS + 2 * DAY_MS).unwrap();
-        assert_eq!(market.orders().next().unwrap().quoted_price, 10.0);
-        market.update(UPDATE_TIME_MS + 3 * DAY_MS).unwrap();
-        assert_eq!(market.orders().next().unwrap().quoted_price, 9.9);
         market.list(seller, PLACE, Good::Berries, 100).unwrap();
-        assert!(market.orders().all(|order| order.quoted_price == 9.9));
-        assert_eq!(
+        assert!(market.orders().all(|order| order.quoted_price == 10.1));
+        market.update(UPDATE_TIME_MS + DAY_MS).unwrap();
+        assert!(market.orders().all(|order| order.quoted_price == 10.05));
+        market.update(UPDATE_TIME_MS + 2 * DAY_MS).unwrap();
+        assert!(market.orders().all(|order| order.quoted_price == 10.025));
+        market.update(UPDATE_TIME_MS + 3 * DAY_MS).unwrap();
+        let state = market.seller_state(seller, PLACE, Good::Berries).unwrap();
+        assert_eq!(state.quoted_price, 9.9);
+        assert_eq!(state.first_listed_ms, UPDATE_TIME_MS + 1);
+        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        assert!(
             market
-                .seller_state(seller, PLACE, Good::Berries)
-                .unwrap()
-                .first_listed_ms,
-            UPDATE_TIME_MS + 1
+                .orders()
+                .any(|order| (order.quoted_price - 9.999).abs() < 1e-12)
+        );
+    }
+
+    #[test]
+    fn ordinary_acceptance_counts_half_recipe_batch_at_each_exact_price() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::BreadRoll, 10.0).unwrap();
+        let id = market
+            .list_at_quote(seller, PLACE, Good::BreadRoll, 100, 12.0)
+            .unwrap();
+        market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 4), 100, 0, true)
+            .unwrap();
+        assert_eq!(
+            market.known_trial_price(seller, PLACE, Good::BreadRoll),
+            10.0
+        );
+        market.set_order_price(id, 11.0).unwrap();
+        market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 1), 100, 0, true)
+            .unwrap();
+        assert_eq!(
+            market.known_trial_price(seller, PLACE, Good::BreadRoll),
+            10.0
+        );
+        market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 4), 100, 0, true)
+            .unwrap();
+        assert_eq!(
+            market.known_trial_price(seller, PLACE, Good::BreadRoll),
+            11.0
+        );
+        market.set_order_price(id, 12.0).unwrap();
+        market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 1), 100, 0, true)
+            .unwrap();
+        assert_eq!(
+            market.known_trial_price(seller, PLACE, Good::BreadRoll),
+            12.0
         );
     }
 
@@ -2084,9 +2208,15 @@ mod tests {
         let buyer = MarketParty::Household(buyer_id);
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::Berries, 5.0).unwrap();
-        market.list(seller, PLACE, Good::Berries, 100).unwrap();
-        market.list(buyer, PLACE, Good::Berries, 500).unwrap();
-        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Berries, 100)
+            .unwrap();
+        market
+            .list_reference(buyer, PLACE, Good::Berries, 500)
+            .unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Berries, 100)
+            .unwrap();
         market
             .set_request(buyer_id, ShoppingList::single(Good::Berries, 200))
             .unwrap();
@@ -2128,7 +2258,9 @@ mod tests {
             .prices
             .with_price(Good::BreadRoll, Good::BreadRoll.export_threshold() * 0.5)
             .unwrap();
-        market.list(seller, PLACE, Good::BreadRoll, 4).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::BreadRoll, 4)
+            .unwrap();
         let payments = market.caravans(PLACE, UPDATE_TIME_MS).unwrap();
         assert_eq!(payments.len(), 1);
         assert_eq!(payments[0].0, id);
@@ -2227,7 +2359,9 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, PLACE, Good::BreadRoll, 1000).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::BreadRoll, 1000)
+            .unwrap();
         for day in 0..=366 {
             let boundary = UPDATE_TIME_MS + day * DAY_MS;
             market
@@ -2263,7 +2397,7 @@ mod tests {
                 .prices
                 .with_price(good, good.core_price() / 10.0)
                 .unwrap();
-            market.list(seller, PLACE, good, 1000).unwrap();
+            market.list_reference(seller, PLACE, good, 1000).unwrap();
             let old_id = OrderId(market.next_order_id);
             market.orders.insert(
                 old_id,
@@ -2443,7 +2577,9 @@ mod tests {
         };
         market.set_caravan_policy(policy).unwrap();
         for day in 0..3 {
-            market.list(seller, PLACE, Good::Flour, 1).unwrap();
+            market
+                .list_reference(seller, PLACE, Good::Flour, 1)
+                .unwrap();
             let payments = market
                 .caravans(PLACE, UPDATE_TIME_MS + day * DAY_MS)
                 .unwrap();
@@ -2507,9 +2643,11 @@ mod tests {
             })
             .unwrap();
         let mut fragmented = whole.clone();
-        whole.list(seller, PLACE, Good::Flour, 6).unwrap();
+        whole.list_reference(seller, PLACE, Good::Flour, 6).unwrap();
         for _ in 0..6 {
-            fragmented.list(seller, PLACE, Good::Flour, 1).unwrap();
+            fragmented
+                .list_reference(seller, PLACE, Good::Flour, 1)
+                .unwrap();
         }
         assert_eq!(
             whole.caravans(PLACE, 0).unwrap(),
@@ -2529,9 +2667,11 @@ mod tests {
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::Flour, 2.0).unwrap();
         for _ in 0..3 {
-            market.list(first, PLACE, Good::Flour, 1).unwrap();
+            market.list_reference(first, PLACE, Good::Flour, 1).unwrap();
         }
-        market.list(second, PLACE, Good::Flour, 2).unwrap();
+        market
+            .list_reference(second, PLACE, Good::Flour, 2)
+            .unwrap();
         market.update(UPDATE_TIME_MS).unwrap();
         let payments = market.caravans(PLACE, UPDATE_TIME_MS).unwrap();
         assert_eq!(market.listed_units(first, Good::Flour), 1);
@@ -2558,16 +2698,20 @@ mod tests {
         let second = AgentId(uuid::Uuid::from_u128(2));
         let mut whole = Market::default();
         whole.prices = whole.prices.with_price(Good::Flour, 2.0).unwrap();
-        whole.list(second, PLACE, Good::Flour, 3).unwrap();
-        whole.list(first, PLACE, Good::Flour, 3).unwrap();
+        whole.list_reference(second, PLACE, Good::Flour, 3).unwrap();
+        whole.list_reference(first, PLACE, Good::Flour, 3).unwrap();
         let mut fragmented = Market {
             prices: whole.prices,
             ..Market::default()
         };
         for _ in 0..3 {
-            fragmented.list(second, PLACE, Good::Flour, 1).unwrap();
+            fragmented
+                .list_reference(second, PLACE, Good::Flour, 1)
+                .unwrap();
         }
-        fragmented.list(first, PLACE, Good::Flour, 3).unwrap();
+        fragmented
+            .list_reference(first, PLACE, Good::Flour, 3)
+            .unwrap();
         let whole_payments = whole.caravans(PLACE, UPDATE_TIME_MS).unwrap();
         let fragmented_payments = fragmented.caravans(PLACE, UPDATE_TIME_MS).unwrap();
         assert_eq!(whole_payments, fragmented_payments);
@@ -2590,7 +2734,9 @@ mod tests {
             .prices
             .with_price(Good::BreadRoll, Good::BreadRoll.export_threshold())
             .unwrap();
-        exact.list(seller, PLACE, Good::BreadRoll, 9).unwrap();
+        exact
+            .list_reference(seller, PLACE, Good::BreadRoll, 9)
+            .unwrap();
         assert!(exact.caravans(PLACE, UPDATE_TIME_MS).unwrap().is_empty());
         assert_eq!(exact.listed_units(seller, Good::BreadRoll), 9);
         exact.prices = exact
@@ -2667,9 +2813,15 @@ mod tests {
         let remote = PlaceId(uuid::Uuid::new_v4());
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::BreadRoll, 15.0).unwrap();
-        market.list(seller, PLACE, Good::BreadRoll, 2).unwrap();
-        market.list(seller, remote, Good::BreadRoll, 3).unwrap();
-        market.list(buyer, PLACE, Good::BreadRoll, 7).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::BreadRoll, 2)
+            .unwrap();
+        market
+            .list_reference(seller, remote, Good::BreadRoll, 3)
+            .unwrap();
+        market
+            .list_reference(buyer, PLACE, Good::BreadRoll, 7)
+            .unwrap();
         assert_eq!(market.available_units(buyer, Good::BreadRoll), 5);
         assert_eq!(market.available_units_at(buyer, PLACE, Good::BreadRoll), 2);
         let purchase = market
@@ -2708,7 +2860,9 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, PLACE, Good::BreadRoll, 10).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::BreadRoll, 10)
+            .unwrap();
         market
             .set_request(buyer, ShoppingList::single(Good::BreadRoll, 7))
             .unwrap();
@@ -2760,7 +2914,9 @@ mod tests {
     fn inactive_latest_period_does_not_reuse_older_history() {
         let seller = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, PLACE, Good::Water, 50).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Water, 50)
+            .unwrap();
         market.update(UPDATE_TIME_MS).unwrap();
         assert_eq!(
             market.previous_period().unwrap().goods[Good::Water as usize].listed_units,
@@ -2782,7 +2938,9 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, PLACE, Good::Berries, 35).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Berries, 35)
+            .unwrap();
         let units = 0;
         market
             .set_request(buyer, ShoppingList::single(Good::Berries, units))
@@ -2804,9 +2962,15 @@ mod tests {
         let other = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::Berries, 5.0).unwrap();
-        market.list(seller, PLACE, Good::Berries, 100).unwrap();
-        market.list(other, PLACE, Good::Berries, 100).unwrap();
-        market.list(seller, PLACE, Good::Berries, 100).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Berries, 100)
+            .unwrap();
+        market
+            .list_reference(other, PLACE, Good::Berries, 100)
+            .unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Berries, 100)
+            .unwrap();
         market
             .set_request(buyer, ShoppingList::single(Good::Berries, 300))
             .unwrap();
@@ -2843,9 +3007,15 @@ mod tests {
         let other = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::Wheat, 12.871549).unwrap();
-        market.list(seller, PLACE, Good::Wheat, 11).unwrap();
-        market.list(other, PLACE, Good::Wheat, 250).unwrap();
-        market.list(seller, PLACE, Good::Wheat, 289).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Wheat, 11)
+            .unwrap();
+        market
+            .list_reference(other, PLACE, Good::Wheat, 250)
+            .unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Wheat, 289)
+            .unwrap();
         assert_eq!(
             market.purchase_cost_at(buyer, PLACE, Good::Wheat, 300),
             Some(4)
@@ -2895,11 +3065,21 @@ mod tests {
         let other = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::Wheat, 12.871549).unwrap();
-        market.list(other, river, Good::Wheat, 10).unwrap();
-        market.list(seller, forest, Good::Water, 1).unwrap();
-        market.list(seller, town, Good::Wheat, 11).unwrap();
-        market.list(other, town, Good::Wheat, 250).unwrap();
-        market.list(seller, town, Good::Wheat, 289).unwrap();
+        market
+            .list_reference(other, river, Good::Wheat, 10)
+            .unwrap();
+        market
+            .list_reference(seller, forest, Good::Water, 1)
+            .unwrap();
+        market
+            .list_reference(seller, town, Good::Wheat, 11)
+            .unwrap();
+        market
+            .list_reference(other, town, Good::Wheat, 250)
+            .unwrap();
+        market
+            .list_reference(seller, town, Good::Wheat, 289)
+            .unwrap();
         let list = ShoppingList::new([(Good::Water, 1), (Good::Wheat, 300)]).unwrap();
         assert_eq!(
             market.nearest_purchase_place(buyer, &map, origin, list, &[]),
@@ -2943,7 +3123,9 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
         market.prices = market.prices.with_price(Good::Wheat, 20.0).unwrap();
-        market.list(seller, PLACE, Good::Wheat, 11).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Wheat, 11)
+            .unwrap();
         let id = OrderId(market.next_order_id);
         market.next_order_id += 1;
         market.orders.insert(
@@ -2957,7 +3139,9 @@ mod tests {
                 quoted_price: 10.0,
             },
         );
-        market.list(seller, PLACE, Good::Wheat, 289).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::Wheat, 289)
+            .unwrap();
         let purchase = market
             .purchase(buyer, PLACE, (Good::Wheat, 300), 3, 0, false)
             .unwrap();
@@ -2973,7 +3157,9 @@ mod tests {
             let buyer = AgentId(uuid::Uuid::new_v4());
             let mut market = Market::default();
             market.prices = market.prices.with_price(Good::Berries, price).unwrap();
-            market.list(seller, PLACE, Good::Berries, 100).unwrap();
+            market
+                .list_reference(seller, PLACE, Good::Berries, 100)
+                .unwrap();
             assert_eq!(
                 market.purchase_cost(buyer, Good::Berries, 100),
                 Some(expected)
@@ -2986,7 +3172,9 @@ mod tests {
         let seller = AgentId(uuid::Uuid::new_v4());
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
-        market.list(seller, PLACE, Good::BreadRoll, 2).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::BreadRoll, 2)
+            .unwrap();
         let before = market.clone();
         let purchase = market
             .purchase(buyer, PLACE, (Good::BreadRoll, 2), 2, 0, true)
@@ -3001,7 +3189,7 @@ mod tests {
         let buyer = AgentId(uuid::Uuid::new_v4());
         let mut market = Market::default();
         market
-            .list(seller, PLACE, Good::Berries, Quantity::MAX)
+            .list_reference(seller, PLACE, Good::Berries, Quantity::MAX)
             .unwrap();
         let purchase = market
             .purchase(buyer, PLACE, (Good::Berries, 1), 1, 0, true)
@@ -3017,11 +3205,13 @@ mod tests {
             Quantity::MAX - 2
         );
         assert_eq!(
-            market.list(seller, PLACE, Good::Berries, 3),
+            market.list_reference(seller, PLACE, Good::Berries, 3),
             Err(SimulationError::WealthOverflow)
         );
         market.prices = market.prices.with_price(Good::BreadRoll, f64::MAX).unwrap();
-        market.list(seller, PLACE, Good::BreadRoll, 1).unwrap();
+        market
+            .list_reference(seller, PLACE, Good::BreadRoll, 1)
+            .unwrap();
         assert_eq!(market.purchase_cost(buyer, Good::BreadRoll, 1), None);
     }
 

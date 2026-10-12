@@ -425,7 +425,10 @@ fn sales_history_and_backlog_do_not_change_stock_capacity() {
     );
     let universe = list(universe, farmer, Good::Wood, 2_800);
     let (universe, buyer) = universe
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(200).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+        )
         .unwrap();
     let universe = universe
         .start_action(

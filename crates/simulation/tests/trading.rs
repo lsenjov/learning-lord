@@ -29,12 +29,7 @@ fn supply(grams: u64) -> (Universe, AgentId) {
 
 #[test]
 fn purchases_top_up_at_completion_without_borrowing() {
-    for (berries, coins, expected_berries, expected_coins) in [
-        (0, 100, 155_u64, 84_i64),
-        (40, 100, 155, 88),
-        (40, 2, 60, 0),
-        (0, 10, 100, 0),
-    ] {
+    for (berries, coins) in [(0, 100), (40, 100), (40, 2), (0, 10)] {
         let (universe, seller) = supply(500);
         let (source, buyer) = universe
             .with_citizen(
@@ -47,6 +42,11 @@ fn purchases_top_up_at_completion_without_borrowing() {
                     .unwrap(),
             )
             .unwrap();
+        let quote = source.market().orders().next().unwrap().quoted_price;
+        let expected_berries =
+            155_u64.min(berries + (coins as f64 * 1000.0 / quote).floor() as u64);
+        let expected_coins =
+            coins - ((expected_berries - berries) as f64 * quote / 1000.0).ceil() as i64;
         let started = source
             .start_action(
                 buyer,
@@ -62,7 +62,8 @@ fn purchases_top_up_at_completion_without_borrowing() {
         assert_eq!(citizen(&complete, seller).coins(), coins - expected_coins);
         let rounding_loss =
             citizen(&source, buyer).wealth().unwrap() - citizen(&complete, buyer).wealth().unwrap();
-        assert!((0.0..1.0).contains(&rounding_loss));
+        let premium = (expected_berries - berries) as f64 * (quote - 100.0) / 1000.0;
+        assert!((0.0..1.0).contains(&(rounding_loss - premium)));
         assert_eq!(
             citizen(&complete, buyer).coins() + citizen(&complete, seller).coins(),
             coins
@@ -142,12 +143,13 @@ fn empty_or_unaffordable_purchases_take_time_without_creating_goods_or_coins() {
 #[test]
 fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_predictions() {
     let (universe, seller) = supply(155);
+    let meal_cost = (universe.market().orders().next().unwrap().quoted_price * 0.155).ceil() as i64;
     let (source, buyer) = universe
         .with_citizen(
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
-                .with_coins(16)
+                .with_coins(meal_cost)
                 .unwrap(),
         )
         .unwrap();
@@ -169,7 +171,7 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
     );
     assert_eq!(citizen(&eating, buyer).berries_units(), 0);
     assert_eq!(citizen(&eating, buyer).coins(), 0);
-    assert_eq!(citizen(&eating, seller).coins(), 16);
+    assert_eq!(citizen(&eating, seller).coins(), meal_cost);
     assert_eq!(source.market().listed_units(seller, Good::Berries), 155);
 }
 
@@ -210,7 +212,11 @@ fn simultaneous_buyers_compete_deterministically_and_partial_fills_conserve_stoc
     let second = if first == a { b } else { a };
     assert_eq!(citizen(&direct, first).berries_units(), 100);
     assert_eq!(citizen(&direct, second).berries_units(), 50);
-    assert_eq!(citizen(&direct, seller).coins(), 15);
+    let quote = started.market().orders().next().unwrap().quoted_price;
+    assert_eq!(
+        citizen(&direct, seller).coins(),
+        (quote * 0.1).ceil() as i64 + (quote * 0.05).ceil() as i64
+    );
     assert_eq!(
         citizen(&direct, a).coins()
             + citizen(&direct, b).coins()
@@ -290,9 +296,21 @@ fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(citizen(&done, cheap).coins(), 4);
-    assert_eq!(citizen(&done, expensive).coins(), 12);
-    assert_eq!(citizen(&done, buyer).coins(), 84);
+    let cost = |seller, units: u64| {
+        let quote = universe
+            .market()
+            .orders()
+            .find(|order| order.seller.citizen() == Some(seller))
+            .unwrap()
+            .quoted_price;
+        (quote * units as f64 / 1000.0).ceil() as i64
+    };
+    assert_eq!(citizen(&done, cheap).coins(), cost(cheap, 40));
+    assert_eq!(citizen(&done, expensive).coins(), cost(expensive, 60));
+    assert_eq!(
+        citizen(&done, buyer).coins(),
+        100 - cost(cheap, 40) - cost(expensive, 60)
+    );
     assert_eq!(done.market().listed_units(expensive, Good::Berries), 40);
     assert_eq!(done.market().trades()[0].seller.citizen(), Some(cheap));
 }
@@ -340,13 +358,14 @@ fn seller_coin_overflow_preserves_the_source() {
 #[test]
 fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
     let (universe, _) = supply(155);
+    let meal_cost = (universe.market().orders().next().unwrap().quoted_price * 0.155).ceil() as i64;
     let (universe, buyer) = universe
         .with_prices(Prices::new(200.0).unwrap())
         .with_citizen(
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
-                .with_coins(16)
+                .with_coins(meal_cost)
                 .unwrap(),
         )
         .unwrap();
@@ -496,8 +515,20 @@ fn one_five_minute_shopping_action_acquires_multiple_inputs_and_records_each_fil
     assert_eq!(citizen(&done, buyer).units(Good::Flour), 100);
     assert_eq!(citizen(&done, buyer).units(Good::Wood), 25);
     assert_eq!(citizen(&done, buyer).units(Good::Water), 100);
-    assert_eq!(citizen(&done, buyer).coins(), 87);
-    assert_eq!(citizen(&done, seller).coins(), 13);
+    let cost: i64 = list
+        .items()
+        .map(|(good, units)| {
+            let quote = universe
+                .market()
+                .orders()
+                .find(|order| order.good == good)
+                .unwrap()
+                .quoted_price;
+            (quote * units as f64 / 1000.0).ceil() as i64
+        })
+        .sum();
+    assert_eq!(citizen(&done, buyer).coins(), 100 - cost);
+    assert_eq!(citizen(&done, seller).coins(), cost);
     assert_eq!(done.market().trades().len(), 3);
     for trade in done.market().trades() {
         assert_eq!(trade.time_ms, 4 * TRADE_DURATION_MS);
@@ -514,7 +545,7 @@ fn a_shopping_list_fills_in_catalogue_order_with_one_shared_budget_and_finite_st
     use learning_lord_simulation::marketplace::ShoppingList;
     let (universe, seller) = production_supply();
     let (universe, buyer) = universe
-        .with_citizen("Baker", Citizen::new(0.0).unwrap().with_coins(12).unwrap())
+        .with_citizen("Baker", Citizen::new(0.0).unwrap().with_coins(13).unwrap())
         .unwrap();
     let list =
         ShoppingList::new([(Good::Water, 100), (Good::Wood, 100), (Good::Flour, 100)]).unwrap();
@@ -524,15 +555,37 @@ fn a_shopping_list_fills_in_catalogue_order_with_one_shared_budget_and_finite_st
         .advance(TRADE_DURATION_MS)
         .unwrap();
     assert_eq!(citizen(&done, buyer).units(Good::Flour), 100);
-    assert_eq!(citizen(&done, buyer).units(Good::Wood), 40);
+    let flour_quote = universe
+        .market()
+        .orders()
+        .find(|order| order.good == Good::Flour)
+        .unwrap()
+        .quoted_price;
+    let wood_quote = universe
+        .market()
+        .orders()
+        .find(|order| order.good == Good::Wood)
+        .unwrap()
+        .quoted_price;
+    let remaining_budget = 13 - (flour_quote * 0.1).ceil() as i64;
+    assert_eq!(
+        citizen(&done, buyer).units(Good::Wood),
+        (remaining_budget as f64 * 1000.0 / wood_quote).floor() as u64
+    );
     assert_eq!(citizen(&done, buyer).units(Good::Water), 0);
     assert_eq!(citizen(&done, buyer).coins(), 0);
-    assert_eq!(citizen(&done, seller).coins(), 12);
+    assert_eq!(citizen(&done, seller).coins(), 13);
     assert_eq!(done.market().trades().len(), 2);
     let remaining = ShoppingList::new([(Good::Flour, 500), (Good::Water, 500)]).unwrap();
     let (done, rich) = done
         .with_citizen("Rich", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
         .unwrap();
+    let remaining_cost: i64 = done
+        .market()
+        .orders()
+        .filter(|order| matches!(order.good, Good::Flour | Good::Water))
+        .map(|order| (order.quoted_price * order.units as f64 / 1000.0).ceil() as i64)
+        .sum();
     let done = done
         .start_action(rich, CitizenAction::Buy(remaining))
         .unwrap()
@@ -540,7 +593,7 @@ fn a_shopping_list_fills_in_catalogue_order_with_one_shared_budget_and_finite_st
         .unwrap();
     assert_eq!(citizen(&done, rich).units(Good::Flour), 200);
     assert_eq!(citizen(&done, rich).units(Good::Water), 200);
-    assert_eq!(citizen(&done, rich).coins(), 78);
+    assert_eq!(citizen(&done, rich).coins(), 100 - remaining_cost);
 }
 
 #[test]
@@ -562,7 +615,7 @@ fn shopping_lists_combine_duplicate_requirements_and_reject_integer_overflow() {
 fn settlement_rounds_once_per_seller_and_good_across_orders() {
     use learning_lord_simulation::marketplace::ShoppingList;
     for same_seller in [true, false] {
-        let universe = Universe::with_map(Map::default()).with_prices(Prices::new(500.0).unwrap());
+        let universe = Universe::with_map(Map::default()).with_prices(Prices::new(450.0).unwrap());
         let (universe, first) = universe
             .with_citizen("First", Citizen::new(0.0).unwrap().with_berries(2).unwrap())
             .unwrap();

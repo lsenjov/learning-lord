@@ -104,12 +104,16 @@ fn unsold_supply_marks_down_seller_quotes_after_observation_and_preserves_refere
     let after = u.advance(UPDATE_TIME_MS - u.current_time_ms()).unwrap();
     close(after.prices().price(Good::Berries).unwrap(), 100.0);
     assert_eq!(after.market().history()[0].remaining_supply_units, 100);
-    assert_eq!(after.market().orders().next().unwrap().quoted_price, 100.0);
+    let initial_quote = u.market().orders().next().unwrap().quoted_price;
+    close(
+        after.market().orders().next().unwrap().quoted_price,
+        (initial_quote + 100.0) / 2.0,
+    );
     let observed = after.advance(2 * DAY_MS).unwrap();
     let rate = f64::from(observed.market().seller_adjustment_rate(seller).unwrap()) / 100.0;
     close(
         observed.market().orders().next().unwrap().quoted_price,
-        100.0 * (1.0 - rate),
+        ((initial_quote + 100.0) / 2.0 + 100.0) / 4.0 + 100.0 * (1.0 - rate) / 2.0,
     );
     close(observed.prices().price(Good::Berries).unwrap(), 100.0);
     assert_eq!(citizen(&after, seller).units(Good::Berries), 0);
@@ -125,7 +129,7 @@ fn unsold_supply_marks_down_seller_quotes_after_observation_and_preserves_refere
 }
 
 #[test]
-fn actual_fills_reduce_requests_and_balanced_trades_record_volume_without_price_changes() {
+fn actual_fills_reduce_requests_and_record_volume_and_observed_prices() {
     let (u, seller) = supply(100);
     let (u, id) = u
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
@@ -139,16 +143,20 @@ fn actual_fills_reduce_requests_and_balanced_trades_record_volume_without_price_
     assert_eq!(started.market().requested(id).units(Good::Berries), 100);
     let bought = started.advance(TRADE_DURATION_MS).unwrap();
     assert_eq!(bought.market().requested(id).units(Good::Berries), 0);
-    assert_eq!(citizen(&bought, seller).coins(), 10);
+    let cost = (u.market().orders().next().unwrap().quoted_price * 0.1).ceil() as i64;
+    assert_eq!(citizen(&bought, seller).coins(), cost);
     let after = bought
         .advance(UPDATE_TIME_MS - bought.current_time_ms())
         .unwrap();
     let day = &after.market().history()[0];
     assert_eq!(day.traded_units, 100);
-    assert_eq!(day.traded_coins, 10);
+    assert_eq!(day.traded_coins, cost);
     assert_eq!(day.unmet_demand_units, 0);
     assert_eq!(day.remaining_supply_units, 0);
-    assert_eq!(day.price_before, day.price_after);
+    close(
+        day.price_after,
+        (3.0 * day.price_before + u.market().orders().next().unwrap().quoted_price) / 4.0,
+    );
     let next = after.advance(DAY_MS).unwrap();
     assert_eq!(next.market().history().len(), 1);
     assert_eq!(next.prices(), after.prices());
@@ -187,7 +195,7 @@ fn one_coin_budget_is_shared_across_goods_and_available_asks_override_reference_
             .market()
             .affordable_request(id)
             .units(Good::Berries),
-        100
+        (10000.0 / requested.market().orders().next().unwrap().quoted_price).floor() as u64
     );
 }
 
@@ -254,14 +262,20 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
     assert_eq!(day.traded_units, 100);
     assert_eq!(day.remaining_supply_units, 50);
     assert_eq!(direct.market().trades()[0].time_ms, UPDATE_TIME_MS);
-    close(day.price_after, 325.0);
-    assert_eq!(direct.market().trades()[0].coins, 10);
+    close(
+        day.price_after,
+        (1200.0 + original_order.quoted_price) / 4.0,
+    );
+    assert_eq!(
+        direct.market().trades()[0].coins,
+        (original_order.quoted_price * 0.1).ceil() as i64
+    );
     let remaining = direct.market().orders().next().unwrap();
     assert_eq!(remaining.id, original_order.id);
     assert_eq!(remaining.seller.citizen(), Some(seller));
     assert_eq!(remaining.good, original_order.good);
     assert_eq!(remaining.units, 50);
-    close(remaining.quoted_price, 100.0);
+    close(remaining.quoted_price, original_order.quoted_price);
     let after = direct
         .start_action(
             id,
@@ -270,7 +284,10 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(after.market().trades()[1].coins, 5);
+    assert_eq!(
+        after.market().trades()[1].coins,
+        (original_order.quoted_price * 0.05).ceil() as i64
+    );
     assert_eq!(after.market().listed_units(seller, Good::Berries), 0);
 }
 
@@ -304,6 +321,7 @@ fn prediction_does_not_register_demands_or_publish_history() {
 fn purchases_crossing_four_preserve_independent_seller_quotes() {
     let (source, seller) = supply(150);
     let source = source.with_prices(Prices::new(400.0).unwrap());
+    let initial_quote = source.market().orders().next().unwrap().quoted_price;
     let (source, buyer) = source
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
         .unwrap();
@@ -318,14 +336,15 @@ fn purchases_crossing_four_preserve_independent_seller_quotes() {
     let boundary = source.advance(TRADE_DURATION_MS / 2).unwrap();
     close(
         boundary.market().orders().next().unwrap().quoted_price,
-        100.0,
+        (initial_quote + 100.0) / 2.0,
     );
     assert!(boundary.market().trades().is_empty());
     assert_eq!(boundary.market().listed_units(seller, Good::Berries), 150);
     let completed = boundary.advance(TRADE_DURATION_MS / 2).unwrap();
     assert_eq!(completed.market().trades()[0].units, 100);
-    assert_eq!(completed.market().trades()[0].coins, 10);
-    assert_eq!(citizen(&completed, buyer).coins(), 90);
-    assert_eq!(citizen(&completed, seller).coins(), 10);
+    let cost = (((initial_quote + 100.0) / 2.0) * 0.1).ceil() as i64;
+    assert_eq!(completed.market().trades()[0].coins, cost);
+    assert_eq!(citizen(&completed, buyer).coins(), 100 - cost);
+    assert_eq!(citizen(&completed, seller).coins(), cost);
     assert_eq!(completed, source.advance(TRADE_DURATION_MS).unwrap());
 }

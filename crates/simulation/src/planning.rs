@@ -125,6 +125,7 @@ pub struct PlanGoal {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Plan {
     actions: Vec<CitizenAction>,
+    commercial_actions: Vec<usize>,
     action_durations_ms: Vec<u64>,
     goals: Vec<PlanGoal>,
     average_wellbeing: f64,
@@ -132,6 +133,40 @@ pub struct Plan {
 }
 
 impl Plan {
+    fn claim_commercial_action(
+        &self,
+        citizen: &mut Citizen,
+        index: usize,
+    ) -> Result<(), SimulationError> {
+        if !self.commercial_actions.contains(&index) {
+            return Ok(());
+        }
+        let action = self.actions[index];
+        let recipe = match action {
+            CitizenAction::Plant { crop, .. } => Some(crop.recipe()),
+            action => action.production_recipe(),
+        };
+        if let Some(recipe) = recipe {
+            let site = action.required_place(citizen);
+            let Some(profit) = crate::production::recipe_profit_for_site(recipe, citizen, site)
+            else {
+                return Err(SimulationError::MissingInputs);
+            };
+            if profit <= 0.0 && !citizen.eligible_production_trial(recipe, site) {
+                return Err(SimulationError::MissingInputs);
+            }
+            citizen.claim_production_trial(recipe, site)?;
+            citizen.start_trial_production(action)?;
+        }
+        Ok(())
+    }
+
+    fn start_action(&self, citizen: &Citizen, index: usize) -> Result<Citizen, SimulationError> {
+        let mut candidate = citizen.clone();
+        self.claim_commercial_action(&mut candidate, index)?;
+        candidate.start_action(self.actions[index])
+    }
+
     pub(crate) fn maintenance_goal(&self) -> Option<Effect> {
         self.goals
             .first()
@@ -351,7 +386,8 @@ impl ActivePlan {
         mut citizen: Citizen,
     ) -> Result<Citizen, SimulationError> {
         while !self.needs_replan(&citizen) {
-            citizen = match citizen.start_action(self.plan.actions[self.action_index]) {
+            let started = self.plan.start_action(&citizen, self.action_index);
+            citizen = match started {
                 Ok(started) => started,
                 Err(SimulationError::MissingInputs) => {
                     self.action_index = self.committed_actions_end();
@@ -389,10 +425,10 @@ impl ActivePlan {
             return Err(SimulationError::MissingInputs);
         }
         set_production_site(&mut citizen, &plan)?;
-        let Some(&action) = plan.actions.first() else {
+        let Some(_) = plan.actions.first() else {
             return Err(SimulationError::PlanningFailed);
         };
-        let started = citizen.start_action(action)?;
+        let started = plan.start_action(&citizen, 0)?;
         if started.active_action().is_none() {
             return Err(SimulationError::MissingInputs);
         }
@@ -432,7 +468,8 @@ impl ActivePlan {
                         .claim(goal, citizen.id, citizen.current_time_ms());
                 }
             }
-            citizen = match citizen.start_action(self.plan.actions[self.action_index]) {
+            let started = self.plan.start_action(&citizen, self.action_index);
+            citizen = match started {
                 Ok(started) => started,
                 Err(SimulationError::MissingInputs) if !freshly_planned => {
                     self.action_index = self.committed_actions_end();
@@ -653,28 +690,32 @@ fn productive_site(actions: &[CitizenAction]) -> Option<crate::locations::PlaceI
 
 fn set_production_site(citizen: &mut Citizen, plan: &Plan) -> Result<(), SimulationError> {
     citizen.cancel_preparing_trials();
-    if let Some(goal) = plan
-        .goals
-        .first()
-        .filter(|goal| goal.goal == Effect::Production)
-    {
-        for &action in &plan.actions[goal.actions.clone()] {
-            let recipe = match action {
-                CitizenAction::Plant { crop, .. } => Some(crop.recipe()),
-                action => action.production_recipe(),
-            };
-            if let Some(recipe) = recipe {
-                citizen.claim_production_trial(recipe, action.required_place(citizen))?;
-                break;
-            }
-        }
-    }
     if let Some(site) = plan.production_site() {
         citizen.production_targets = Some(crate::production::ProductionTargets::calculate_at(
             citizen,
             citizen.current_time_ms(),
             Some(site),
         )?);
+    }
+    for &index in &plan.commercial_actions {
+        if index
+            >= plan
+                .goals
+                .first()
+                .map_or(plan.actions.len(), |goal| goal.actions.end)
+        {
+            continue;
+        }
+        let action = plan.actions[index];
+        let recipe = match action {
+            CitizenAction::Plant { crop, .. } => Some(crop.recipe()),
+            action => action.production_recipe(),
+        };
+        if let Some(recipe) = recipe
+            && citizen.eligible_production_trial(recipe, action.required_place(citizen))
+        {
+            citizen.claim_production_trial(recipe, action.required_place(citizen))?;
+        }
     }
     Ok(())
 }
@@ -799,6 +840,12 @@ impl ActivePlan {
         use crate::persistence::SaveError;
         if self.action_index >= self.plan.actions.len()
             || self.plan.actions.len() != self.plan.action_durations_ms.len()
+            || self.plan.commercial_actions.iter().any(|index| {
+                self.plan.actions.get(*index).is_none_or(|action| {
+                    action.production_recipe().is_none()
+                        && !matches!(action, CitizenAction::Plant { .. })
+                })
+            })
             || !self.plan.average_wellbeing.is_finite()
             || self.plan.goals.iter().any(|goal| {
                 goal.actions.start >= goal.actions.end || goal.actions.end > self.plan.actions.len()
@@ -837,6 +884,7 @@ fn empty_plan() -> Plan {
     Plan {
         actions: Vec::new(),
         action_durations_ms: Vec::new(),
+        commercial_actions: Vec::new(),
         goals: Vec::new(),
         average_wellbeing: f64::NEG_INFINITY,
         decision: None,
@@ -866,6 +914,7 @@ fn search_with_goals(
         *best = Plan {
             actions: state.actions.clone(),
             action_durations_ms: state.action_durations_ms.clone(),
+            commercial_actions: state.commercial_actions.clone(),
             goals: boundaries.clone(),
             average_wellbeing: score,
             decision: None,
@@ -890,6 +939,16 @@ fn search_with_goals(
                 goal,
                 actions: state.actions.len()..actions.len(),
             });
+            next.commercial_actions = state
+                .commercial_actions
+                .iter()
+                .copied()
+                .chain(
+                    next.commercial_actions
+                        .iter()
+                        .map(|index| index + state.actions.len()),
+                )
+                .collect();
             next.actions = actions;
             search_with_goals(next, best, next_boundaries)?;
         }
@@ -901,7 +960,7 @@ pub(crate) fn start(citizen: &Citizen) -> Result<Citizen, SimulationError> {
     let plan = plan(citizen)?;
     let mut citizen = citizen.clone();
     set_production_site(&mut citizen, &plan)?;
-    let mut citizen = citizen.start_action(plan.actions[0])?;
+    let mut citizen = plan.start_action(&citizen, 0)?;
     if citizen.household.is_none()
         && let Some(goal) = plan.maintenance_goal()
     {
@@ -943,6 +1002,7 @@ pub(crate) fn executing_fixture(citizen: &Citizen, actions: Vec<CitizenAction>) 
     citizen.active_plan = Some(ActivePlan {
         plan: Plan {
             action_durations_ms: vec![0; actions.len()],
+            commercial_actions: Vec::new(),
             goals: Vec::new(),
             actions,
             average_wellbeing: -1.0,
@@ -952,6 +1012,51 @@ pub(crate) fn executing_fixture(citizen: &Citizen, actions: Vec<CitizenAction>) 
         elapsed_ms: 0,
     });
     citizen
+}
+
+#[cfg(test)]
+pub(crate) fn adopt_commercial_fixture(
+    citizen: &Citizen,
+    actions: Vec<CitizenAction>,
+    commercial_actions: Vec<usize>,
+) -> Result<Citizen, SimulationError> {
+    let plan = Plan {
+        action_durations_ms: vec![0; actions.len()],
+        commercial_actions,
+        goals: vec![PlanGoal {
+            goal: Effect::Production,
+            actions: 0..actions.len(),
+        }],
+        actions,
+        average_wellbeing: -1.0,
+        decision: None,
+    };
+    let mut citizen = citizen.clone();
+    set_production_site(&mut citizen, &plan)?;
+    plan.start_action(&citizen, 0)
+}
+
+#[cfg(test)]
+pub(crate) fn resume_commercial_fixture(
+    citizen: Citizen,
+    action: CitizenAction,
+) -> Result<Citizen, SimulationError> {
+    let mut execution = ActivePlan {
+        plan: Plan {
+            actions: vec![action],
+            action_durations_ms: vec![0],
+            commercial_actions: vec![0],
+            goals: vec![PlanGoal {
+                goal: Effect::Production,
+                actions: 0..1,
+            }],
+            average_wellbeing: -1.0,
+            decision: None,
+        },
+        action_index: 0,
+        elapsed_ms: 0,
+    };
+    execution.resume_committed(citizen)
 }
 
 #[cfg(test)]
@@ -1265,6 +1370,7 @@ mod tests {
                         list: ShoppingList::single(Good::BreadRoll, 10),
                     },
                 ],
+                commercial_actions: Vec::new(),
                 action_durations_ms: vec![
                     60_000,
                     crate::TRADE_DURATION_MS,
@@ -1335,6 +1441,7 @@ mod tests {
         citizen.active_plan = Some(ActivePlan {
             plan: Plan {
                 action_durations_ms: vec![0; actions.len()],
+                commercial_actions: Vec::new(),
                 goals: Vec::new(),
                 actions,
                 average_wellbeing: -1.0,
@@ -1945,7 +2052,7 @@ mod tests {
         );
         assert_eq!(
             boundary.market().orders().next().unwrap().quoted_price,
-            initial_quote
+            (initial_quote + Prices::default().price(Good::Berries).unwrap()) / 2.0
         );
         assert_eq!(buyer.prices(), boundary.prices());
         let after = boundary.advance(crate::TRADE_DURATION_MS).unwrap();
@@ -1975,6 +2082,7 @@ mod tests {
         let partial_meal = Plan {
             actions: vec![CitizenAction::Eat],
             action_durations_ms: vec![39_000],
+            commercial_actions: Vec::new(),
             goals: vec![],
             average_wellbeing: 0.0,
             decision: None,
@@ -2085,6 +2193,7 @@ mod tests {
             plan: Plan {
                 actions: vec![CitizenAction::Eat, CitizenAction::Wait],
                 action_durations_ms: vec![0; 2],
+                commercial_actions: Vec::new(),
                 goals: Vec::new(),
                 average_wellbeing: 0.0,
                 decision: None,
