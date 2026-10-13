@@ -464,7 +464,11 @@ impl Citizen {
     }
 
     fn drink_units_for(&self, good: Good) -> Quantity {
-        self.available_units(good)
+        self.drink_units_from_available(self.available_units(good))
+    }
+
+    fn drink_units_from_available(&self, available: Quantity) -> Quantity {
+        available
             .min(DRINK_WATER_GRAMS)
             .min(((self.thirst + 100.0).max(0.0) * 4.0).floor() as Quantity)
     }
@@ -480,15 +484,23 @@ impl Citizen {
     }
 
     fn preferred_drink(&self) -> (Good, Quantity) {
+        let available = self.consumption_available_units();
+        let reserve =
+            available[Good::Water as usize].saturating_add(available[Good::Beer as usize]);
         [Good::Water, Good::Beer]
             .into_iter()
-            .map(|good| (good, self.drink_units_for(good)))
+            .map(|good| {
+                (
+                    good,
+                    self.drink_units_from_available(available[good as usize]),
+                )
+            })
             .max_by(|a, b| {
-                self.consumption_wellbeing([0; Good::COUNT], a.0, a.1)
+                self.consumption_wellbeing([0; Good::COUNT], a.0, a.1, reserve)
                     .unwrap_or(f64::NEG_INFINITY)
                     .total_cmp(
                         &self
-                            .consumption_wellbeing([0; Good::COUNT], b.0, b.1)
+                            .consumption_wellbeing([0; Good::COUNT], b.0, b.1, reserve)
                             .unwrap_or(f64::NEG_INFINITY),
                     )
                     .then_with(|| (b.0 as usize).cmp(&(a.0 as usize)))

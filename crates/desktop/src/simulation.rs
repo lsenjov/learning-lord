@@ -612,9 +612,35 @@ mod tests {
     #[test]
     #[ignore = "manual five-day fresh-universe profiling workload"]
     fn fresh_universe_five_day_profile() {
+        use std::io::Write;
+
         const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let write_snapshot = |path: &std::ffi::OsStr, universe: &Universe| {
+            let contents = universe.to_save_string().unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .unwrap()
+                .write_all(contents.as_bytes())
+                .unwrap();
+        };
         let total_started = Instant::now();
-        let mut universe = new_universe().unwrap();
+        let mut universe = match std::env::var_os("LL_PROFILE_FIXTURE") {
+            Some(path) => match std::fs::read_to_string(&path) {
+                Ok(contents) => Universe::from_save_str(&contents).unwrap(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let universe = new_universe().unwrap();
+                    write_snapshot(&path, &universe);
+                    universe
+                }
+                Err(error) => panic!("cannot read profiling fixture: {error}"),
+            },
+            None => new_universe().unwrap(),
+        };
+        let expected = std::env::var_os("LL_PROFILE_EXPECTED")
+            .map(|path| Universe::from_save_str(&std::fs::read_to_string(path).unwrap()).unwrap());
+        let output = std::env::var_os("LL_PROFILE_OUTPUT");
         let mut planner = PlanningRuntime::default();
         eprintln!(
             "fresh universe setup: {:.3} ms",
@@ -643,6 +669,12 @@ mod tests {
             "setup and advancement total: {:.3} ms",
             total_started.elapsed().as_secs_f64() * 1000.0
         );
+        if let Some(expected) = expected {
+            assert_eq!(universe, expected);
+        }
+        if let Some(path) = output {
+            write_snapshot(&path, &universe);
+        }
     }
 
     fn pacing(rate: u32) -> Pacing {

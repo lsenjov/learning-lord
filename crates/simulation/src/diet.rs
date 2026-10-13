@@ -304,7 +304,7 @@ impl Citizen {
     #[cfg(test)]
     fn meal_wellbeing(&self, meal_units: [crate::Quantity; Good::COUNT]) -> Option<f64> {
         let (good, units) = self.preferred_drink();
-        self.consumption_wellbeing(meal_units, good, units)
+        self.consumption_wellbeing(meal_units, good, units, self.available_drink_units())
     }
 
     pub(crate) fn consumption_wellbeing(
@@ -312,6 +312,7 @@ impl Citizen {
         meal_units: [crate::Quantity; Good::COUNT],
         drink_good: Good,
         drink_units: crate::Quantity,
+        drink_reserve: crate::Quantity,
     ) -> Option<f64> {
         let mut predicted = self.clone();
         predicted.active_action = None;
@@ -355,20 +356,23 @@ impl Citizen {
             * (self.garment_condition.unwrap_or(0.0) - predicted.garment_condition.unwrap_or(0.0));
         let score = predicted.needs_wellbeing()
             - (food_value + drink_value + garment_value) * crate::WEALTH_WELLBEING_PER_COIN
-            + crate::water_reserve_bonus((self.available_drink_units() - drink_units) as f64)
-            - crate::water_reserve_bonus(self.available_drink_units() as f64);
+            + crate::water_reserve_bonus((drink_reserve - drink_units) as f64)
+            - crate::water_reserve_bonus(drink_reserve as f64);
         score.is_finite().then_some(score)
     }
 
     pub(crate) fn preferred_consumption(
         &self,
     ) -> ([crate::Quantity; Good::COUNT], f64, Good, crate::Quantity) {
+        let available = self.consumption_available_units();
+        let drink_reserve =
+            available[Good::Water as usize].saturating_add(available[Good::Beer as usize]);
         let mut candidates = Vec::new();
         let has_drink = [Good::Water, Good::Beer]
             .into_iter()
-            .any(|good| self.drink_units_for(good) > 0);
+            .any(|good| self.drink_units_from_available(available[good as usize]) > 0);
         for drink_good in [Good::Water, Good::Beer] {
-            let drink_units = self.drink_units_for(drink_good);
+            let drink_units = self.drink_units_from_available(available[drink_good as usize]);
             if has_drink && drink_units == 0 {
                 continue;
             }
@@ -378,7 +382,7 @@ impl Citizen {
                 0.0
             };
             let mut foods = Vec::new();
-            self.mixed_meals(0, [0; Good::COUNT], drink_nutrition, &mut foods);
+            Self::mixed_meals(&available, 0, [0; Good::COUNT], drink_nutrition, &mut foods);
             for (units, nutrition) in foods {
                 candidates.push((
                     units,
@@ -400,7 +404,7 @@ impl Citizen {
                     c.4 == maximum
                 }
             })
-            .filter_map(|c| Some((c, self.consumption_wellbeing(c.0, c.2, c.3)?)))
+            .filter_map(|c| Some((c, self.consumption_wellbeing(c.0, c.2, c.3, drink_reserve)?)))
             .max_by(|a, b| {
                 a.1.total_cmp(&b.1)
                     .then_with(|| a.0.0.cmp(&b.0.0))
@@ -412,7 +416,7 @@ impl Citizen {
     }
 
     fn mixed_meals(
-        &self,
+        available: &[crate::Quantity; Good::COUNT],
         index: usize,
         mut units: [crate::Quantity; Good::COUNT],
         nutrition: f64,
@@ -420,7 +424,7 @@ impl Citizen {
     ) {
         const COUNTED: [Good; 4] = [Good::BreadRoll, Good::Fish, Good::Cabbage, Good::BerryPie];
         if index == COUNTED.len() {
-            let berries = self.available_units(Good::Berries).min(
+            let berries = available[Good::Berries as usize].min(
                 ((crate::MEAL_NOURISHMENT - nutrition).max(0.0) / crate::BERRY_NUTRITION_PER_GRAM)
                     .ceil() as crate::Quantity,
             );
@@ -433,8 +437,7 @@ impl Citizen {
         }
         let good = COUNTED[index];
         let per_unit = good.nutrition_per_unit().unwrap();
-        let limit = self
-            .available_units(good)
+        let limit = available[good as usize]
             .min((crate::MEAL_NOURISHMENT / per_unit).ceil() as crate::Quantity);
         for count in 0..=limit {
             let total = nutrition + count as f64 * per_unit;
@@ -447,7 +450,7 @@ impl Citizen {
             {
                 break;
             }
-            self.mixed_meals(index + 1, units, total, candidates);
+            Self::mixed_meals(available, index + 1, units, total, candidates);
         }
     }
 }
@@ -459,6 +462,46 @@ mod tests {
 
     fn close(left: f64, right: f64) {
         assert!((left - right).abs() < 1e-9, "{left} != {right}");
+    }
+
+    #[test]
+    fn forecast_recounts_food_and_drink_after_each_meal() {
+        let mut source = Citizen::new(80.0)
+            .unwrap()
+            .with_thirst(80.0)
+            .unwrap()
+            .with_good(Good::BreadRoll, 5)
+            .unwrap()
+            .with_good(Good::Water, 200)
+            .unwrap();
+        let owner = source.goods_owner();
+        for (good, units) in [(Good::BreadRoll, 5), (Good::Beer, 200)] {
+            source
+                .storage
+                .set_units(
+                    crate::storage::StockKey {
+                        place: source.home,
+                        owner,
+                        good,
+                    },
+                    units,
+                )
+                .unwrap();
+        }
+        let first = source.food_forecast(1);
+        let later = source.food_forecast(6);
+        assert_eq!(first.units[Good::BreadRoll as usize], 5);
+        assert_eq!(later.units[Good::BreadRoll as usize], 10);
+        assert_eq!(later.units[Good::Water as usize], 200);
+        assert_eq!(later.units[Good::Beer as usize], 200);
+        for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
+            assert!(later.units[good as usize] <= source.available_units(good));
+        }
+        assert_eq!(source.units(Good::BreadRoll), 5);
+        assert_eq!(
+            source.stored_available_units(source.home, Good::BreadRoll),
+            5
+        );
     }
 
     #[test]
@@ -719,7 +762,13 @@ mod tests {
         source.garment_condition = Some(0.4);
         source.tax_reserved.insert(Good::BreadRoll, 1);
         let mut candidates = Vec::new();
-        source.mixed_meals(0, [0; Good::COUNT], 0.0, &mut candidates);
+        Citizen::mixed_meals(
+            &source.consumption_available_units(),
+            0,
+            [0; Good::COUNT],
+            0.0,
+            &mut candidates,
+        );
         for (meal, nutrition) in candidates {
             let mut predicted = source.clone();
             let meal_ms: u64 = Good::FOOD

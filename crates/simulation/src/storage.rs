@@ -248,9 +248,8 @@ impl crate::Citizen {
 }
 
 impl crate::Citizen {
-    pub(crate) fn colocated_storage_places(&self) -> Vec<PlaceId> {
-        let mut places: Vec<_> = self
-            .map
+    fn accessible_colocated_storage_places(&self) -> impl Iterator<Item = PlaceId> + '_ {
+        self.map
             .places()
             .values()
             .filter(|place| {
@@ -258,7 +257,24 @@ impl crate::Citizen {
                     && self.accessible_place(place.id).is_ok()
             })
             .map(|place| place.id)
-            .collect();
+    }
+
+    pub(crate) fn consumption_available_units(&self) -> [Quantity; Good::COUNT] {
+        let mut available = [0; Good::COUNT];
+        for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
+            available[good as usize] = self.carried_available_units(good);
+        }
+        for place in self.accessible_colocated_storage_places() {
+            for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
+                available[good as usize] = available[good as usize]
+                    .saturating_add(self.stored_available_units(place, good));
+            }
+        }
+        available
+    }
+
+    pub(crate) fn colocated_storage_places(&self) -> Vec<PlaceId> {
+        let mut places: Vec<_> = self.accessible_colocated_storage_places().collect();
         places.sort_by_key(|place| {
             (
                 self.active_action
@@ -379,6 +395,85 @@ mod transport_tests {
     use crate::{
         AgentKind, Citizen, CitizenAction, TRADE_DURATION_MS, Universe, marketplace::ShoppingList,
     };
+
+    #[test]
+    fn consumption_availability_matches_individual_counts_with_access_and_reservations() {
+        use crate::locations::{Location, Position};
+
+        for shared in [false, true] {
+            let mut citizen = Citizen::new(80.0).unwrap();
+            let other = AgentId(uuid::Uuid::new_v4());
+            if shared {
+                citizen.household = Some(crate::households::HouseholdContext {
+                    id: other,
+                    members: vec![citizen.id, other],
+                    allegiance: 0.0,
+                    other_carried: [0; Good::COUNT],
+                    other_consumption_value: 0.0,
+                });
+            }
+            let owner = citizen.goods_owner();
+            let (map, other_home) = citizen
+                .map
+                .with_place(Location::Home, citizen.position, Some(other), "Other home")
+                .unwrap();
+            let (map, distant) = map
+                .with_place(
+                    Location::Home,
+                    Position { x: 10.0, y: 0.0 },
+                    Some(citizen.id),
+                    "Distant home",
+                )
+                .unwrap();
+            citizen.map = map;
+            for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
+                citizen.inventory.insert(good, 20);
+                citizen.tax_reserved.insert(good, 3);
+                let home_key = StockKey {
+                    place: citizen.home,
+                    owner,
+                    good,
+                };
+                citizen.storage.set_units(home_key, 30).unwrap();
+                citizen.storage.set_reserved(home_key, 5);
+                citizen.storage.reserve_work(home_key, 7).unwrap();
+                for (place, stock_owner, units) in [
+                    (other_home, owner, 11),
+                    (distant, owner, 100),
+                    (citizen.home, GoodsOwner::Town, 200),
+                    (
+                        citizen.home,
+                        GoodsOwner::Agent(AgentId(uuid::Uuid::new_v4())),
+                        300,
+                    ),
+                ] {
+                    citizen
+                        .storage
+                        .set_units(
+                            StockKey {
+                                place,
+                                owner: stock_owner,
+                                good,
+                            },
+                            units,
+                        )
+                        .unwrap();
+                }
+            }
+            let available = citizen.consumption_available_units();
+            for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
+                assert_eq!(available[good as usize], citizen.available_units(good));
+                assert_eq!(available[good as usize], if shared { 46 } else { 35 });
+            }
+            citizen.inventory.insert(Good::Water, Quantity::MAX);
+            citizen.tax_reserved.remove(&Good::Water);
+            assert_eq!(
+                citizen.consumption_available_units()[Good::Water as usize],
+                Quantity::MAX
+            );
+            assert_eq!(citizen.available_units(Good::Water), Quantity::MAX);
+        }
+    }
 
     #[test]
     fn planned_storage_transfers_conserve_stock_and_leave_snapshots_unchanged() {
