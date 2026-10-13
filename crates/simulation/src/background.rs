@@ -343,7 +343,7 @@ mod tests {
     fn first_goal_final_action_submits_without_projecting_the_forecast_goal() {
         let source = Citizen::with_needs(60.0, 100.0)
             .unwrap()
-            .with_berries(310)
+            .with_home_good(crate::marketplace::Good::Berries, 310)
             .unwrap()
             .start_planning()
             .unwrap();
@@ -396,7 +396,7 @@ mod tests {
     fn stale_market_result_adopts_only_plan_and_preserves_actual_resources() {
         let citizen = Citizen::with_needs(-50.0, 100.0)
             .unwrap()
-            .with_berries(310)
+            .with_home_good(crate::marketplace::Good::Berries, 310)
             .unwrap();
         let source = executing_fixture(&citizen, vec![CitizenAction::Sleep]);
         let mut execution = source.active_plan().unwrap().clone();
@@ -426,7 +426,10 @@ mod tests {
             .at_boundary(&actual, &mut execution, SLEEP_DURATION_MS, &mut || false)
             .unwrap()
             .unwrap();
-        let expected = actual.start_action(execution.plan().actions()[0]).unwrap();
+        let expected = execution
+            .clone()
+            .adopt(actual.clone(), execution.plan().clone())
+            .unwrap();
         assert_eq!(result, expected);
         assert_eq!(result.coins(), actual.coins());
         assert_eq!(result.forage_rng, actual.forage_rng);
@@ -441,7 +444,9 @@ mod tests {
             vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
         );
         let mut execution = source.active_plan().unwrap().clone();
-        let forecast = citizen.with_berries(310).unwrap();
+        let forecast = citizen
+            .with_home_good(crate::marketplace::Good::Berries, 310)
+            .unwrap();
         let expected_forecast = planning::plan(&forecast).unwrap();
         assert_eq!(expected_forecast.actions()[0], CitizenAction::Eat);
         let mut runtime = PlanningRuntime::default();
@@ -461,7 +466,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(execution.plan(), &fresh);
-        assert_eq!(result, citizen.start_action(fresh.actions()[0]).unwrap());
+        let expected = execution.clone().adopt(citizen.clone(), fresh).unwrap();
+        assert_eq!(result, expected);
         runtime.planning_event(&source, 0).unwrap();
         assert_eq!(runtime.pending.len(), 1);
         runtime.reset();

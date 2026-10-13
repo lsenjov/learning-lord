@@ -1,3 +1,6 @@
+mod support;
+use support::HomeStock;
+
 use learning_lord_simulation::{Citizen, CitizenAction, SimulationError, planning::plan};
 
 const HALF_HOUR_MS: u64 = 1_800_000;
@@ -13,32 +16,63 @@ fn inventory_is_integer_and_busy_replacement_is_rejected() {
     let stocked = original.with_berries(310).unwrap();
     assert_eq!(stocked.berries_units(), 310);
     assert_eq!(original.berries_units(), 0);
-    let busy = stocked.start_action(CitizenAction::Eat).unwrap();
+    let busy = stocked
+        .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 155)
+        .unwrap()
+        .start_action(CitizenAction::Eat)
+        .unwrap();
     assert_eq!(busy.with_berries(1), Err(SimulationError::CitizenBusy));
 }
 
 #[test]
 fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() {
     for stock in [155, 310, 500] {
-        let source = Citizen::new(20.0).unwrap().with_berries(stock).unwrap();
+        let source = Citizen::new(20.0)
+            .unwrap()
+            .with_home_good(learning_lord_simulation::marketplace::Good::Berries, stock)
+            .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
         let duration_ms = 155_000;
         assert_eq!(started.active_action().unwrap().duration_ms(), duration_ms);
-        assert_eq!(started.berries_units(), stock - 155);
+        assert_eq!(
+            started.stored_available_units(
+                started.home(),
+                learning_lord_simulation::marketplace::Good::Berries
+            ),
+            stock - 155
+        );
         let halfway = started.advance(duration_ms / 2).unwrap();
-        assert_eq!(halfway.berries_units(), stock - 155);
+        assert_eq!(
+            halfway.stored_available_units(
+                halfway.home(),
+                learning_lord_simulation::marketplace::Good::Berries
+            ),
+            stock - 155
+        );
         assert_close(
             halfway.hunger(),
             20.0 + 100.0 / 24.0 * duration_ms as f64 / 7_200_000.0 - 25.0,
         );
         let completed = halfway.advance(duration_ms / 2).unwrap();
         assert_eq!(completed.active_action(), None);
-        assert_eq!(completed.berries_units(), stock - 155);
+        assert_eq!(
+            completed.stored_available_units(
+                completed.home(),
+                learning_lord_simulation::marketplace::Good::Berries
+            ),
+            stock - 155
+        );
         assert_close(
             completed.hunger(),
             20.0 + 100.0 / 24.0 * duration_ms as f64 / 3_600_000.0 - 50.0,
         );
-        assert_eq!(source.berries_units(), stock);
+        assert_eq!(
+            source.stored_available_units(
+                source.home(),
+                learning_lord_simulation::marketplace::Good::Berries
+            ),
+            stock
+        );
     }
 }
 
@@ -47,9 +81,17 @@ fn empty_meals_skip_and_partial_berries_use_whole_available_units() {
     let empty = Citizen::new(0.0).unwrap();
     assert_eq!(empty.start_action(CitizenAction::Eat).unwrap(), empty);
     for units in [1, 154] {
-        let citizen = empty.with_berries(units).unwrap();
+        let citizen = empty
+            .with_home_good(learning_lord_simulation::marketplace::Good::Berries, units)
+            .unwrap();
         let eating = citizen.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(eating.berries_units(), 0);
+        assert_eq!(
+            eating.stored_available_units(
+                eating.home(),
+                learning_lord_simulation::marketplace::Good::Berries
+            ),
+            0
+        );
         assert_eq!(eating.active_action().unwrap().duration_ms(), units * 1000);
         let eaten = eating.advance(units * 1000).unwrap();
         assert_close(
@@ -96,7 +138,7 @@ fn empty_hungry_citizens_can_plan_and_advance_without_zero_duration_loops() {
     let planned = source.start_planning().unwrap();
     assert!(matches!(
         planned.active_action().unwrap().action(),
-        CitizenAction::Produce(_)
+        CitizenAction::Produce(_) | CitizenAction::ProduceAt { .. }
     ));
     let advanced = planned.advance(24 * 3_600_000).unwrap();
     assert!(advanced.hunger().is_finite());

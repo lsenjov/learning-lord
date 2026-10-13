@@ -456,36 +456,6 @@ impl Universe {
     }
 }
 
-impl Citizen {
-    fn reserve_units(&self, good: Good, available: bool) -> Quantity {
-        let stored = if available {
-            self.stored_available_units(self.home, good)
-        } else {
-            self.storage.units(self.home, self.goods_owner(), good)
-        };
-        let carried = if available {
-            self.carried_available_units(good)
-        } else {
-            self.units(good)
-        };
-        stored.saturating_add(carried).saturating_add(
-            self.household
-                .as_ref()
-                .map_or(0, |household| household.other_carried[good as usize]),
-        )
-    }
-    pub(crate) fn reserve_food_nutrition(&self) -> f64 {
-        Good::FOOD
-            .into_iter()
-            .map(|good| self.reserve_units(good, false) as f64 * good.nutrition_per_unit().unwrap())
-            .sum::<f64>()
-            + self.reserve_units(Good::Beer, false) as f64 * 0.05
-    }
-    pub(crate) fn reserve_drink_units(&self) -> Quantity {
-        self.reserve_units(Good::Water, true)
-            .saturating_add(self.reserve_units(Good::Beer, true))
-    }
-}
 impl Universe {
     pub(crate) fn account_workers(&self, account: AgentId) -> Vec<AgentId> {
         if self.guilds.contains_key(&account) {

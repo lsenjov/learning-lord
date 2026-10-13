@@ -186,7 +186,7 @@ impl CitizenAction {
     pub fn required_place(self, citizen: &Citizen) -> Option<PlaceId> {
         match self {
             Self::CollectBeer { brewery, .. } => Some(brewery),
-            Self::Sleep => Some(citizen.home),
+            Self::Sleep | Self::Eat | Self::Drink => Some(citizen.home),
             Self::Plant { field, .. }
             | Self::Tend { field, .. }
             | Self::Harvest { field, .. }
@@ -464,7 +464,7 @@ impl Citizen {
     }
 
     fn drink_units_for(&self, good: Good) -> Quantity {
-        self.drink_units_from_available(self.available_units(good))
+        self.drink_units_from_available(self.consumption_available_units()[good as usize])
     }
 
     fn drink_units_from_available(&self, available: Quantity) -> Quantity {
@@ -1324,9 +1324,9 @@ impl Citizen {
             return Err(SimulationError::MissingInputs);
         }
         for good in Good::FOOD {
-            citizen.consume_goods(good, meal_units[good as usize])?;
+            citizen.consume_home_goods(good, meal_units[good as usize])?;
         }
-        citizen.consume_goods(drink_good, drink_units)?;
+        citizen.consume_home_goods(drink_good, drink_units)?;
         if action == CitizenAction::Eat {
             citizen.last_meal_started_ms = Some(self.market_time_ms);
         }
@@ -1378,7 +1378,7 @@ impl Citizen {
     }
 
     pub fn food_reserve_wellbeing(&self) -> f64 {
-        let nutrition = self.reserve_food_nutrition()
+        let nutrition = self.home_food_nutrition()
             + self.active_action.map_or(0.0, |active| {
                 active.drink_nutrition() * active.remaining_fraction(active.drink_duration_ms())
                     + active.meal_nutrition
@@ -1392,7 +1392,7 @@ impl Citizen {
     }
 
     pub fn drinking_water_reserve(&self) -> f64 {
-        self.reserve_drink_units() as f64
+        self.home_drink_units() as f64
             + self.active_action.map_or(0.0, |active| {
                 let duration = active.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS;
                 active.drink_units as f64
@@ -3105,6 +3105,41 @@ impl fmt::Display for SimulationError {
 impl std::error::Error for SimulationError {}
 
 #[cfg(test)]
+impl Citizen {
+    pub(crate) fn with_home_good(
+        &self,
+        good: Good,
+        units: Quantity,
+    ) -> Result<Self, SimulationError> {
+        let mut citizen = self.clone();
+        citizen.storage.set_units(
+            storage::StockKey {
+                place: citizen.home,
+                owner: citizen.goods_owner(),
+                good,
+            },
+            units,
+        )?;
+        Ok(citizen)
+    }
+
+    pub(crate) fn reserve_home_good(&mut self, good: Good, units: Quantity) {
+        self.storage.set_reserved(
+            storage::StockKey {
+                place: self.home,
+                owner: self.goods_owner(),
+                good,
+            },
+            units,
+        );
+    }
+
+    pub(crate) fn home_units(&self, good: Good) -> Quantity {
+        self.storage.units(self.home, self.goods_owner(), good)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rand::SeedableRng;
@@ -3132,14 +3167,14 @@ mod tests {
     fn drinking_excludes_reserved_and_town_water_and_preserves_active_wealth() {
         let mut source = Citizen::new(0.0)
             .unwrap()
-            .with_good(Good::Water, 300)
+            .with_home_good(Good::Water, 300)
             .unwrap();
-        source.tax_reserved.insert(Good::Water, 250);
+        source.reserve_home_good(Good::Water, 250);
         source.town_inventory.insert(Good::Water, 500);
         let wealth = source.wealth().unwrap();
         let started = source.start_action(CitizenAction::Drink).unwrap();
         assert_eq!(started.active_action().unwrap().drinking_units(), 50);
-        assert_eq!(started.units(Good::Water), 250);
+        assert_eq!(started.home_units(Good::Water), 250);
         assert!((started.wealth().unwrap() - wealth).abs() < 1e-9);
         let middle = started.advance(7500).unwrap();
         let water_value = source.prices.value(Good::Water, 25).unwrap();
@@ -3152,7 +3187,11 @@ mod tests {
                 .is_none()
         );
         assert_eq!(done.town_inventory[&Good::Water], 500);
-        assert_eq!(done.tax_reserved[&Good::Water], 250);
+        assert_eq!(
+            done.storage
+                .reserved_units(done.home, done.goods_owner(), Good::Water),
+            250
+        );
         assert!(matches!(
             source.with_thirst(f64::NAN),
             Err(SimulationError::InvalidThirst)
@@ -3160,15 +3199,23 @@ mod tests {
     }
 
     #[test]
-    fn water_reserves_diminish_and_follow_unconsumed_drinks() {
-        let source = Citizen::new(0.0)
+    fn water_reserves_credit_only_usable_home_stock_and_unconsumed_drinks() {
+        let carried = Citizen::new(0.0)
             .unwrap()
             .with_good(Good::Water, 400)
             .unwrap();
+        assert_eq!(carried.drinking_water_reserve(), 0.0);
+        assert_eq!(carried.water_reserve_wellbeing(), 0.0);
+        let source = carried
+            .with_good(Good::Water, 0)
+            .unwrap()
+            .with_home_good(Good::Water, 400)
+            .unwrap();
+        assert_eq!(source.wealth().unwrap(), carried.wealth().unwrap());
         assert_eq!(source.water_reserve_wellbeing(), 10.0);
         assert_eq!(
             source
-                .with_good(Good::Water, 1200)
+                .with_home_good(Good::Water, 1200)
                 .unwrap()
                 .water_reserve_wellbeing(),
             14.0
@@ -3179,9 +3226,10 @@ mod tests {
             drinking.advance(30_000).unwrap().water_reserve_wellbeing(),
             7.5
         );
-        assert_eq!(source.units(Good::Water), 400);
+        assert_eq!(source.home_units(Good::Water), 400);
         let mut taxed = source.clone();
-        taxed.tax_reserved.insert(Good::Water, 400);
+        taxed.reserve_home_good(Good::Water, 400);
+        assert_eq!(taxed.wealth().unwrap(), source.wealth().unwrap());
         assert_eq!(taxed.water_reserve_wellbeing(), 0.0);
         taxed.town_inventory.insert(Good::Water, 500);
         assert_eq!(taxed.water_reserve_wellbeing(), 0.0);
@@ -3249,7 +3297,9 @@ mod tests {
     #[test]
     fn acquired_inputs_survive_changed_mix_replanning_and_repeated_excess_sales() {
         let mut worker = baker_with_targets()
-            .with_good(Good::BreadRoll, 120)
+            .with_good(Good::BreadRoll, 115)
+            .unwrap()
+            .with_home_good(Good::BreadRoll, 5)
             .unwrap()
             .with_good(Good::BerryPie, 16)
             .unwrap()
@@ -3270,11 +3320,12 @@ mod tests {
             0
         );
         let place = worker.selling_place();
-        worker.position = worker.map.position(place);
+        worker.position = worker.map.position(worker.home);
         let eating = worker.start_action(CitizenAction::Eat).unwrap();
         let mut worker = eating
             .advance(eating.active_action().unwrap().duration_ms())
             .unwrap();
+        worker.position = worker.map.position(place);
         assert!(
             production::projected_recipes(&worker, production::DAILY_CAPACITY_MS)
                 .unwrap()
@@ -3427,18 +3478,18 @@ mod tests {
                     .with_price(Good::BerryPie, 25.0)
                     .unwrap(),
             )
-            .with_berries(154)
+            .with_home_good(Good::Berries, 154)
             .unwrap()
-            .with_good(Good::BreadRoll, 5)
+            .with_home_good(Good::BreadRoll, 5)
             .unwrap()
-            .with_good(Good::BerryPie, 1)
+            .with_home_good(Good::BerryPie, 1)
             .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(started.units(Good::BreadRoll), 4);
-        assert_eq!(started.units(Good::BerryPie), 1);
+        assert_eq!(started.home_units(Good::BreadRoll), 4);
+        assert_eq!(started.home_units(Good::BerryPie), 1);
         assert!(started.active_action().unwrap().meal_nutrition >= MEAL_NOURISHMENT);
-        assert!(started.berries_units() < source.berries_units());
-        let source = source.with_berries(155).unwrap();
+        assert!(started.home_units(Good::Berries) < source.home_units(Good::Berries));
+        let source = source.with_home_good(Good::Berries, 155).unwrap();
         let source = source.with_prices(
             source
                 .prices()
@@ -3448,8 +3499,8 @@ mod tests {
                 .unwrap(),
         );
         let started = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(started.units(Good::BerryPie), 0);
-        assert_eq!(started.berries_units(), 155);
+        assert_eq!(started.home_units(Good::BerryPie), 0);
+        assert_eq!(started.home_units(Good::Berries), 155);
         assert_eq!(started.active_action().unwrap().duration_ms(), 125_000);
         let halfway = started.advance(62_500).unwrap();
         assert!((source.wealth().unwrap() - halfway.wealth().unwrap() - 12.5).abs() < 1e-10);

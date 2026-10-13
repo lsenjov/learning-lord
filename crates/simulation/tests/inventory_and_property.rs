@@ -1,3 +1,6 @@
+mod support;
+use support::HomeStock;
+
 use learning_lord_simulation::{
     AgentKind, Citizen, CitizenAction, SimulationError, Universe,
     locations::{Location, Map, PlaceId, Position},
@@ -57,11 +60,20 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
             .sum::<f64>();
     assert!((stocked.wealth().unwrap() - expected).abs() < 1e-12);
     let eaten = stocked
+        .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 200)
+        .unwrap()
+        .with_home_good(Good::Water, 1000)
+        .unwrap()
         .start_action(CitizenAction::Eat)
         .unwrap()
         .advance(50_000)
         .unwrap();
-    assert_eq!(eaten.berries_units(), 45);
+    assert_eq!(eaten.berries_units(), 200);
+    assert_eq!(
+        eaten.stored_available_units(eaten.home(), Good::Berries),
+        45
+    );
+    assert_eq!(eaten.stored_available_units(eaten.home(), Good::Water), 800);
     assert_eq!(eaten.units(Good::BreadRoll), 1000);
     let sold = stocked
         .start_action(CitizenAction::List(Good::Berries, 50))
@@ -79,20 +91,26 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         Good::Water,
         Good::BreadRoll,
     ] {
-        assert_eq!(
-            eaten.units(good),
-            stocked.units(good) - if good == Good::Water { 200 } else { 0 }
-        );
+        assert_eq!(eaten.units(good), stocked.units(good));
         assert_eq!(sold.units(good), stocked.units(good));
     }
     let bread_only = Citizen::new(40.0)
         .unwrap()
         .with_good(Good::BreadRoll, 50)
         .unwrap();
-    let bread_meal = bread_only.start_action(CitizenAction::Eat).unwrap();
+    let bread_meal = bread_only
+        .with_good(Good::BreadRoll, 0)
+        .unwrap()
+        .with_home_good(Good::BreadRoll, 50)
+        .unwrap()
+        .start_action(CitizenAction::Eat)
+        .unwrap();
     assert_eq!(bread_meal.active_action().unwrap().duration_ms(), 100_000);
     assert_eq!(
-        bread_meal.advance(100_000).unwrap().units(Good::BreadRoll),
+        bread_meal
+            .advance(100_000)
+            .unwrap()
+            .stored_available_units(bread_meal.home(), Good::BreadRoll),
         45
     );
     assert_eq!(

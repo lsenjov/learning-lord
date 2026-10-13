@@ -494,6 +494,12 @@ fn active_beer_meal_persists_and_resumes_identical_benefits_and_history() {
     let (world, id) = Universe::with_map(Map::default())
         .with_citizen("Diner", worker)
         .unwrap();
+    let home = citizen(&world, id).home();
+    let world = world
+        .deposit_goods(id, home, Good::Beer, 200)
+        .unwrap()
+        .deposit_goods(id, home, Good::BreadRoll, 4)
+        .unwrap();
     let started = world.start_action(id, CitizenAction::Eat).unwrap();
     let halfway = started.advance(30_000).unwrap();
     assert_eq!(

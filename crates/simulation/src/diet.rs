@@ -146,14 +146,66 @@ impl Citizen {
         forecast.storage = crate::storage::Storage::default();
         forecast.active_action = None;
         forecast.active_plan = None;
+        forecast.position = forecast.map.position(forecast.home);
         for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-            forecast.inventory.insert(good, available[good as usize]);
+            forecast
+                .storage
+                .set_units(
+                    crate::storage::StockKey {
+                        place: forecast.home,
+                        owner: forecast.goods_owner(),
+                        good,
+                    },
+                    available[good as usize],
+                )
+                .expect("retention stock is valid");
             forecast.tax_reserved.remove(&good);
         }
         let mut retained = forecast
             .food_forecast(6usize.saturating_mul(self.supplied_members() as usize))
             .units;
         retained[Good::Water as usize] = 0;
+        let mut stocked = [0.0; 4];
+        let mut retained_points = [0.0; 4];
+        for good in Good::FOOD.into_iter().chain([Good::Beer]) {
+            for (index, points) in good.diet_per_unit().into_iter().enumerate() {
+                stocked[index] += points
+                    * self
+                        .stored_available_units(self.home, good)
+                        .min(available[good as usize]) as f64;
+                retained_points[index] += points * retained[good as usize] as f64;
+            }
+        }
+        let mut categories = [0, 1, 2, 3];
+        categories.sort_by(|a, b| stocked[*b].total_cmp(&stocked[*a]).then_with(|| a.cmp(b)));
+        for category in categories.into_iter().take(3) {
+            let target = stocked[category].min(75.0 * self.supplied_members() as f64);
+            let mut foods: Vec<_> = Good::FOOD
+                .into_iter()
+                .chain([Good::Beer])
+                .filter(|good| good.diet_per_unit()[category] > 0.0)
+                .collect();
+            foods.sort_by(|a, b| {
+                let cost = |good: Good| {
+                    self.prices.value(good, 1).unwrap_or(0.0) / good.diet_per_unit()[category]
+                };
+                cost(*a)
+                    .total_cmp(&cost(*b))
+                    .then_with(|| (*a as usize).cmp(&(*b as usize)))
+            });
+            for good in foods {
+                let missing = (target - retained_points[category]).max(0.0);
+                let added = self
+                    .stored_available_units(self.home, good)
+                    .min(available[good as usize])
+                    .saturating_sub(retained[good as usize])
+                    .min((missing / good.diet_per_unit()[category]).ceil() as crate::Quantity);
+                retained[good as usize] += added;
+                for (points, per_unit) in retained_points.iter_mut().zip(good.diet_per_unit()) {
+                    *points += added as f64 * per_unit;
+                }
+            }
+        }
         let mut nutrition: f64 = Good::FOOD
             .into_iter()
             .map(|good| retained[good as usize] as f64 * good.nutrition_per_unit().unwrap())
@@ -183,6 +235,7 @@ impl Citizen {
         let mut future = self.clone();
         future.active_action = None;
         future.active_plan = None;
+        future.position = future.map.position(future.home);
         let mut elapsed = 0;
         let mut benefit = 0.0;
         let mut consumed_value = 0.0;
@@ -218,12 +271,12 @@ impl Citizen {
                 let portion = action.meal_units[good as usize];
                 units[good as usize] += portion;
                 future
-                    .consume_goods(good, portion)
+                    .consume_home_goods(good, portion)
                     .expect("forecast consumes available food");
             }
             units[action.drink_good as usize] += action.drink_units;
             future
-                .consume_goods(action.drink_good, action.drink_units)
+                .consume_home_goods(action.drink_good, action.drink_units)
                 .expect("forecast consumes available drink");
             let duration = action.duration_ms.min(horizon - elapsed);
             benefit +=
@@ -490,12 +543,12 @@ mod tests {
         }
         let first = source.food_forecast(1);
         let later = source.food_forecast(6);
-        assert_eq!(first.units[Good::BreadRoll as usize], 5);
-        assert_eq!(later.units[Good::BreadRoll as usize], 10);
-        assert_eq!(later.units[Good::Water as usize], 200);
+        assert_eq!(first.units[Good::BreadRoll as usize], 4);
+        assert_eq!(later.units[Good::BreadRoll as usize], 5);
+        assert_eq!(later.units[Good::Water as usize], 0);
         assert_eq!(later.units[Good::Beer as usize], 200);
         for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-            assert!(later.units[good as usize] <= source.available_units(good));
+            assert!(later.units[good as usize] <= source.stored_available_units(source.home, good));
         }
         assert_eq!(source.units(Good::BreadRoll), 5);
         assert_eq!(
@@ -510,10 +563,10 @@ mod tests {
             .unwrap()
             .with_thirst(80.0)
             .unwrap()
-            .with_good(Good::Beer, 200)
+            .with_home_good(Good::Beer, 200)
             .unwrap();
         let started = source.start_action(CitizenAction::Drink).unwrap();
-        assert_eq!(started.units(Good::Beer), 0);
+        assert_eq!(started.home_units(Good::Beer), 0);
         close(started.wealth().unwrap(), source.wealth().unwrap());
         close(
             started.food_reserve_wellbeing(),
@@ -552,9 +605,9 @@ mod tests {
                 .unwrap()
                 .with_thirst(80.0)
                 .unwrap()
-                .with_good(Good::Beer, beer)
+                .with_home_good(Good::Beer, beer)
                 .unwrap()
-                .with_good(Good::BreadRoll, 10)
+                .with_home_good(Good::BreadRoll, 10)
                 .unwrap();
             let forecast = source.food_forecast(1);
             let started = source.start_action(CitizenAction::Eat).unwrap();
@@ -603,11 +656,11 @@ mod tests {
             .unwrap()
             .with_thirst(80.0)
             .unwrap()
-            .with_good(Good::BreadRoll, 10)
+            .with_home_good(Good::BreadRoll, 10)
             .unwrap()
-            .with_good(Good::Water, 200)
+            .with_home_good(Good::Water, 200)
             .unwrap()
-            .with_good(Good::Beer, 200)
+            .with_home_good(Good::Beer, 200)
             .unwrap();
         source.prices = source.prices.with_price(Good::Beer, 100.0).unwrap();
         assert_eq!(
@@ -627,7 +680,7 @@ mod tests {
         );
         let beer_only = Citizen::new(80.0)
             .unwrap()
-            .with_good(Good::Beer, 10_000)
+            .with_home_good(Good::Beer, 10_000)
             .unwrap();
         assert!(!beer_only.has_complete_meal());
     }
@@ -638,18 +691,18 @@ mod tests {
             .unwrap()
             .with_thirst(80.0)
             .unwrap()
-            .with_good(Good::Beer, 250)
+            .with_home_good(Good::Beer, 250)
             .unwrap();
-        source.tax_reserved.insert(Good::Beer, 200);
+        source.reserve_home_good(Good::Beer, 200);
         source.town_inventory.insert(Good::Beer, 1000);
         let started = source.start_action(CitizenAction::Drink).unwrap();
         assert_eq!(started.active_action().unwrap().drink_units, 50);
-        assert_eq!(started.units(Good::Beer), 200);
+        assert_eq!(started.home_units(Good::Beer), 200);
         assert_eq!(started.town_inventory[&Good::Beer], 1000);
         close(started.drinking_water_reserve(), 50.0);
         let reserves = source.reserved_goods().unwrap();
         assert!(reserves.units(Good::Beer) <= 50);
-        source.tax_reserved.insert(Good::Beer, 250);
+        source.reserve_home_good(Good::Beer, 250);
         assert!(
             source
                 .start_action(CitizenAction::Drink)
@@ -702,7 +755,10 @@ mod tests {
             (Good::Fish, 2),
             (Good::Cabbage, 2),
         ] {
-            let source = Citizen::new(80.0).unwrap().with_good(good, units).unwrap();
+            let source = Citizen::new(80.0)
+                .unwrap()
+                .with_home_good(good, units)
+                .unwrap();
             let started = source.start_action(CitizenAction::Eat).unwrap();
             assert_eq!(started.diet, [0.0; 4]);
             let duration = started.active_action().unwrap().duration_ms();
@@ -728,39 +784,39 @@ mod tests {
     fn meals_consider_diet_cost_and_time_instead_of_only_nutrition_price() {
         let mut source = Citizen::new(40.0)
             .unwrap()
-            .with_good(Good::BreadRoll, 5)
+            .with_home_good(Good::BreadRoll, 5)
             .unwrap()
-            .with_good(Good::Fish, 2)
+            .with_home_good(Good::Fish, 2)
             .unwrap();
         source.diet = [0.0, 100.0, 0.0, 0.0];
         let chosen = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(chosen.units(Good::Fish), 0);
-        assert_eq!(chosen.units(Good::BreadRoll), 5);
+        assert_eq!(chosen.home_units(Good::Fish), 0);
+        assert_eq!(chosen.home_units(Good::BreadRoll), 5);
         source.prices = source.prices.with_price(Good::Fish, 100.0).unwrap();
         let economical = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(economical.units(Good::Fish), 2);
-        assert_eq!(economical.units(Good::BreadRoll), 0);
+        assert_eq!(economical.home_units(Good::Fish), 2);
+        assert_eq!(economical.home_units(Good::BreadRoll), 0);
     }
 
     #[test]
     fn meal_scores_match_consumption_predictions_without_food_reserve_changes() {
         let mut source = Citizen::with_needs(140.0, 20.0)
             .unwrap()
-            .with_good(Good::BreadRoll, 10)
+            .with_home_good(Good::BreadRoll, 10)
             .unwrap()
-            .with_good(Good::Fish, 2)
+            .with_home_good(Good::Fish, 2)
             .unwrap()
-            .with_good(Good::Cabbage, 2)
+            .with_home_good(Good::Cabbage, 2)
             .unwrap()
-            .with_good(Good::BerryPie, 1)
+            .with_home_good(Good::BerryPie, 1)
             .unwrap()
-            .with_good(Good::Berries, 200)
+            .with_home_good(Good::Berries, 200)
             .unwrap()
-            .with_good(Good::Water, 300)
+            .with_home_good(Good::Water, 300)
             .unwrap();
         source.diet = [95.0, 48.0, 0.0, 52.0];
         source.garment_condition = Some(0.4);
-        source.tax_reserved.insert(Good::BreadRoll, 1);
+        source.reserve_home_good(Good::BreadRoll, 1);
         let mut candidates = Vec::new();
         Citizen::mixed_meals(
             &source.consumption_available_units(),
@@ -769,6 +825,7 @@ mod tests {
             0.0,
             &mut candidates,
         );
+        assert!(!candidates.is_empty());
         for (meal, nutrition) in candidates {
             let mut predicted = source.clone();
             let meal_ms: u64 = Good::FOOD
@@ -776,14 +833,14 @@ mod tests {
                 .map(|good| meal[good as usize] * good.eating_ms_per_unit().unwrap())
                 .sum();
             for good in Good::FOOD {
-                predicted
-                    .inventory
-                    .insert(good, source.units(good) - meal[good as usize]);
+                predicted = predicted
+                    .with_home_good(good, source.home_units(good) - meal[good as usize])
+                    .unwrap();
             }
             let drink = source.drink_units();
-            predicted
-                .inventory
-                .insert(Good::Water, source.units(Good::Water) - drink);
+            predicted = predicted
+                .with_home_good(Good::Water, source.home_units(Good::Water) - drink)
+                .unwrap();
             let duration = meal_ms.max(drink * crate::DRINK_DURATION_MS / crate::DRINK_WATER_GRAMS);
             let active = ActiveAction {
                 stored_inputs: crate::marketplace::ShoppingList::default(),
@@ -820,7 +877,7 @@ mod tests {
                     .with_price(Good::BreadRoll, 0.1)
                     .unwrap(),
             )
-            .with_good(Good::BreadRoll, 35)
+            .with_home_good(Good::BreadRoll, 35)
             .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
         close(
@@ -840,7 +897,7 @@ mod tests {
                     .with_price(Good::BreadRoll, 0.1)
                     .unwrap(),
             )
-            .with_good(Good::BreadRoll, 35)
+            .with_home_good(Good::BreadRoll, 35)
             .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
         let duration = started.active_action().unwrap().duration_ms();
@@ -859,7 +916,7 @@ mod tests {
             complete.food_forecast(6).units[Good::BreadRoll as usize],
             30
         );
-        assert_eq!(complete.units(Good::BreadRoll), 30);
+        assert_eq!(complete.home_units(Good::BreadRoll), 30);
     }
 
     #[test]
@@ -885,7 +942,7 @@ mod tests {
     fn food_forecast_values_future_diet_without_mutating_the_source() {
         let source = Citizen::new(-50.0)
             .unwrap()
-            .with_good(Good::BreadRoll, 100)
+            .with_home_good(Good::BreadRoll, 100)
             .unwrap();
         let before = source.clone();
         let value = source
@@ -920,9 +977,9 @@ mod tests {
     fn mixed_whole_food_supplies_a_complete_meal() {
         let source = Citizen::new(80.0)
             .unwrap()
-            .with_good(Good::Fish, 1)
+            .with_home_good(Good::Fish, 1)
             .unwrap()
-            .with_good(Good::Cabbage, 1)
+            .with_home_good(Good::Cabbage, 1)
             .unwrap();
         assert!(source.has_complete_meal());
         let started = source.start_action(CitizenAction::Eat).unwrap();
@@ -930,18 +987,18 @@ mod tests {
         assert_eq!(active.meal_nutrition, 50.0);
         assert_eq!(active.meal_units[Good::Fish as usize], 1);
         assert_eq!(active.meal_units[Good::Cabbage as usize], 1);
-        assert_eq!(source.units(Good::Fish), 1);
+        assert_eq!(source.home_units(Good::Fish), 1);
     }
 
     #[test]
     fn mixed_rolls_fish_and_berries_fill_the_remaining_nutrition() {
         let source = Citizen::new(80.0)
             .unwrap()
-            .with_good(Good::Fish, 1)
+            .with_home_good(Good::Fish, 1)
             .unwrap()
-            .with_good(Good::BreadRoll, 2)
+            .with_home_good(Good::BreadRoll, 2)
             .unwrap()
-            .with_good(Good::Berries, 16)
+            .with_home_good(Good::Berries, 16)
             .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
         let active = started.active_action().unwrap();
@@ -958,9 +1015,9 @@ mod tests {
     fn minimal_whole_food_overfill_remains_a_complete_meal() {
         let source = Citizen::new(80.0)
             .unwrap()
-            .with_good(Good::Fish, 1)
+            .with_home_good(Good::Fish, 1)
             .unwrap()
-            .with_good(Good::BreadRoll, 3)
+            .with_home_good(Good::BreadRoll, 3)
             .unwrap();
         assert!(source.has_complete_meal());
         let started = source.start_action(CitizenAction::Eat).unwrap();
@@ -971,9 +1028,9 @@ mod tests {
     fn mixed_partial_meal_uses_available_food_without_phantom_nutrition() {
         let source = Citizen::new(80.0)
             .unwrap()
-            .with_good(Good::Fish, 1)
+            .with_home_good(Good::Fish, 1)
             .unwrap()
-            .with_good(Good::Berries, 10)
+            .with_home_good(Good::Berries, 10)
             .unwrap();
         assert!(!source.has_complete_meal());
         let started = source.start_action(CitizenAction::Eat).unwrap();
@@ -990,9 +1047,9 @@ mod tests {
     fn capped_meal_with_a_longer_drink_is_invariant_to_elapsed_chunks() {
         let mut source = Citizen::new(30.0)
             .unwrap()
-            .with_good(Good::Berries, 1)
+            .with_home_good(Good::Berries, 1)
             .unwrap()
-            .with_good(Good::Water, 200)
+            .with_home_good(Good::Water, 200)
             .unwrap();
         source.diet = [1.0, 50.0, 100.0, 99.9];
         let started = source.start_action(CitizenAction::Eat).unwrap();

@@ -501,13 +501,16 @@ mod tests {
                 .unwrap()
                 .with_thirst(80.0)
                 .unwrap()
-                .with_good(Good::Beer, beer)
+                .with_home_good(Good::Beer, beer)
                 .unwrap()
-                .with_good(Good::BreadRoll, 10)
+                .with_home_good(Good::BreadRoll, 10)
                 .unwrap();
-            let (world, id) = Universe::with_map(citizen.map())
-                .with_citizen("Beer diner", citizen)
-                .unwrap();
+            let (world, id) = Universe {
+                storage: citizen.storage.clone(),
+                ..Universe::with_map(citizen.map())
+            }
+            .with_citizen("Beer diner", citizen)
+            .unwrap();
             let started = world.start_action(id, CitizenAction::Eat).unwrap();
             let history = started.citizen_history(id).unwrap();
             assert_eq!(history.current.consumed[Good::Beer as usize], beer.min(200));
@@ -557,14 +560,17 @@ mod tests {
     fn diet_history_is_chunk_invariant_at_meal_caps_and_drink_completion() {
         let mut citizen = Citizen::new(-50.0)
             .unwrap()
-            .with_good(Good::Berries, 1)
+            .with_home_good(Good::Berries, 1)
             .unwrap()
-            .with_good(Good::Water, 200)
+            .with_home_good(Good::Water, 200)
             .unwrap();
         citizen.diet = [0.01, 50.01, 100.0, 99.9];
-        let (world, id) = Universe::with_map(crate::locations::Map::default())
-            .with_citizen("Diet", citizen)
-            .unwrap();
+        let (world, id) = Universe {
+            storage: citizen.storage.clone(),
+            ..Universe::with_map(citizen.map())
+        }
+        .with_citizen("Diet", citizen)
+        .unwrap();
         let started = world.start_action(id, CitizenAction::Eat).unwrap();
         let whole = started.advance(60_000).unwrap();
         let chunks = started
@@ -662,11 +668,14 @@ mod tests {
     fn drinking_reserve_clamps_have_chunk_independent_history() {
         let citizen = Citizen::new(-50.0)
             .unwrap()
-            .with_good(Good::Water, 1300)
+            .with_home_good(Good::Water, 1300)
             .unwrap();
-        let (world, id) = Universe::with_map(citizen.map())
-            .with_citizen("Drinker", citizen)
-            .unwrap();
+        let (world, id) = Universe {
+            storage: citizen.storage.clone(),
+            ..Universe::with_map(citizen.map())
+        }
+        .with_citizen("Drinker", citizen)
+        .unwrap();
         let started = world.start_action(id, CitizenAction::Drink).unwrap();
         let whole = started.advance(crate::DRINK_DURATION_MS).unwrap();
         let split = started.advance(20_000).unwrap().advance(40_000).unwrap();
@@ -685,13 +694,16 @@ mod tests {
         for water in [500, 1300] {
             let citizen = Citizen::new(-50.0)
                 .unwrap()
-                .with_berries(155)
+                .with_home_good(Good::Berries, 155)
                 .unwrap()
-                .with_good(Good::Water, water)
+                .with_home_good(Good::Water, water)
                 .unwrap();
-            let (world, id) = Universe::with_map(citizen.map())
-                .with_citizen("Diner", citizen)
-                .unwrap();
+            let (world, id) = Universe {
+                storage: citizen.storage.clone(),
+                ..Universe::with_map(citizen.map())
+            }
+            .with_citizen("Diner", citizen)
+            .unwrap();
             let started = world.start_action(id, CitizenAction::Eat).unwrap();
             let whole = started.advance(155_000).unwrap();
             let split = started.advance(60_000).unwrap().advance(95_000).unwrap();
@@ -708,10 +720,16 @@ mod tests {
 
     #[test]
     fn planned_meals_count_time_towards_food_goals_without_double_counting_activity() {
-        let citizen = Citizen::new(80.0).unwrap().with_berries(310).unwrap();
-        let (world, id) = Universe::with_map(citizen.map())
-            .with_citizen("Hungry", citizen)
+        let citizen = Citizen::new(80.0)
+            .unwrap()
+            .with_home_good(Good::Berries, 310)
             .unwrap();
+        let (world, id) = Universe {
+            storage: citizen.storage.clone(),
+            ..Universe::with_map(citizen.map())
+        }
+        .with_citizen("Hungry", citizen)
+        .unwrap();
         let started = world.start_planning(id).unwrap();
         let AgentKind::Citizen(citizen) = &started.agents()[&id].kind;
         assert_eq!(

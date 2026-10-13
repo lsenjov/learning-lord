@@ -1296,22 +1296,40 @@ mod tests {
     }
 
     #[test]
-    fn reserved_food_keeps_wellbeing_credit_but_cannot_be_eaten() {
+    fn reserved_food_keeps_wealth_but_has_no_consumption_or_reserve_credit() {
         let (world, id, _) = reserved_worker(Good::BreadRoll, 10);
         let AgentKind::Citizen(worker) = &world.agents[&id].kind;
-        assert_eq!(worker.food_nutrition(), 100.0);
-        assert_eq!(worker.available_food_nutrition(), 50.0);
-        assert_eq!(worker.food_reserve_wellbeing(), 10.0);
+        let home = worker.home;
+        let wealth = worker.wealth().unwrap();
+        assert_eq!(worker.food_reserve_wellbeing(), 0.0);
+        let world = world.deposit_goods(id, home, Good::BreadRoll, 10).unwrap();
+        let AgentKind::Citizen(worker) = &world.agents[&id].kind;
+        assert_eq!(worker.home_units(Good::BreadRoll), 10);
+        assert_eq!(worker.stored_available_units(home, Good::BreadRoll), 5);
+        assert_eq!(worker.food_reserve_wellbeing(), 5.0);
+        assert_eq!(worker.wealth().unwrap(), wealth);
         let busy = world.start_action(id, crate::CitizenAction::Eat).unwrap();
         let AgentKind::Citizen(worker) = &busy.agents[&id].kind;
-        assert_eq!(worker.units(Good::BreadRoll), 5);
-        assert_eq!(worker.tax_reserved_units(Good::BreadRoll), 5);
-        assert_eq!(worker.available_units(Good::BreadRoll), 0);
+        assert_eq!(worker.home_units(Good::BreadRoll), 5);
+        assert_eq!(
+            worker
+                .storage
+                .reserved_units(home, worker.goods_owner(), Good::BreadRoll),
+            5
+        );
+        assert_eq!(worker.stored_available_units(home, Good::BreadRoll), 0);
+        assert_eq!(worker.food_reserve_wellbeing(), 5.0);
+        assert_eq!(worker.wealth().unwrap(), wealth);
         let done = busy
             .advance(worker.active_action().unwrap().remaining_ms())
             .unwrap();
         let AgentKind::Citizen(worker) = &done.agents[&id].kind;
-        assert_eq!(worker.units(Good::BreadRoll), 5);
+        assert_eq!(worker.home_units(Good::BreadRoll), 5);
+        assert_eq!(worker.food_reserve_wellbeing(), 0.0);
+        assert_eq!(
+            worker.wealth().unwrap(),
+            wealth - worker.prices.value(Good::BreadRoll, 5).unwrap()
+        );
     }
 
     #[test]

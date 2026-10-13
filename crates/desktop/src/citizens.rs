@@ -847,6 +847,15 @@ mod tests {
         let (universe, empty_id) = universe
             .with_citizen("Empty", Citizen::new(0.0).unwrap())
             .unwrap();
+        let AgentKind::Citizen(eater) = &universe.agents()[&eater_id].kind;
+        let universe = universe
+            .deposit_goods(
+                eater_id,
+                eater.home(),
+                learning_lord_simulation::marketplace::Good::Fish,
+                2,
+            )
+            .unwrap();
         let universe = universe
             .start_action(eater_id, CitizenAction::Eat)
             .unwrap()
@@ -1135,6 +1144,15 @@ mod tests {
             .unwrap();
         let (universe, bram) = universe
             .with_citizen("Bram", Citizen::new(-10.0).unwrap())
+            .unwrap();
+        let AgentKind::Citizen(eater) = &universe.agents()[&ada].kind;
+        let universe = universe
+            .deposit_goods(
+                ada,
+                eater.home(),
+                learning_lord_simulation::marketplace::Good::Berries,
+                310,
+            )
             .unwrap();
         let started = universe.start_planning(ada).unwrap();
         let progressed = started.advance(50_000).unwrap();

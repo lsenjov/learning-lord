@@ -1,3 +1,6 @@
+mod support;
+use support::HomeStock;
+
 use learning_lord_simulation::planning::plan;
 use learning_lord_simulation::{
     AgentId, AgentKind, Citizen, CitizenAction, SimulationError, Universe,
@@ -56,7 +59,10 @@ fn goal_planning_scores_action_endpoints_and_preserves_the_source() {
     ] {
         let original = Citizen::with_needs(hunger, tiredness)
             .unwrap()
-            .with_berries(berries)
+            .with_home_good(
+                learning_lord_simulation::marketplace::Good::Berries,
+                berries,
+            )
             .unwrap();
         let snapshot = original.clone();
         let chosen = plan(&original).unwrap();
@@ -85,7 +91,16 @@ fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
         chosen.average_wellbeing(),
     );
 
-    let satiated = Citizen::with_needs(-50.0, -100.0).unwrap();
+    let satiated = Citizen::with_needs(-100.0, -100.0)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::BreadRoll, 15)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::Fish, 3)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 233)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::Water, 1200)
+        .unwrap();
     let chosen = plan(&satiated).unwrap();
     assert_close(
         score_actions(&satiated, chosen.actions()),
@@ -102,11 +117,17 @@ fn large_finite_scores_can_be_averaged_without_overflowing() {
 
 #[test]
 fn execution_keeps_its_plan_for_two_hours_then_replans() {
-    let original = Citizen::with_needs(-50.0, -100.0)
+    let original = Citizen::with_needs(-100.0, -100.0)
         .unwrap()
         .with_thirst(-100.0)
         .unwrap()
-        .with_good(learning_lord_simulation::marketplace::Good::Water, 400)
+        .with_home_good(learning_lord_simulation::marketplace::Good::Water, 1200)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::BreadRoll, 15)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::Fish, 3)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 233)
         .unwrap();
     let mut executing = original.start_planning().unwrap();
     let initial_plan = executing.active_plan().unwrap().plan().clone();
@@ -331,7 +352,7 @@ fn planning_sleeps_when_tired_and_eats_before_sleep_when_hungry() {
     assert_eq!(plan(&tired).unwrap().actions()[0], CitizenAction::Sleep);
     let hungry = Citizen::with_needs(60.0, 100.0)
         .unwrap()
-        .with_berries(200)
+        .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 200)
         .unwrap();
     let chosen = plan(&hungry).unwrap();
     assert_eq!(chosen.actions()[0], CitizenAction::Eat);

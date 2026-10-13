@@ -149,22 +149,55 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
+                .with_thirst(-100.0)
+                .unwrap()
                 .with_coins(meal_cost)
                 .unwrap(),
         )
         .unwrap();
+    let source = source
+        .with_stored_good(
+            citizen(&source, buyer).home(),
+            learning_lord_simulation::storage::GoodsOwner::Agent(buyer),
+            Good::Water,
+            1200,
+        )
+        .unwrap();
+    let source = source.with_prices(source.prices().with_price(Good::Water, 0.1).unwrap());
     let chosen = learning_lord_simulation::planning::plan(citizen(&source, buyer)).unwrap();
     assert!(
-        matches!(chosen.actions()[0], CitizenAction::BuyAt { place, list } if place == source.map().public_place(learning_lord_simulation::locations::Location::Market) && list.units(Good::Berries) == 155)
+        matches!(chosen.actions()[0], CitizenAction::BuyAt { place, list } if place == source.map().public_place(learning_lord_simulation::locations::Location::Market) && list.units(Good::Berries) == 155),
+        "{:?}",
+        chosen.actions()
     );
-    assert_eq!(chosen.actions()[1], CitizenAction::Eat);
+    assert!(
+        matches!(chosen.actions()[1], CitizenAction::DepositStored { list, .. } if list.units(Good::Berries) == 155),
+        "{:?}",
+        chosen.actions()
+    );
+    assert!(chosen.actions().contains(&CitizenAction::Eat));
     assert_eq!(source.market().orders().count(), 1);
     assert!(source.market().trades().is_empty());
-    let eating = source
+    let bought = source
         .start_planning(buyer)
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
+    assert!(matches!(
+        citizen(&bought, buyer).active_action().unwrap().action(),
+        CitizenAction::DepositStored { .. }
+    ));
+    assert_eq!(citizen(&bought, buyer).berries_units(), 155);
+    assert_eq!(
+        citizen(&bought, buyer)
+            .stored_available_units(citizen(&bought, buyer).home(), Good::Berries),
+        0
+    );
+    assert_eq!(
+        bought.citizen_history(buyer).unwrap().current.consumed[Good::Berries as usize],
+        0
+    );
+    let eating = bought.advance(TRADE_DURATION_MS).unwrap();
     assert_eq!(
         citizen(&eating, buyer).active_action().unwrap().action(),
         CitizenAction::Eat
@@ -365,15 +398,33 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
+                .with_thirst(-100.0)
+                .unwrap()
                 .with_coins(meal_cost)
                 .unwrap(),
         )
         .unwrap();
+    let universe = universe
+        .with_stored_good(
+            citizen(&universe, buyer).home(),
+            learning_lord_simulation::storage::GoodsOwner::Agent(buyer),
+            Good::Water,
+            1200,
+        )
+        .unwrap();
+    let universe = universe.with_prices(universe.prices().with_price(Good::Water, 0.1).unwrap());
     let chosen = learning_lord_simulation::planning::plan(citizen(&universe, buyer)).unwrap();
     assert!(
-        matches!(chosen.actions()[0], CitizenAction::BuyAt { place, list } if place == universe.map().public_place(learning_lord_simulation::locations::Location::Market) && list.units(Good::Berries) == 155)
+        matches!(chosen.actions()[0], CitizenAction::BuyAt { place, list } if place == universe.map().public_place(learning_lord_simulation::locations::Location::Market) && list.units(Good::Berries) == 155),
+        "{:?}",
+        chosen.actions()
     );
-    assert_eq!(chosen.actions()[1], CitizenAction::Eat);
+    assert!(
+        matches!(chosen.actions()[1], CitizenAction::DepositStored { list, .. } if list.units(Good::Berries) == 155),
+        "{:?}",
+        chosen.actions()
+    );
+    assert!(chosen.actions().contains(&CitizenAction::Eat));
     assert!(universe.market().trades().is_empty());
 }
 

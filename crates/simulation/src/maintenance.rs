@@ -62,6 +62,23 @@ impl MaintenanceState {
         true
     }
 
+    pub(crate) fn claim_urgent(
+        &mut self,
+        goal: Effect,
+        worker: AgentId,
+        now_ms: u64,
+        urgent: bool,
+    ) -> bool {
+        if urgent && goal == Effect::ReplenishReserves {
+            if self.replenishment.claimant.is_some() {
+                return false;
+            }
+            self.replenishment.claimant = Some(worker);
+            self.replenishment.performed_work = false;
+            return true;
+        }
+        self.claim(goal, worker, now_ms)
+    }
     pub fn finish(&mut self, goal: Effect, worker: AgentId, now_ms: u64, successful: bool) {
         let Some(task) = self.task_mut(goal) else {
             return;
@@ -95,6 +112,22 @@ impl MaintenanceState {
 }
 
 impl crate::Citizen {
+    pub(crate) fn urgent_provisioning(&self) -> bool {
+        let members = self.supplied_members() as f64;
+        self.home_food_nutrition() < 100.0 * members
+            || self.home_drink_units() < 400 * self.supplied_members()
+    }
+    pub(crate) fn maintenance_available(&self, goal: Effect) -> bool {
+        self.maintenance.available(goal, self.current_time_ms())
+            || goal == Effect::ReplenishReserves
+                && self.urgent_provisioning()
+                && self.maintenance.replenishment.claimant.is_none()
+    }
+    pub(crate) fn claim_personal_maintenance(&mut self, goal: Effect) -> bool {
+        let urgent = self.urgent_provisioning();
+        self.maintenance
+            .claim_urgent(goal, self.id, self.current_time_ms(), urgent)
+    }
     pub(crate) fn supplied_members(&self) -> u64 {
         self.household
             .as_ref()
@@ -120,6 +153,7 @@ impl crate::Universe {
         };
         let owner = citizen.economic_id();
         let now = citizen.current_time_ms();
+        let urgent = citizen.urgent_provisioning();
         let state = if let Some(household) = self.households.get_mut(&owner) {
             &mut household.maintenance
         } else {
@@ -133,7 +167,7 @@ impl crate::Universe {
         {
             return Ok(());
         }
-        if state.claim(goal, worker, now) {
+        if state.claim_urgent(goal, worker, now, urgent) {
             Ok(())
         } else {
             Err(crate::SimulationError::MissingInputs)

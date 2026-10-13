@@ -52,7 +52,7 @@ fn travel_moves_continuously_and_arrives_exactly_without_mutating_the_source() {
 }
 
 #[test]
-fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
+fn site_actions_and_eating_require_arrival_but_waiting_does_not() {
     let home = Citizen::new(0.0)
         .unwrap()
         .with_map(map())
@@ -87,7 +87,14 @@ fn site_actions_require_arrival_but_eating_and_waiting_do_not() {
             away.start_action(action),
             Err(SimulationError::WrongLocation)
         );
-        assert!(away.start_action(CitizenAction::Eat).is_ok());
+        assert_eq!(
+            away.start_action(CitizenAction::Eat),
+            Err(SimulationError::WrongLocation)
+        );
+        assert_eq!(
+            away.start_action(CitizenAction::Drink),
+            Err(SimulationError::WrongLocation)
+        );
         assert!(away.start_action(CitizenAction::Wait).is_ok());
     }
     let busy = home

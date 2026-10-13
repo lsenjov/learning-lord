@@ -1,3 +1,6 @@
+mod support;
+use support::HomeStock;
+
 use learning_lord_simulation::{
     AgentKind, Citizen, CitizenAction, THIRST_PER_HOUR, Universe, marketplace::Good,
 };
@@ -11,12 +14,15 @@ fn thirst_advances_and_drinks_partial_water_gradually_without_waste() {
     let citizen = Citizen::new(0.0).unwrap().with_thirst(-50.0).unwrap();
     close(citizen.advance(86_400_000).unwrap().thirst(), 50.0);
     let partial = citizen
-        .with_good(Good::Water, 100)
+        .with_home_good(Good::Water, 100)
         .unwrap()
         .start_action(CitizenAction::Drink)
         .unwrap();
     assert_eq!(partial.active_action().unwrap().duration_ms(), 30_000);
-    assert_eq!(partial.units(Good::Water), 0);
+    assert_eq!(
+        partial.stored_available_units(partial.home(), Good::Water),
+        0
+    );
     close(
         partial.advance(15_000).unwrap().thirst(),
         -62.5 + THIRST_PER_HOUR / 240.0,
@@ -24,17 +30,20 @@ fn thirst_advances_and_drinks_partial_water_gradually_without_waste() {
     let capped = citizen
         .with_thirst(-99.0)
         .unwrap()
-        .with_good(Good::Water, 200)
+        .with_home_good(Good::Water, 200)
         .unwrap()
         .start_action(CitizenAction::Drink)
         .unwrap();
     assert_eq!(capped.active_action().unwrap().drinking_units(), 4);
-    assert_eq!(capped.units(Good::Water), 196);
+    assert_eq!(
+        capped.stored_available_units(capped.home(), Good::Water),
+        196
+    );
     assert!(
         citizen
             .with_thirst(-100.0)
             .unwrap()
-            .with_good(Good::Water, 200)
+            .with_home_good(Good::Water, 200)
             .unwrap()
             .start_action(CitizenAction::Drink)
             .unwrap()
@@ -50,9 +59,12 @@ fn meal_and_water_finish_their_components_in_parallel_and_history_is_chunk_indep
             .unwrap()
             .with_thirst(20.0)
             .unwrap()
-            .with_berries(berries)
+            .with_home_good(
+                learning_lord_simulation::marketplace::Good::Berries,
+                berries,
+            )
             .unwrap()
-            .with_good(Good::Water, 200)
+            .with_home_good(Good::Water, 200)
             .unwrap();
         let started = citizen.start_action(CitizenAction::Eat).unwrap();
         assert_eq!(
@@ -64,6 +76,23 @@ fn meal_and_water_finish_their_components_in_parallel_and_history_is_chunk_indep
         close(midway.thirst(), -5.0 + THIRST_PER_HOUR / 120.0);
         let (world, id) = Universe::with_map(citizen.map())
             .with_citizen("Ada", citizen)
+            .unwrap();
+        let AgentKind::Citizen(diner) = &world.agents()[&id].kind;
+        let home = diner.home();
+        let world = world
+            .with_stored_good(
+                home,
+                learning_lord_simulation::storage::GoodsOwner::Agent(id),
+                Good::Berries,
+                berries,
+            )
+            .unwrap()
+            .with_stored_good(
+                home,
+                learning_lord_simulation::storage::GoodsOwner::Agent(id),
+                Good::Water,
+                200,
+            )
             .unwrap();
         let world = world.start_action(id, CitizenAction::Eat).unwrap();
         let whole = world.advance(180_000).unwrap();

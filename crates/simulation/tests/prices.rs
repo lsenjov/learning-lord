@@ -110,6 +110,12 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
     let (universe, id) = Universe::with_map(Map::default())
         .with_citizen("Ada", source)
         .unwrap();
+    let home = citizen(&universe, id).home();
+    let universe = universe
+        .deposit_goods(id, home, Good::Water, 400)
+        .unwrap()
+        .deposit_goods(id, home, Good::Berries, 200)
+        .unwrap();
     let source = citizen(&universe, id);
     let chosen = learning_lord_simulation::planning::plan(source).unwrap();
     assert_eq!(chosen.actions()[0], CitizenAction::Sleep);

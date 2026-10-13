@@ -1188,6 +1188,10 @@ mod tests {
                 .with_prices(prices)
                 .with_citizen("Ada", Citizen::new(0.0).unwrap().with_berries(35).unwrap())
                 .unwrap();
+        let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
+        let universe = universe
+            .deposit_goods(id, citizen.home(), Good::Berries, 35)
+            .unwrap();
         assert!(decision_readout(&universe, None).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
         let text = decision_readout(&planned, None);
@@ -1197,7 +1201,7 @@ mod tests {
             .split("\nHunger")
             .nth(1)
             .unwrap()
-            .split("\nSleep")
+            .split("\nThirst")
             .next()
             .unwrap();
         assert!(!hunger.contains("Unavailable:"));
@@ -1363,6 +1367,10 @@ mod tests {
                 .with_prices(learning_lord_simulation::marketplace::Prices::new(1.0).unwrap())
                 .with_citizen("Ada", citizen)
                 .unwrap();
+        let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
+        let universe = universe
+            .deposit_goods(id, citizen.home(), Good::Berries, 310)
+            .unwrap();
         let universe = universe
             .start_planning(id)
             .unwrap()
@@ -1392,6 +1400,13 @@ mod tests {
         let (universe, id) = Universe::starting_at(0)
             .with_citizen("Ada", citizen)
             .unwrap();
+        let learning_lord_simulation::AgentKind::Citizen(diner) = &universe.agents()[&id].kind;
+        let home = diner.home();
+        let universe = universe
+            .deposit_goods(id, home, Good::BreadRoll, 5)
+            .unwrap()
+            .deposit_goods(id, home, Good::Water, 200)
+            .unwrap();
         let universe = universe.start_action(id, CitizenAction::Eat).unwrap();
         let readout = citizen_readout(&universe, Some(id));
         assert!(readout.contains("Thirst: 25.0"));
@@ -1417,6 +1432,10 @@ mod tests {
                 .with_prices(learning_lord_simulation::marketplace::Prices::default())
                 .with_citizen("Ada", citizen)
                 .unwrap();
+        let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
+        let universe = universe
+            .deposit_goods(id, citizen.home(), Good::Water, 400)
+            .unwrap();
         let universe = universe
             .start_planning(id)
             .unwrap()

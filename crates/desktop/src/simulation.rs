@@ -609,6 +609,31 @@ mod tests {
     use super::*;
     use learning_lord_simulation::Citizen;
 
+    fn pantry_allocation(
+        universe: &Universe,
+        citizen: &learning_lord_simulation::Citizen,
+        good: Good,
+    ) -> u64 {
+        let consumed: u64 = universe
+            .agents()
+            .values()
+            .filter_map(|agent| {
+                let learning_lord_simulation::AgentKind::Citizen(member) = &agent.kind;
+                (member.goods_owner() == citizen.goods_owner()).then(|| {
+                    universe
+                        .citizen_history(member.id())
+                        .unwrap()
+                        .current
+                        .consumed[good as usize]
+                })
+            })
+            .sum();
+        universe
+            .storage()
+            .units(citizen.home(), citizen.goods_owner(), good)
+            + consumed
+    }
+
     #[test]
     #[ignore = "manual five-day fresh-universe profiling workload"]
     fn fresh_universe_five_day_profile() {
@@ -1183,9 +1208,7 @@ mod tests {
             assert_eq!(citizen.berries_units(), 0);
             assert_eq!(citizen.units(Good::BreadRoll), 0);
             assert_eq!(
-                citizen
-                    .storage()
-                    .units(citizen.home(), citizen.goods_owner(), Good::BreadRoll),
+                pantry_allocation(&universe, citizen, Good::BreadRoll),
                 if citizen.household_id().is_some() {
                     140
                 } else {
@@ -1363,11 +1386,7 @@ mod tests {
                     assert_eq!(citizen.units(good), 0);
                 }
                 assert_eq!(
-                    universe.storage().units(
-                        citizen.home(),
-                        citizen.goods_owner(),
-                        Good::BreadRoll
-                    ),
+                    pantry_allocation(&universe, citizen, Good::BreadRoll),
                     70 * members as u64
                 );
                 if let Some(id) = citizen.household_id() {
@@ -1503,9 +1522,7 @@ mod tests {
             let learning_lord_simulation::AgentKind::Citizen(citizen) = &agent.kind;
             assert_eq!(citizen.units(Good::BreadRoll), 0);
             assert_eq!(
-                citizen
-                    .storage()
-                    .units(citizen.home(), citizen.goods_owner(), Good::BreadRoll),
+                pantry_allocation(&state.universe, citizen, Good::BreadRoll),
                 if citizen.household_id().is_some() {
                     140
                 } else {

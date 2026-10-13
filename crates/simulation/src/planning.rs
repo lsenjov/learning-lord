@@ -404,11 +404,10 @@ impl ActivePlan {
     }
 
     pub(crate) fn first_action_valid(citizen: &Citizen, plan: &Plan) -> bool {
-        if plan.maintenance_goal().is_some_and(|goal| {
-            !citizen
-                .maintenance
-                .available(goal, citizen.current_time_ms())
-        }) {
+        if plan
+            .maintenance_goal()
+            .is_some_and(|goal| !citizen.maintenance_available(goal))
+        {
             return false;
         }
         plan.actions.first().is_some_and(|action| {
@@ -437,9 +436,7 @@ impl ActivePlan {
             && let Some(goal) = plan.maintenance_goal()
         {
             started.maintenance.cancel(started.id);
-            started
-                .maintenance
-                .claim(goal, started.id, started.current_time_ms());
+            started.claim_personal_maintenance(goal);
         }
         self.plan = plan;
         self.action_index = 0;
@@ -463,9 +460,7 @@ impl ActivePlan {
                 if citizen.household.is_none()
                     && let Some(goal) = self.plan.maintenance_goal()
                 {
-                    citizen
-                        .maintenance
-                        .claim(goal, citizen.id, citizen.current_time_ms());
+                    citizen.claim_personal_maintenance(goal);
                 }
             }
             let started = self.plan.start_action(&citizen, self.action_index);
@@ -488,7 +483,11 @@ impl ActivePlan {
 fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -> bool {
     action_index > 0
         && match action {
-            CitizenAction::Eat => citizen.available_food_nutrition() < REPLAN_MIN_NUTRITION,
+            CitizenAction::Eat => citizen.home_meal_nutrition() < REPLAN_MIN_NUTRITION,
+            CitizenAction::Drink => {
+                citizen.position() != citizen.map().position(citizen.home())
+                    || citizen.home_drink_units() == 0
+            }
             CitizenAction::EquipClothing => {
                 citizen.available_units(crate::marketplace::Good::FlaxGarment) == 0
             }
@@ -619,11 +618,7 @@ fn root_goals(citizen: &Citizen) -> Result<Vec<Effect>, SimulationError> {
     if clothing_choice && citizen.production_targets().is_some() {
         goals.push(Effect::ListExcess);
     }
-    goals.retain(|goal| {
-        citizen
-            .maintenance
-            .available(*goal, citizen.current_time_ms())
-    });
+    goals.retain(|goal| citizen.maintenance_available(*goal));
     Ok(goals)
 }
 
@@ -964,9 +959,7 @@ pub(crate) fn start(citizen: &Citizen) -> Result<Citizen, SimulationError> {
     if citizen.household.is_none()
         && let Some(goal) = plan.maintenance_goal()
     {
-        citizen
-            .maintenance
-            .claim(goal, citizen.id, citizen.current_time_ms());
+        citizen.claim_personal_maintenance(goal);
     }
     citizen.active_plan = Some(ActivePlan {
         plan,
@@ -1066,6 +1059,44 @@ mod tests {
 
     const MINUTE_MS: u64 = 60_000;
     const TWO_HOURS_MS: u64 = 2 * 60 * MINUTE_MS;
+
+    #[test]
+    fn a_legacy_away_drink_plan_replans_before_consumption() {
+        use crate::{
+            locations::{Location, Map, Position},
+            marketplace::Good,
+        };
+        let map = Map::new(
+            Position::default(),
+            Position { x: 100.0, y: 0.0 },
+            Position::default(),
+        )
+        .unwrap();
+        let source = Citizen::new(0.0)
+            .unwrap()
+            .with_thirst(80.0)
+            .unwrap()
+            .with_map(map.clone())
+            .unwrap()
+            .with_home_good(Good::Water, 400)
+            .unwrap()
+            .with_position(map.position(map.public_place(Location::River)))
+            .unwrap();
+        let legacy = executing(
+            &source,
+            vec![
+                CitizenAction::Wait,
+                CitizenAction::Drink,
+                CitizenAction::Sleep,
+            ],
+        );
+        let next = legacy.advance(crate::ACTION_DURATION_MS).unwrap();
+        assert_eq!(next.active_plan().unwrap().action_index(), 0);
+        assert_eq!(
+            next.active_action().unwrap().action(),
+            CitizenAction::Travel(source.home())
+        );
+    }
 
     #[test]
     fn synchronous_replan_installs_the_new_selected_workplace_targets() {
@@ -1695,7 +1726,7 @@ mod tests {
     fn goal_boundaries_cover_actions_and_metadata_survives_execution() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
-            .with_berries(310)
+            .with_home_good(crate::marketplace::Good::Berries, 310)
             .unwrap();
         let started = start(&citizen).unwrap();
         let plan = started.active_plan().unwrap().plan();
@@ -1778,7 +1809,7 @@ mod tests {
             let citizen = Citizen::with_needs(50.0, -100.0)
                 .unwrap()
                 .with_prices(prices)
-                .with_berries(33)
+                .with_home_good(crate::marketplace::Good::Berries, 33)
                 .unwrap();
             let snapshot = citizen.clone();
             let chosen = plan(&citizen).unwrap();
@@ -1832,7 +1863,7 @@ mod tests {
         let citizen = Citizen::with_needs(0.0, -100.0)
             .unwrap()
             .with_prices(crate::marketplace::Prices::new(500.0).unwrap())
-            .with_berries(120)
+            .with_home_good(crate::marketplace::Good::Berries, 120)
             .unwrap();
         let local = goals::best_variant(&citizen, Effect::ReduceHunger, Cooldowns::default(), 0)
             .unwrap()
@@ -1854,101 +1885,6 @@ mod tests {
             let mut full = empty_plan();
             search(variant, Effect::ReduceHunger, &mut full).unwrap();
             assert!(full.average_wellbeing <= forecast.full_plan_wellbeing);
-        }
-    }
-
-    #[test]
-    fn exported_hunger_state_compares_affordable_trading_continuations() {
-        use crate::locations::{Location, Map, Position};
-        use crate::marketplace::Prices;
-        let map = Map::new(
-            Position {
-                x: 386.3952040173808,
-                y: -841.1173238559137,
-            },
-            Position {
-                x: -724.4895163019701,
-                y: -755.0057040246737,
-            },
-            Position {
-                x: -501.65675592959025,
-                y: 468.19843490627386,
-            },
-        )
-        .unwrap();
-        let growth = 73533.0 * 100.0 / 86400000.0;
-        let citizen =
-            Citizen::with_needs(-19.624550026806507 - growth, -14.518873842590954 - growth)
-                .unwrap()
-                .with_map(map.clone())
-                .unwrap()
-                .with_position(map.position(map.public_place(Location::River)))
-                .unwrap()
-                .with_prices(Prices::new(189.75551078215392).unwrap())
-                .with_berries(25)
-                .unwrap()
-                .with_coins(100)
-                .unwrap();
-        let mut market = citizen.market().clone();
-        market
-            .list(
-                crate::AgentId(uuid::Uuid::new_v4()),
-                citizen
-                    .map()
-                    .public_place(crate::locations::Location::Market),
-                crate::marketplace::Good::Berries,
-                1000,
-            )
-            .unwrap();
-        let citizen = citizen.with_market(market);
-        let variants = goals::variants_after(
-            &Prediction::new(&citizen, Cooldowns::default()),
-            Effect::ReduceHunger,
-        )
-        .unwrap();
-        let trade = variants
-            .iter()
-            .find(|variant| {
-                variant.actions
-                    == [
-                        CitizenAction::Travel(map.public_place(Location::Market)),
-                        CitizenAction::BuyAt {
-                            place: map.public_place(Location::Market),
-                            list: crate::marketplace::ShoppingList::single(
-                                crate::marketplace::Good::Berries,
-                                130,
-                            )
-                            .with_purchase_bounds(
-                                citizen.market(),
-                                citizen.market_party(),
-                                map.public_place(Location::Market),
-                                citizen.coins(),
-                            )
-                            .unwrap(),
-                        },
-                        CitizenAction::Eat,
-                    ]
-            })
-            .unwrap();
-        let mut trade_plan = empty_plan();
-        search(trade.clone(), Effect::ReduceHunger, &mut trade_plan).unwrap();
-        let local = goals::best_variant(&citizen, Effect::ReduceHunger, Cooldowns::default(), 0)
-            .unwrap()
-            .unwrap();
-        let mut local_plan = empty_plan();
-        search(local, Effect::ReduceHunger, &mut local_plan).unwrap();
-        assert!(trade_plan.average_wellbeing.is_finite());
-        let chosen = plan(&citizen).unwrap();
-        let hunger = chosen.decision().unwrap().candidates[0]
-            .forecast
-            .as_ref()
-            .unwrap();
-        assert!(hunger.full_plan_wellbeing >= trade_plan.average_wellbeing);
-        assert!(hunger.full_plan_wellbeing >= local_plan.average_wellbeing);
-        for variant in variants {
-            let mut full = empty_plan();
-            search(variant, Effect::ReduceHunger, &mut full).unwrap();
-            assert!(hunger.full_plan_wellbeing >= full.average_wellbeing);
         }
     }
 
@@ -2074,7 +2010,7 @@ mod tests {
     fn fresh_plan_can_start_with_a_partial_meal_below_the_replan_threshold() {
         let citizen = Citizen::with_needs(100.0, -100.0)
             .unwrap()
-            .with_berries(39)
+            .with_home_good(crate::marketplace::Good::Berries, 39)
             .unwrap();
         let mut execution = executing(&citizen, vec![CitizenAction::Wait])
             .active_plan
@@ -2100,7 +2036,7 @@ mod tests {
         for units in [0, 61, 62, 77] {
             let citizen = Citizen::with_needs(100.0, -100.0)
                 .unwrap()
-                .with_berries(units)
+                .with_home_good(crate::marketplace::Good::Berries, units)
                 .unwrap();
             assert!(!replan_check(&citizen, CitizenAction::Eat, 0));
             assert!(!replan_check(
@@ -2137,7 +2073,7 @@ mod tests {
                     CitizenAction::Eat
                 );
             }
-            assert_eq!(planned.berries_units(), units);
+            assert_eq!(planned.home_units(crate::marketplace::Good::Berries), units);
         }
     }
 
@@ -2214,7 +2150,10 @@ mod tests {
     #[test]
     fn stocked_hungry_citizens_forecast_at_most_one_meal() {
         for (hunger, units) in [(50.0, 200), (150.0, 1000), (500.0, 1000), (500.0, 10_000)] {
-            let citizen = Citizen::new(hunger).unwrap().with_berries(units).unwrap();
+            let citizen = Citizen::new(hunger)
+                .unwrap()
+                .with_home_good(crate::marketplace::Good::Berries, units)
+                .unwrap();
             let chosen = plan(&citizen).unwrap();
             assert_eq!(
                 chosen

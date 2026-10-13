@@ -1,3 +1,6 @@
+mod support;
+use support::HomeStock;
+
 use learning_lord_simulation::locations::Map;
 use learning_lord_simulation::marketplace::{DAY_MS, Good, ShoppingList};
 use learning_lord_simulation::production::{
@@ -373,11 +376,26 @@ fn personal_food_reserve_is_shared_across_edible_goods_and_does_not_block_eating
         .sum();
     assert_eq!(excess_nutrition, 90.0);
     assert_eq!(nutrition + excess_nutrition, worker.food_nutrition());
-    let eating = worker.start_action(CitizenAction::Eat).unwrap();
+    let pantry_worker = worker
+        .with_home_good(Good::Berries, 124)
+        .unwrap()
+        .with_home_good(Good::BreadRoll, 30)
+        .unwrap()
+        .with_home_good(Good::BerryPie, 1)
+        .unwrap();
+    let eating = pantry_worker.start_action(CitizenAction::Eat).unwrap();
     let eaten = eating
         .advance(eating.active_action().unwrap().duration_ms())
         .unwrap();
-    assert!(eaten.food_nutrition() < worker.food_nutrition());
+    assert_eq!(eaten.food_nutrition(), worker.food_nutrition());
+    let remaining: f64 = Good::FOOD
+        .into_iter()
+        .map(|good| {
+            eaten.stored_available_units(eaten.home(), good) as f64
+                * good.nutrition_per_unit().unwrap()
+        })
+        .sum();
+    assert!(remaining < worker.food_nutrition());
 }
 
 #[test]

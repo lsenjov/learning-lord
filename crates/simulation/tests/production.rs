@@ -1,3 +1,6 @@
+mod support;
+use support::HomeStock;
+
 use learning_lord_simulation::locations::Map;
 use learning_lord_simulation::marketplace::Good;
 use learning_lord_simulation::production::{Recipe, Skill, starting_inputs};
@@ -238,16 +241,25 @@ fn starting_inputs_cover_four_baseline_hours_of_the_selected_profession() {
 fn meals_choose_one_available_food_and_keep_other_inventory() {
     let source = Citizen::new(80.0)
         .unwrap()
-        .with_berries(40)
+        .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 40)
         .unwrap()
-        .with_good(Good::BreadRoll, 5)
+        .with_home_good(Good::BreadRoll, 5)
         .unwrap()
-        .with_good(Good::BerryPie, 1)
+        .with_home_good(Good::BerryPie, 1)
         .unwrap();
     let started = source.start_action(CitizenAction::Eat).unwrap();
-    assert_eq!(started.units(Good::BreadRoll), 5);
-    assert_eq!(started.units(Good::BerryPie), 0);
-    assert_eq!(started.berries_units(), 40);
+    assert_eq!(
+        started.stored_available_units(started.home(), Good::BreadRoll),
+        5
+    );
+    assert_eq!(
+        started.stored_available_units(started.home(), Good::BerryPie),
+        0
+    );
+    assert_eq!(
+        started.stored_available_units(started.home(), Good::Berries),
+        40
+    );
     let duration = started.active_action().unwrap().duration_ms();
     assert_eq!(duration, 125_000);
     let partial = started.advance(duration / 2).unwrap();
@@ -271,9 +283,12 @@ fn each_food_requires_a_whole_meal_and_nonfood_is_rejected() {
         (Good::Fish, 2, 50.0),
         (Good::Cabbage, 2, 50.0),
     ] {
-        let source = Citizen::new(40.0).unwrap().with_good(good, units).unwrap();
+        let source = Citizen::new(40.0)
+            .unwrap()
+            .with_home_good(good, units)
+            .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(started.units(good), 0);
+        assert_eq!(started.stored_available_units(started.home(), good), 0);
         let duration = started.active_action().unwrap().duration_ms();
         let complete = started.advance(duration).unwrap();
         close(

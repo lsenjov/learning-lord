@@ -82,6 +82,10 @@ fn production_reward_is_not_spread_across_the_completed_action() {
 #[test]
 fn meals_record_reserved_food_and_integrate_consumption_continuously() {
     let (world, id) = world(Citizen::new(50.0).unwrap().with_berries(310).unwrap());
+    let AgentKind::Citizen(diner) = &world.agents()[&id].kind;
+    let world = world
+        .deposit_goods(id, diner.home(), Good::Berries, 310)
+        .unwrap();
     let started = world.start_action(id, CitizenAction::Eat).unwrap();
     let duration = match &started.agents()[&id].kind {
         AgentKind::Citizen(c) => c.active_action().unwrap().duration_ms(),

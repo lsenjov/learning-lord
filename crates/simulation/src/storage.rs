@@ -259,16 +259,37 @@ impl crate::Citizen {
             .map(|place| place.id)
     }
 
+    pub(crate) fn home_food_nutrition(&self) -> f64 {
+        Good::FOOD
+            .into_iter()
+            .map(|good| {
+                self.stored_available_units(self.home, good) as f64
+                    * good.nutrition_per_unit().unwrap()
+            })
+            .sum::<f64>()
+            + self.stored_available_units(self.home, Good::Beer) as f64 * 0.05
+    }
+    pub(crate) fn home_drink_units(&self) -> Quantity {
+        self.stored_available_units(self.home, Good::Water)
+            .saturating_add(self.stored_available_units(self.home, Good::Beer))
+    }
+    pub(crate) fn home_meal_nutrition(&self) -> f64 {
+        let available = self.consumption_available_units();
+        Good::FOOD
+            .into_iter()
+            .map(|good| available[good as usize] as f64 * good.nutrition_per_unit().unwrap())
+            .sum::<f64>()
+            + available[Good::Beer as usize] as f64 * 0.05
+    }
     pub(crate) fn consumption_available_units(&self) -> [Quantity; Good::COUNT] {
         let mut available = [0; Good::COUNT];
-        for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-            available[good as usize] = self.carried_available_units(good);
+        if self.position != self.map.position(self.home)
+            || self.accessible_place(self.home).is_err()
+        {
+            return available;
         }
-        for place in self.accessible_colocated_storage_places() {
-            for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-                available[good as usize] = available[good as usize]
-                    .saturating_add(self.stored_available_units(place, good));
-            }
+        for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
+            available[good as usize] = self.stored_available_units(self.home, good);
         }
         available
     }
@@ -293,6 +314,29 @@ impl crate::Citizen {
     pub(crate) fn carried_available_units(&self, good: Good) -> Quantity {
         self.units(good)
             .saturating_sub(self.tax_reserved_units(good))
+    }
+    pub(crate) fn consume_home_goods(
+        &mut self,
+        good: Good,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        if units == 0 {
+            return Ok(());
+        }
+        if self.position != self.map.position(self.home) {
+            return Err(SimulationError::WrongLocation);
+        }
+        self.accessible_place(self.home)?;
+        if units > self.stored_available_units(self.home, good) {
+            return Err(SimulationError::MissingInputs);
+        }
+        let key = StockKey {
+            place: self.home,
+            owner: self.goods_owner(),
+            good,
+        };
+        self.storage
+            .set_units(key, self.storage.units(self.home, key.owner, good) - units)
     }
     pub(crate) fn consume_goods(
         &mut self,
@@ -462,14 +506,17 @@ mod transport_tests {
             }
             let available = citizen.consumption_available_units();
             for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-                assert_eq!(available[good as usize], citizen.available_units(good));
-                assert_eq!(available[good as usize], if shared { 46 } else { 35 });
+                assert_eq!(
+                    available[good as usize],
+                    citizen.stored_available_units(citizen.home, good)
+                );
+                assert_eq!(available[good as usize], 18);
             }
             citizen.inventory.insert(Good::Water, Quantity::MAX);
             citizen.tax_reserved.remove(&Good::Water);
             assert_eq!(
                 citizen.consumption_available_units()[Good::Water as usize],
-                Quantity::MAX
+                18
             );
             assert_eq!(citizen.available_units(Good::Water), Quantity::MAX);
         }

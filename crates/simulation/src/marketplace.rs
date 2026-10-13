@@ -969,24 +969,6 @@ impl Market {
             .sum()
     }
 
-    pub(crate) fn lowest_quote_at(
-        &self,
-        buyer: impl Into<MarketParty>,
-        place: PlaceId,
-        good: Good,
-    ) -> Option<f64> {
-        let buyer = buyer.into();
-        self.orders()
-            .filter(|order| {
-                self.purchasable(order)
-                    && order.seller != buyer
-                    && order.place == place
-                    && order.good == good
-            })
-            .map(|order| order.quoted_price)
-            .min_by(f64::total_cmp)
-    }
-
     pub(crate) fn nearest_purchase_place(
         &self,
         buyer: impl Into<MarketParty>,

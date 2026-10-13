@@ -1,3 +1,6 @@
+mod support;
+use support::HomeStock;
+
 use learning_lord_simulation::marketplace::{Good, Prices};
 use learning_lord_simulation::planning::plan;
 use learning_lord_simulation::{ACTION_DURATION_MS, Citizen, CitizenAction, SimulationError};
@@ -18,6 +21,11 @@ fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
     assert_eq!(source.wealth(), Ok(0.0));
     assert_eq!(rich.with_coins(-250).unwrap().wealth(), Ok(-200.0));
     let half = rich
+        .with_berries(0)
+        .unwrap()
+        .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 500)
+        .unwrap()
+        .with_prices(Prices::new(100.0).unwrap())
         .start_action(CitizenAction::Eat)
         .unwrap()
         .advance(50_000)
@@ -52,7 +60,7 @@ fn integer_coin_boundaries_and_busy_setup_are_supported() {
 fn berries_arrive_on_completion_and_prediction_preserves_randomness() {
     let source = Citizen::with_needs(-50.0, -100.0)
         .unwrap()
-        .with_good(learning_lord_simulation::marketplace::Good::Water, 10_000)
+        .with_home_good(learning_lord_simulation::marketplace::Good::Water, 10_000)
         .unwrap();
     let original = source.clone();
     let planned = plan(&source).unwrap();

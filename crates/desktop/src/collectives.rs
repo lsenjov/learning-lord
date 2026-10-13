@@ -1099,6 +1099,26 @@ mod tests {
             })
             .unwrap()
             .id;
+        let household = &snapshot.universe.households()[&id];
+        let stored = snapshot.universe.storage().units(
+            household.home,
+            learning_lord_simulation::storage::GoodsOwner::Household(id),
+            learning_lord_simulation::marketplace::Good::BreadRoll,
+        );
+        let consumed: u64 = household
+            .members
+            .iter()
+            .map(|member| {
+                snapshot
+                    .universe
+                    .citizen_history(*member)
+                    .unwrap()
+                    .current
+                    .consumed[learning_lord_simulation::marketplace::Good::BreadRoll as usize]
+            })
+            .sum();
+        assert_eq!(stored + consumed, 140);
+        let stock_label = format!("{stored} rolls stored");
         let mut app = App::new();
         let mut state = State::default();
         state.select(id);
@@ -1120,7 +1140,7 @@ mod tests {
             "Ada's home",
             "Shared coins: 6000",
             "Bread rolls",
-            "140 rolls stored",
+            stock_label.as_str(),
             "Ada's field",
             "Owner:",
             "MAINTENANCE (6-hour cooldown)",
