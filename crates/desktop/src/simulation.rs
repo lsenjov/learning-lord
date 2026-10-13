@@ -609,6 +609,42 @@ mod tests {
     use super::*;
     use learning_lord_simulation::Citizen;
 
+    #[test]
+    #[ignore = "manual five-day fresh-universe profiling workload"]
+    fn fresh_universe_five_day_profile() {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let total_started = Instant::now();
+        let mut universe = new_universe().unwrap();
+        let mut planner = PlanningRuntime::default();
+        eprintln!(
+            "fresh universe setup: {:.3} ms",
+            total_started.elapsed().as_secs_f64() * 1000.0
+        );
+        assert_eq!(universe.current_time_ms(), START_TIME_MS);
+
+        let advancement_started = Instant::now();
+        for day in 1..=5 {
+            let day_started = Instant::now();
+            universe = universe
+                .advance_with_planner(&mut planner, DAY_MS, || false)
+                .unwrap()
+                .expect("profiling advancement must not be cancelled");
+            assert_eq!(universe.current_time_ms(), START_TIME_MS + day * DAY_MS);
+            eprintln!(
+                "day {day}: {:.3} ms",
+                day_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        eprintln!(
+            "five-day advancement: {:.3} ms",
+            advancement_started.elapsed().as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "setup and advancement total: {:.3} ms",
+            total_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
     fn pacing(rate: u32) -> Pacing {
         let mut pacing = Pacing::new(NonZeroU32::new(rate).unwrap());
         pacing.set_running(true, Duration::ZERO);
