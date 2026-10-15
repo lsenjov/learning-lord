@@ -449,7 +449,7 @@ pub(crate) fn recipe_profit_for_site(
     citizen: &Citizen,
     site: Option<PlaceId>,
 ) -> Option<f64> {
-    let owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
+    let owned = owned_recipe_inputs(recipe, citizen);
     let profit = output_value(
         recipe,
         citizen,
@@ -464,7 +464,7 @@ pub(crate) fn recipe_profit_for_site(
 }
 
 fn recipe_profit_at(recipe: Recipe, citizen: &Citizen, export: bool) -> Option<f64> {
-    let owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
+    let owned = owned_recipe_inputs(recipe, citizen);
     let profit = output_value(recipe, citizen, None, export)?
         - input_value(recipe, citizen, &owned)?
         - citizen.workshop_fee_cost(
@@ -523,13 +523,21 @@ pub(crate) fn estimated_batch_cost(
     citizen: &Citizen,
     site: Option<PlaceId>,
 ) -> Option<f64> {
-    let owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
+    let owned = owned_recipe_inputs(recipe, citizen);
     let cost = input_value(recipe, citizen, &owned)?
         + citizen.workshop_fee_cost(
             site.or_else(|| citizen.production_place(recipe).ok()),
             recipe.duration_ms(citizen).ok()?,
         );
     cost.is_finite().then_some(cost)
+}
+
+fn owned_recipe_inputs(recipe: Recipe, citizen: &Citizen) -> [Quantity; Good::COUNT] {
+    let mut owned = [0; Good::COUNT];
+    for &(good, _) in recipe.inputs() {
+        owned[good as usize] = citizen.usable_owned_units(good);
+    }
+    owned
 }
 
 fn input_value(recipe: Recipe, citizen: &Citizen, owned: &[Quantity; Good::COUNT]) -> Option<f64> {
