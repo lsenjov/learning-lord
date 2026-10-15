@@ -265,8 +265,16 @@ impl Prediction {
         };
         let duration = active.duration_ms();
         let citizen = started.advance_predicted(duration)?;
-        let before = self.citizen.planning_wellbeing()?;
-        let after = citizen.planning_wellbeing()?;
+        let consumption = matches!(action, CitizenAction::Eat | CitizenAction::Drink);
+        let (before, after) = if consumption {
+            // Forecast benefit is bounded by dietary wellbeing, so only decision scores can overflow.
+            (self.citizen.decision_score()?, citizen.decision_score()?)
+        } else {
+            (
+                self.citizen.planning_wellbeing()?,
+                citizen.planning_wellbeing()?,
+            )
+        };
         let mut next = self.clone();
         if matches!(
             action,
@@ -277,17 +285,18 @@ impl Prediction {
             return Ok(None);
         }
         next.citizen = citizen;
-        if matches!(action, CitizenAction::Eat | CitizenAction::Drink) {
+        if consumption {
             let mut current = started;
             let mut remaining = duration;
+            let mut from = current.planning_wellbeing()?;
             while remaining > 0 {
                 let step = current.active_action().unwrap().next_boundary_ms();
                 let advanced = current.advance_predicted(step)?;
-                let from = current.planning_wellbeing()?;
                 let to = advanced.planning_wellbeing()?;
                 next.score.add(from, to, step)?;
                 next.goal_score.add(from, to, step)?;
                 current = advanced;
+                from = to;
                 remaining -= step;
             }
         } else {
@@ -5351,6 +5360,84 @@ mod tests {
             (gathered.average().unwrap() - (-20.0 - crate::THIRST_PER_HOUR / 4.0 + 0.05)).abs()
                 < 1e-12
         );
+    }
+
+    #[test]
+    fn consumption_scores_use_component_boundaries_and_keep_full_advance_state() {
+        for action in [CitizenAction::Eat, CitizenAction::Drink] {
+            let source = Citizen::new(80.0)
+                .unwrap()
+                .with_thirst(80.0)
+                .unwrap()
+                .with_home_good(Good::Fish, 3)
+                .unwrap()
+                .with_home_good(Good::Cabbage, 3)
+                .unwrap()
+                .with_home_good(Good::BreadRoll, 10)
+                .unwrap()
+                .with_home_good(Good::Water, 1000)
+                .unwrap();
+            let started = source.start_action(action).unwrap();
+            let active = started.active_action().unwrap();
+            let duration = active.duration_ms();
+            let first_step = active.next_boundary_ms();
+            let middle = started.advance_predicted(first_step).unwrap();
+            let final_state = started.advance_predicted(duration).unwrap();
+            let initial_score = started.planning_wellbeing().unwrap();
+            let middle_score = middle.planning_wellbeing().unwrap();
+            let expected = if action == CitizenAction::Eat {
+                assert!(active.meal_units.iter().filter(|units| **units > 0).count() > 1);
+                assert!(first_step < duration);
+                let end = middle.advance_predicted(duration - first_step).unwrap();
+                ((initial_score * 0.5 + middle_score * 0.5) * first_step as f64
+                    + (middle_score * 0.5 + end.planning_wellbeing().unwrap() * 0.5)
+                        * (duration - first_step) as f64)
+                    / duration as f64
+            } else {
+                assert_eq!(first_step, duration);
+                initial_score * 0.5 + middle_score * 0.5
+            };
+            let predicted = Prediction::new(&source, Cooldowns::default())
+                .perform(action, 0)
+                .unwrap()
+                .unwrap();
+            assert!((predicted.average().unwrap() - expected).abs() < 1e-12);
+            assert_eq!(predicted.goal_score.mean, predicted.score.mean);
+            assert_eq!(predicted.score.elapsed_ms, duration);
+            assert_eq!(
+                ron::to_string(&predicted.citizen).unwrap(),
+                ron::to_string(&final_state).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn consumption_predictions_preserve_validation_errors() {
+        let source = Citizen::new(80.0)
+            .unwrap()
+            .with_thirst(80.0)
+            .unwrap()
+            .with_home_good(Good::BreadRoll, 10)
+            .unwrap()
+            .with_home_good(Good::Water, 1000)
+            .unwrap();
+        for action in [CitizenAction::Eat, CitizenAction::Drink] {
+            let mut overflowing = source.clone();
+            overflowing.market_time_ms = u64::MAX;
+            assert!(matches!(
+                Prediction::new(&overflowing, Cooldowns::default()).perform(action, 0),
+                Err(SimulationError::TimeOverflow)
+            ));
+            let overflowing = source
+                .with_good(Good::Flax, u64::MAX)
+                .unwrap()
+                .with_home_good(Good::Flax, 1)
+                .unwrap();
+            assert!(matches!(
+                Prediction::new(&overflowing, Cooldowns::default()).perform(action, 0),
+                Err(SimulationError::WealthOverflow)
+            ));
+        }
     }
 
     #[test]
