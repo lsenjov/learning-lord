@@ -978,14 +978,16 @@ impl Market {
         visited: &[PlaceId],
     ) -> Option<PlaceId> {
         let buyer = buyer.into();
-        map.places()
-            .values()
+        self.orders()
+            .filter(|order| {
+                order.units > 0
+                    && list.units(order.good) > 0
+                    && order.seller != buyer
+                    && self.purchasable(order)
+            })
+            .filter_map(|order| map.places().get(&order.place))
             .filter(|place| place.kind != crate::locations::Location::Home)
             .filter(|place| !visited.contains(&place.id))
-            .filter(|place| {
-                list.items()
-                    .any(|(good, _)| self.available_units_at(buyer, place.id, good) > 0)
-            })
             .min_by(|a, b| {
                 position
                     .distance(a.position)
@@ -3096,6 +3098,110 @@ mod tests {
         assert_eq!(
             market.estimated_purchase_cost_from(buyer, &map, origin, remaining),
             Some(1 + 4 + 2)
+        );
+    }
+
+    #[test]
+    fn nearest_purchase_place_filters_orders_and_excluded_places() {
+        use crate::locations::{Location, Map, Position};
+        let buyer = AgentId(uuid::Uuid::from_u128(1));
+        let seller = MarketParty::Citizen(AgentId(uuid::Uuid::from_u128(2)));
+        let map = Map::new(
+            Position { x: 1.0, y: 0.0 },
+            Position { x: 2.0, y: 0.0 },
+            Position { x: 3.0, y: 0.0 },
+        )
+        .unwrap();
+        let forest = map.public_place(Location::Forest);
+        let river = map.public_place(Location::River);
+        let (map, home) = map
+            .with_place(Location::Home, Position::default(), Some(buyer), "home")
+            .unwrap();
+        let orphan = PlaceId(uuid::Uuid::from_u128(99));
+        let list = ShoppingList::single(Good::Wheat, 1);
+        for (place, owner, good, units, tariff) in [
+            (forest, MarketParty::Citizen(buyer), Good::Wheat, 1, 0),
+            (forest, seller, Good::Wheat, 0, 0),
+            (forest, seller, Good::Wood, 1, 0),
+            (forest, MarketParty::Caravan, Good::Wheat, 1, 10_000),
+            (home, seller, Good::Wheat, 1, 0),
+            (orphan, seller, Good::Wheat, 1, 0),
+        ] {
+            let mut market = Market::default();
+            market.policy.import_tariff_basis_points = tariff;
+            market
+                .list_reference(seller, river, Good::Wheat, 1)
+                .unwrap();
+            let id = OrderId(market.next_order_id);
+            market.orders.insert(
+                id,
+                SellOrder {
+                    id,
+                    seller: owner,
+                    place,
+                    good,
+                    units,
+                    quoted_price: 1.0,
+                },
+            );
+            assert_eq!(
+                market.nearest_purchase_place(buyer, &map, Position::default(), list, &[]),
+                Some(river)
+            );
+        }
+        let mut market = Market::default();
+        market
+            .list_reference(seller, forest, Good::Wheat, 1)
+            .unwrap();
+        market
+            .list_reference(seller, river, Good::Wheat, 1)
+            .unwrap();
+        assert_eq!(
+            market.nearest_purchase_place(buyer, &map, Position::default(), list, &[forest]),
+            Some(river)
+        );
+        assert_eq!(
+            market.nearest_purchase_place(buyer, &map, Position::default(), list, &[forest, river]),
+            None
+        );
+        assert_eq!(
+            market.nearest_purchase_place(
+                buyer,
+                &map,
+                Position::default(),
+                ShoppingList::default(),
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn nearest_purchase_place_breaks_distance_ties_by_place_id() {
+        use crate::locations::{Map, Position};
+        let map = Map::default();
+        let mut places: Vec<_> = map.places().keys().copied().collect();
+        places.sort_by_key(|place| place.0);
+        let buyer = AgentId(uuid::Uuid::from_u128(1));
+        let seller = AgentId(uuid::Uuid::from_u128(2));
+        let mut market = Market::default();
+        for place in places.iter().rev() {
+            market
+                .list_reference(seller, *place, Good::Wheat, 1)
+                .unwrap();
+            market
+                .list_reference(seller, *place, Good::Wood, 1)
+                .unwrap();
+        }
+        assert_eq!(
+            market.nearest_purchase_place(
+                buyer,
+                &map,
+                Position::default(),
+                ShoppingList::new([(Good::Wheat, 1), (Good::Wood, 1)]).unwrap(),
+                &[],
+            ),
+            Some(places[0])
         );
     }
 
