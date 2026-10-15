@@ -1262,6 +1262,7 @@ impl Market {
             withdrawn = withdrawn
                 .checked_add(units)
                 .ok_or(SimulationError::WealthOverflow)?;
+            self.record_trial_withdrawal(order.id, units);
             order.units -= units;
             if order.units == 0 {
                 self.orders.remove(&order.id);

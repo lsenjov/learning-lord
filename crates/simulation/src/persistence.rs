@@ -589,6 +589,7 @@ fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result
     }
     let place = match action {
         CitizenAction::Travel(place)
+        | CitizenAction::WithdrawAt { place, .. }
         | CitizenAction::BuyAt { place, .. }
         | CitizenAction::ProduceAt { place, .. }
         | CitizenAction::CollectStored { place, .. }
@@ -679,6 +680,69 @@ mod tests {
             .unwrap();
         let world = world.with_designated_workplace(second, mill).unwrap();
         (world, first, second, household, mill)
+    }
+
+    #[test]
+    fn household_remote_withdrawal_round_trips_and_cannot_take_another_account() {
+        let (mut world, _, second, household, mill) = household_world();
+        world
+            .market
+            .list(
+                crate::marketplace::MarketParty::Household(household),
+                mill,
+                Good::Flour,
+                100,
+            )
+            .unwrap();
+        let (updated, other) = world
+            .with_citizen("Other", Citizen::new(0.0).unwrap())
+            .unwrap();
+        world = updated;
+        world.market.list(other, mill, Good::Flour, 100).unwrap();
+        world.refresh_market();
+        world = world
+            .start_action(second, CitizenAction::Travel(mill))
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents[&second].kind;
+        world = world
+            .advance(citizen.active_action().map_or(0, |a| a.remaining_ms()))
+            .unwrap();
+        let action = CitizenAction::WithdrawAt {
+            place: mill,
+            good: Good::Flour,
+            units: 150,
+        };
+        world = world.start_action(second, action).unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents[&second].kind;
+        assert_eq!(
+            citizen.active_action().unwrap().remaining_ms(),
+            TRADE_DURATION_MS
+        );
+        let loaded = round_trip(&world);
+        let complete = loaded.advance(TRADE_DURATION_MS).unwrap();
+        let AgentKind::Citizen(citizen) = &complete.agents[&second].kind;
+        assert_eq!(citizen.carried_available_units(Good::Flour), 100);
+        assert_eq!(
+            complete
+                .market
+                .orders()
+                .filter(|order| order.seller == crate::marketplace::MarketParty::Citizen(other))
+                .map(|order| order.units)
+                .sum::<u64>(),
+            100
+        );
+        assert!(complete.market.trades().is_empty());
+        assert!(
+            validate_action(
+                CitizenAction::WithdrawAt {
+                    place: crate::locations::PlaceId(uuid::Uuid::new_v4()),
+                    good: Good::Flour,
+                    units: 1
+                },
+                &world.map
+            )
+            .is_err()
+        );
     }
 
     #[test]

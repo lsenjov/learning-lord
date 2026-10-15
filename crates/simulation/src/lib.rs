@@ -164,6 +164,11 @@ pub enum CitizenAction {
         list: marketplace::ShoppingList,
     },
     Withdraw(Good, Quantity),
+    WithdrawAt {
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+    },
     CollectStored {
         place: PlaceId,
         list: marketplace::ShoppingList,
@@ -194,7 +199,8 @@ impl CitizenAction {
             Self::Produce(recipe) => citizen.production_place(recipe).ok(),
             Self::ProduceAt { place, .. } => Some(place),
             Self::BuyFood(_) | Self::Buy(..) => Some(citizen.map.public_place(Location::Market)),
-            Self::BuyAt { place, .. }
+            Self::WithdrawAt { place, .. }
+            | Self::BuyAt { place, .. }
             | Self::CollectStored { place, .. }
             | Self::DepositStored { place, .. } => Some(place),
             Self::ListExcess | Self::List(..) | Self::Withdraw(..) => Some(citizen.selling_place()),
@@ -846,6 +852,7 @@ impl Citizen {
             | CitizenAction::Buy(..)
             | CitizenAction::BuyAt { .. }
             | CitizenAction::Withdraw(..)
+            | CitizenAction::WithdrawAt { .. }
             | CitizenAction::CollectStored { .. }
             | CitizenAction::DepositStored { .. } => TRADE_DURATION_MS,
         })
@@ -977,13 +984,42 @@ impl Citizen {
     pub(crate) fn withdrawable_units(&self, good: Good) -> Quantity {
         self.market
             .orders()
-            .filter(|order| {
-                order.seller == self.market_party()
-                    && order.place == self.selling_place()
-                    && order.good == good
-            })
+            .filter(|order| order.seller == self.market_party() && order.good == good)
             .map(|order| order.units)
             .sum()
+    }
+
+    pub(crate) fn withdraw_action(
+        &self,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+    ) -> CitizenAction {
+        if place == self.selling_place() {
+            CitizenAction::Withdraw(good, units)
+        } else {
+            CitizenAction::WithdrawAt { place, good, units }
+        }
+    }
+
+    pub(crate) fn listed_sources(&self, good: Good) -> Vec<(PlaceId, Quantity)> {
+        let mut sources = std::collections::HashMap::<PlaceId, Quantity>::new();
+        for order in self
+            .market
+            .orders()
+            .filter(|order| order.seller == self.market_party() && order.good == good)
+        {
+            let units = sources.entry(order.place).or_default();
+            *units = units.saturating_add(order.units);
+        }
+        let mut sources: Vec<_> = sources.into_iter().collect();
+        sources.sort_by(|(a, _), (b, _)| {
+            self.position
+                .distance(self.map.position(*a))
+                .total_cmp(&self.position.distance(self.map.position(*b)))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        sources
     }
 
     pub(crate) fn usable_owned_units(&self, good: Good) -> Quantity {
@@ -1255,6 +1291,9 @@ impl Citizen {
         }
         if let CitizenAction::ProduceAt { place, recipe } = action {
             self.validate_production_site(place, recipe)?;
+        }
+        if let CitizenAction::WithdrawAt { place, .. } = action {
+            self.accessible_place(place)?;
         }
         if let CitizenAction::BuyAt { place, .. } = action {
             let site = self.accessible_place(place)?;
@@ -1611,10 +1650,16 @@ impl Citizen {
                         let units = requested.min(citizen.available_units(good));
                         citizen.list_trial_stock(good, units)?;
                     }
-                    CitizenAction::Withdraw(good, requested) => {
+                    CitizenAction::Withdraw(good, requested)
+                    | CitizenAction::WithdrawAt {
+                        good,
+                        units: requested,
+                        ..
+                    } => {
+                        let place = active.action.required_place(&citizen).unwrap();
                         let units = citizen.market.withdraw(
                             citizen.market_party(),
-                            citizen.selling_place(),
+                            place,
                             good,
                             requested,
                         )?;

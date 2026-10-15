@@ -137,6 +137,23 @@ impl Market {
         }
     }
 
+    pub(crate) fn record_trial_withdrawal(&mut self, order: OrderId, units: Quantity) {
+        let key = self
+            .production_trials
+            .active
+            .iter()
+            .find_map(|(key, trial)| (trial.order == Some(order)).then_some(*key));
+        let Some(key) = key else {
+            return;
+        };
+        let trial = self.production_trials.active.get_mut(&key).unwrap();
+        trial.remaining = trial.remaining.saturating_sub(units);
+        if trial.remaining == 0 {
+            self.production_trials.active.remove(&key);
+            self.mark_trial_order(order, false);
+        }
+    }
+
     pub(crate) fn charge_trial_sale_tax(&mut self, order: OrderId, tax: Coins, local: bool) {
         let key = self
             .production_trials
@@ -1261,6 +1278,95 @@ mod tests {
         assert!(market.trial_eligible(account, Good::Thread, 95.0, 100.0));
         assert!(market.trial_eligible(account, Good::Thread, 100.0, 101.0));
     }
+    #[test]
+    fn partial_canary_withdrawal_preserves_sales_and_valid_save_state() {
+        let (mut market, account, place, order) = offered();
+        market
+            .purchase(
+                AgentId(uuid::Uuid::new_v4()),
+                place,
+                (Good::Thread, 50),
+                1000,
+                0,
+                true,
+            )
+            .unwrap();
+        let before = market
+            .production_trial(account, Good::Thread)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            market.withdraw(account, place, Good::Thread, 100).unwrap(),
+            100
+        );
+        let trial = market.production_trial(account, Good::Thread).unwrap();
+        assert_eq!(trial.remaining, 50);
+        assert_eq!(trial.sold_units, before.sold_units);
+        assert_eq!(trial.local_sales, before.local_sales);
+        assert_eq!(trial.net_receipts, before.net_receipts);
+        assert_eq!(trial.local_net_receipts, before.local_net_receipts);
+        assert!(!trial.accepted);
+        assert!(market.order_is_trial(order));
+        market.validate_production_trial_state().unwrap();
+        market.update_production_trials(1);
+        assert!(market.production_trial(account, Good::Thread).is_some());
+        assert!(
+            market
+                .production_trial_result(account, Good::Thread)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn full_canary_withdrawal_clears_trial_without_sale_or_retry_penalty() {
+        let (mut market, account, place, order) = offered();
+        assert_eq!(
+            market.withdraw(account, place, Good::Thread, 200).unwrap(),
+            200
+        );
+        assert!(market.order(order).is_none());
+        assert!(!market.order_is_trial(order));
+        assert!(market.production_trial(account, Good::Thread).is_none());
+        assert!(
+            market
+                .production_trial_result(account, Good::Thread)
+                .is_none()
+        );
+        assert!(market.trial_eligible(account, Good::Thread, 100.0, 100.0));
+        market.validate_production_trial_state().unwrap();
+    }
+
+    #[test]
+    fn partial_canary_withdrawal_keeps_historical_local_sales_for_daily_acceptance() {
+        let (mut market, account, place, _) = offered();
+        market
+            .purchase(
+                AgentId(uuid::Uuid::new_v4()),
+                place,
+                (Good::Thread, 100),
+                1000,
+                0,
+                true,
+            )
+            .unwrap();
+        market.withdraw(account, place, Good::Thread, 50).unwrap();
+        assert!(
+            !market
+                .production_trial(account, Good::Thread)
+                .unwrap()
+                .accepted
+        );
+        market.validate_production_trial_state().unwrap();
+        market.update_production_trials(1);
+        let result = market
+            .production_trial_result(account, Good::Thread)
+            .unwrap();
+        assert!(result.trial.accepted);
+        assert_eq!(result.trial.local_sales, 100);
+        assert_eq!(result.trial.sold_units, 100);
+        assert_eq!(result.trial.net_receipts, 20);
+    }
+
     #[test]
     fn nonsale_withdrawal_after_partial_sale_does_not_record_a_failed_experiment() {
         let (mut market, account, place, _) = offered();

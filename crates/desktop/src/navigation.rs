@@ -284,6 +284,16 @@ pub(crate) fn action(
             )),
             Fragment::good(good),
         ],
+        A::WithdrawAt {
+            place: id,
+            good,
+            units,
+        } => vec![
+            Fragment::text(format!("Withdraw {} ", crate::quantity_label(good, units))),
+            Fragment::good(good),
+            Fragment::text(" at "),
+            place(citizen, id),
+        ],
         A::Buy(list) => {
             let mut row = vec![Fragment::text("Buy ")];
             row.extend(shopping(list));

@@ -1085,15 +1085,15 @@ mod tests {
             recipe_profit(Recipe::WeaveCloth, &reserved),
             recipe_profit(Recipe::WeaveCloth, &missing)
         );
-        let mut inaccessible = missing.clone();
-        let place = inaccessible.map().public_place(Location::River);
-        inaccessible
+        let mut remote = missing.clone();
+        let place = remote.map().public_place(Location::River);
+        remote
             .market
-            .list(inaccessible.id(), place, Good::Thread, 200)
+            .list(remote.id(), place, Good::Thread, 200)
             .unwrap();
         assert_eq!(
-            recipe_profit(Recipe::WeaveCloth, &inaccessible),
-            recipe_profit(Recipe::WeaveCloth, &missing)
+            recipe_profit(Recipe::WeaveCloth, &remote),
+            recipe_profit(Recipe::WeaveCloth, &owned)
         );
     }
 
