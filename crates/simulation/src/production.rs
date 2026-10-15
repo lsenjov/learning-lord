@@ -739,29 +739,32 @@ pub(crate) fn projected_recipes_at(
                 .map(|&(good, units)| (good, units.saturating_sub(owned[good as usize]))),
         )?;
         let mut position = citizen.position();
-        let mut visited = Vec::new();
-        while let Some(place) = quoted.market().nearest_purchase_place(
-            citizen.id(),
+        while let Some((place, basket)) = quoted.market().next_purchase_stop(
+            citizen.market_party(),
             &citizen.map(),
             position,
             missing,
-            &visited,
+            None,
         ) {
             let mut remaining = Vec::new();
-            for (good, units) in missing.items() {
+            for (good, units) in basket.items() {
                 let purchase = quoted.market.purchase(
-                    citizen.id(),
+                    citizen.market_party(),
                     place,
                     (good, units),
                     Coins::MAX,
                     citizen.current_time_ms(),
                     false,
                 )?;
-                remaining.push((good, units.saturating_sub(purchase.units)));
+                remaining.push((good, purchase.units));
             }
-            missing = crate::marketplace::ShoppingList::new(remaining)?;
+            let bought = crate::marketplace::ShoppingList::new(remaining)?;
+            missing = crate::marketplace::ShoppingList::new(
+                missing
+                    .items()
+                    .map(|(good, units)| (good, units.saturating_sub(bought.units(good)))),
+            )?;
             position = citizen.map().position(place);
-            visited.push(place);
         }
         for &(good, units) in recipe.inputs() {
             let consumed = units.min(owned[good as usize]);

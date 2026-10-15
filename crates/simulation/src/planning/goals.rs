@@ -793,31 +793,7 @@ fn acquire_provisioning_list(
         return Ok(state);
     }
     record_blocked_purchase(&state, missing)?;
-    let mut alternatives = Vec::new();
-    for place in state
-        .citizen
-        .map()
-        .places()
-        .values()
-        .filter(|place| place.kind != crate::locations::Location::Home)
-    {
-        if missing.items().any(|(good, _)| {
-            state
-                .citizen
-                .market()
-                .available_units_at(state.citizen.market_party(), place.id, good)
-                > 0
-        }) {
-            alternatives.extend(shopping_trip_from_mode(
-                &state,
-                missing,
-                0,
-                prior_actions,
-                place.id,
-                true,
-            )?);
-        }
-    }
+    let alternatives = shopping_trip_from_mode(&state, missing, 0, prior_actions, true)?;
     Ok(alternatives
         .into_iter()
         .max_by(|a, b| {
@@ -929,19 +905,16 @@ fn provision_household(
     {
         let place = acquired
             .citizen
-            .map()
-            .places()
-            .values()
-            .find(|place| {
-                place.kind != crate::locations::Location::Home
-                    && place.position == acquired.citizen.position()
-                    && acquired.citizen.market().available_units_at(
-                        acquired.citizen.market_party(),
-                        place.id,
-                        Good::FlaxGarment,
-                    ) > 0
-            })
-            .map(|place| place.id);
+            .market()
+            .next_purchase_stop(
+                acquired.citizen.market_party(),
+                &acquired.citizen.map(),
+                acquired.citizen.position(),
+                crate::marketplace::ShoppingList::single(Good::FlaxGarment, 1),
+                Some(acquired.citizen.coins()),
+            )
+            .map(|(place, _)| place)
+            .filter(|place| acquired.citizen.map().position(*place) == acquired.citizen.position());
         let mut ready = acquired.clone();
         ready.cooldowns.buy = 0;
         let with_spare = if ready.citizen.withdrawable_units(Good::FlaxGarment) > 0 {
@@ -1170,57 +1143,7 @@ fn shopping_trip_with_demand(
         return Ok(Vec::new());
     }
     record_blocked_purchase(initial, demand)?;
-    let mut places: Vec<_> = initial
-        .citizen
-        .map()
-        .places()
-        .values()
-        .filter(|place| place.kind != crate::locations::Location::Home)
-        .filter(|place| {
-            list.items().any(|(good, _)| {
-                initial.citizen.market().available_units_at(
-                    initial.citizen.market_party(),
-                    place.id,
-                    good,
-                ) > 0
-            })
-        })
-        .map(|place| place.id)
-        .collect();
-    if places.is_empty() {
-        places.push(initial.citizen.selling_place());
-    }
-    places.sort_by_key(|place| place.0);
-    let mut variants = Vec::new();
-    for place in places {
-        variants.extend(shopping_trip_from(
-            initial,
-            list,
-            demand,
-            reserved_ms,
-            prior_actions,
-            place,
-        )?);
-    }
-    Ok(variants)
-}
-
-fn shopping_trip_from(
-    initial: &Prediction,
-    list: crate::marketplace::ShoppingList,
-    _demand: crate::marketplace::ShoppingList,
-    reserved_ms: u64,
-    prior_actions: usize,
-    first_place: crate::PlaceId,
-) -> Result<Vec<Prediction>, SimulationError> {
-    shopping_trip_from_mode(
-        initial,
-        list,
-        reserved_ms,
-        prior_actions,
-        first_place,
-        false,
-    )
+    shopping_trip_from_mode(initial, list, reserved_ms, prior_actions, false)
 }
 
 fn shopping_trip_from_mode(
@@ -1228,7 +1151,6 @@ fn shopping_trip_from_mode(
     list: crate::marketplace::ShoppingList,
     reserved_ms: u64,
     prior_actions: usize,
-    first_place: crate::PlaceId,
     partial: bool,
 ) -> Result<Vec<Prediction>, SimulationError> {
     if initial.cooldowns.buy > 0 || initial.elapsed_ms + reserved_ms >= GOAL_HORIZON_MS {
@@ -1268,53 +1190,21 @@ fn shopping_trip_from_mode(
     if remaining.items().next().is_none() {
         return Ok(vec![state]);
     }
-    let mut first = Some(first_place);
     while remaining.items().next().is_some() {
         let citizen = &state.citizen;
-        let place = first.take().or_else(|| {
-            citizen
-                .map()
-                .places()
-                .values()
-                .filter(|place| place.kind != crate::locations::Location::Home)
-                .filter(|place| {
-                    citizen
-                        .market()
-                        .affordable_purchase_list_at(
-                            citizen.market_party(),
-                            Some(place.id),
-                            remaining,
-                            citizen.coins(),
-                        )
-                        .is_ok_and(|list| list.items().next().is_some())
-                })
-                .min_by(|a, b| {
-                    citizen
-                        .position()
-                        .distance(a.position)
-                        .total_cmp(&citizen.position().distance(b.position))
-                        .then_with(|| a.id.0.cmp(&b.id.0))
-                })
-                .map(|place| place.id)
-        });
-        let Some(place) = place else {
+        let Some((place, basket)) = citizen.market().next_purchase_stop(
+            citizen.market_party(),
+            &citizen.map(),
+            citizen.position(),
+            remaining,
+            Some(citizen.coins()),
+        ) else {
             return Ok(if partial && state.actions.len() > initial.actions.len() {
                 vec![state]
             } else {
                 Vec::new()
             });
         };
-        let basket =
-            crate::marketplace::ShoppingList::new(remaining.items().map(|(good, units)| {
-                (
-                    good,
-                    units.min(citizen.market().available_units_at(
-                        citizen.market_party(),
-                        place,
-                        good,
-                    )),
-                )
-            }))?;
         if citizen.position() != citizen.map().position(place) {
             let Some(travelled) = state.perform(CitizenAction::Travel(place), prior_actions)?
             else {
@@ -3756,7 +3646,7 @@ mod tests {
     }
 
     #[test]
-    fn shopping_trip_visits_nearest_useful_stock_and_keeps_one_cooldown() {
+    fn shopping_trip_breaks_price_ties_by_distance_and_keeps_one_cooldown() {
         let (buyer, mill, market) = workplace_shopper();
         let initial = Prediction::new(&buyer, Cooldowns::default());
         let list =
