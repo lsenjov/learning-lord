@@ -21,6 +21,7 @@ struct Day {
     end: u64,
     price: f64,
     reference: f64,
+    reference_end: f64,
     observed: bool,
     initial: bool,
     activity: GoodActivity,
@@ -46,6 +47,7 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
         } else {
             result.last().unwrap().start.max(first)
         };
+        let reference_end = price;
         let activity = if slot == 0 {
             current.goods[good as usize]
         } else if history.peek().is_some_and(|entry| entry.start_ms == start) {
@@ -80,6 +82,7 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
             end,
             price,
             reference: price,
+            reference_end,
             observed: false,
             initial: true,
             activity,
@@ -218,6 +221,8 @@ pub(super) struct Axis;
 pub(super) struct Legend;
 #[derive(Component)]
 pub(super) struct Detail;
+#[derive(Component, Default)]
+pub(super) struct DayTable(Vec<[String; 5]>);
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
     parent.spawn(text(
@@ -264,6 +269,25 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
             ..default()
         },
         Detail,
+    ));
+    parent.spawn((
+        Node {
+            display: Display::Grid,
+            grid_template_columns: vec![
+                GridTrack::flex(1.6),
+                GridTrack::flex(1.0),
+                GridTrack::flex(1.0),
+                GridTrack::flex(1.0),
+                GridTrack::flex(1.0),
+            ],
+            width: percent(100),
+            flex_shrink: 0.0,
+            row_gap: px(8),
+            column_gap: px(10),
+            margin: UiRect::vertical(px(10)),
+            ..default()
+        },
+        DayTable::default(),
     ));
 }
 
@@ -363,6 +387,7 @@ pub fn refresh(
             old.start == new.start
                 && old.price == new.price
                 && old.reference == new.reference
+                && old.reference_end == new.reference_end
                 && old.observed == new.observed
                 && old.initial == new.initial
                 && old.activity == new.activity
@@ -424,8 +449,19 @@ fn hover_index(position: Option<Vec2>, over: bool, count: usize) -> Option<usize
 }
 
 fn hover_label(good: Good, day: &Day) -> String {
+    let activity = day.activity;
+    let asking_price = if activity.imported_units == 0 {
+        "—".into()
+    } else {
+        format!(
+            "{:.6} coins/{}",
+            activity.imported_quoted_value / activity.imported_units as f64
+                * good.units_per_price_unit() as f64,
+            good.price_unit_name()
+        )
+    };
     format!(
-        "{} to {} | {}\n{}: {:.6} coins/{}\nReference estimate: {:.6} coins/{}\n{}",
+        "{} to {} | {}\n{}: {:.6} coins/{}\nReference estimate: {:.6} → {:.6} coins/{}\nUnfulfilled demand: {}\nCaravan deliveries: {} | {:.6} coins quoted value | Average ask: {}",
         format_clock(day.start),
         format_clock(day.end),
         if day.partial {
@@ -443,12 +479,105 @@ fn hover_label(good: Good, day: &Day) -> String {
         day.price,
         good.price_unit_name(),
         day.reference,
+        day.reference_end,
         good.price_unit_name(),
-        market::metrics(good, day.activity),
+        crate::quantity_label(good, activity.affordable_demand_units),
+        crate::quantity_label(good, activity.imported_units),
+        activity.imported_quoted_value,
+        asking_price,
     )
 }
 
+fn day_table(good: Good, activity: GoodActivity) -> Vec<[String; 5]> {
+    let quantities = [
+        activity.traded_units,
+        activity.local_traded_units,
+        activity.caravan_purchased_units,
+        activity.exported_units,
+    ];
+    let payments = [
+        activity.traded_coins as i128,
+        activity.local_traded_coins as i128,
+        activity.caravan_purchased_coins as i128,
+        activity.exported_coins as i128,
+    ];
+    let import_receipts =
+        activity.caravan_purchased_coins as i128 - activity.import_tariff_coins as i128;
+    let receipts = [
+        activity.local_traded_coins as i128 + import_receipts + activity.exported_receipts as i128,
+        activity.local_traded_coins as i128,
+        import_receipts,
+        activity.exported_receipts as i128,
+    ];
+    let row = |label: &str, cells: [String; 4]| {
+        let [total, local, import, export] = cells;
+        [label.into(), total, local, import, export]
+    };
+    vec![
+        [
+            "".into(),
+            "Total".into(),
+            "Local".into(),
+            "Import".into(),
+            "Export".into(),
+        ],
+        row(
+            "Traded quantity",
+            quantities.map(|units| crate::quantity_label(good, units)),
+        ),
+        row("Coins paid", payments.map(|coins| coins.to_string())),
+        row(
+            &format!("Average paid price (coins/{})", good.price_unit_name()),
+            std::array::from_fn(|index| {
+                if quantities[index] == 0 {
+                    "—".into()
+                } else {
+                    format!(
+                        "{:.6}",
+                        payments[index] as f64 / quantities[index] as f64
+                            * good.units_per_price_unit() as f64
+                    )
+                }
+            }),
+        ),
+        row(
+            "Tariffs / subsidies (coins)",
+            [
+                (activity.import_tariff_coins as i128 + activity.export_tariff_coins as i128)
+                    .to_string(),
+                "—".into(),
+                activity.import_tariff_coins.to_string(),
+                activity.export_tariff_coins.to_string(),
+            ],
+        ),
+        row(
+            "Seller receipts before income tax (coins)",
+            receipts.map(|coins| coins.to_string()),
+        ),
+        row(
+            "Unsold listed stock",
+            [
+                crate::quantity_label(good, activity.listed_units),
+                crate::quantity_label(
+                    good,
+                    activity
+                        .listed_units
+                        .saturating_sub(activity.caravan_listed_units),
+                ),
+                crate::quantity_label(good, activity.caravan_listed_units),
+                "—".into(),
+            ],
+        ),
+    ]
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy injects each system parameter independently"
+)]
 pub fn hover(
+    mut commands: Commands,
+    mut tables: Query<(Entity, &mut DayTable)>,
     selection: Res<market::Selection>,
     mut cached: ResMut<ChartDisplay>,
     plots: Query<&RelativeCursorPosition, With<Plot>>,
@@ -496,6 +625,43 @@ pub fn hover(
             format!("{status} | {}", hover_label(selection.good(), day))
         },
     );
+    let rows = selected
+        .map(|index| day_table(selection.good(), cached.days[index].activity))
+        .unwrap_or_default();
+    for (entity, mut table) in &mut tables {
+        if table.0 != rows {
+            table.0.clone_from(&rows);
+            commands
+                .entity(entity)
+                .despawn_children()
+                .with_children(|parent| {
+                    for (row_index, row) in rows.iter().enumerate() {
+                        for (column, value) in row.iter().enumerate() {
+                            parent.spawn((
+                                text(
+                                    value.clone(),
+                                    13.0,
+                                    if row_index == 0 || column == 0 {
+                                        MUTED
+                                    } else {
+                                        TEXT
+                                    },
+                                ),
+                                TextLayout::justify(if column == 0 {
+                                    Justify::Left
+                                } else {
+                                    Justify::Right
+                                }),
+                                Node {
+                                    min_width: px(0),
+                                    ..default()
+                                },
+                            ));
+                        }
+                    }
+                });
+        }
+    }
     for mut text in &mut readouts {
         if text.0 != value {
             text.0.clone_from(&value);
@@ -863,11 +1029,13 @@ mod tests {
             end: UPDATE_TIME_MS,
             price: 20.0,
             reference: 20.0,
+            reference_end: 20.0,
             observed: true,
             initial: false,
             partial: false,
             activity: GoodActivity {
                 traded_units: 6,
+                traded_coins: 126,
                 local_traded_units: 1,
                 local_traded_coins: 20,
                 exported_units: 2,
@@ -881,14 +1049,65 @@ mod tests {
         };
         let label = hover_label(Good::BreadRoll, &day);
         assert!(label.contains("CLOSED | quantities at close"));
-        assert!(label.contains("Total traded volume: 6 rolls"));
-        assert!(label.contains("Local trades: 1 roll | 20 coins"));
-        assert!(label.contains("Exports: 2 rolls | 15 gross coins entering town"));
-        assert!(label.contains("Import deliveries: 4 rolls"));
-        assert!(label.contains("Bought from caravans: 3 rolls | 91 gross coins spent"));
-        assert!(label.contains("Caravan stock: 1 roll"));
+        assert!(label.contains("Caravan deliveries: 4 rolls"));
+        let rows = day_table(Good::BreadRoll, day.activity);
+        assert_eq!(
+            rows[1],
+            ["Traded quantity", "6 rolls", "1 roll", "3 rolls", "2 rolls"]
+        );
+        assert_eq!(rows[2], ["Coins paid", "126", "20", "91", "15"]);
+        assert_eq!(rows[3][2], "20.000000");
+        assert_eq!(rows[3][3], "30.333333");
         day.partial = true;
         assert!(hover_label(Good::BreadRoll, &day).contains("PARTIAL | live quantities so far"));
+    }
+
+    #[test]
+    fn table_uses_rounded_payments_and_keeps_subsidies_and_stock_separate() {
+        let activity = GoodActivity {
+            traded_units: 6000,
+            local_traded_units: 1000,
+            local_traded_coins: 650,
+            exported_units: 2000,
+            exported_coins: 600,
+            exported_receipts: 700,
+            export_tariff_coins: -100,
+            import_tariff_coins: -75,
+            imported_units: 9000,
+            caravan_purchased_units: 3000,
+            caravan_purchased_coins: 2925,
+            traded_coins: 4175,
+            listed_units: 8000,
+            caravan_listed_units: 6000,
+            ..default()
+        };
+        let rows = day_table(Good::Berries, activity);
+        assert_eq!(
+            rows[1],
+            ["Traded quantity", "6000 g", "1000 g", "3000 g", "2000 g"]
+        );
+        assert_eq!(rows[2], ["Coins paid", "4175", "650", "2925", "600"]);
+        assert_eq!(
+            rows[3][1..],
+            ["695.833333", "650.000000", "975.000000", "300.000000"]
+        );
+        assert_eq!(rows[4][1..], ["-175", "—", "-75", "-100"]);
+        assert_eq!(rows[5][1..], ["4350", "650", "3000", "700"]);
+        assert_eq!(rows[6][1..], ["8000 g", "2000 g", "6000 g", "—"]);
+        let empty = day_table(Good::BreadRoll, GoodActivity::default());
+        assert_eq!(empty[3][1..], ["—", "—", "—", "—"]);
+        let rounded = day_table(
+            Good::BreadRoll,
+            GoodActivity {
+                traded_units: 3,
+                traded_coins: 2,
+                local_traded_units: 3,
+                local_traded_coins: 2,
+                local_quoted_value: 1.2,
+                ..default()
+            },
+        );
+        assert_eq!(rounded[3][1], "0.666667");
     }
 
     #[test]
@@ -918,7 +1137,7 @@ mod tests {
         assert_eq!(closed.activity.imported_units, 3);
         assert_eq!(closed.activity.caravan_listed_units, 3);
         assert_eq!(closed.activity.traded_units, 0);
-        assert!(hover_label(Good::BreadRoll, closed).contains("Import deliveries: 3 rolls"));
+        assert!(hover_label(Good::BreadRoll, closed).contains("Caravan deliveries: 3 rolls"));
     }
 
     #[test]
@@ -943,6 +1162,10 @@ mod tests {
         assert_eq!(values[0].start, 6 * 60 * 60 * 1000);
         assert_eq!(values[0].end, DAY_MS + UPDATE_TIME_MS);
         assert_eq!(values[0].price, old_price);
+        assert_eq!(values[0].reference, old_price);
+        assert_eq!(values[0].reference_end, new_price);
+        assert_eq!(values[1].reference, new_price);
+        assert_eq!(values[1].reference_end, new_price);
         assert_eq!(values[0].activity.affordable_demand_units, 100);
         assert_eq!(values[1].price, new_price);
         let universe = universe
@@ -1057,21 +1280,43 @@ mod tests {
             .clone()
     }
 
+    fn displayed_table(app: &mut App) -> Vec<String> {
+        let children = app
+            .world_mut()
+            .query_filtered::<&Children, With<DayTable>>()
+            .single(app.world())
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        children
+            .into_iter()
+            .map(|entity| app.world().get::<Text>(entity).unwrap().0.clone())
+            .collect()
+    }
+
     #[test]
     fn hover_preview_restores_current_or_pin_and_switching_goods_keeps_the_day() {
         let mut app = selection_app();
         assert!(detail(&mut app).starts_with("CURRENT | Day 1"));
+        {
+            let mut chart = app.world_mut().resource_mut::<ChartDisplay>();
+            chart.days[0].activity.traded_units = 7;
+            chart.days.last_mut().unwrap().activity.traded_units = 11;
+        }
         pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), false);
+        assert_eq!(displayed_table(&mut app)[6], "7 g");
         assert!(detail(&mut app).starts_with("PREVIEW | Day 0 | Monday | 00:00:00"));
         assert_eq!(app.world().resource::<ChartDisplay>().pinned, None);
         pointer(&mut app, None, false);
         assert!(detail(&mut app).starts_with("CURRENT | Day 1"));
+        assert_eq!(displayed_table(&mut app)[6], "11 g");
         pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), true);
         assert_eq!(app.world().resource::<ChartDisplay>().pinned, Some(0));
         pointer(&mut app, Some(Vec2::new(0.49, 0.0)), false);
         assert!(detail(&mut app).starts_with("PREVIEW | Day 1"));
         pointer(&mut app, None, false);
         assert!(detail(&mut app).starts_with("PINNED | Day 0 | Monday | 00:00:00"));
+        assert_eq!(displayed_table(&mut app)[6], "7 g");
         let button = app
             .world_mut()
             .spawn((market::Choice::Good(Good::BreadRoll), Interaction::Pressed))
@@ -1086,7 +1331,9 @@ mod tests {
         let label = detail(&mut app);
         assert!(label.starts_with("PINNED | Day 0 | Monday | 00:00:00"));
         assert!(label.contains("coins/roll"));
-        assert!(label.contains("Total traded volume: 0 rolls"));
+        let cells = displayed_table(&mut app);
+        assert_eq!(cells[6], "0 rolls");
+        assert_eq!(cells[15], "Average paid price (coins/roll)");
         pointer(&mut app, Some(Vec2::new(0.0, 0.0)), true);
         assert_eq!(
             app.world().resource::<ChartDisplay>().pinned,

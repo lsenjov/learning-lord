@@ -7,7 +7,7 @@ use bevy::{
 use learning_lord_simulation::{
     Universe,
     locations::PlaceId,
-    marketplace::{Good, GoodActivity, MarketParty},
+    marketplace::{Good, MarketParty},
     production::Recipe,
 };
 
@@ -530,86 +530,6 @@ pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
     )
 }
 
-pub(super) fn trade_breakdown(good: Good, activity: GoodActivity) -> String {
-    let totals = format!(
-        "Local trades: {} | {} coins\nExports: {} | {} gross coins entering town\nExport seller receipts: {} coins | Export tariff revenue: {} coins\nImport deliveries: {}\nBought from caravans: {} | {} gross coins spent\nImport payments leaving town: {} coins | Import tariff revenue: {} coins",
-        crate::quantity_label(good, activity.local_traded_units),
-        activity.local_traded_coins,
-        crate::quantity_label(good, activity.exported_units),
-        activity.exported_coins,
-        activity.exported_receipts,
-        activity.export_tariff_coins,
-        crate::quantity_label(good, activity.imported_units),
-        crate::quantity_label(good, activity.caravan_purchased_units),
-        activity.caravan_purchased_coins,
-        activity
-            .caravan_purchased_coins
-            .saturating_sub(activity.import_tariff_coins),
-        activity.import_tariff_coins
-    );
-    let mut prices = Vec::new();
-    for (label, units, coins) in [
-        (
-            "Export gross paid price",
-            activity.exported_units,
-            activity.exported_coins,
-        ),
-        (
-            "Export net seller price",
-            activity.exported_units,
-            activity.exported_receipts,
-        ),
-        (
-            "Caravan purchase gross paid price",
-            activity.caravan_purchased_units,
-            activity.caravan_purchased_coins,
-        ),
-    ] {
-        if units > 0 {
-            prices.push(format!(
-                "{label}: {:.6} coins/{}",
-                coins as f64 / units as f64 * good.units_per_price_unit() as f64,
-                good.price_unit_name()
-            ));
-        }
-    }
-    if activity.imported_units > 0 {
-        prices.push(format!(
-            "Import delivery quoted value: {:.6} coins | Asking price: {:.6} coins/{}",
-            activity.imported_quoted_value,
-            activity.imported_quoted_value / activity.imported_units as f64
-                * good.units_per_price_unit() as f64,
-            good.price_unit_name()
-        ));
-    }
-    if prices.is_empty() {
-        totals
-    } else {
-        format!("{totals}\n{}", prices.join("\n"))
-    }
-}
-
-pub(crate) fn metrics(good: Good, activity: GoodActivity) -> String {
-    format!(
-        "Buy volume: {}\nSell volume: {}\nTotal traded volume: {}\n{}\nListed stock: {} | Caravan stock: {}\nUnfulfilled demand: {}",
-        crate::quantity_label(
-            good,
-            activity
-                .traded_units
-                .saturating_add(activity.affordable_demand_units)
-        ),
-        crate::quantity_label(
-            good,
-            activity.traded_units.saturating_add(activity.listed_units)
-        ),
-        crate::quantity_label(good, activity.traded_units),
-        trade_breakdown(good, activity),
-        crate::quantity_label(good, activity.listed_units),
-        crate::quantity_label(good, activity.caravan_listed_units),
-        crate::quantity_label(good, activity.affordable_demand_units)
-    )
-}
-
 pub fn refresh_choices(
     selection: Res<Selection>,
     mut buttons: Query<(&Choice, &Interaction, &mut BackgroundColor)>,
@@ -1101,44 +1021,6 @@ mod tests {
         assert_eq!(groups[0].orders[0].1, 3);
         assert_eq!(groups[0].orders[0].2, Good::BreadRoll.import_threshold());
         assert_eq!(universe.agents().len(), 1);
-        let current = metrics(
-            Good::BreadRoll,
-            universe.market().current_period().goods[Good::BreadRoll as usize],
-        );
-        assert!(current.contains("Import deliveries: 3 rolls"));
-        assert!(current.contains("Caravan stock: 3 rolls"));
-    }
-
-    #[test]
-    fn trade_metrics_keep_each_external_flow_separate() {
-        let label = metrics(
-            Good::Berries,
-            GoodActivity {
-                traded_units: 6000,
-                local_traded_units: 1000,
-                local_traded_coins: 650,
-                exported_units: 2000,
-                exported_coins: 600,
-                exported_receipts: 300,
-                export_tariff_coins: 300,
-                import_tariff_coins: 975,
-                imported_units: 4000,
-                caravan_purchased_units: 3000,
-                caravan_purchased_coins: 2925,
-                ..default()
-            },
-        );
-        assert!(label.contains("Total traded volume: 6000 g"));
-        assert!(label.contains("Local trades: 1000 g | 650 coins"));
-        assert!(label.contains("Exports: 2000 g | 600 gross coins entering town"));
-        assert!(
-            label.contains("Export seller receipts: 300 coins | Export tariff revenue: 300 coins")
-        );
-        assert!(label.contains(
-            "Import payments leaving town: 1950 coins | Import tariff revenue: 975 coins"
-        ));
-        assert!(label.contains("Import deliveries: 4000 g"));
-        assert!(label.contains("Bought from caravans: 3000 g | 2925 gross coins spent"));
     }
 
     #[test]
@@ -1187,23 +1069,6 @@ mod tests {
     }
 
     #[test]
-    fn quantities_include_transactions_once_and_label_periods() {
-        let value = metrics(
-            Good::Berries,
-            GoodActivity {
-                traded_units: 200,
-                listed_units: 800,
-                affordable_demand_units: 500,
-                ..default()
-            },
-        );
-        assert!(
-            value.contains("Buy volume: 700 g\nSell volume: 1000 g\nTotal traded volume: 200 g")
-        );
-        assert!(value.contains("Unfulfilled demand: 500 g"));
-    }
-
-    #[test]
     fn counted_goods_display_integer_quantities_and_item_prices() {
         assert_eq!(
             order_label(Good::BreadRoll, 2, 15.0),
@@ -1212,18 +1077,6 @@ mod tests {
         assert_eq!(
             order_label(Good::BerryPie, 1, 25.0),
             "1 pie remaining  |  25.000 coins/pie  |  25.000 coins quoted value"
-        );
-        assert!(
-            metrics(
-                Good::BreadRoll,
-                GoodActivity {
-                    traded_units: 1,
-                    listed_units: 2,
-                    affordable_demand_units: 3,
-                    ..default()
-                }
-            )
-            .contains("Buy volume: 4 rolls")
         );
     }
 
