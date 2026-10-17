@@ -23,6 +23,8 @@ pub struct ProductionLocationForecast {
     pub forecast: Option<GoalForecast>,
     pub best_for_goal: bool,
     pub selected: bool,
+    #[serde(default)]
+    pub projection: Option<ProductionProjection>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -52,6 +54,8 @@ pub struct ProductionInputDecision {
 pub struct ProductionDecision {
     pub recipe: crate::production::Recipe,
     pub profit_per_hour: Option<f64>,
+    #[serde(default)]
+    pub routes: crate::production::ProductionRoutes,
     pub remaining_batches: Option<crate::Quantity>,
     pub inputs: Vec<ProductionInputDecision>,
     pub prefix_attempted: bool,
@@ -63,8 +67,10 @@ pub struct ProductionDecision {
 
 impl ProductionDecision {
     fn new(citizen: &Citizen, recipe: crate::production::Recipe) -> Self {
+        let routes = crate::production::production_routes(recipe, citizen, None);
         Self {
             recipe,
+            routes,
             profit_per_hour: crate::production::recipe_profit(recipe, citizen)
                 .zip(recipe.duration_ms(citizen).ok())
                 .map(|(profit, duration)| profit * 3_600_000.0 / duration as f64),
@@ -113,6 +119,31 @@ pub struct PlanningDecision {
     pub production: Vec<ProductionDecision>,
     pub prices: crate::marketplace::Prices,
     pub blocked_requests: crate::marketplace::ShoppingList,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct ProductionProjection {
+    pub recipes: Vec<crate::production::Recipe>,
+    pub purchases: crate::marketplace::ShoppingList,
+}
+
+impl ProductionProjection {
+    fn from_targets(
+        citizen: &Citizen,
+        targets: &crate::production::ProductionTargets,
+    ) -> Result<Self, SimulationError> {
+        let requirements = crate::production::recipe_requirements_at(
+            citizen,
+            targets.site,
+            &targets.projected_order,
+        )?;
+        Ok(Self {
+            recipes: targets.projected_order.clone(),
+            purchases: crate::marketplace::ShoppingList::new(requirements.items().map(
+                |(good, units)| (good, units.saturating_sub(citizen.usable_owned_units(good))),
+            ))?,
+        })
+    }
 }
 
 /// A chosen goal and its primitive actions, including prerequisites.
@@ -750,6 +781,7 @@ fn evaluate_goal(
                 forecast: None,
                 best_for_goal: false,
                 selected: false,
+                projection: None,
             });
         }
     }
@@ -757,7 +789,12 @@ fn evaluate_goal(
     let initial = Prediction::new(citizen, Cooldowns::default());
     let blocked_requests = initial.blocked_requests.clone();
     let variants = if goal == Effect::Production {
-        goals::production_prefixes(initial, 0, &mut production)?
+        goals::production_prefixes_with_locations(
+            initial,
+            0,
+            &mut production,
+            &mut production_locations,
+        )?
     } else {
         goals::variants_after(&initial, goal)?
     };

@@ -1896,6 +1896,15 @@ pub(super) fn production_prefixes(
     prior_actions: usize,
     diagnostics: &mut [super::ProductionDecision],
 ) -> Result<Vec<Prediction>, SimulationError> {
+    production_prefixes_with_locations(initial, prior_actions, diagnostics, &mut [])
+}
+
+pub(super) fn production_prefixes_with_locations(
+    initial: Prediction,
+    prior_actions: usize,
+    diagnostics: &mut [super::ProductionDecision],
+    locations: &mut [super::ProductionLocationForecast],
+) -> Result<Vec<Prediction>, SimulationError> {
     let mut variants = Vec::new();
     for site in initial.citizen.production_sites() {
         variants.extend(production_at_site(
@@ -1903,6 +1912,10 @@ pub(super) fn production_prefixes(
             site,
             prior_actions,
             diagnostics,
+            locations
+                .iter_mut()
+                .find(|location| location.place == site)
+                .map(|location| &mut location.projection),
         )?);
     }
     Ok(variants)
@@ -1913,13 +1926,21 @@ fn production_at_site(
     site: crate::locations::PlaceId,
     prior_actions: usize,
     diagnostics: &mut [super::ProductionDecision],
+    projection: Option<&mut Option<super::ProductionProjection>>,
 ) -> Result<Vec<Prediction>, SimulationError> {
     let mut initial = initial;
-    initial.citizen.production_targets = Some(crate::production::ProductionTargets::calculate_at(
+    let targets = crate::production::ProductionTargets::calculate_at(
         &initial.citizen,
         initial.citizen.current_time_ms(),
         Some(site),
-    )?);
+    )?;
+    if let Some(projection) = projection {
+        *projection = Some(super::ProductionProjection::from_targets(
+            &initial.citizen,
+            &targets,
+        )?);
+    }
+    initial.citizen.production_targets = Some(targets);
     let mut state = if initial.citizen.brewing_actions_at(site).is_empty() {
         production_restock_at(&initial, prior_actions, Some(site))?
     } else {
@@ -2738,6 +2759,7 @@ mod tests {
             site,
             0,
             &mut [],
+            None,
         )
         .unwrap()
         .pop()

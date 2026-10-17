@@ -1,3 +1,7 @@
+mod routes;
+pub(crate) use routes::production_routes;
+pub use routes::{ProductionRouteQuote, ProductionRoutes};
+
 use crate::{
     Citizen, Coins, Quantity, SimulationError,
     locations::{Location, PlaceId},
@@ -450,25 +454,31 @@ pub(crate) fn recipe_profit_for_site(
     site: Option<PlaceId>,
 ) -> Option<f64> {
     let owned = owned_recipe_inputs(recipe, citizen);
-    let profit = output_value(
+    profit_with_inputs(
         recipe,
         citizen,
         site,
+        &owned,
         stock_fraction(recipe, citizen)? >= 1.0,
-    )? - input_value(recipe, citizen, &owned)?
-        - citizen.workshop_fee_cost(
-            site.or_else(|| citizen.production_place(recipe).ok()),
-            recipe.duration_ms(citizen).ok()?,
-        );
-    profit.is_finite().then_some(profit)
+    )
 }
 
 fn recipe_profit_at(recipe: Recipe, citizen: &Citizen, export: bool) -> Option<f64> {
     let owned = owned_recipe_inputs(recipe, citizen);
-    let profit = output_value(recipe, citizen, None, export)?
-        - input_value(recipe, citizen, &owned)?
+    profit_with_inputs(recipe, citizen, None, &owned, export)
+}
+
+fn profit_with_inputs(
+    recipe: Recipe,
+    citizen: &Citizen,
+    site: Option<PlaceId>,
+    owned: &[Quantity; Good::COUNT],
+    export: bool,
+) -> Option<f64> {
+    let profit = output_value(recipe, citizen, site, export)?
+        - input_value(recipe, citizen, owned)?
         - citizen.workshop_fee_cost(
-            citizen.production_place(recipe).ok(),
+            site.or_else(|| citizen.production_place(recipe).ok()),
             recipe.duration_ms(citizen).ok()?,
         );
     profit.is_finite().then_some(profit)
@@ -694,12 +704,35 @@ pub(crate) fn projected_recipes_at(
                     .map(|&(good, units)| stock[good as usize] / units as f64)
                     .max_by(f64::total_cmp)?;
                 let fraction = batches / cap;
-                let profit = output_value(recipe, citizen, site, fraction >= 1.0)?
-                    - input_value(recipe, &quoted, &owned)?
-                    - citizen.workshop_fee_cost(
-                        site.or_else(|| citizen.production_place(recipe).ok()),
-                        recipe.duration_ms(citizen).ok()?,
-                    );
+                if routes::preferred_manufacturing(recipe, &quoted, site, &owned, fraction >= 1.0)
+                    .is_some_and(|route| {
+                        route.intermediate_batches.iter().all(|&(supplier, _)| {
+                            if !citizen.eligible_sale_replenishment(supplier, site) {
+                                return false;
+                            }
+                            let supplier_fraction = supplier
+                                .outputs()
+                                .iter()
+                                .map(|&(good, units)| stock[good as usize] / units as f64)
+                                .max_by(f64::total_cmp)
+                                .unwrap_or(0.0)
+                                / stock_cap_batches(supplier, citizen).unwrap_or(1.0);
+                            let profit = profit_with_inputs(
+                                supplier,
+                                &quoted,
+                                site,
+                                &owned,
+                                supplier_fraction >= 1.0,
+                            );
+                            profit.is_some_and(|profit| profit > 0.0)
+                                || !recipes.contains(&supplier)
+                                    && citizen.eligible_production_trial(supplier, site)
+                        })
+                    })
+                {
+                    return None;
+                }
+                let profit = profit_with_inputs(recipe, &quoted, site, &owned, fraction >= 1.0)?;
                 let duration = recipe.duration_ms(citizen).ok()?;
                 if horizon_ms == DAILY_CAPACITY_MS && duration > horizon_ms.saturating_sub(elapsed)
                 {
@@ -803,6 +836,24 @@ pub(crate) fn ranked_recipes_at(citizen: &Citizen, site: Option<PlaceId>) -> Vec
         })
         .filter_map(|recipe| {
             if !citizen.eligible_sale_replenishment(recipe, site) {
+                return None;
+            }
+            let owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
+            if routes::preferred_manufacturing(
+                recipe,
+                citizen,
+                site,
+                &owned,
+                stock_fraction(recipe, citizen)? >= 1.0,
+            )
+            .is_some_and(|route| {
+                route.intermediate_batches.iter().all(|&(supplier, _)| {
+                    citizen.eligible_sale_replenishment(supplier, site)
+                        && (recipe_profit_for_site(supplier, citizen, site)
+                            .is_some_and(|profit| profit > 0.0)
+                            || citizen.eligible_production_trial(supplier, site))
+                })
+            }) {
                 return None;
             }
             let rate = recipe_profit_for_site(recipe, citizen, site)?

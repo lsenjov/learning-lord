@@ -869,6 +869,7 @@ fn decision_rows(
                 profit,
                 target
             ));
+            lines.extend(production_route_rows(&recipe.routes, citizen));
             if recipe.inputs.is_empty() {
                 lines.push("Inputs per batch: none");
             } else {
@@ -973,6 +974,53 @@ fn refresh_display(
     }
 }
 
+fn production_route_rows(
+    routes: &learning_lord_simulation::production::ProductionRoutes,
+    citizen: &Citizen,
+) -> Vec<Vec<navigation::Fragment>> {
+    use navigation::Fragment as F;
+    let mut lines = RichRows(Vec::new());
+    if let Some(site) = routes.site {
+        lines.push(vec![
+            F::text("Complete-batch method estimates at "),
+            navigation::place(citizen, site),
+            F::text("; assumes buying all inputs, independent of owned supplies and cash."),
+        ]);
+    }
+    for (name, quote) in [("Buy inputs", &routes.buy), ("Make inputs", &routes.make)] {
+        if let Some(quote) = quote {
+            let preference = if name == "Make inputs" && routes.prefer_make {
+                " | preferred if ordinary production supplies intermediates"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "{name}: {:.3} coins/h | {:.3} coins profit | {:.2} working hours | {} coins purchases{preference}",
+                quote.profit_per_hour(),
+                quote.profit,
+                quote.duration_ms as f64 / 3_600_000.0,
+                quote.purchase_coins,
+            ));
+            for &(intermediate, batches) in &quote.intermediate_batches {
+                lines.push(format!(
+                    "  Method intermediate work: {} × {}",
+                    batches,
+                    intermediate.name()
+                ));
+            }
+            for (good, units) in quote.purchases.items() {
+                lines.push(vec![
+                    F::text(format!("  Method inputs: {} ", quantity_label(good, units))),
+                    F::good(good),
+                ]);
+            }
+        } else {
+            lines.push(format!("{name}: unavailable"));
+        }
+    }
+    lines.0
+}
+
 struct RichRows(Vec<Vec<navigation::Fragment>>);
 struct RichRow(Vec<navigation::Fragment>);
 impl From<String> for RichRow {
@@ -1053,6 +1101,24 @@ fn production_location_rows(
         rows.push(vec![F::text(
             "Unavailable: No executable production sequence at this location.",
         )]);
+    }
+    if let Some(projection) = &candidate.projection {
+        rows.push(vec![F::text("Projected work, up to twelve working hours:")]);
+        for run in projection.recipes.chunk_by(|a, b| a == b) {
+            rows.push(vec![F::text(format!("{} × {}", run.len(), run[0].name()))]);
+        }
+        if projection.purchases.items().next().is_none() {
+            rows.push(vec![F::text("Net projected purchases: none")]);
+        }
+        for (good, units) in projection.purchases.items() {
+            rows.push(vec![
+                F::text(format!(
+                    "Net projected purchase: {} ",
+                    quantity_label(good, units)
+                )),
+                F::good(good),
+            ]);
+        }
     }
     rows
 }
@@ -1252,6 +1318,7 @@ mod tests {
             }),
             best_for_goal: true,
             selected: false,
+            projection: None,
         };
         let text = production_location_readout(&location, &citizen).join("\n");
         assert!(text.contains("North workshop [best production option]"));
@@ -1269,6 +1336,27 @@ mod tests {
         assert!(text.starts_with("North workshop\nUnavailable:"));
         assert!(!text.contains("chosen"));
         assert!(!text.contains("best production option"));
+        location.projection = Some(learning_lord_simulation::planning::ProductionProjection {
+            recipes: vec![learning_lord_simulation::production::Recipe::MakeClothingBlock; 8],
+            purchases: learning_lord_simulation::marketplace::ShoppingList::new([(
+                Good::Cloth,
+                200,
+            )])
+            .unwrap(),
+        });
+        let rows = production_location_rows(&location, &citizen);
+        let text = rows
+            .iter()
+            .map(|row| navigation::plain(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("8 × Make clothing block"));
+        assert!(text.contains("Net projected purchase: 200 g Cloth"));
+        assert!(
+            rows.iter()
+                .flatten()
+                .any(|fragment| fragment.target == Some(navigation::Target::Good(Good::Cloth)))
+        );
     }
 
     #[test]
@@ -1298,6 +1386,60 @@ mod tests {
         assert!(text.contains("100 g missing"));
         let later = universe.advance(1).unwrap();
         assert_eq!(text, decision_readout(&later, Some(id)));
+    }
+
+    #[test]
+    fn production_route_readout_shows_economics_and_links_supplies_and_workplace() {
+        use learning_lord_simulation::{
+            locations::Location,
+            marketplace::ShoppingList,
+            production::{ProductionRouteQuote, ProductionRoutes, Recipe},
+        };
+        let citizen = Citizen::new(0.0).unwrap();
+        let (map, site) = citizen
+            .map()
+            .with_place(
+                Location::Tailory,
+                citizen.position(),
+                Some(citizen.id()),
+                "North tailory",
+            )
+            .unwrap();
+        let citizen = citizen.with_map(map).unwrap();
+        let routes = ProductionRoutes {
+            site: Some(site),
+            buy: None,
+            make: Some(ProductionRouteQuote {
+                profit: 90.0,
+                duration_ms: 16_200_000,
+                purchase_coins: 10,
+                purchases: ShoppingList::new([(Good::Cloth, 200)]).unwrap(),
+                intermediate_batches: vec![(Recipe::MakeClothingBlock, 8)],
+            }),
+            prefer_make: true,
+        };
+        let rows = production_route_rows(&routes, &citizen);
+        let text = rows
+            .iter()
+            .map(|row| navigation::plain(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Buy inputs: unavailable"));
+        assert!(text.contains("independent of owned supplies and cash"));
+        assert!(text.contains("Make inputs: 20.000 coins/h | 90.000 coins profit | 4.50 working hours | 10 coins purchases"));
+        assert!(text.contains("preferred if ordinary production supplies intermediates"));
+        assert!(text.contains("8 × Make clothing block"));
+        assert!(text.contains("Method inputs: 200 g Cloth"));
+        for target in [
+            navigation::Target::Good(Good::Cloth),
+            navigation::Target::Location(site),
+        ] {
+            assert!(
+                rows.iter()
+                    .flatten()
+                    .any(|fragment| fragment.target == Some(target))
+            );
+        }
     }
 
     #[test]
