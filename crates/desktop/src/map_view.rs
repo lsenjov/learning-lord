@@ -158,11 +158,12 @@ pub fn interaction(
         Res<DisplaySnapshot>,
         ResMut<Selection>,
         ResMut<crate::locations::State>,
+        Option<ResMut<citizens::RosterState>>,
     ),
     mut floating: ResMut<crate::floating_ui::Windows>,
     mut viewport: ResMut<MapViewport>,
 ) {
-    let (snapshot, mut selection, mut locations) = state;
+    let (snapshot, mut selection, mut locations, mut roster) = state;
     let Ok(window) = windows.single() else {
         return;
     };
@@ -200,6 +201,9 @@ pub fn interaction(
             citizen_point(&viewport, &agents, *id, citizen.position()).distance(pointer) <= 10.0
         }) {
             selection.0 = Some(*id);
+            if let Some(roster) = roster.as_mut() {
+                roster.detail = true;
+            }
             floating.open(crate::floating_ui::WindowKind::Citizens);
             return;
         }
@@ -521,6 +525,7 @@ mod tests {
         }))
         .insert_resource(viewport)
         .init_resource::<Selection>()
+        .init_resource::<citizens::RosterState>()
         .init_resource::<ButtonInput<MouseButton>>()
         .init_resource::<crate::floating_ui::Windows>()
         .init_resource::<crate::locations::State>()
@@ -541,11 +546,13 @@ mod tests {
                 .take_new()
                 .is_empty()
         );
+        assert!(!app.world().resource::<citizens::RosterState>().detail);
         app.world_mut()
             .resource_mut::<crate::floating_ui::InputCapture>()
             .blocked = false;
         app.update();
         assert_eq!(app.world().resource::<Selection>().0, Some(id));
+        assert!(app.world().resource::<citizens::RosterState>().detail);
         assert_eq!(
             app.world_mut()
                 .resource_mut::<crate::floating_ui::Windows>()

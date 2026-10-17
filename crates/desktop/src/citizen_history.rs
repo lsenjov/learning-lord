@@ -8,7 +8,9 @@ use learning_lord_simulation::AgentId;
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum View {
     #[default]
-    Current,
+    Needs,
+    Belongings,
+    Planning,
     History,
 }
 
@@ -39,10 +41,10 @@ fn button(choice: Choice) -> impl Bundle {
         Button,
         choice,
         Node {
-            min_height: px(32),
-            padding: UiRect::axes(px(12), px(6)),
+            min_height: px(27),
+            padding: UiRect::axes(px(9), px(4)),
             align_items: AlignItems::Center,
-            border_radius: BorderRadius::all(px(8)),
+
             ..default()
         },
         BackgroundColor(PANEL),
@@ -57,7 +59,12 @@ pub fn spawn_tabs(parent: &mut ChildSpawnerCommands) {
             ..default()
         })
         .with_children(|row| {
-            for (view, label) in [(View::Current, "Current"), (View::History, "Daily history")] {
+            for (view, label) in [
+                (View::Needs, "Needs"),
+                (View::Belongings, "Belongings"),
+                (View::Planning, "Planning"),
+                (View::History, "Daily history"),
+            ] {
                 row.spawn(button(Choice::View(view)))
                     .with_children(|button| {
                         button.spawn(text(label, 14.0, TEXT));
@@ -74,17 +81,14 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
             Node {
                 display: Display::None,
                 flex_direction: FlexDirection::Column,
-                row_gap: px(12),
+                row_gap: px(6),
                 flex_shrink: 0.0,
                 ..default()
             },
         ))
         .with_children(|panel| {
-            panel.spawn(text(
-                "DAILY HISTORY  |  days close at 04:00; latest 30 completed days",
-                14.0,
-                MUTED,
-            ));
+            panel.spawn((text("Daily history (i)", 14.0, MUTED), Interaction::None,
+                crate::tooltip::Tooltip("Food goals include meals and overlap activity times. Days close at 04:00; latest 30 completed days. Historical average wellbeing includes personal wealth. Cash totals are actual trades; price changes do not affect them. Background planning is real wall time attributed to plan adoption day; initial startup plans are excluded.".into())));
             panel
                 .spawn(Node {
                     column_gap: px(8),
@@ -235,7 +239,7 @@ fn day_label_with_goods(
 ) -> String {
     let a = day.activity;
     format!(
-        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals (includes meals) {} · overlaps activity times\n\n{}COINS\nEarned {}  |  Spent {}  |  Net {:+}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
+        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals {}\n\n{}COINS\nEarned {}  |  Spent {}  |  Net {:+}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
         crate::format_clock(day.start_ms),
         crate::format_clock(day.end_ms),
         if partial {
@@ -273,7 +277,7 @@ pub fn refresh(
         Res<citizens::Selection>,
         Res<Selection>,
     ),
-    mut panels: Query<(&ViewPanel, &mut Node, &mut Visibility)>,
+    mut panels: Query<(Ref<ViewPanel>, &mut Node, &mut Visibility)>,
     mut buttons: Query<(&Choice, Ref<Interaction>, &mut BackgroundColor)>,
     mut readouts: Query<&mut Text, With<HistoryText>>,
     mut commands: Commands,
@@ -283,6 +287,7 @@ pub fn refresh(
     if !snapshot.is_changed()
         && !citizen.is_changed()
         && !selection.is_changed()
+        && !panels.iter().any(|(panel, _, _)| panel.is_added())
         && !goods_panels.iter().any(|(_, panel)| panel.is_added())
         && !buttons
             .iter()
@@ -363,7 +368,7 @@ pub fn refresh(
         let (request, wait, requests) = planning.map_or((0.0, 0.0, 0), |day| {
             (day.request_ms, day.wait_ms, day.requests)
         });
-        value.push_str(&format!("\nCash totals are actual trades; inventory price changes do not affect them.\n\nBACKGROUND PLANNING · REAL WALL TIME\nRequest queue + work {:.3} s  |  {} requests\nBlocked at action boundary {:.3} s\nAttributed to plan adoption day; initial startup plans excluded.", request / 1000.0, requests, wait / 1000.0));
+        value.push_str(&format!("\n\nBACKGROUND PLANNING · REAL WALL TIME\nRequest queue + work {:.3} s  |  {} requests\nBlocked at action boundary {:.3} s", request / 1000.0, requests, wait / 1000.0));
     }
     use learning_lord_simulation::marketplace::Good;
     let goods = index.map_or_else(Vec::new, |index| {
@@ -393,8 +398,7 @@ pub fn refresh(
     {
         for (entity, _) in &goods_panels {
             commands.entity(entity).despawn_children().with_children(|panel| {
-                panel.spawn(text("GOODS", 14.0, MUTED));
-                panel.spawn(text("Consumed includes recipe inputs, food and water reserved when eating or drinking starts, and equipped clothing.", 14.0, MUTED));
+                panel.spawn((text("Goods (i)", 14.0, MUTED), Interaction::None, crate::tooltip::Tooltip("Consumed includes recipe inputs, food and water reserved when eating or drinking starts, and equipped clothing.".into())));
                 if goods.is_empty() {
                     panel.spawn(text("No goods produced, traded or consumed yet.", 14.0, TEXT));
                 }

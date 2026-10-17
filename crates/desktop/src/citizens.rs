@@ -1,4 +1,4 @@
-use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, action_label, text};
+use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, text};
 use bevy::{
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
@@ -14,6 +14,7 @@ pub struct Selection(pub Option<AgentId>);
 #[derive(Resource, Default)]
 pub struct RosterState {
     generation: u64,
+    pub(crate) detail: bool,
 }
 
 #[derive(Resource, Default)]
@@ -25,7 +26,19 @@ pub struct PlanDisplay {
 #[derive(Component)]
 pub struct Card(usize);
 #[derive(Component)]
-pub struct Summary(usize);
+pub struct Summary(usize, usize);
+#[derive(Component)]
+pub struct Screen(pub bool);
+#[derive(Component)]
+pub(crate) struct Back;
+#[derive(Component)]
+pub(crate) struct SkillsToggle;
+#[derive(Component)]
+pub(crate) struct SkillsLabel;
+#[derive(Resource, Default)]
+pub struct SkillsExpanded(bool);
+#[derive(Component)]
+pub(crate) struct RosterContent(usize);
 #[derive(Clone, Copy)]
 pub enum Need {
     Hunger,
@@ -59,9 +72,9 @@ pub struct DietLabel(learning_lord_simulation::diet::DietCategory);
 pub struct DietFill(learning_lord_simulation::diet::DietCategory);
 
 #[derive(Component)]
-pub struct NeedLabel(usize, Need);
+pub struct NeedLabel(Need);
 #[derive(Component)]
-pub struct NeedFill(usize, Need);
+pub struct NeedFill(Need);
 #[derive(Component)]
 pub struct PlanContent;
 #[derive(Component)]
@@ -96,166 +109,220 @@ pub fn selected_agent(universe: &Universe, id: Option<AgentId>) -> Option<&Agent
         .or_else(|| sorted_agents(universe).first().map(|(_, agent)| *agent))
 }
 
-pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
+const COLUMNS: [(&str, f32); 5] = [
+    ("Name", 24.0),
+    ("Profession", 23.0),
+    ("Coins", 17.0),
+    ("Wealth", 18.0),
+    ("Wellbeing", 18.0),
+];
+
+fn cell(parent: &mut ChildSpawnerCommands, width: f32, label: &str, color: Color) -> Entity {
     parent
         .spawn(Node {
-            width: percent(100),
-            flex_direction: FlexDirection::Column,
-            row_gap: px(10),
+            width: percent(width),
+            min_width: px(0),
+            padding: UiRect::horizontal(px(6)),
             flex_shrink: 0.0,
             ..default()
         })
-        .with_children(|row| {
-            for slot in 0..count {
-                row.spawn((
-                    Button,
-                    Card(slot),
-                    Node {
-                        flex_shrink: 0.0,
-                        min_width: px(0),
-                        padding: UiRect::all(px(10)),
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(4),
-                        border_radius: BorderRadius::all(px(8)),
-                        ..default()
-                    },
-                    BackgroundColor(PANEL),
-                ))
-                .with_children(|card| {
-                    card.spawn((text("", 15.0, TEXT), Summary(slot)));
-                    for need in [Need::Hunger, Need::Thirst, Need::Sleep, Need::Clothing] {
-                        card.spawn((text("", 12.0, TEXT), NeedLabel(slot, need)));
-                        card.spawn((
-                            Node {
-                                width: percent(100),
-                                height: px(7),
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.04, 0.06, 0.08)),
-                        ))
-                        .with_children(|bar| {
-                            bar.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    height: percent(100),
-                                    ..default()
-                                },
-                                BackgroundColor(SELECTED),
-                                NeedFill(slot, need),
-                            ));
-                            if !matches!(need, Need::Clothing) {
-                                bar.spawn((
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: percent(50),
-                                        width: px(1),
-                                        height: percent(100),
-                                        ..default()
-                                    },
-                                    BackgroundColor(MUTED),
-                                ));
-                            }
-                        });
+        .with_children(|cell| {
+            cell.spawn(text(label, 14.0, color));
+        })
+        .id()
+}
+
+fn roster_rows(parent: &mut ChildSpawnerCommands, count: usize, values: Option<&[[String; 5]]>) {
+    if count == 0 {
+        parent.spawn(text("No citizens", 14.0, MUTED));
+    }
+    for slot in 0..count {
+        parent
+            .spawn((
+                Button,
+                Card(slot),
+                Node {
+                    min_height: px(27),
+                    width: percent(100),
+                    align_items: AlignItems::Center,
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                BackgroundColor(PANEL),
+            ))
+            .with_children(|row| {
+                for (column, (_, width)) in COLUMNS.iter().enumerate() {
+                    row.spawn((
+                        Node {
+                            width: percent(*width),
+                            min_width: px(0),
+                            padding: UiRect::horizontal(px(6)),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                        crate::tooltip::Tooltip(String::new()),
+                        Interaction::None,
+                        bevy::ui::FocusPolicy::Pass,
+                    ))
+                    .with_children(|cell| {
+                        cell.spawn((
+                            text(
+                                values
+                                    .and_then(|rows| rows.get(slot))
+                                    .map_or("", |row| row[column].as_str()),
+                                14.0,
+                                TEXT,
+                            ),
+                            Summary(slot, column),
+                        ));
+                    });
+                }
+            });
+    }
+}
+
+pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
+    parent
+        .spawn((
+            Screen(false),
+            Node {
+                width: percent(100),
+                min_width: px(0),
+                flex_grow: 1.0,
+                min_height: px(0),
+                flex_direction: FlexDirection::Column,
+                overflow: Overflow::scroll_x(),
+                ..default()
+            },
+            ScrollPosition::default(),
+            RelativeCursorPosition::default(),
+        ))
+        .with_children(|table| {
+            table
+                .spawn(Node {
+                    min_height: px(29),
+                    min_width: percent(100),
+                    width: px(720),
+                    align_items: AlignItems::Center,
+                    flex_shrink: 0.0,
+                    ..default()
+                })
+                .with_children(|row| {
+                    for (label, width) in COLUMNS {
+                        cell(row, width, label, MUTED);
                     }
                 });
-            }
+            table
+                .spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        min_width: percent(100),
+                        width: px(720),
+                        min_height: px(0),
+                        flex_direction: FlexDirection::Column,
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    RelativeCursorPosition::default(),
+                    RosterContent(count),
+                ))
+                .with_children(|rows| roster_rows(rows, count, None));
         });
 }
 
 pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
-    parent
-        .spawn((
-            Node {
-                flex_basis: px(0),
-                flex_grow: 1.0,
-                min_width: px(0),
-                min_height: px(0),
-                padding: UiRect::all(px(16)),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(12),
-                overflow: Overflow::scroll_y(),
-                border_radius: BorderRadius::all(px(12)),
-                ..default()
-            },
-            BackgroundColor(PANEL),
-            ScrollPosition::default(),
-            RelativeCursorPosition::default(),
-            DetailScroll,
-        ))
-        .with_children(|panel| {
-            crate::citizen_history::spawn_tabs(panel);
-            panel
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(12),
-                        flex_shrink: 0.0,
-                        ..default()
-                    },
-                    crate::citizen_history::ViewPanel(crate::citizen_history::View::Current),
-                ))
+    use crate::citizen_history::{View, ViewPanel};
+    parent.spawn((Screen(true), Visibility::Hidden, Node {
+        display: Display::None, width: percent(100), flex_grow: 1.0, min_height: px(0),
+        flex_direction: FlexDirection::Column, row_gap: px(6), ..default()
+    })).with_children(|detail| {
+        detail.spawn(Node { align_items: AlignItems::Center, column_gap: px(10), flex_shrink: 0.0, ..default() })
+            .with_children(|header| {
+                header.spawn((Button, Back, Node { padding: UiRect::axes(px(7), px(4)), ..default() }, BackgroundColor(PANEL)))
+                    .with_children(|button| { button.spawn(text("< Citizens", 14.0, TEXT)); });
+                header.spawn(LinkedReadout::bundle(Section::Header));
+            });
+        crate::citizen_history::spawn_tabs(detail);
+        detail.spawn((Node {
+            flex_grow: 1.0, min_height: px(0), padding: UiRect::axes(px(6), px(4)),
+            flex_direction: FlexDirection::Column, overflow: Overflow::scroll(), ..default()
+        }, ScrollPosition::default(), RelativeCursorPosition::default(), DetailScroll))
+        .with_children(|body| {
+            body.spawn((ViewPanel(View::Needs), Node { flex_direction: FlexDirection::Column,
+                row_gap: px(7), flex_shrink: 0.0, ..default() })).with_children(|needs| {
+                needs.spawn(LinkedReadout::bundle(Section::Needs));
+                for need in [Need::Hunger, Need::Thirst, Need::Sleep, Need::Clothing] {
+                    needs.spawn((text("", 14.0, TEXT), NeedLabel(need)));
+                    needs.spawn((Node { width: percent(100), height: px(5), flex_shrink: 0.0, ..default() },
+                        BackgroundColor(Color::srgb(0.04, 0.06, 0.08))))
+                    .with_children(|bar| {
+                        bar.spawn((Node { position_type: PositionType::Absolute, height: percent(100), ..default() },
+                            BackgroundColor(SELECTED), NeedFill(need)));
+                        if !matches!(need, Need::Clothing) {
+                            bar.spawn((Node { position_type: PositionType::Absolute, left: percent(50), width: px(1),
+                                height: percent(100), ..default() }, BackgroundColor(MUTED)));
+                        }
+                    });
+                }
+                for category in learning_lord_simulation::diet::DietCategory::ALL {
+                    needs.spawn((text("", 14.0, TEXT), DietLabel(category), Interaction::None, crate::tooltip::Tooltip("Each diet category decays 50/day; +5 wellbeing at 50 and +7 at 100.".into())));
+                    needs.spawn((Node { width: percent(100), height: px(5), flex_shrink: 0.0, ..default() },
+                        BackgroundColor(Color::srgb(0.04, 0.06, 0.08))))
+                    .with_children(|bar| { bar.spawn((Node { height: percent(100), ..default() },
+                        BackgroundColor(SELECTED), DietFill(category))); });
+                }
+                needs.spawn(LinkedReadout::bundle(Section::Reserves));
+            });
+            body.spawn((ViewPanel(View::Belongings), Node { display: Display::None,
+                flex_direction: FlexDirection::Column, row_gap: px(6), flex_shrink: 0.0, ..default() }, Visibility::Hidden))
+                .with_children(|panel| { panel.spawn(LinkedReadout::bundle(Section::Belongings)); });
+            body.spawn((ViewPanel(View::Planning), Node { display: Display::None,
+                flex_direction: FlexDirection::Column, row_gap: px(6), flex_shrink: 0.0, ..default() }, Visibility::Hidden))
                 .with_children(|panel| {
-                    panel.spawn(LinkedReadout::bundle(false));
-                    for category in learning_lord_simulation::diet::DietCategory::ALL {
-                        panel.spawn((text("", 12.0, TEXT), DietLabel(category)));
-                        panel
-                            .spawn((
-                                Node {
-                                    width: percent(100),
-                                    height: px(7),
-                                    flex_shrink: 0.0,
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.04, 0.06, 0.08)),
-                            ))
-                            .with_children(|bar| {
-                                bar.spawn((
-                                    Node {
-                                        width: percent(0),
-                                        height: percent(100),
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgb(0.24, 0.67, 0.53)),
-                                    DietFill(category),
-                                ));
-                                bar.spawn((
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: percent(50),
-                                        width: px(1),
-                                        height: percent(100),
-                                        ..default()
-                                    },
-                                    BackgroundColor(MUTED),
-                                ));
-                            });
-                    }
-                    panel.spawn(text(
-                        "ACTIVE PLAN  |  durations are planning estimates",
-                        14.0,
-                        MUTED,
-                    ));
-                    panel.spawn((
-                        Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: px(3),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        PlanContent,
-                    ));
-                    panel.spawn(LinkedReadout::bundle(true));
+                    panel.spawn(LinkedReadout::bundle(Section::Planning));
+                    panel.spawn((text("Active plan (i)", 14.0, MUTED), Interaction::None,
+                        crate::tooltip::Tooltip("Durations are planning estimates. Later goals are forecasts after replanning.".into())));
+                    panel.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_shrink: 0.0, ..default() }, PlanContent));
+                    panel.spawn((Button, SkillsToggle, Node { padding: UiRect::vertical(px(4)), ..default() }))
+                        .with_children(|button| { button.spawn((text("Skills [+]", 14.0, TEXT), SkillsLabel)); });
+                    panel.spawn(LinkedReadout::bundle(Section::Skills));
+                    panel.spawn(LinkedReadout::bundle(Section::Decision));
                 });
-            crate::citizen_history::spawn(panel);
+            crate::citizen_history::spawn(body);
         });
+    });
+}
+
+pub fn refresh_screens(
+    state: Res<RosterState>,
+    mut screens: Query<(&Screen, &mut Node, &mut Visibility)>,
+) {
+    for (screen, mut node, mut visibility) in &mut screens {
+        let visible = screen.0 == state.detail;
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        *visibility = if visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
 }
 
 pub fn handle_selection(
-    snapshot: Res<DisplaySnapshot>,
-    mut selection: ResMut<Selection>,
-    mut page: ResMut<RosterState>,
+    (snapshot, mut selection, mut page): (
+        Res<DisplaySnapshot>,
+        ResMut<Selection>,
+        ResMut<RosterState>,
+    ),
     cards: Query<(&Interaction, &Card), Changed<Interaction>>,
+    back: Query<&Interaction, (With<Back>, Changed<Interaction>)>,
+    toggles: Query<&Interaction, (With<SkillsToggle>, Changed<Interaction>)>,
+    mut skills: Option<ResMut<SkillsExpanded>>,
     shortcuts: crate::KeyboardShortcuts,
     mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
@@ -263,6 +330,7 @@ pub fn handle_selection(
     if page.generation != snapshot.0.generation {
         page.generation = snapshot.0.generation;
         selection.0 = agents.first().map(|(id, _)| *id);
+        page.detail = false;
     }
     if selection
         .0
@@ -273,12 +341,25 @@ pub fn handle_selection(
             selection.0 = next;
         }
     }
+    for interaction in &back {
+        if *interaction == Interaction::Pressed {
+            page.detail = false;
+        }
+    }
+    for interaction in &toggles {
+        if *interaction == Interaction::Pressed
+            && let Some(skills) = skills.as_mut()
+        {
+            skills.0 = !skills.0;
+        }
+    }
     for (interaction, card) in &cards {
         if *interaction == Interaction::Pressed {
             let next = agents.get(card.0).map(|(id, _)| *id);
             if selection.0 != next {
                 selection.0 = next;
             }
+            page.detail = next.is_some();
             if let (Some(_), Some(windows)) = (next, windows.as_mut()) {
                 windows.open(crate::floating_ui::WindowKind::Citizens);
             }
@@ -300,6 +381,7 @@ pub fn handle_selection(
             if selection.0 != next {
                 selection.0 = next;
             }
+            page.detail = next.is_some();
             if let (Some(_), Some(windows)) = (next, windows.as_mut()) {
                 windows.open(crate::floating_ui::WindowKind::Citizens);
             }
@@ -444,166 +526,178 @@ fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
     rows
 }
 
+pub fn overview_values(universe: &Universe, agent: &Agent) -> [String; 5] {
+    let AgentKind::Citizen(citizen) = &agent.kind;
+    let shared = citizen.household_id();
+    let coins = shared.map_or(citizen.coins(), |id| universe.households()[&id].coins);
+    let wealth = shared.map_or_else(|| citizen.wealth(), |id| universe.household_wealth(id));
+    [
+        agent.name.clone(),
+        citizen
+            .starting_role()
+            .map_or("-", |role| role.name())
+            .into(),
+        format!("{coins}{}", if shared.is_some() { " | H" } else { "" }),
+        wealth.map_or_else(
+            |error| error.to_string(),
+            |value| format!("{value:.3}{}", if shared.is_some() { " | H" } else { "" }),
+        ),
+        format!("{:.1}", citizen.needs_wellbeing()),
+    ]
+}
+
+impl Need {
+    fn contribution(self, citizen: &Citizen) -> f64 {
+        let value = self.value(citizen);
+        match self {
+            Self::Hunger => {
+                -value.max(0.0) - 4.0 * (value - 100.0).max(0.0) - (-value - 100.0).max(0.0)
+            }
+            Self::Thirst => -value.max(0.0) - 4.0 * (value - 100.0).max(0.0),
+            Self::Sleep | Self::Clothing => -value.max(0.0),
+        }
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct RosterQueries<'w, 's> {
+    contents: Query<'w, 's, (Entity, &'static mut RosterContent)>,
+    tips: Query<'w, 's, (&'static Children, &'static mut crate::tooltip::Tooltip)>,
+}
+
 pub fn refresh_cards(
-    snapshot: Res<DisplaySnapshot>,
-    selection: Res<Selection>,
+    mut commands: Commands,
+    (snapshot, selection): (Res<DisplaySnapshot>, Res<Selection>),
     mut summaries: Query<(&Summary, &mut Text), Without<NeedLabel>>,
-    mut labels: Query<(&NeedLabel, &mut Text), Without<Summary>>,
+    mut labels: Query<(&NeedLabel, &mut Text, &mut TextColor), Without<Summary>>,
     mut fills: Query<(&NeedFill, &mut Node, &mut BackgroundColor), Without<Card>>,
     mut cards: Query<(&Card, &Interaction, &mut BackgroundColor), Without<NeedFill>>,
+    mut roster: RosterQueries,
 ) {
-    let agents = sorted_agents(&snapshot.0.universe);
-    for (summary, mut value) in &mut summaries {
-        if let Some((id, agent)) = agents.get(summary.0) {
-            let AgentKind::Citizen(citizen) = &agent.kind;
-            let action = citizen.active_action().map_or_else(
-                || "Idle".into(),
-                |active| {
-                    format!(
-                        "{} | {} left",
-                        action_label(active.action(), citizen),
-                        duration(active.remaining_ms())
-                    )
-                },
-            );
-            let wellbeing = citizen
-                .personal_wellbeing()
-                .map_or_else(|e| e.to_string(), |v| format!("{v:.1}"));
-            let wealth = citizen
-                .wealth()
-                .map_or_else(|e| e.to_string(), |v| format!("{v:.3}"));
-            let account = citizen.household_id().map_or_else(
-                || format!("Coins {}", citizen.coins()),
-                |id| {
-                    format!(
-                        "{} | Shared coins {} | Shared wealth {}",
-                        crate::locations::name(&snapshot.0.universe, id),
-                        citizen.coins(),
-                        snapshot.0.universe.household_wealth(id).map_or_else(
-                            |error| error.to_string(),
-                            |wealth| format!("{wealth:.3}")
-                        )
-                    )
-                },
-            );
-            let decision = citizen
-                .decision_score()
-                .map_or_else(|error| error.to_string(), |score| format!("{score:.1}"));
-            let next = format!(
-                "{}{}\n{}  |  Personal wealth {}\nPersonal wellbeing {} | Decision score {}\n{}",
-                agent.name,
-                if Some(*id) == selection.0 {
-                    "  [selected]"
-                } else {
-                    ""
-                },
-                account,
-                wealth,
-                wellbeing,
-                decision,
-                action
-            );
-            if value.0 != next {
-                value.0 = next;
-            }
-        } else {
-            let next = "No citizen".into();
+    let universe = &snapshot.0.universe;
+    let agents = sorted_agents(universe);
+    let refresh_values =
+        snapshot.is_changed() || summaries.iter().any(|(_, value)| value.0.is_empty());
+    let values = if refresh_values {
+        agents
+            .iter()
+            .map(|(_, agent)| overview_values(universe, agent))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    for (entity, mut content) in &mut roster.contents {
+        if content.0 != agents.len() {
+            commands
+                .entity(entity)
+                .despawn_children()
+                .with_children(|parent| roster_rows(parent, agents.len(), Some(&values)));
+            content.0 = agents.len();
+        }
+    }
+    if refresh_values {
+        for (summary, mut value) in &mut summaries {
+            let next = values
+                .get(summary.0)
+                .map_or_else(String::new, |cells| cells[summary.1].clone());
             if value.0 != next {
                 value.0 = next;
             }
         }
     }
-    for (label, mut value) in &mut labels {
-        if let Some((_, agent)) = agents.get(label.0) {
-            let AgentKind::Citizen(citizen) = &agent.kind;
-            let next = match label.1 {
-                Need::Clothing => format!(
-                    "Clothing: {}",
-                    match citizen.garment_condition() {
-                        None => "Absent",
-                        Some(0.0) => "Worn out",
-                        Some(1.0) => "Clothed",
-                        Some(_) => "Worn",
-                    }
-                ),
-                Need::Hunger | Need::Thirst | Need::Sleep => format!(
-                    "{}: {}   (- < 0 > +)",
-                    label.1.name(),
-                    match label.1 {
-                        Need::Thirst => thirst_label(citizen.thirst()),
-                        _ => need_label(label.1.value(citizen), matches!(label.1, Need::Sleep)),
-                    }
-                ),
-            };
-            if value.0 != next {
-                value.0 = next;
+    for (children, mut tip) in &mut roster.tips {
+        let Some((summary, _)) = children.iter().find_map(|child| summaries.get(child).ok()) else {
+            continue;
+        };
+        let Some((_, agent)) = agents.get(summary.0) else {
+            continue;
+        };
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        tip.0 = match summary.1 {
+            2 | 3 => citizen.household_id().map_or_else(String::new, |id| format!("H | {}. Coins and wealth belong to the shared household account.", crate::locations::name(universe, id))),
+            4 => "Needs wellbeing: hunger, thirst, sleep, clothing, diet and reserve contributions. Excludes wealth.".into(),
+            _ => String::new(),
+        };
+    }
+    let citizen = selected_agent(universe, selection.0).map(|agent| {
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        citizen
+    });
+    for (label, mut value, mut color) in &mut labels {
+        let Some(citizen) = citizen else {
+            continue;
+        };
+        let need = label.0;
+        let status = match need {
+            Need::Clothing => citizen.garment_condition().map_or_else(
+                || "No garment".into(),
+                |v| format!("Garment {:.1}%", v * 100.0),
+            ),
+            Need::Thirst => thirst_label(citizen.thirst()).into(),
+            _ => need_label(need.value(citizen), matches!(need, Need::Sleep)).into(),
+        };
+        let contribution = need.contribution(citizen);
+        let next = format!(
+            "{} {:.1} | {} | {:+.2} wellbeing",
+            need.name(),
+            need.value(citizen),
+            status,
+            if contribution == 0.0 {
+                0.0
+            } else {
+                contribution
             }
+        );
+        if value.0 != next {
+            value.0 = next;
         }
+        color.0 = if contribution == 0.0 { MUTED } else { TEXT };
     }
     for (fill, mut node, mut color) in &mut fills {
-        if let Some((_, agent)) = agents.get(fill.0) {
-            let AgentKind::Citizen(citizen) = &agent.kind;
-            let value = fill.1.value(citizen);
-            let (left, width) = if matches!(fill.1, Need::Clothing) {
-                clothing_geometry(value)
-            } else {
-                need_geometry(value)
-            };
-            let next = percent(left);
-            if node.left != next {
-                node.left = next;
-            }
-            let next = percent(width);
-            if node.width != next {
-                node.width = next;
-            }
-            let severity = if matches!(fill.1, Need::Clothing) {
-                width as f64
-            } else {
-                value
-            };
-            let next = if matches!(fill.1, Need::Clothing) && severity >= 100.0
-                || !(-100.0..=100.0).contains(&severity)
-            {
-                Color::srgb(0.95, 0.35, 0.25)
-            } else if severity > 50.0 {
-                Color::srgb(0.88, 0.65, 0.23)
-            } else {
-                Color::srgb(0.24, 0.67, 0.53)
-            };
-            if color.0 != next {
-                color.0 = next;
-            }
-        }
+        let Some(citizen) = citizen else {
+            continue;
+        };
+        let value = fill.0.value(citizen);
+        let (left, width) = if matches!(fill.0, Need::Clothing) {
+            clothing_geometry(value)
+        } else {
+            need_geometry(value)
+        };
+        node.left = percent(left);
+        node.width = percent(width);
+        color.0 = if fill.0.contribution(citizen) == 0.0 {
+            MUTED
+        } else if value > 100.0 || value < -100.0 {
+            Color::srgb(0.95, 0.35, 0.25)
+        } else {
+            Color::srgb(0.88, 0.65, 0.23)
+        };
     }
     for (card, interaction, mut color) in &mut cards {
-        let next = if agents
+        color.0 = if *interaction == Interaction::Hovered {
+            Color::srgb(0.16, 0.23, 0.26)
+        } else if agents
             .get(card.0)
             .is_some_and(|(id, _)| Some(*id) == selection.0)
         {
             SELECTED
-        } else if *interaction == Interaction::Hovered {
-            Color::srgb(0.16, 0.23, 0.26)
         } else {
             PANEL
         };
-        if color.0 != next {
-            color.0 = next;
-        }
     }
 }
 
 pub fn refresh_diet(
     snapshot: Res<DisplaySnapshot>,
     selection: Res<Selection>,
-    mut labels: Query<(&DietLabel, &mut Text)>,
-    mut fills: Query<(&DietFill, &mut Node)>,
+    mut labels: Query<(&DietLabel, &mut Text, &mut TextColor)>,
+    mut fills: Query<(&DietFill, &mut Node, Option<&mut BackgroundColor>)>,
 ) {
     let citizen = selected_agent(&snapshot.0.universe, selection.0).map(|agent| {
         let AgentKind::Citizen(citizen) = &agent.kind;
         citizen
     });
-    for (label, mut text) in &mut labels {
+    for (label, mut text, mut color) in &mut labels {
         let next = citizen.map_or_else(
             || "No citizen".into(),
             |citizen| {
@@ -618,8 +712,20 @@ pub fn refresh_diet(
         if text.0 != next {
             text.0 = next;
         }
+        color.0 = if citizen.is_none_or(|citizen| citizen.diet(label.0) == 0.0) {
+            MUTED
+        } else {
+            TEXT
+        };
     }
-    for (fill, mut node) in &mut fills {
+    for (fill, mut node, color) in &mut fills {
+        if let Some(mut color) = color {
+            color.0 = if citizen.is_none_or(|citizen| citizen.diet(fill.0) == 0.0) {
+                MUTED
+            } else {
+                SELECTED
+            };
+        }
         let width = percent(citizen.map_or(0.0, |citizen| citizen.diet(fill.0) as f32));
         if node.width != width {
             node.width = width;
@@ -655,9 +761,9 @@ pub fn refresh_plan(
                 .with_children(|parent| {
                     for row in &rows {
                         let (size, color) = match row.state {
-                            RowState::Heading => (17.0, TEXT),
+                            RowState::Heading => (14.0, TEXT),
                             RowState::Complete => (14.0, MUTED),
-                            RowState::Current => (15.0, Color::srgb(0.40, 0.90, 0.70)),
+                            RowState::Current => (14.0, Color::srgb(0.40, 0.90, 0.70)),
                             RowState::Upcoming => (14.0, TEXT),
                         };
                         crate::navigation::render(parent, &row.fragments, size, color);
@@ -738,21 +844,376 @@ pub fn scroll_panels(
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Section {
+    Header,
+    Needs,
+    Reserves,
+    Belongings,
+    Planning,
+    Skills,
+    Decision,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ReadoutRow {
+    fragments: Vec<crate::navigation::Fragment>,
+    muted: bool,
+    tooltip: String,
+    table: bool,
+}
+impl ReadoutRow {
+    fn text(value: impl Into<String>) -> Self {
+        Self::rich(vec![crate::navigation::Fragment::text(value)])
+    }
+    fn rich(fragments: Vec<crate::navigation::Fragment>) -> Self {
+        Self {
+            fragments,
+            muted: false,
+            tooltip: String::new(),
+            table: false,
+        }
+    }
+    fn contribution(value: String, contribution: f64) -> Self {
+        Self {
+            muted: contribution == 0.0,
+            ..Self::text(value)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct InventoryRow {
+    holder: crate::navigation::Fragment,
+    good: learning_lord_simulation::marketplace::Good,
+    available: u64,
+    tax_reserved: u64,
+    work_reserved: u64,
+    town_owned: u64,
+}
+
+fn inventory_rows(universe: &Universe, citizen: &Citizen) -> Vec<InventoryRow> {
+    use crate::navigation::{Fragment as F, Target};
+    use learning_lord_simulation::{marketplace::Good, storage::GoodsOwner};
+    let members = sorted_agents(universe)
+        .into_iter()
+        .filter_map(|(_, agent)| {
+            let AgentKind::Citizen(member) = &agent.kind;
+            (member.economic_id() == citizen.economic_id()).then_some((agent, member))
+        })
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    for (agent, member) in &members {
+        for good in Good::ALL {
+            let units = member.units(good);
+            let town_owned = member.town_carried_units(good);
+            if units == 0 && town_owned == 0 {
+                continue;
+            }
+            let tax_reserved = member.tax_reserved_units(good);
+            rows.push(InventoryRow {
+                holder: F::entity(
+                    format!("Carried | {}", agent.name),
+                    Target::Citizen(member.id()),
+                ),
+                good,
+                available: units.saturating_sub(tax_reserved),
+                tax_reserved,
+                work_reserved: 0,
+                town_owned,
+            });
+        }
+    }
+    let mut stocks = universe
+        .storage()
+        .stock()
+        .iter()
+        .filter(|(key, units)| {
+            **units > 0
+                && (key.owner == citizen.goods_owner()
+                    || key.owner == GoodsOwner::Town
+                        && members.iter().any(|(_, member)| {
+                            member.owned_properties().any(|place| place.id == key.place)
+                        }))
+        })
+        .collect::<Vec<_>>();
+    stocks.sort_by_key(|(key, _)| (key.place.0, key.good as usize));
+    for (key, units) in stocks {
+        let town = key.owner == GoodsOwner::Town;
+        let tax_reserved = if town {
+            0
+        } else {
+            universe
+                .storage()
+                .reserved_units(key.place, key.owner, key.good)
+        };
+        let available = if town {
+            0
+        } else {
+            citizen.stored_available_units(key.place, key.good)
+        };
+        let work_reserved = if town {
+            0
+        } else {
+            units.saturating_sub(tax_reserved).saturating_sub(available)
+        };
+        if let Some(row) = rows.iter_mut().find(|row| {
+            row.holder.target == Some(Target::Location(key.place)) && row.good == key.good
+        }) {
+            row.town_owned += if town { *units } else { 0 };
+            row.available += available;
+            row.tax_reserved += tax_reserved;
+            row.work_reserved += work_reserved;
+        } else {
+            rows.push(InventoryRow {
+                holder: crate::navigation::place(citizen, key.place),
+                good: key.good,
+                available,
+                tax_reserved,
+                work_reserved,
+                town_owned: if town { *units } else { 0 },
+            });
+        }
+    }
+    rows
+}
+
+fn section_rows(
+    universe: &Universe,
+    selected: Option<AgentId>,
+    section: Section,
+    skills: bool,
+) -> Vec<ReadoutRow> {
+    use crate::navigation::{self, Fragment as F, Target};
+    use learning_lord_simulation::{marketplace::Good, production::Skill};
+    let Some(agent) = selected_agent(universe, selected) else {
+        return vec![ReadoutRow::text("No citizens")];
+    };
+    let AgentKind::Citizen(citizen) = &agent.kind;
+    match section {
+        Section::Header => {
+            let mut row = vec![F::text(format!(
+                "{} | {}",
+                agent.name,
+                citizen
+                    .starting_role()
+                    .map_or("No profession", |role| role.name())
+            ))];
+            if let Some(id) = citizen.household_id() {
+                row.extend([F::text(" | "), navigation::account(universe, id)]);
+            }
+            for id in citizen.guild_ids() {
+                row.extend([F::text(" | "), navigation::account(universe, id)]);
+            }
+            vec![ReadoutRow::rich(row)]
+        }
+        Section::Needs => vec![ReadoutRow {
+            tooltip:
+                "Includes hunger, thirst, sleep, clothing, diets and reserves. Excludes wealth."
+                    .into(),
+            ..ReadoutRow::text(format!("Wellbeing {:.1} (i)", citizen.needs_wellbeing()))
+        }],
+        Section::Reserves => {
+            let nutrition = Good::FOOD
+                .into_iter()
+                .map(|good| {
+                    let carried = universe
+                        .agents()
+                        .values()
+                        .filter_map(|agent| {
+                            let AgentKind::Citizen(member) = &agent.kind;
+                            (member.economic_id() == citizen.economic_id()).then_some(
+                                member
+                                    .units(good)
+                                    .saturating_sub(member.tax_reserved_units(good)),
+                            )
+                        })
+                        .fold(0_u64, u64::saturating_add);
+                    citizen
+                        .stored_available_units(citizen.home(), good)
+                        .saturating_add(carried) as f64
+                        * good.nutrition_per_unit().unwrap()
+                })
+                .sum::<f64>();
+            vec![ReadoutRow::contribution(format!("Food reserves {:.1} nutrition | {:+.2} wellbeing (i)", nutrition, citizen.food_reserve_wellbeing()), citizen.food_reserve_wellbeing()),
+                ReadoutRow::contribution(format!("Drinking reserves {:.0} g | {:+.2} wellbeing (i)", citizen.drinking_water_reserve(), citizen.water_reserve_wellbeing()), citizen.water_reserve_wellbeing())]
+                .into_iter().map(|mut row| { row.tooltip = "Reserve bonuses use usable home supplies and unconsumed active meals/drinks, divided between household members. Food nutrition also includes food carried by household members.".into(); row }).collect()
+        }
+        Section::Belongings => {
+            let values = overview_values(universe, agent);
+            let mut rows = vec![ReadoutRow::text(format!(
+                "{}coins {} | {}wealth {}",
+                if citizen.household_id().is_some() {
+                    "Shared "
+                } else {
+                    ""
+                },
+                values[2].trim_end_matches(" | H"),
+                if citizen.household_id().is_some() {
+                    "shared "
+                } else {
+                    ""
+                },
+                values[3].trim_end_matches(" | H")
+            ))];
+            rows.push(ReadoutRow {
+                table: true,
+                muted: true,
+                ..ReadoutRow::rich(
+                    [
+                        "Location / carrier",
+                        "Good",
+                        "Available",
+                        "Tax reserved",
+                        "Town-owned",
+                    ]
+                    .into_iter()
+                    .map(F::text)
+                    .collect(),
+                )
+            });
+            let inventory = inventory_rows(universe, citizen);
+            if inventory.is_empty() {
+                rows.push(ReadoutRow::text("No goods"));
+            }
+            for item in inventory {
+                rows.push(ReadoutRow { table: true,
+                    tooltip: format!("{} committed to production; excluded from Available. Available also excludes tax reservations. Town-owned goods are held separately.", crate::quantity_label(item.good, item.work_reserved)),
+                    ..ReadoutRow::rich(vec![item.holder, F::good(item.good), F::text(format!("{}{}", crate::quantity_label(item.good, item.available), if item.work_reserved > 0 { " (i)" } else { "" })),
+                        F::text(crate::quantity_label(item.good, item.tax_reserved)), F::text(crate::quantity_label(item.good, item.town_owned))]) });
+            }
+            let mut owned = vec![F::text("Owns: ")];
+            let mut properties = citizen.owned_properties().collect::<Vec<_>>();
+            properties.sort_by(|a, b| a.name.cmp(&b.name));
+            if properties.is_empty() {
+                owned.push(F::text("None"));
+            }
+            for (index, place) in properties.iter().enumerate() {
+                if index > 0 {
+                    owned.push(F::text(", "));
+                }
+                owned.push(F::entity(&place.name, Target::Location(place.id)));
+            }
+            rows.push(ReadoutRow::rich(owned));
+            rows.push(ReadoutRow::rich(vec![
+                F::text("Designated workplace: "),
+                citizen
+                    .designated_workplace()
+                    .map_or_else(|| F::text("None"), |id| navigation::place(citizen, id)),
+            ]));
+            rows.push(ReadoutRow::text(format!(
+                "Workshop fees owed: {:.3} coins",
+                citizen.workshop_fee_liability().max(0.0)
+            )));
+            rows
+        }
+        Section::Planning => {
+            let mut rows = vec![ReadoutRow::rich(location_fragments(citizen))];
+            if let Some(active) = citizen.active_action() {
+                let mut row = navigation::active_action(&active, citizen);
+                row.push(F::text(format!(
+                    " | {} remaining",
+                    duration(active.remaining_ms())
+                )));
+                rows.push(ReadoutRow::rich(row));
+            } else {
+                rows.push(ReadoutRow::text("Idle"));
+            }
+            rows.push(ReadoutRow::text(format!(
+                "Decision score: {}",
+                citizen
+                    .decision_score()
+                    .map_or_else(|error| error.to_string(), |value| format!("{value:.2}"))
+            )));
+            if let Some(goal) = citizen
+                .active_plan()
+                .and_then(|active| active.plan().goals().first())
+            {
+                rows.push(ReadoutRow::text(format!(
+                    "Replan after {} completes",
+                    goal_label(goal.goal)
+                )));
+            }
+            let maintenance = citizen.household_id().map_or(citizen.maintenance(), |id| {
+                &universe.households()[&id].maintenance
+            });
+            for (name, task) in [
+                ("Replenishment", &maintenance.replenishment),
+                ("Listing excess", &maintenance.listing),
+            ] {
+                rows.push(ReadoutRow { tooltip: "Maintenance has a six-hour cooldown. Claimant is the worker committed to that task.".into(),
+                    ..ReadoutRow::rich(vec![F::text(format!("{name}: {} cooldown | Claimant ", duration(task.remaining_ms(universe.current_time_ms())))), task.claimant.map_or_else(|| F::text("None"), |id| navigation::account(universe, id)), F::text(" (i)")]) });
+            }
+            rows
+        }
+        Section::Skills => {
+            if skills {
+                Skill::ALL
+                    .into_iter()
+                    .filter_map(|skill| {
+                        citizen.skill_practice_ms(skill).map(|practice| {
+                            ReadoutRow::text(format!(
+                                "{}: {:.1} h practiced | {:.2}% less production time",
+                                skill.name(),
+                                practice as f64 / 3_600_000.0,
+                                learning_lord_simulation::production::skill_duration_reduction(
+                                    practice
+                                ) * 100.0
+                            ))
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Section::Decision => {
+            let mut rows: Vec<ReadoutRow> = Vec::new();
+            for fragments in crate::decision_rows(universe, selected) {
+                let plain = navigation::plain(&fragments);
+                if plain.starts_with("Inputs and targets below") || plain.starts_with("\nChosen by")
+                {
+                    if let Some(last) = rows.last_mut() {
+                        last.tooltip = plain;
+                        last.fragments.push(F::text(" (i)"));
+                    }
+                } else if plain.starts_with("Complete-batch method estimates at ") {
+                    rows.push(ReadoutRow {
+                        tooltip: plain,
+                        ..ReadoutRow::rich(fragments.into_iter().take(2).collect())
+                    });
+                } else {
+                    rows.push(ReadoutRow::rich(fragments));
+                }
+            }
+            rows
+        }
+    }
+}
+
 #[derive(Component)]
 pub(crate) struct LinkedReadout {
-    decision: bool,
-    rows: Vec<Vec<crate::navigation::Fragment>>,
+    section: Section,
+    rows: Vec<ReadoutRow>,
 }
 impl LinkedReadout {
-    fn bundle(decision: bool) -> impl Bundle {
+    fn bundle(section: Section) -> impl Bundle {
         (
             Self {
-                decision,
+                section,
                 rows: Vec::new(),
             },
             Node {
+                min_width: px(0),
+                width: if section == Section::Header {
+                    Val::Auto
+                } else {
+                    percent(100)
+                },
+                flex_grow: if section == Section::Header { 1.0 } else { 0.0 },
                 flex_direction: FlexDirection::Column,
-                flex_shrink: 0.0,
+                row_gap: px(3),
+                flex_shrink: if section == Section::Header { 1.0 } else { 0.0 },
                 ..default()
             },
         )
@@ -762,39 +1223,88 @@ pub(crate) fn refresh_linked(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
     selection: Res<Selection>,
-    mut panels: Query<(Entity, Ref<LinkedReadout>)>,
+    skills: Option<Res<SkillsExpanded>>,
+    panels: Query<(Entity, Ref<LinkedReadout>)>,
+    mut skills_labels: Query<&mut Text, With<SkillsLabel>>,
 ) {
+    let expanded = skills.as_ref().is_some_and(|skills| skills.0);
+    for mut label in &mut skills_labels {
+        let next = if expanded { "Skills [-]" } else { "Skills [+]" };
+        if label.0 != next {
+            label.0 = next.into();
+        }
+    }
     if panels.is_empty()
         || !snapshot.is_changed()
             && !selection.is_changed()
+            && !skills.as_ref().is_some_and(|skills| skills.is_changed())
             && panels.iter().all(|(_, panel)| !panel.is_added())
     {
         return;
     }
-    for (entity, panel) in &mut panels {
-        let rows = if panel.decision {
-            crate::decision_rows(&snapshot.0.universe, selection.0)
-        } else {
-            crate::citizen_rows(&snapshot.0.universe, selection.0)
-        };
+    for (entity, panel) in &panels {
+        let rows = section_rows(
+            &snapshot.0.universe,
+            selection.0,
+            panel.section,
+            skills.as_ref().is_some_and(|skills| skills.0),
+        );
         if rows == panel.rows {
             continue;
         }
-        let decision = panel.decision;
+        let section = panel.section;
         commands
             .entity(entity)
             .despawn_children()
             .with_children(|parent| {
                 for row in &rows {
-                    crate::navigation::render(
-                        parent,
-                        row,
-                        if decision { 14.0 } else { 17.0 },
-                        if decision { MUTED } else { TEXT },
-                    );
+                    let color = if row.muted { MUTED } else { TEXT };
+                    parent
+                        .spawn((
+                            Node {
+                                width: if row.table { px(720) } else { percent(100) },
+                                min_height: px(if row.table { 26 } else { 0 }),
+                                min_width: if row.table { percent(100) } else { px(0) },
+                                flex_direction: if row.table {
+                                    FlexDirection::Row
+                                } else {
+                                    FlexDirection::Column
+                                },
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                            Interaction::None,
+                            crate::tooltip::Tooltip(row.tooltip.clone()),
+                            bevy::ui::FocusPolicy::Pass,
+                        ))
+                        .with_children(|line| {
+                            if row.table {
+                                for (fragment, width) in
+                                    row.fragments.iter().zip([27.0, 22.0, 17.0, 17.0, 17.0])
+                                {
+                                    line.spawn(Node {
+                                        width: percent(width),
+                                        min_width: px(0),
+                                        padding: UiRect::right(px(5)),
+                                        flex_shrink: 0.0,
+                                        ..default()
+                                    })
+                                    .with_children(|cell| {
+                                        crate::navigation::render(
+                                            cell,
+                                            std::slice::from_ref(fragment),
+                                            14.0,
+                                            color,
+                                        )
+                                    });
+                                }
+                            } else {
+                                crate::navigation::render(line, &row.fragments, 14.0, color);
+                            }
+                        });
                 }
             })
-            .insert(LinkedReadout { decision, rows });
+            .insert(LinkedReadout { section, rows });
     }
 }
 pub(crate) fn location_fragments(citizen: &Citizen) -> Vec<crate::navigation::Fragment> {
@@ -829,10 +1339,304 @@ pub(crate) fn location_fragments(citizen: &Citizen) -> Vec<crate::navigation::Fr
 }
 
 #[cfg(test)]
+pub(crate) fn readout(universe: &Universe, selected: Option<AgentId>) -> String {
+    let mut rows = [
+        Section::Header,
+        Section::Needs,
+        Section::Reserves,
+        Section::Belongings,
+        Section::Planning,
+        Section::Skills,
+        Section::Decision,
+    ]
+    .into_iter()
+    .flat_map(|section| section_rows(universe, selected, section, true))
+    .map(|row| {
+        if row.table {
+            row.fragments
+                .iter()
+                .map(|f| f.label.clone())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        } else {
+            crate::navigation::plain(&row.fragments)
+        }
+    })
+    .collect::<Vec<_>>();
+    if let Some(agent) = selected_agent(universe, selected) {
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        for need in [Need::Hunger, Need::Thirst, Need::Sleep, Need::Clothing] {
+            rows.push(format!("{}: {:.1}", need.name(), need.value(citizen)));
+        }
+        rows.push(format!(
+            "Diet wellbeing: +{:.2}",
+            citizen.dietary_wellbeing()
+        ));
+        if let Some(goal) = citizen
+            .active_plan()
+            .and_then(|active| active.plan().goals().first())
+        {
+            rows.push(format!("Replan after {} completes", goal_label(goal.goal)));
+        }
+    }
+    rows.join("\n")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::simulation::{self, Snapshot};
     use learning_lord_simulation::{CitizenAction, locations::Map};
+
+    #[test]
+    fn overview_uses_shared_accounts_and_needs_wellbeing_without_wealth() {
+        let universe = simulation::new_universe().unwrap();
+        let (id, agent) = sorted_agents(&universe)[0];
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        let household = citizen.household_id().unwrap();
+        let values = overview_values(&universe, agent);
+        assert_eq!(
+            values[2],
+            format!("{} | H", universe.households()[&household].coins)
+        );
+        assert_eq!(
+            values[3],
+            format!("{:.3} | H", universe.household_wealth(household).unwrap())
+        );
+        assert_eq!(values[4], format!("{:.1}", citizen.needs_wellbeing()));
+        assert_ne!(citizen.needs_wellbeing(), citizen.decision_score().unwrap());
+        let header = section_rows(&universe, Some(id), Section::Header, false);
+        assert!(header[0].fragments.iter().any(
+            |fragment| fragment.target == Some(crate::navigation::Target::Household(household))
+        ));
+    }
+
+    #[test]
+    fn zero_contribution_dimming_handles_satiation_and_overfull_penalties() {
+        for (hunger, contribution) in [
+            (-150.0, -50.0),
+            (-100.0, 0.0),
+            (-50.0, 0.0),
+            (0.0, 0.0),
+            (25.0, -25.0),
+            (125.0, -225.0),
+        ] {
+            let citizen = Citizen::new(hunger).unwrap();
+            assert_eq!(Need::Hunger.contribution(&citizen), contribution);
+        }
+        let citizen = Citizen::new(0.0).unwrap().with_thirst(-150.0).unwrap();
+        assert_eq!(Need::Thirst.contribution(&citizen), 0.0);
+        assert!(Need::Clothing.contribution(&citizen) < 0.0);
+        let (universe, id) = Universe::with_map(Map::default())
+            .with_citizen("Ada", citizen)
+            .unwrap();
+        let reserves = section_rows(&universe, Some(id), Section::Reserves, false);
+        assert!(reserves.iter().all(|row| row.muted));
+    }
+
+    #[test]
+    fn household_belongings_include_all_carriers_shared_storage_and_work_commitments_once() {
+        use learning_lord_simulation::{
+            CitizenAction, locations::Location, marketplace::Good, production::Recipe,
+            storage::GoodsOwner,
+        };
+        let (world, first) = Universe::with_map(Map::default())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(learning_lord_simulation::StartingRole::Baker)
+                    .with_good(Good::Berries, 12)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (world, second) = world
+            .with_citizen(
+                "Ben",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_good(Good::Water, 34)
+                    .unwrap(),
+            )
+            .unwrap();
+        let AgentKind::Citizen(worker) = &world.agents()[&first].kind;
+        let (world, household) = world
+            .with_household("Family", worker.home(), &[first, second])
+            .unwrap();
+        let (mut world, bakery) = world.with_property(first, Location::Bakery).unwrap();
+        for &(good, units) in Recipe::BakeRolls.inputs() {
+            world = world
+                .with_stored_good(bakery, GoodsOwner::Household(household), good, units + 20)
+                .unwrap();
+        }
+        world = world
+            .with_stored_good(bakery, GoodsOwner::Town, Good::BreadRoll, 3)
+            .unwrap();
+        world = world
+            .start_action(
+                first,
+                CitizenAction::ProduceAt {
+                    recipe: Recipe::BakeRolls,
+                    place: bakery,
+                },
+            )
+            .unwrap();
+        let AgentKind::Citizen(worker) = &world.agents()[&first].kind;
+        let rows = inventory_rows(&world, worker);
+        assert!(rows.iter().any(|row| row.holder.target
+            == Some(crate::navigation::Target::Citizen(first))
+            && row.good == Good::Berries
+            && row.available == 12));
+        assert!(rows.iter().any(|row| row.holder.target
+            == Some(crate::navigation::Target::Citizen(second))
+            && row.good == Good::Water
+            && row.available == 34));
+        for &(good, units) in Recipe::BakeRolls.inputs() {
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row.holder.target == Some(crate::navigation::Target::Location(bakery))
+                        && row.good == good
+                })
+                .unwrap();
+            assert_eq!(
+                (row.available, row.tax_reserved, row.work_reserved),
+                (20, 0, units)
+            );
+        }
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.good == Good::BreadRoll && row.town_owned == 3)
+                .count(),
+            1
+        );
+        assert!(rows.iter().all(|row| row.available
+            + row.tax_reserved
+            + row.work_reserved
+            + row.town_owned
+            > 0));
+        let AgentKind::Citizen(member) = &world.agents()[&second].kind;
+        assert_eq!(inventory_rows(&world, member), rows);
+    }
+
+    #[test]
+    fn table_is_default_row_opens_details_and_return_preserves_selection_and_tabs() {
+        let universe = simulation::new_universe().unwrap();
+        let ids = sorted_agents(&universe)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(Snapshot {
+            universe,
+            error: None,
+            mutation_error: None,
+            mutation_revision: 0,
+            planning_history: Default::default(),
+            generation: 0,
+            revision: 0,
+        }))
+        .init_resource::<Selection>()
+        .init_resource::<RosterState>()
+        .init_resource::<SkillsExpanded>()
+        .init_resource::<crate::citizen_history::Selection>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<bevy::input_focus::InputFocus>()
+        .add_systems(Startup, move |mut commands: Commands| {
+            commands.spawn(Node::default()).with_children(|parent| {
+                spawn_roster(parent, ids.len());
+                spawn_details(parent);
+            });
+        })
+        .add_systems(
+            Update,
+            (
+                handle_selection,
+                crate::citizen_history::handle_selection,
+                refresh_cards,
+                refresh_screens,
+                crate::citizen_history::refresh,
+            )
+                .chain(),
+        );
+        app.update();
+        assert!(!app.world().resource::<RosterState>().detail);
+        let tabs = app
+            .world_mut()
+            .query::<&crate::citizen_history::ViewPanel>()
+            .iter(app.world())
+            .count();
+        assert_eq!(tabs, 4);
+        let row = app
+            .world_mut()
+            .query::<(Entity, &Card)>()
+            .iter(app.world())
+            .find(|(_, card)| card.0 == 1)
+            .unwrap()
+            .0;
+        app.world_mut().entity_mut(row).insert(Interaction::Pressed);
+        app.update();
+        let selected = app.world().resource::<Selection>().0;
+        assert!(app.world().resource::<RosterState>().detail);
+        let tab = app
+            .world_mut()
+            .query::<(Entity, &crate::citizen_history::Choice)>()
+            .iter(app.world())
+            .find(|(_, choice)| {
+                matches!(
+                    choice,
+                    crate::citizen_history::Choice::View(crate::citizen_history::View::Belongings)
+                )
+            })
+            .unwrap()
+            .0;
+        app.world_mut().entity_mut(row).insert(Interaction::None);
+        app.world_mut().entity_mut(tab).insert(Interaction::Pressed);
+        app.update();
+        assert!(
+            app.world_mut()
+                .query::<(&crate::citizen_history::ViewPanel, &Node)>()
+                .iter(app.world())
+                .all(|(panel, node)| (node.display == Display::Flex)
+                    == (panel.0 == crate::citizen_history::View::Belongings))
+        );
+        let back = app
+            .world_mut()
+            .query_filtered::<Entity, With<Back>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .entity_mut(back)
+            .insert(Interaction::Pressed);
+        app.update();
+        assert!(!app.world().resource::<RosterState>().detail);
+        assert_eq!(app.world().resource::<Selection>().0, selected);
+        let populated = app.world().resource::<DisplaySnapshot>().0.universe.clone();
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe =
+            Universe::with_map(Map::default());
+        app.update();
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|text| text.0 == "No citizens")
+        );
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = populated;
+        app.update();
+        let cells = app
+            .world_mut()
+            .query_filtered::<&Text, With<Summary>>()
+            .iter(app.world())
+            .collect::<Vec<_>>();
+        assert_eq!(cells.len(), 50);
+        assert!(cells.iter().all(|text| !text.0.is_empty()));
+        assert!(
+            !app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|text| text.0 == "No citizens")
+        );
+    }
 
     #[test]
     fn selected_diet_bars_follow_consumption_and_selection() {
@@ -1120,6 +1924,7 @@ mod tests {
             .press(KeyCode::Digit2);
         app.update();
         let selected = app.world().resource::<Selection>().0.unwrap();
+        assert!(app.world().resource::<RosterState>().detail);
         assert_eq!(
             app.world()
                 .resource::<DisplaySnapshot>()

@@ -68,6 +68,7 @@ pub(crate) fn handle(
     input: Input,
     snapshot: Res<DisplaySnapshot>,
     mut generation: Local<u64>,
+    mut roster: Option<ResMut<citizens::RosterState>>,
     (mut citizens, mut collectives, mut locations, mut market, mut windows): Destinations,
 ) {
     let Input {
@@ -112,6 +113,9 @@ pub(crate) fn handle(
         let kind = match *target {
             Target::Citizen(id) if universe.agents().contains_key(&id) => {
                 citizens.0 = Some(id);
+                if let Some(roster) = roster.as_mut() {
+                    roster.detail = true;
+                }
                 WindowKind::Citizens
             }
             Target::Household(id) if universe.households().contains_key(&id) => {
@@ -442,6 +446,7 @@ mod tests {
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .init_resource::<Windows>()
             .init_resource::<citizens::Selection>()
+            .init_resource::<citizens::RosterState>()
             .init_resource::<collectives::State>()
             .init_resource::<locations::State>()
             .init_resource::<market::Selection>()
@@ -472,6 +477,7 @@ mod tests {
         let member = universe.households()[&household].members[0];
         let home = universe.households()[&household].home;
         click(&mut app, Target::Citizen(member));
+        assert!(app.world().resource::<citizens::RosterState>().detail);
         click(&mut app, Target::Household(household));
         assert_eq!(
             app.world().resource::<collectives::State>().selected(),

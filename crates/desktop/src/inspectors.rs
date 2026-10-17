@@ -57,33 +57,8 @@ pub fn open_windows(
             bounds,
             |parent| match kind {
                 WindowKind::Citizens => {
-                    parent
-                        .spawn(Node {
-                            width: percent(100),
-                            flex_grow: 1.0,
-                            min_height: px(0),
-                            column_gap: px(14),
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            row.spawn((
-                                Node {
-                                    width: px(250),
-                                    flex_shrink: 0.0,
-                                    min_height: px(0),
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: px(10),
-                                    overflow: Overflow::scroll_y(),
-                                    ..default()
-                                },
-                                ScrollPosition::default(),
-                                bevy::ui::RelativeCursorPosition::default(),
-                            ))
-                            .with_children(|list| {
-                                citizens::spawn_roster(list, snapshot.0.universe.agents().len())
-                            });
-                            citizens::spawn_details(row);
-                        });
+                    citizens::spawn_roster(parent, snapshot.0.universe.agents().len());
+                    citizens::spawn_details(parent);
                 }
                 WindowKind::Collectives => collectives::spawn(parent),
                 WindowKind::Locations => locations::spawn(parent),

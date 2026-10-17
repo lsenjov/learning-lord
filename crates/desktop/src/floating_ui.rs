@@ -249,7 +249,7 @@ pub fn spawn_window(
                     .spawn(Node {
                         width: percent(100),
                         height: percent(100),
-                        min_width: if kind == WindowKind::Market {
+                        min_width: if matches!(kind, WindowKind::Market | WindowKind::Citizens) {
                             px(0)
                         } else {
                             px(720)

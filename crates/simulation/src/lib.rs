@@ -1444,7 +1444,7 @@ impl Citizen {
         water_reserve_bonus(self.drinking_water_reserve() / self.supplied_members() as f64)
     }
 
-    pub(crate) fn needs_wellbeing(&self) -> f64 {
+    pub fn needs_wellbeing(&self) -> f64 {
         -self.clothing_need()
             - self.thirst.max(0.0)
             - 4.0 * (self.thirst - 100.0).max(0.0)
