@@ -6,7 +6,7 @@ use crate::{
 
 pub const GOAL_HORIZON_MS: u64 = 4 * 60 * 60 * 1000;
 pub const TRADE_PLAN_COOLDOWN_MS: u64 = 2 * 60 * 60 * 1000;
-const DRINK_PLAN_MIN_THIRST: f64 = -50.0;
+const WAIT_GOAL_DURATION_MS: u64 = 2 * 60 * 60 * 1000;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {
@@ -19,6 +19,7 @@ pub enum Effect {
     ReplenishReserves,
     Production,
     ListExcess,
+    Wait,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +36,7 @@ impl CitizenAction {
             Self::Eat => &[ReduceHunger],
             Self::Drink => &[ReduceThirst],
             Self::Sleep => &[ReduceTiredness],
+            Self::Wait => &[Effect::Wait],
             Self::EquipClothing => &[ReduceClothingNeed],
             Self::BuyFood(good) if good.nutrition_per_unit().is_some() => {
                 &[Food, ReplenishReserves]
@@ -86,8 +88,7 @@ impl CitizenAction {
             | Self::Harvest { .. }
             | Self::Clear { .. }
             | Self::CollectBeer { .. } => &[Production],
-            Self::Wait
-            | Self::Travel(_)
+            Self::Travel(_)
             | Self::ListExcess
             | Self::List(..)
             | Self::ListAt { .. }
@@ -2095,6 +2096,15 @@ fn production_at_site(
     Ok(if productive { vec![state] } else { Vec::new() })
 }
 
+pub(super) fn need_eligible(citizen: &Citizen, goal: Effect) -> bool {
+    match goal {
+        Effect::ReduceHunger => citizen.hunger() > 0.0,
+        Effect::ReduceThirst => citizen.thirst() > 0.0,
+        Effect::ReduceTiredness => citizen.tiredness() > 0.0,
+        _ => true,
+    }
+}
+
 fn variants_from(
     initial: Prediction,
     goal: Effect,
@@ -2106,11 +2116,21 @@ fn variants_from(
     {
         return Ok(Vec::new());
     }
+    if !need_eligible(citizen, goal) {
+        return Ok(Vec::new());
+    }
+    if goal == Effect::Wait {
+        let mut waited = initial;
+        while waited.elapsed_ms < WAIT_GOAL_DURATION_MS {
+            let Some(next) = waited.perform(CitizenAction::Wait, prior_actions)? else {
+                return Ok(Vec::new());
+            };
+            waited = next;
+        }
+        return Ok(vec![waited]);
+    }
     let mut variants: Vec<Prediction> = Vec::new();
     if matches!(goal, Effect::ReduceHunger | Effect::ReduceThirst) {
-        if goal == Effect::ReduceThirst && citizen.thirst() < DRINK_PLAN_MIN_THIRST {
-            return Ok(variants);
-        }
         let mut ready = initial.clone();
         if citizen.position() != citizen.map().position(citizen.home()) {
             let Some(home) =
@@ -2406,7 +2426,8 @@ mod tests {
 
     #[test]
     fn empty_unfunded_pantry_delivers_partial_food_and_drink() {
-        let source = reserve_shopper(0, &[]);
+        let mut source = reserve_shopper(0, &[]);
+        source.hunger = 50.0;
         let candidates =
             provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
         let delivered = &candidates[0];
@@ -2792,7 +2813,7 @@ mod tests {
     #[test]
     fn provisioning_evaluates_food_after_delivery_and_consumption_keeps_travel_cost() {
         use crate::locations::{Location, Position};
-        let source = reserve_shopper(0, &[])
+        let mut source = reserve_shopper(0, &[])
             .with_good(Good::BreadRoll, 30)
             .unwrap()
             .with_good(Good::Water, 1200)
@@ -2801,6 +2822,7 @@ mod tests {
             .unwrap()
             .with_good(Good::Cabbage, 3)
             .unwrap();
+        source.hunger = 50.0;
         let (map, remote) = source
             .map()
             .with_place(
@@ -3520,8 +3542,73 @@ mod tests {
     }
 
     #[test]
-    fn standalone_drinking_requires_room_for_full_relief() {
-        for (thirst, eligible) in [(-50.0, true), (-50.001, false), (-99.789, false)] {
+    fn personal_need_goals_require_positive_need_at_their_start() {
+        for need in [-1.0, 0.0, 0.001] {
+            let mut citizen = Citizen::new(need)
+                .unwrap()
+                .with_thirst(need)
+                .unwrap()
+                .with_home_good(Good::BreadRoll, 30)
+                .unwrap()
+                .with_home_good(Good::Water, 1200)
+                .unwrap();
+            citizen.tiredness = need;
+            let initial = Prediction::new(&citizen, Cooldowns::default());
+            for goal in [
+                Effect::ReduceHunger,
+                Effect::ReduceThirst,
+                Effect::ReduceTiredness,
+            ] {
+                assert_eq!(
+                    !variants_after(&initial, goal).unwrap().is_empty(),
+                    need > 0.0,
+                    "{goal:?}, need {need}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn waiting_keeps_position_and_advances_needs_before_the_second_goal() {
+        let mut citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_thirst(0.0)
+            .unwrap()
+            .with_home_good(Good::BreadRoll, 30)
+            .unwrap()
+            .with_home_good(Good::Water, 1200)
+            .unwrap();
+        citizen.tiredness = 0.0;
+        let initial = Prediction::new(&citizen, Cooldowns::default());
+        let waited = variants_after(&initial, Effect::Wait)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(waited.actions, [CitizenAction::Wait; 4]);
+        assert_eq!(waited.elapsed_ms, WAIT_GOAL_DURATION_MS);
+        assert_eq!(waited.citizen.position(), citizen.position());
+        for goal in [
+            Effect::ReduceHunger,
+            Effect::ReduceThirst,
+            Effect::ReduceTiredness,
+        ] {
+            assert!(variants_after(&initial, goal).unwrap().is_empty());
+            assert!(
+                !variants_after(&waited, goal).unwrap().is_empty(),
+                "{goal:?}"
+            );
+        }
+        let second_wait = variants_after(&waited, Effect::Wait)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(second_wait.elapsed_ms, WAIT_GOAL_DURATION_MS);
+        assert_eq!(second_wait.actions.len(), 4);
+    }
+
+    #[test]
+    fn standalone_drinking_requires_positive_thirst() {
+        for (thirst, eligible) in [(-50.0, false), (0.0, false), (0.001, true)] {
             let citizen = Citizen::new(-50.0)
                 .unwrap()
                 .with_thirst(thirst)

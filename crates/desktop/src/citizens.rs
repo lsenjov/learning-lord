@@ -456,6 +456,7 @@ pub(crate) fn goal_label(goal: Effect) -> &'static str {
         Effect::Production => "Production",
         Effect::ReplenishReserves => "Replenish reserves",
         Effect::ListExcess => "List excess",
+        Effect::Wait => "Wait",
         _ => unreachable!("plan boundaries contain goals"),
     }
 }

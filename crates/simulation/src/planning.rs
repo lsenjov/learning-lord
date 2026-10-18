@@ -681,13 +681,16 @@ fn root_goals_with_priority(
             Effect::ReplenishReserves,
             Effect::ReduceClothingNeed,
             Effect::Production,
+            Effect::Wait,
         ]
     };
     let mut goals = goals.to_vec();
     if clothing_choice && citizen.production_targets().is_some() {
         goals.push(Effect::ListExcess);
     }
-    goals.retain(|goal| citizen.maintenance_available(*goal));
+    goals.retain(|goal| {
+        citizen.maintenance_available(*goal) && goals::need_eligible(citizen, *goal)
+    });
     Ok(goals)
 }
 
@@ -951,13 +954,14 @@ fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
     }
 }
 
-fn ordinary_goals() -> [Effect; 5] {
+fn ordinary_goals() -> [Effect; 6] {
     [
         Effect::ReduceHunger,
         Effect::ReduceThirst,
         Effect::ReduceTiredness,
         Effect::ReduceClothingNeed,
         Effect::Production,
+        Effect::Wait,
     ]
 }
 
@@ -1978,6 +1982,59 @@ mod tests {
     }
 
     #[test]
+    fn wait_is_available_first_and_second_and_commits_for_two_hours() {
+        let citizen = Citizen::with_needs(-100.0, -100.0)
+            .unwrap()
+            .with_thirst(-100.0)
+            .unwrap()
+            .with_home_good(crate::marketplace::Good::BreadRoll, 5)
+            .unwrap()
+            .with_home_good(crate::marketplace::Good::Fish, 1)
+            .unwrap()
+            .with_home_good(crate::marketplace::Good::Cabbage, 1)
+            .unwrap()
+            .with_home_good(crate::marketplace::Good::Water, 400)
+            .unwrap();
+        let roots = root_goals_with_priority(&citizen, true).unwrap();
+        assert!(roots.contains(&Effect::Wait));
+        assert!(ordinary_goals().contains(&Effect::Wait));
+        assert!(!roots.iter().any(|goal| matches!(
+            goal,
+            Effect::ReduceHunger | Effect::ReduceThirst | Effect::ReduceTiredness
+        )));
+        let chosen = reduce_results(
+            &citizen,
+            Vec::new(),
+            vec![evaluate_goal(&citizen, Effect::Wait, Vec::new())],
+        )
+        .unwrap();
+        assert_eq!(chosen.goals()[0].goal, Effect::Wait);
+        let mut active = chosen.start_action(&citizen, 0).unwrap();
+        active.active_plan = Some(ActivePlan {
+            plan: chosen,
+            action_index: 0,
+            elapsed_ms: 0,
+        });
+        let original_position = active.position();
+        for _ in 0..3 {
+            active = active.advance(crate::ACTION_DURATION_MS).unwrap();
+            assert_eq!(
+                active.active_action().unwrap().action(),
+                CitizenAction::Wait
+            );
+            assert_eq!(
+                active.active_plan().unwrap().plan().goals()[0].goal,
+                Effect::Wait
+            );
+        }
+        assert_eq!(active.position(), original_position);
+        assert_eq!(active.active_plan().unwrap().action_index(), 3);
+        active = active.advance(crate::ACTION_DURATION_MS).unwrap();
+        assert_eq!(active.active_plan().unwrap().action_index(), 0);
+        assert_eq!(active.active_plan().unwrap().elapsed_ms(), 0);
+    }
+
+    #[test]
     fn decision_records_existing_candidates_and_preserves_search_result() {
         use crate::marketplace::Prices;
         for prices in [Prices::new(200.0).unwrap(), Prices::new(100.0).unwrap()] {
@@ -1992,7 +2049,10 @@ mod tests {
             assert_eq!(chosen.actions(), reference.actions());
             assert_eq!(chosen.average_wellbeing(), reference.average_wellbeing());
             let decision = chosen.decision().unwrap();
-            assert_eq!(decision.candidates.len(), 6);
+            assert_eq!(
+                decision.candidates.len(),
+                root_goals_with_priority(&citizen, true).unwrap().len()
+            );
             assert_eq!(decision.prices, prices);
             for candidate in &decision.candidates {
                 let expected = goals::variants_after(
@@ -2035,7 +2095,7 @@ mod tests {
 
     #[test]
     fn pair_evaluation_compares_all_first_goal_variants() {
-        let citizen = Citizen::with_needs(0.0, -100.0)
+        let citizen = Citizen::with_needs(1.0, -100.0)
             .unwrap()
             .with_prices(crate::marketplace::Prices::new(500.0).unwrap())
             .with_home_good(crate::marketplace::Good::Berries, 120)

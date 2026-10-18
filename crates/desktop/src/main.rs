@@ -606,6 +606,7 @@ fn decision_rows(
             Effect::Production => "Production",
             Effect::ReplenishReserves => "Replenish reserves",
             Effect::ListExcess => "List excess",
+            Effect::Wait => "Wait",
             _ => unreachable!("decision candidates are goals"),
         };
         let selected = if candidate.goal == decision.selected_goal {
@@ -1026,7 +1027,13 @@ mod tests {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_prices(prices)
-                .with_citizen("Ada", Citizen::new(0.0).unwrap().with_berries(35).unwrap())
+                .with_citizen(
+                    "Ada",
+                    Citizen::with_needs(1.0, 1.0)
+                        .unwrap()
+                        .with_berries(35)
+                        .unwrap(),
+                )
                 .unwrap();
         let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
         let universe = universe
@@ -1041,7 +1048,7 @@ mod tests {
             .split("\nHunger")
             .nth(1)
             .unwrap()
-            .split("\nThirst")
+            .split("\nSleep")
             .next()
             .unwrap();
         assert!(!hunger.contains("Unavailable:"));
