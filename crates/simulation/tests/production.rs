@@ -194,18 +194,17 @@ fn failed_production_does_not_consume_inputs_or_change_progress() {
         )
         .unwrap();
     let AgentKind::Citizen(source) = &world.agents()[&id].kind;
-    let started = source
-        .start_action(CitizenAction::Produce(Recipe::BakeRolls))
-        .unwrap();
+    let snapshot = source.clone();
     assert_eq!(
-        started.advance(3_600_000),
+        source.start_action(CitizenAction::Produce(Recipe::BakeRolls)),
         Err(SimulationError::InventoryOverflow)
     );
     for &(good, grams) in Recipe::BakeRolls.inputs() {
-        assert_eq!(started.units(good), grams);
+        assert_eq!(source.units(good), grams);
     }
-    assert_eq!(started.active_action().unwrap().remaining_ms(), 3_600_000);
-    assert_eq!(started.skill_practice_ms(Skill::Baking), Some(0));
+    assert_eq!(source, &snapshot);
+    assert!(source.active_action().is_none());
+    assert_eq!(source.skill_practice_ms(Skill::Baking), Some(0));
 }
 
 #[test]

@@ -261,25 +261,10 @@ impl Universe {
             citizen.coins = coins;
         }
         let stock: Vec<_> = universe.storage.stock().iter().filter(|(key,_)| matches!(key.owner, GoodsOwner::Agent(owner) if members.contains(&owner))).map(|(key,units)| (*key,*units)).collect();
-        for (key, units) in stock {
-            if universe
+        for (key, _) in stock {
+            universe
                 .storage
-                .reserved_units(key.place, key.owner, key.good)
-                > 0
-            {
-                return Err(SimulationError::MissingInputs);
-            }
-            universe.storage.set_units(key, 0)?;
-            let household_key = StockKey {
-                owner: GoodsOwner::Household(id),
-                ..key
-            };
-            let total = universe
-                .storage
-                .units(key.place, household_key.owner, key.good)
-                .checked_add(units)
-                .ok_or(SimulationError::InventoryOverflow)?;
-            universe.storage.set_units(household_key, total)?;
+                .reassign_owner(key, GoodsOwner::Household(id))?;
         }
         universe.household_histories.insert(
             id,
@@ -352,7 +337,14 @@ impl Universe {
                         .units(place, key.owner, good)
                         .checked_add(units)
                         .ok_or(SimulationError::InventoryOverflow)?;
-                    universe.storage.set_units(key, next)?;
+                    let allowed = citizen.accessible_storage_objects(place);
+                    universe.storage.set_units_in(
+                        key,
+                        next,
+                        &universe.map,
+                        &universe.market,
+                        Some(&allowed),
+                    )?;
                 }
                 citizen.inventory.remove(&good);
             }

@@ -518,11 +518,27 @@ impl Citizen {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn list_trial_stock(
         &mut self,
         good: Good,
         units: Quantity,
     ) -> Result<(), SimulationError> {
+        self.list_trial_stock_at(self.listing_place(good), good, units)
+    }
+    pub(crate) fn list_trial_stock_at(
+        &mut self,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+    ) -> Result<(), SimulationError> {
+        if units == 0 {
+            return Ok(());
+        }
+        if self.position != self.map.position(place) {
+            return Err(SimulationError::WrongLocation);
+        }
+        let object = self.storage_object(place, good)?;
         let key = (self.economic_id(), good);
         let saleable = self.excess_goods()?.units(good);
         let eligible = self
@@ -541,14 +557,15 @@ impl Citizen {
         if let Some(trial) = eligible
             && trial_units > 0
         {
-            let selling_place = self.selling_place();
+            let selling_place = place;
             let order = self.market.list_at_quote(
                 self.market_party(),
-                self.selling_place(),
+                place,
                 good,
                 trial_units,
                 trial.asking_price,
             )?;
+            self.market.bind_order(order, object);
             self.market.mark_trial_order(order, true);
             let current = self.market.production_trials.active.get_mut(&key).unwrap();
             current.estimated_cost *= trial_units as f64 / current.cost_quantity as f64;
@@ -560,11 +577,12 @@ impl Citizen {
             current.observed_at_ms = self.market_time_ms;
         }
         if units > trial_units {
-            self.market.list(
+            self.market.list_in(
                 self.market_party(),
-                self.selling_place(),
+                place,
                 good,
                 units - trial_units,
+                object,
             )?;
         }
         self.consume_goods(good, units)?;

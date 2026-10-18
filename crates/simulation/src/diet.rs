@@ -149,8 +149,7 @@ impl Citizen {
         forecast.position = forecast.map.position(forecast.home);
         for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
             forecast
-                .storage
-                .set_units(
+                .set_stored_units(
                     crate::storage::StockKey {
                         place: forecast.home,
                         owner: forecast.goods_owner(),
@@ -385,6 +384,7 @@ impl Citizen {
         let action = ActiveAction {
             claimed_objects: [None; 2],
             stored_inputs: crate::marketplace::ShoppingList::default(),
+            listing_place: None,
             action: crate::CitizenAction::Eat,
             remaining_ms: duration_ms,
             duration_ms,
@@ -539,6 +539,8 @@ mod tests {
                         good,
                     },
                     units,
+                    &source.map,
+                    &source.market,
                 )
                 .unwrap();
         }
@@ -846,6 +848,7 @@ mod tests {
             let active = ActiveAction {
                 claimed_objects: [None; 2],
                 stored_inputs: crate::marketplace::ShoppingList::default(),
+                listing_place: None,
                 action: CitizenAction::Eat,
                 duration_ms: duration,
                 remaining_ms: duration,

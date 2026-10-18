@@ -31,6 +31,8 @@ pub mod production_trials;
 pub type Quantity = u64;
 pub type Coins = i64;
 
+type ActionSettlement = (Citizen, Vec<(AgentId, Coins)>, bool);
+
 pub const WEALTH_WELLBEING_PER_COIN: f64 = 0.1;
 pub const FOOD_RESERVE_FULL_BONUS_NUTRITION: f64 = 100.0;
 pub const FOOD_RESERVE_CAP_NUTRITION: f64 = 300.0;
@@ -159,6 +161,10 @@ pub enum CitizenAction {
     },
     ListExcess,
     List(Good, Quantity),
+    ListAt {
+        place: PlaceId,
+        list: marketplace::ShoppingList,
+    },
     Buy(marketplace::ShoppingList),
     BuyAt {
         place: PlaceId,
@@ -204,7 +210,9 @@ impl CitizenAction {
             | Self::BuyAt { place, .. }
             | Self::CollectStored { place, .. }
             | Self::DepositStored { place, .. } => Some(place),
-            Self::ListExcess | Self::List(..) | Self::Withdraw(..) => Some(citizen.selling_place()),
+            Self::ListAt { place, .. } => Some(place),
+            Self::List(good, _) => Some(citizen.listing_place(good)),
+            Self::ListExcess | Self::Withdraw(..) => Some(citizen.selling_place()),
             _ => None,
         }
     }
@@ -222,6 +230,7 @@ pub struct ActiveAction {
     meal_nutrition: f64,
     meal_units: [Quantity; Good::COUNT],
     stored_inputs: marketplace::ShoppingList,
+    listing_place: Option<PlaceId>,
     travel_origin: Position,
     travel_destination: Option<Position>,
 }
@@ -544,6 +553,7 @@ impl Citizen {
             meal_nutrition,
             meal_units,
             stored_inputs: marketplace::ShoppingList::default(),
+            listing_place: None,
             travel_origin: self.position,
             travel_destination: None,
         }
@@ -855,6 +865,7 @@ impl Citizen {
             CitizenAction::BuyFood(_)
             | CitizenAction::ListExcess
             | CitizenAction::List(..)
+            | CitizenAction::ListAt { .. }
             | CitizenAction::Buy(..)
             | CitizenAction::BuyAt { .. }
             | CitizenAction::Withdraw(..)
@@ -916,6 +927,15 @@ impl Citizen {
             .map(|place| place.id)
             .min_by_key(|id| id.0)
             .unwrap_or_else(|| self.map.public_place(Location::Market))
+    }
+
+    pub(crate) fn listing_place(&self, good: Good) -> PlaceId {
+        let preferred = self.selling_place();
+        if self.storage_object(preferred, good).is_ok() {
+            preferred
+        } else {
+            self.map.public_place(Location::Market)
+        }
     }
 
     pub fn production_place(&self, recipe: production::Recipe) -> Result<PlaceId, SimulationError> {
@@ -1295,8 +1315,30 @@ impl Citizen {
         if self.active_action.is_some() || self.active_plan.is_some() {
             return Err(SimulationError::CitizenBusy);
         }
+        let action = if action == CitizenAction::ListExcess {
+            let place = self.selling_place();
+            let list = self
+                .listing_baskets(self.excess_goods()?)?
+                .into_iter()
+                .find(|(site, _)| *site == place)
+                .map(|(_, list)| list)
+                .unwrap_or_default();
+            CitizenAction::ListAt { place, list }
+        } else {
+            action
+        };
         if let CitizenAction::ProduceAt { place, recipe } = action {
             self.validate_production_site(place, recipe)?;
+        }
+        if let CitizenAction::ListAt { place, list } = action {
+            if self.accessible_place(place)?.kind == Location::Home {
+                return Err(SimulationError::PrivateProperty);
+            }
+            for (good, units) in list.items() {
+                if units > 0 {
+                    self.storage_object(place, good)?;
+                }
+            }
         }
         if let CitizenAction::WithdrawAt { place, .. } = action {
             self.accessible_place(place)?;
@@ -1328,6 +1370,9 @@ impl Citizen {
                 };
                 if units > available {
                     return Err(SimulationError::MissingInputs);
+                }
+                if matches!(action, CitizenAction::DepositStored { .. }) && units > 0 {
+                    self.storage_object(place, good)?;
                 }
             }
         }
@@ -1400,19 +1445,31 @@ impl Citizen {
                     )
                 }))?;
             for (good, units) in stored_inputs.items() {
-                citizen.storage.reserve_work(
+                citizen.storage.reserve_work_for(
+                    citizen.id,
                     StockKey {
                         place,
                         owner: citizen.goods_owner(),
                         good,
                     },
                     units,
+                    &citizen.accessible_storage_objects(place),
                 )?;
             }
         }
+        let listing = match action {
+            CitizenAction::List(good, units) => Some((
+                action.required_place(self).unwrap(),
+                marketplace::ShoppingList::single(good, units),
+            )),
+            CitizenAction::ListAt { place, list } => Some((place, list)),
+            _ => None,
+        };
         citizen.active_action = Some(ActiveAction {
             claimed_objects,
             stored_inputs,
+            listing_place: matches!(action, CitizenAction::List(..))
+                .then(|| action.required_place(self).unwrap()),
             action,
             remaining_ms: duration_ms,
             duration_ms,
@@ -1428,6 +1485,59 @@ impl Citizen {
                 None
             },
         });
+        let active = citizen.active_action.unwrap();
+        let stored_output = action.production_recipe().is_some_and(|recipe| {
+            recipe != production::Recipe::BrewBeer
+                && action.required_place(self).is_some_and(|place| {
+                    self.map
+                        .place(place)
+                        .is_ok_and(|site| !site.kind.is_public())
+                })
+        });
+        if stored_output
+            || matches!(
+                action,
+                CitizenAction::Harvest { .. }
+                    | CitizenAction::CollectBeer { .. }
+                    | CitizenAction::DepositStored { .. }
+            )
+            || listing.is_some()
+        {
+            let mut preview = citizen.clone();
+            match action {
+                CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. }
+                    if recipe != production::Recipe::BrewBeer =>
+                {
+                    preview.complete_production(recipe, true, active)?
+                }
+                CitizenAction::Harvest { .. } => preview.complete_farming(
+                    action,
+                    self.market_time_ms
+                        .checked_add(duration_ms)
+                        .ok_or(SimulationError::TimeOverflow)?,
+                )?,
+                CitizenAction::CollectBeer { brewery, slot } => {
+                    preview.collect_beer(brewery, slot)?
+                }
+                CitizenAction::DepositStored { place, list } => {
+                    preview.transfer_stored_action(place, list, true)?
+                }
+                _ if listing.is_some() => {
+                    let (place, list) = listing.unwrap();
+                    for (good, units) in list.items() {
+                        let object = preview.storage_object(place, good)?;
+                        preview.market.list_in(
+                            preview.market_party(),
+                            place,
+                            good,
+                            units,
+                            object,
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(citizen)
     }
 
@@ -1493,9 +1603,12 @@ impl Citizen {
     }
 
     fn advance_action(&self, elapsed_ms: u64, prediction: bool) -> Result<Self, SimulationError> {
-        Ok(self
-            .advance_action_with_settlement(elapsed_ms, prediction, false)?
-            .0)
+        let (citizen, _, failed) =
+            self.advance_action_with_settlement(elapsed_ms, prediction, false)?;
+        if prediction && failed {
+            return Err(SimulationError::MissingInputs);
+        }
+        Ok(citizen)
     }
 
     fn advance_action_with_settlement(
@@ -1503,11 +1616,12 @@ impl Citizen {
         elapsed_ms: u64,
         prediction: bool,
         record_trades: bool,
-    ) -> Result<(Self, Vec<(AgentId, Coins)>), SimulationError> {
+    ) -> Result<ActionSettlement, SimulationError> {
         let mut citizen = self.clone();
         let mut payments = Vec::new();
+        let mut completion_failed = false;
         if elapsed_ms == 0 {
-            return Ok((citizen, payments));
+            return Ok((citizen, payments, false));
         }
 
         if let Some(mut active) = citizen.active_action {
@@ -1583,111 +1697,141 @@ impl Citizen {
                 citizen
                     .market
                     .set_time(citizen.market_time_ms.saturating_add(action_elapsed_ms));
-                match active.action {
-                    CitizenAction::CollectStored { place, list }
-                    | CitizenAction::DepositStored { place, list } => {
-                        match citizen.transfer_stored_action(
-                            place,
-                            list,
-                            matches!(active.action, CitizenAction::DepositStored { .. }),
-                        ) {
-                            Ok(()) | Err(SimulationError::MissingInputs) => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    CitizenAction::BuyFood(good) => {
-                        let units = ((MEAL_NOURISHMENT - citizen.available_food_nutrition())
-                            .max(0.0)
-                            / good.nutrition_per_unit().ok_or(SimulationError::NotFood)?)
-                        .ceil() as Quantity;
-                        payments.extend(citizen.complete_purchase(
-                            citizen.map.public_place(Location::Market),
-                            good,
-                            units,
-                            record_trades,
-                            action_elapsed_ms,
-                        )?);
-                    }
-                    CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. } => {
-                        if recipe == production::Recipe::BrewBeer {
-                            citizen.finish_preparation(
-                                active.action,
-                                self.market_time_ms
-                                    .checked_add(action_elapsed_ms)
-                                    .ok_or(SimulationError::TimeOverflow)?,
-                            )?;
-                        } else {
-                            citizen.complete_production(recipe, prediction, active)?;
-                        }
-                    }
-                    action if action.crop_plot().is_some() => {
-                        let finish = self
-                            .market_time_ms
-                            .checked_add(action_elapsed_ms)
-                            .ok_or(SimulationError::TimeOverflow)?;
-                        citizen.complete_farming(action, finish)?;
-                    }
-                    CitizenAction::CollectBeer { brewery, slot } => {
-                        match citizen.collect_beer(brewery, slot) {
-                            Ok(()) | Err(SimulationError::MissingInputs) => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    CitizenAction::EquipClothing => {
-                        match citizen.consume_goods(Good::FlaxGarment, 1) {
-                            Ok(()) => citizen.garment_condition = Some(1.0),
-                            Err(SimulationError::MissingInputs) => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    CitizenAction::ListExcess => {
-                        for (good, units) in citizen.excess_goods()?.items() {
-                            citizen.list_trial_stock(good, units)?;
-                        }
-                    }
-                    CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } => {
-                        let place = active.action.required_place(&citizen).unwrap();
-                        let mut budget = citizen.coins.min(list.spending_budget());
-                        for (good, units) in list.items() {
-                            let before = citizen.coins;
-                            payments.extend(citizen.complete_purchase_at_quote(
+                let checkpoint = citizen.clone();
+                let payments_before = payments.len();
+                let completion = (|| -> Result<(), SimulationError> {
+                    match active.action {
+                        CitizenAction::CollectStored { place, list }
+                        | CitizenAction::DepositStored { place, list } => {
+                            match citizen.transfer_stored_action(
                                 place,
+                                list,
+                                matches!(active.action, CitizenAction::DepositStored { .. }),
+                            ) {
+                                Ok(()) => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        CitizenAction::BuyFood(good) => {
+                            let units = ((MEAL_NOURISHMENT - citizen.available_food_nutrition())
+                                .max(0.0)
+                                / good.nutrition_per_unit().ok_or(SimulationError::NotFood)?)
+                            .ceil() as Quantity;
+                            payments.extend(citizen.complete_purchase(
+                                citizen.map.public_place(Location::Market),
                                 good,
                                 units,
                                 record_trades,
                                 action_elapsed_ms,
-                                (budget, list.quote_ceiling(good)),
                             )?);
-                            budget -= before - citizen.coins;
                         }
-                    }
-                    CitizenAction::List(good, requested) => {
-                        let units = requested.min(citizen.available_units(good));
-                        citizen.list_trial_stock(good, units)?;
-                    }
-                    CitizenAction::Withdraw(good, requested)
-                    | CitizenAction::WithdrawAt {
-                        good,
-                        units: requested,
-                        ..
-                    } => {
-                        let place = active.action.required_place(&citizen).unwrap();
-                        let units = citizen.market.withdraw(
-                            citizen.market_party(),
-                            place,
+                        CitizenAction::Produce(recipe)
+                        | CitizenAction::ProduceAt { recipe, .. } => {
+                            if recipe == production::Recipe::BrewBeer {
+                                citizen.finish_preparation(
+                                    active.action,
+                                    self.market_time_ms
+                                        .checked_add(action_elapsed_ms)
+                                        .ok_or(SimulationError::TimeOverflow)?,
+                                )?;
+                            } else {
+                                citizen.complete_production(recipe, prediction, active)?;
+                            }
+                        }
+                        action if action.crop_plot().is_some() => {
+                            let finish = self
+                                .market_time_ms
+                                .checked_add(action_elapsed_ms)
+                                .ok_or(SimulationError::TimeOverflow)?;
+                            citizen.complete_farming(action, finish)?;
+                        }
+                        CitizenAction::CollectBeer { brewery, slot } => {
+                            match citizen.collect_beer(brewery, slot) {
+                                Ok(()) => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        CitizenAction::EquipClothing => {
+                            match citizen.consume_goods(Good::FlaxGarment, 1) {
+                                Ok(()) => citizen.garment_condition = Some(1.0),
+                                Err(SimulationError::MissingInputs) => {
+                                    return Err(SimulationError::MissingInputs);
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } => {
+                            let place = active.action.required_place(&citizen).unwrap();
+                            let mut budget = citizen.coins.min(list.spending_budget());
+                            for (good, units) in list.items() {
+                                let before = citizen.coins;
+                                payments.extend(citizen.complete_purchase_at_quote(
+                                    place,
+                                    good,
+                                    units,
+                                    record_trades,
+                                    action_elapsed_ms,
+                                    (budget, list.quote_ceiling(good)),
+                                )?);
+                                budget -= before - citizen.coins;
+                            }
+                        }
+                        CitizenAction::ListExcess
+                        | CitizenAction::ListAt { .. }
+                        | CitizenAction::List(..) => {
+                            let (place, list) = match active.action {
+                                CitizenAction::ListAt { place, list } => (place, list),
+                                CitizenAction::List(good, units) => (
+                                    active.listing_place.ok_or(SimulationError::MissingInputs)?,
+                                    marketplace::ShoppingList::single(good, units),
+                                ),
+                                _ => return Err(SimulationError::MissingInputs),
+                            };
+                            let mut listed = false;
+                            for (good, requested) in list.items() {
+                                let units = requested.min(citizen.available_units(good));
+                                citizen.list_trial_stock_at(place, good, units)?;
+                                listed |= units > 0;
+                            }
+                            if list.items().next().is_some() && !listed {
+                                return Err(SimulationError::MissingInputs);
+                            }
+                        }
+                        CitizenAction::Withdraw(good, requested)
+                        | CitizenAction::WithdrawAt {
                             good,
-                            requested,
-                        )?;
-                        let stock = citizen
-                            .units(good)
-                            .checked_add(units)
-                            .ok_or(SimulationError::WealthOverflow)?;
-                        citizen.set_inventory_units(good, stock);
-                        citizen.retain_production_input(good, units)?;
+                            units: requested,
+                            ..
+                        } => {
+                            let place = active.action.required_place(&citizen).unwrap();
+                            let units = citizen.market.withdraw(
+                                citizen.market_party(),
+                                place,
+                                good,
+                                requested,
+                            )?;
+                            let stock = citizen
+                                .units(good)
+                                .checked_add(units)
+                                .ok_or(SimulationError::WealthOverflow)?;
+                            citizen.set_inventory_units(good, stock);
+                            citizen.retain_production_input(good, units)?;
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                    Ok(())
+                })();
+                match completion {
+                    Ok(()) => citizen.complete_trial_output(active.action),
+                    Err(SimulationError::MissingInputs) => {
+                        citizen = checkpoint;
+                        payments.truncate(payments_before);
+                        citizen.abandon_action()?;
+                        citizen.cancel_preparing_trials();
+                        completion_failed = true;
+                    }
+                    Err(error) => return Err(error),
                 }
-                citizen.complete_trial_output(active.action);
                 citizen.map.release_objects(
                     active
                         .action
@@ -1709,7 +1853,7 @@ impl Citizen {
             .checked_add(elapsed_ms)
             .ok_or(SimulationError::TimeOverflow)?;
         citizen.reconcile_production_trials();
-        Ok((citizen, payments))
+        Ok((citizen, payments, completion_failed))
     }
 
     fn complete_production(
@@ -1723,13 +1867,15 @@ impl Citizen {
                 .action
                 .required_place(self)
                 .ok_or(SimulationError::MissingProperty)?;
-            self.storage.release_work(
+            self.storage.release_work_for(
+                self.id,
                 StockKey {
                     place,
                     owner: self.goods_owner(),
                     good,
                 },
                 units,
+                true,
             )?;
         }
         for &(good, units) in recipe.inputs() {
@@ -1739,7 +1885,7 @@ impl Citizen {
                     .required_place(self)
                     .ok_or(SimulationError::MissingProperty)?,
                 good,
-                units,
+                units - active.stored_inputs.units(good),
             )?;
         }
         for &(good, units) in recipe.outputs() {
@@ -2021,9 +2167,12 @@ impl Universe {
             _ => {}
         }
         let mut universe = self.clone();
-        universe
-            .storage
-            .set_units(StockKey { place, owner, good }, units)?;
+        universe.storage.set_units(
+            StockKey { place, owner, good },
+            units,
+            &universe.map,
+            &universe.market,
+        )?;
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
         universe.refresh_guild_history(universe.current_time_ms, false);
@@ -2078,6 +2227,7 @@ impl Universe {
             return Err(SimulationError::WrongLocation);
         }
         let owner = citizen.goods_owner();
+        let allowed = citizen.accessible_storage_objects(place);
         let stored = self.storage.units(place, owner, good);
         let carried = citizen.units(good);
         let reserved = match citizen.active_action.map(|active| active.action) {
@@ -2089,7 +2239,8 @@ impl Universe {
                     .iter()
                     .filter(|(input, _)| *input == good)
                     .map(|(_, units)| *units)
-                    .sum()
+                    .sum::<Quantity>()
+                    .saturating_sub(citizen.active_action.unwrap().stored_inputs.units(good))
             }
             Some(CitizenAction::EquipClothing) if good == Good::FlaxGarment => 1,
             _ => 0,
@@ -2116,14 +2267,31 @@ impl Universe {
                     .ok_or(SimulationError::MissingInputs)?,
             )
         };
-        let tax_reserved = if deposit {
-            citizen.tax_reserved_units(good)
+        let physical = storage::StockKey { place, owner, good };
+        let mut accessible = 0_u64;
+        let mut accessible_tax = 0_u64;
+        let mut accessible_work = 0_u64;
+        for (key, quantity) in self
+            .storage
+            .contents()
+            .iter()
+            .filter(|(key, _)| key.stock == physical && allowed.contains(&key.object))
+        {
+            accessible += quantity;
+            accessible_tax += self.storage.object_tax_reserved(*key);
+            accessible_work += self.storage.object_work_reserved(*key);
+        }
+        let (source, tax_reserved, work_reserved) = if deposit {
+            (carried, citizen.tax_reserved_units(good), reserved)
         } else {
-            self.storage.reserved_units(place, owner, good)
+            (accessible, accessible_tax, accessible_work)
         };
-        let source = if deposit { carried } else { stored };
-        let movable_available =
-            (source - tax_reserved).saturating_sub(if deposit { reserved } else { 0 });
+        if units > source.saturating_sub(work_reserved) {
+            return Err(SimulationError::MissingInputs);
+        }
+        let movable_available = source
+            .saturating_sub(tax_reserved)
+            .saturating_sub(work_reserved);
         let moved_reserved = units.saturating_sub(movable_available);
         let mut universe = self.clone();
         let carried_reserved = citizen.tax_reserved_units(good);
@@ -2148,20 +2316,31 @@ impl Universe {
                 carried_reserved + moved_reserved
             },
         );
-        universe.storage.set_reserved(
+        let next_reserved = if deposit {
+            stored_reserved + moved_reserved
+        } else {
+            stored_reserved - moved_reserved
+        };
+        if !deposit {
+            universe
+                .storage
+                .set_reserved_in(stock_key, next_reserved, Some(&allowed))?;
+        }
+        universe.storage.set_units_in(
             stock_key,
-            if deposit {
-                stored_reserved + moved_reserved
-            } else {
-                stored_reserved - moved_reserved
-            },
-        );
+            next_stored,
+            &universe.map,
+            &universe.market,
+            Some(&allowed),
+        )?;
+        if deposit {
+            universe
+                .storage
+                .set_reserved_in(stock_key, next_reserved, Some(&allowed))?;
+        }
         citizen.inventory.insert(good, next_carried);
         citizen.production_acquisitions[good as usize] =
             citizen.production_acquisitions[good as usize].min(citizen.available_units(good));
-        universe
-            .storage
-            .set_units(StockKey { place, owner, good }, next_stored)?;
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
         universe.refresh_guild_history(universe.current_time_ms, false);
@@ -2373,30 +2552,31 @@ impl Universe {
                     .collect();
                 let action_before = citizen.clone();
                 let execution = citizen.active_plan.take();
-                let (updated, payments) =
+                let (updated, payments, completion_failed) =
                     citizen.advance_action_with_settlement(step, false, true)?;
-                let lost_shared_input = action_before.active_action().is_some_and(|active| {
-                    active.remaining_ms() == step
-                        && match active.action() {
-                            CitizenAction::CollectStored { place, list } => {
-                                list.items().any(|(good, units)| {
-                                    action_before.stored_available_units(place, good) < units
-                                })
+                let lost_shared_input = completion_failed
+                    || action_before.active_action().is_some_and(|active| {
+                        active.remaining_ms() == step
+                            && match active.action() {
+                                CitizenAction::CollectStored { place, list } => {
+                                    list.items().any(|(good, units)| {
+                                        action_before.stored_available_units(place, good) < units
+                                    })
+                                }
+                                CitizenAction::DepositStored { list, .. } => {
+                                    list.items().any(|(good, units)| {
+                                        action_before.carried_available_units(good) < units
+                                    })
+                                }
+                                CitizenAction::CollectBeer { brewery, slot } => action_before
+                                    .beer_batch(brewery, slot)
+                                    .is_ok_and(|batch| batch.is_none()),
+                                CitizenAction::EquipClothing => {
+                                    action_before.available_units(Good::FlaxGarment) == 0
+                                }
+                                _ => false,
                             }
-                            CitizenAction::DepositStored { list, .. } => {
-                                list.items().any(|(good, units)| {
-                                    action_before.carried_available_units(good) < units
-                                })
-                            }
-                            CitizenAction::CollectBeer { brewery, slot } => action_before
-                                .beer_batch(brewery, slot)
-                                .is_ok_and(|batch| batch.is_none()),
-                            CitizenAction::EquipClothing => {
-                                action_before.available_units(Good::FlaxGarment) == 0
-                            }
-                            _ => false,
-                        }
-                });
+                    });
                 universe.citizen_histories.get_mut(id).unwrap().advance(
                     match &agents_before[id].kind {
                         AgentKind::Citizen(before) => before,
@@ -2405,6 +2585,7 @@ impl Universe {
                     &updated,
                     step,
                     finishing_time,
+                    !completion_failed,
                 )?;
                 *citizen = updated;
                 if let Some(mut execution) = execution {
@@ -2477,12 +2658,12 @@ impl Universe {
                 {
                     let AgentKind::Citizen(after) = &universe.agents[id].kind;
                     let changed = match active.action() {
-                        CitizenAction::ListExcess | CitizenAction::List(..) => {
-                            Good::ALL.into_iter().any(|good| {
-                                after.market.listed_units(after.market_party(), good)
-                                    > before.market.listed_units(before.market_party(), good)
-                            })
-                        }
+                        CitizenAction::ListExcess
+                        | CitizenAction::List(..)
+                        | CitizenAction::ListAt { .. } => Good::ALL.into_iter().any(|good| {
+                            after.market.listed_units(after.market_party(), good)
+                                > before.market.listed_units(before.market_party(), good)
+                        }),
                         CitizenAction::DepositStored { place, list } if place == after.home => {
                             list.items().any(|(good, _)| {
                                 after.storage.units(place, after.goods_owner(), good)
@@ -2504,6 +2685,7 @@ impl Universe {
                 let before = &action_before;
                 if let Some(active) = before.active_action()
                     && active.remaining_ms() == step
+                    && !completion_failed
                     && let Some(recipe) = active.action().production_recipe()
                     && recipe != production::Recipe::BrewBeer
                 {
@@ -2532,6 +2714,7 @@ impl Universe {
                 }
                 if let Some(active) = before.active_action()
                     && active.remaining_ms() == step
+                    && !completion_failed
                     && let CitizenAction::Harvest { field, plot } = active.action()
                 {
                     let crop = before
@@ -2550,6 +2733,7 @@ impl Universe {
                 }
                 if let Some(active) = before.active_action()
                     && active.remaining_ms() == step
+                    && !completion_failed
                     && let CitizenAction::CollectBeer { brewery, .. } = active.action()
                     && {
                         let AgentKind::Citizen(after) = &universe.agents[id].kind;
@@ -2638,6 +2822,9 @@ impl Universe {
                     finishing_time,
                     limits,
                 )?;
+                universe
+                    .market
+                    .bind_unplaced_orders(&universe.map, &universe.storage)?;
                 let mut changed = Vec::new();
                 for (seller, coins) in payments {
                     let balance = universe
@@ -3167,19 +3354,23 @@ impl Citizen {
                 good,
             },
             units,
+            &citizen.map,
+            &citizen.market,
         )?;
         Ok(citizen)
     }
 
     pub(crate) fn reserve_home_good(&mut self, good: Good, units: Quantity) {
-        self.storage.set_reserved(
-            storage::StockKey {
-                place: self.home,
-                owner: self.goods_owner(),
-                good,
-            },
-            units,
-        );
+        self.storage
+            .set_reserved(
+                storage::StockKey {
+                    place: self.home,
+                    owner: self.goods_owner(),
+                    good,
+                },
+                units,
+            )
+            .unwrap();
     }
 
     pub(crate) fn home_units(&self, good: Good) -> Quantity {

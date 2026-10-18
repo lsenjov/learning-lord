@@ -8,13 +8,15 @@ impl Citizen {
         if let Some(active) = self.active_action {
             let site = active.action().required_place(self).unwrap_or(self.home);
             for (good, units) in active.stored_inputs.items() {
-                self.storage.release_work(
+                self.storage.release_work_for(
+                    self.id,
                     crate::storage::StockKey {
                         place: site,
                         owner: self.goods_owner(),
                         good,
                     },
                     units,
+                    false,
                 )?;
             }
             if active.action().production_recipe() == Some(crate::production::Recipe::BrewBeer) {
@@ -38,6 +40,9 @@ impl Citizen {
     }
 
     pub(crate) fn may_use_object(&self, place: &Place, object: &Object) -> bool {
+        if place.kind.is_town_owned() {
+            return false;
+        }
         let owner = if place.buildings.is_empty() {
             place.owner
         } else {
@@ -381,11 +386,27 @@ mod tests {
         site: crate::locations::PlaceId,
         recipes: &[Recipe],
     ) -> Universe {
+        let id = owner;
         let owner = worker(&world, owner).goods_owner();
         for recipe in recipes {
             for &(good, units) in recipe.inputs() {
                 let total = world.storage.units(site, owner, good) + units * 4;
-                world = world.with_stored_good(site, owner, good, total).unwrap();
+                let allowed = worker(&world, id).accessible_storage_objects(site);
+                world
+                    .storage
+                    .set_units_in(
+                        crate::storage::StockKey {
+                            place: site,
+                            owner,
+                            good,
+                        },
+                        total,
+                        &world.map,
+                        &world.market,
+                        Some(&allowed),
+                    )
+                    .unwrap();
+                world.refresh_market();
             }
         }
         world
@@ -502,7 +523,17 @@ mod tests {
         let (world, first, second, _) = household(StartingRole::Miller, Location::Mill);
         let home = worker(&world, first).home();
         assert_eq!(home, worker(&world, second).home());
-        assert_eq!(world.map.place(home).unwrap().buildings[0].rooms.len(), 2);
+        assert_eq!(world.map.place(home).unwrap().buildings[0].rooms.len(), 3);
+        assert_eq!(
+            world
+                .map
+                .place(home)
+                .unwrap()
+                .objects()
+                .filter(|object| object.kind.is_storage())
+                .count(),
+            5
+        );
         let world = world
             .start_action(first, CitizenAction::Sleep)
             .unwrap()

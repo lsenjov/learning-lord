@@ -321,7 +321,7 @@ fn storage_transfers_require_arrival_and_refuse_travel() {
 fn stored_owner_totals_update_on_replacement_removal_and_checked_overflow() {
     let world = Universe::with_map(Map::default());
     let forest = world.map().public_place(Location::Forest);
-    let river = world.map().public_place(Location::River);
+    let river = world.map().public_place(Location::Market);
     let full = world
         .with_stored_good(forest, GoodsOwner::Town, Good::Wood, u64::MAX)
         .unwrap();

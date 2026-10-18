@@ -522,30 +522,7 @@ impl Universe {
                         citizen.town_inventory.insert(good, town);
                     }
                     ReservationStock::Stored(stock) => {
-                        let reserved = self
-                            .storage
-                            .reserved_units(stock.place, stock.owner, good)
-                            .checked_sub(units)
-                            .ok_or(SimulationError::MissingInputs)?;
-                        self.storage.set_reserved(stock, reserved);
-                        let owned = self
-                            .storage
-                            .units(stock.place, stock.owner, good)
-                            .checked_sub(units)
-                            .ok_or(SimulationError::MissingInputs)?;
-                        self.storage.set_units(stock, owned)?;
-                        let town = self
-                            .storage
-                            .units(stock.place, GoodsOwner::Town, good)
-                            .checked_add(units)
-                            .ok_or(SimulationError::InventoryOverflow)?;
-                        self.storage.set_units(
-                            StockKey {
-                                owner: GoodsOwner::Town,
-                                ..stock
-                            },
-                            town,
-                        )?;
+                        self.storage.settle_tax(stock, units)?;
                     }
                 }
                 self.taxation
@@ -742,7 +719,7 @@ impl Universe {
                         if total > self.storage.units(stock.place, stock.owner, good) {
                             return Err(SimulationError::MissingInputs);
                         }
-                        self.storage.set_reserved(stock, total);
+                        self.storage.set_reserved(stock, total)?;
                     }
                 }
                 changed = true;

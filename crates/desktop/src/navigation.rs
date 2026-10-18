@@ -304,10 +304,12 @@ pub(crate) fn action(
             row
         }
         A::BuyAt { place: id, list }
+        | A::ListAt { place: id, list }
         | A::CollectStored { place: id, list }
         | A::DepositStored { place: id, list } => {
             let mut row = vec![Fragment::text(match action {
                 A::BuyAt { .. } => "Buy ",
+                A::ListAt { .. } => "List ",
                 A::CollectStored { .. } => "Collect ",
                 _ => "Deposit ",
             })];

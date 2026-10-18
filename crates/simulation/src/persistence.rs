@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 9;
+pub const SAVE_VERSION: u32 = 10;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -128,6 +128,7 @@ impl Universe {
         self.validate_objects()?;
         self.market.validate_save()?;
         self.storage.validate_save()?;
+        self.storage.validate_objects(&self.map, &self.market)?;
         self.validate_households()?;
         self.validate_guilds()?;
         self.validate_household_histories()?;
@@ -145,6 +146,11 @@ impl Universe {
                 ));
             }
             citizen.validate_save()?;
+            if citizen.storage != self.storage || citizen.market != self.market {
+                return Err(SaveError::InvalidState(
+                    "citizen storage or market snapshot mismatch",
+                ));
+            }
             self.citizen_histories[id].validate_save(self.current_time_ms)?;
         }
         for (id, rule) in &self.taxation.rules {
@@ -343,16 +349,36 @@ impl Universe {
                         owner: citizen.goods_owner(),
                         good,
                     };
-                    let total = expected.entry(key).or_insert(0_u64);
+                    let total = expected.entry((citizen.id, key)).or_insert(0_u64);
                     *total = total
                         .checked_add(units)
                         .ok_or(SaveError::InvalidState("production reservation overflow"))?;
                 }
             }
         }
-        if &expected != self.storage.work_reservations() {
+        let mut actual = imbl::HashMap::new();
+        for ((worker, physical), units) in self.storage.work_allocations() {
+            let Some(agent) = self.agents.get(worker) else {
+                return Err(SaveError::InvalidState(
+                    "missing storage reservation worker",
+                ));
+            };
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            if !citizen
+                .accessible_storage_objects(physical.stock.place)
+                .contains(&physical.object)
+            {
+                return Err(SaveError::InvalidState("inaccessible reserved storage"));
+            }
+            let held = actual.entry((*worker, physical.stock)).or_insert(0_u64);
+            *held = held
+                .checked_add(*units)
+                .ok_or(SaveError::InvalidState("storage work reservation overflow"))?;
+        }
+        if expected != actual {
             return Err(SaveError::InvalidState("production reservation mismatch"));
         }
+
         Ok(())
     }
 
@@ -434,6 +460,7 @@ impl Citizen {
         self.map.validate_save()?;
         self.market.validate_save()?;
         self.storage.validate_save()?;
+        self.storage.validate_objects(&self.map, &self.market)?;
         if !self.position.valid()
             || ![
                 self.hunger,
@@ -487,6 +514,34 @@ impl Citizen {
             {
                 return Err(SaveError::InvalidState("invalid active action"));
             }
+            let listing = match active.action {
+                CitizenAction::List(good, units) => Some((
+                    active
+                        .listing_place
+                        .ok_or(SaveError::InvalidState("missing listing place"))?,
+                    crate::marketplace::ShoppingList::single(good, units),
+                )),
+                CitizenAction::ListAt { place, list } => Some((place, list)),
+                CitizenAction::ListExcess => {
+                    return Err(SaveError::InvalidState("unresolved active listing"));
+                }
+                _ => None,
+            };
+            if active.listing_place.is_some() != matches!(active.action, CitizenAction::List(..)) {
+                return Err(SaveError::InvalidState("invalid listing place snapshot"));
+            }
+            if let Some((place, list)) = listing {
+                let valid_place = self.map.place(place).is_ok_and(|site| {
+                    site.position == self.position
+                        && site.kind != Location::Home
+                        && list
+                            .items()
+                            .all(|(good, _)| site.objects().any(|object| object.kind.accepts(good)))
+                });
+                if !list.validate_bounds() || !valid_place {
+                    return Err(SaveError::InvalidState("invalid listing action snapshot"));
+                }
+            }
             validate_action(active.action, &self.map)?;
         }
         if let Some(active) = &self.active_plan {
@@ -503,7 +558,7 @@ impl Citizen {
 }
 
 fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result<(), SaveError> {
-    if matches!(action, CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } if !list.validate_bounds())
+    if matches!(action, CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } | CitizenAction::ListAt {list, ..} | CitizenAction::CollectStored {list, ..} | CitizenAction::DepositStored {list, ..} if !list.validate_bounds())
     {
         return Err(SaveError::InvalidState("invalid purchase bounds"));
     }
@@ -511,6 +566,7 @@ fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result
         CitizenAction::Travel(place)
         | CitizenAction::WithdrawAt { place, .. }
         | CitizenAction::BuyAt { place, .. }
+        | CitizenAction::ListAt { place, .. }
         | CitizenAction::ProduceAt { place, .. }
         | CitizenAction::CollectStored { place, .. }
         | CitizenAction::DepositStored { place, .. } => Some(place),
@@ -619,6 +675,10 @@ mod tests {
             .unwrap();
         world = updated;
         world.market.list(other, mill, Good::Flour, 100).unwrap();
+        world
+            .market
+            .bind_unplaced_orders(&world.map, &world.storage)
+            .unwrap();
         world.refresh_market();
         world = world
             .start_action(second, CitizenAction::Travel(mill))
@@ -746,6 +806,8 @@ mod tests {
                                 good: Good::Wheat,
                             },
                             10,
+                            &invalid.map,
+                            &invalid.market,
                         )
                         .unwrap();
                 }
@@ -755,7 +817,10 @@ mod tests {
                         owner: GoodsOwner::Household(household),
                         good: Good::Wheat,
                     };
-                    invalid.storage.set_units(key, 10).unwrap();
+                    invalid
+                        .storage
+                        .set_units(key, 10, &invalid.map, &invalid.market)
+                        .unwrap();
                     invalid.storage.reserve_work(key, 1).unwrap();
                 }
                 _ => {
@@ -1182,6 +1247,7 @@ mod tests {
             meal_nutrition: 0.0,
             meal_units: [0; Good::COUNT],
             stored_inputs: ShoppingList::default(),
+            listing_place: None,
             travel_origin: Position::default(),
             travel_destination: None,
         });

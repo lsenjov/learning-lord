@@ -109,6 +109,12 @@ pub enum ObjectKind {
     Bed {
         resident: AgentId,
     },
+    PantryShelving,
+    DryGoodsBin,
+    FishCrate,
+    WoodRack,
+    TextileChest,
+    LiquidBarrel,
     BerryBushes,
     Trees,
     FishingSpot,
@@ -130,6 +136,12 @@ impl ObjectKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Bed { .. } => "Bed",
+            Self::PantryShelving => "Pantry shelving",
+            Self::DryGoodsBin => "Dry goods bin",
+            Self::FishCrate => "Fish crate",
+            Self::WoodRack => "Wood rack",
+            Self::TextileChest => "Textile chest",
+            Self::LiquidBarrel => "Liquid barrel",
             Self::BerryBushes => "Berry bushes",
             Self::Trees => "Trees",
             Self::FishingSpot => "Fishing spot",
@@ -142,6 +154,68 @@ impl ObjectKind {
             Self::BrewingEquipment => "Brewing equipment",
             Self::FermentationVessel { .. } => "Fermentation vessel",
             Self::CropPlot { .. } => "Crop plot",
+        }
+    }
+    pub fn accepts(self, good: crate::marketplace::Good) -> bool {
+        use crate::marketplace::Good::*;
+        match self {
+            Self::PantryShelving => matches!(good, Berries | BreadRoll | BerryPie | Cabbage),
+            Self::DryGoodsBin => matches!(good, Wheat | Flour | Hops),
+            Self::FishCrate => good == Fish,
+            Self::WoodRack => good == Wood,
+            Self::TextileChest => matches!(good, Flax | Thread | Cloth | FlaxBlock | FlaxGarment),
+            Self::LiquidBarrel => matches!(good, Water | Beer),
+            _ => false,
+        }
+    }
+    pub fn is_storage(self) -> bool {
+        matches!(
+            self,
+            Self::PantryShelving
+                | Self::DryGoodsBin
+                | Self::FishCrate
+                | Self::WoodRack
+                | Self::TextileChest
+                | Self::LiquidBarrel
+        )
+    }
+    pub fn single_good(self) -> bool {
+        matches!(self, Self::DryGoodsBin | Self::LiquidBarrel)
+    }
+    fn storage_kit(kind: Location) -> Vec<Self> {
+        use ObjectKind::*;
+        match kind {
+            Location::Home => vec![
+                PantryShelving,
+                FishCrate,
+                TextileChest,
+                LiquidBarrel,
+                LiquidBarrel,
+            ],
+            Location::Field => vec![DryGoodsBin, DryGoodsBin, TextileChest, PantryShelving],
+            Location::Mill => vec![DryGoodsBin, DryGoodsBin],
+            Location::Bakery => vec![DryGoodsBin, WoodRack, LiquidBarrel, PantryShelving],
+            Location::Weavery | Location::Tailory => vec![TextileChest],
+            Location::Brewery => vec![
+                DryGoodsBin,
+                DryGoodsBin,
+                WoodRack,
+                LiquidBarrel,
+                LiquidBarrel,
+            ],
+            Location::Forest => vec![PantryShelving, WoodRack],
+            Location::River => vec![FishCrate, LiquidBarrel],
+            Location::Market | Location::Warehouse => vec![
+                PantryShelving,
+                FishCrate,
+                WoodRack,
+                TextileChest,
+                DryGoodsBin,
+                DryGoodsBin,
+                DryGoodsBin,
+                LiquidBarrel,
+                LiquidBarrel,
+            ],
         }
     }
     pub fn unlimited_workers(self) -> bool {
@@ -304,21 +378,34 @@ impl Building {
                 .collect(),
             _ => Vec::new(),
         };
+        let storage = ObjectKind::storage_kit(kind);
+        let mut rooms = vec![Room {
+            id: RoomId(Uuid::new_v4()),
+            name: "Storeroom".into(),
+            object_capacity: storage.len(),
+            objects: storage.into_iter().map(Object::new).collect(),
+        }];
+        if !kinds.is_empty() {
+            rooms.insert(
+                0,
+                Room {
+                    id: RoomId(Uuid::new_v4()),
+                    name: if kind == Location::Home {
+                        "Bedroom"
+                    } else {
+                        "Workroom"
+                    }
+                    .into(),
+                    object_capacity: kinds.len(),
+                    objects: kinds.into_iter().map(Object::new).collect(),
+                },
+            );
+        }
         Self {
             id: BuildingId(Uuid::new_v4()),
             name: kind.name().into(),
             owner,
-            rooms: vec![Room {
-                id: RoomId(Uuid::new_v4()),
-                name: if kind == Location::Home {
-                    "Bedroom"
-                } else {
-                    "Workroom"
-                }
-                .into(),
-                object_capacity: kinds.len(),
-                objects: kinds.into_iter().map(Object::new).collect(),
-            }],
+            rooms,
         }
     }
 }
@@ -495,6 +582,7 @@ impl Map {
                 buildings: if matches!(
                     kind,
                     Location::Home
+                        | Location::Field
                         | Location::Mill
                         | Location::Bakery
                         | Location::Weavery
@@ -508,19 +596,25 @@ impl Map {
                 } else {
                     Vec::new()
                 },
-                outdoor_objects: match kind {
-                    Location::Forest => vec![
-                        Object::new(ObjectKind::BerryBushes),
-                        Object::new(ObjectKind::Trees),
-                    ],
-                    Location::River => vec![
-                        Object::new(ObjectKind::FishingSpot),
-                        Object::new(ObjectKind::WaterSource),
-                    ],
-                    Location::Field => (0..crate::farming::FIELD_PLOTS)
-                        .map(|_| Object::new(ObjectKind::CropPlot { crop: None }))
-                        .collect(),
-                    _ => Vec::new(),
+                outdoor_objects: {
+                    let mut objects: Vec<_> = match kind {
+                        Location::Forest => vec![
+                            Object::new(ObjectKind::BerryBushes),
+                            Object::new(ObjectKind::Trees),
+                        ],
+                        Location::River => vec![
+                            Object::new(ObjectKind::FishingSpot),
+                            Object::new(ObjectKind::WaterSource),
+                        ],
+                        Location::Field => (0..crate::farming::FIELD_PLOTS)
+                            .map(|_| Object::new(ObjectKind::CropPlot { crop: None }))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    if kind.is_public() || kind.is_town_owned() {
+                        objects.extend(ObjectKind::storage_kit(kind).into_iter().map(Object::new));
+                    }
+                    objects
                 },
             },
         );
@@ -566,6 +660,7 @@ impl Map {
                 if !identities.insert(object.id.0)
                     || object.id.0.get_version_num() != 4
                     || (!object.kind.unlimited_workers() && object.workers.len() > 1)
+                    || (object.kind.is_storage() && !object.workers.is_empty())
                     || object
                         .workers
                         .iter()
@@ -579,6 +674,7 @@ impl Map {
             if place.outdoor_objects.iter().any(|object| {
                 !object.kind.unlimited_workers()
                     && !matches!(object.kind, ObjectKind::CropPlot { .. })
+                    && !object.kind.is_storage()
             }) {
                 return Err(SaveError::InvalidState("indoor object outdoors"));
             }

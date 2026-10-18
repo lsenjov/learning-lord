@@ -157,6 +157,7 @@ impl CitizenHistory {
         after: &Citizen,
         elapsed: u64,
         end: u64,
+        completion_succeeded: bool,
     ) -> Result<(), SimulationError> {
         let active = before.active_action();
         let action = active.map(|a| a.action());
@@ -180,6 +181,7 @@ impl CitizenHistory {
                 | CitizenAction::BuyAt { .. }
                 | CitizenAction::ListExcess
                 | CitizenAction::List(..)
+                | CitizenAction::ListAt { .. }
                 | CitizenAction::Withdraw(..)
                 | CitizenAction::WithdrawAt { .. }
                 | CitizenAction::CollectStored { .. }
@@ -224,7 +226,7 @@ impl CitizenHistory {
         if !self.current.mean_wellbeing.is_finite() {
             return Err(SimulationError::WellbeingOverflow);
         }
-        if active.is_some_and(|a| a.remaining_ms() == elapsed) {
+        if completion_succeeded && active.is_some_and(|a| a.remaining_ms() == elapsed) {
             match action {
                 Some(CitizenAction::Produce(recipe) | CitizenAction::ProduceAt { recipe, .. })
                     if recipe != crate::production::Recipe::BrewBeer =>

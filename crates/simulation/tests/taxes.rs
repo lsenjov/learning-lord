@@ -235,26 +235,26 @@ fn assets_tax_goods_owners_at_current_prices_and_exclude_town_carried_and_buildi
     let (world, owner, place) = block_worker();
     let payer = Citizen::new(0.0)
         .unwrap()
-        .with_good(Good::BreadRoll, 10)
+        .with_good(Good::FlaxBlock, 10)
         .unwrap()
         .with_coins(1000)
         .unwrap();
     let (world, payer) = world.with_citizen("Bram", payer).unwrap();
     let world = world
-        .with_stored_good(place, GoodsOwner::Agent(payer), Good::BreadRoll, 10)
+        .with_stored_good(place, GoodsOwner::Agent(payer), Good::FlaxBlock, 10)
         .unwrap()
-        .with_stored_good(place, GoodsOwner::Town, Good::BreadRoll, 500)
+        .with_stored_good(place, GoodsOwner::Town, Good::FlaxBlock, 500)
         .unwrap();
     let (world, rule) = world
         .with_tax_rule(
             place,
             "Asset",
             TaxKind::Asset {
-                rates: rates(Good::BreadRoll, 1000),
+                rates: rates(Good::FlaxBlock, 1000),
             },
         )
         .unwrap();
-    let world = world.with_prices(Prices::default().with_price(Good::BreadRoll, 4.0).unwrap());
+    let world = world.with_prices(Prices::default().with_price(Good::FlaxBlock, 4.0).unwrap());
     let next = world.advance(FIRST_WEEKLY_SETTLEMENT_MS).unwrap();
     assert_eq!(next.town_treasury(), 4);
     assert_eq!(citizen(&next, payer).coins(), 996);

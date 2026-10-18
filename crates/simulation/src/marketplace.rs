@@ -493,6 +493,7 @@ struct ListingBatch {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Market {
+    containers: HashMap<OrderId, crate::locations::ObjectId>,
     batches: HashMap<OrderId, ListingBatch>,
     pub(crate) production_trials: crate::production_trials::ProductionTrials,
     seller_rates: HashMap<AgentId, u8>,
@@ -525,6 +526,44 @@ pub(crate) struct Purchase {
 }
 
 impl Market {
+    pub fn order_container(&self, id: OrderId) -> Option<crate::locations::ObjectId> {
+        self.containers.get(&id).copied()
+    }
+    pub(crate) fn bind_order(&mut self, id: OrderId, object: crate::locations::ObjectId) {
+        self.containers.insert(id, object);
+    }
+    pub(crate) fn bind_unplaced_orders(
+        &mut self,
+        map: &crate::locations::Map,
+        storage: &crate::storage::Storage,
+    ) -> Result<(), SimulationError> {
+        let mut orders: Vec<_> = self
+            .orders()
+            .filter(|order| !self.containers.contains_key(&order.id))
+            .cloned()
+            .collect();
+        orders.sort_by_key(|order| order.id.0);
+        for order in orders {
+            let object = storage.select_object(order.place, order.good, map, self, None)?;
+            self.bind_order(order.id, object);
+        }
+        Ok(())
+    }
+    pub(crate) fn list_in(
+        &mut self,
+        seller: MarketParty,
+        place: PlaceId,
+        good: Good,
+        units: Quantity,
+        object: crate::locations::ObjectId,
+    ) -> Result<(), SimulationError> {
+        let id = OrderId(self.next_order_id);
+        self.list(seller, place, good, units)?;
+        if units > 0 {
+            self.bind_order(id, object);
+        }
+        Ok(())
+    }
     pub(crate) fn set_time(&mut self, time_ms: u64) {
         self.clock_ms = time_ms;
     }
@@ -707,6 +746,7 @@ impl Market {
         self.orders.retain(|_, order| {
             order.seller != MarketParty::Caravan || order.good.caravan_eligible()
         });
+        self.containers.retain(|id, _| self.orders.contains_key(id));
     }
 
     fn purchasable(&self, order: &SellOrder) -> bool {
@@ -1305,6 +1345,7 @@ impl Market {
             order.units -= units;
             if order.units == 0 {
                 self.orders.remove(&order.id);
+                self.containers.remove(&order.id);
                 self.batches.remove(&order.id);
             } else {
                 self.orders.insert(order.id, order);
@@ -1440,6 +1481,7 @@ impl Market {
             }
             if order.units == 0 {
                 self.orders.remove(&id);
+                self.containers.remove(&id);
                 self.batches.remove(&id);
             } else {
                 self.orders.insert(id, order);
@@ -1549,6 +1591,7 @@ impl Market {
                         order.units -= units;
                         if order.units == 0 {
                             self.orders.remove(&order.id);
+                            self.containers.remove(&order.id);
                             self.batches.remove(&order.id);
                         } else {
                             self.orders.insert(order.id, order.clone());
@@ -1847,6 +1890,14 @@ impl Market {
         self.policy
             .validate()
             .map_err(|_| SaveError::InvalidState("invalid caravan policy"))?;
+        if self.containers.len() != self.orders.len()
+            || self
+                .containers
+                .keys()
+                .any(|id| !self.orders.contains_key(id))
+        {
+            return Err(SaveError::InvalidState("market container binding mismatch"));
+        }
         if self
             .import_tariff_carry
             .into_iter()
@@ -1854,6 +1905,7 @@ impl Market {
             .any(|carry| carry >= 10_000)
             || self.orders.iter().any(|(id, order)| {
                 *id != order.id
+                    || order.units == 0
                     || id.0 >= self.next_order_id
                     || !order.quoted_price.is_finite()
                     || order.quoted_price < MIN_QUOTED_PRICE
@@ -1957,6 +2009,26 @@ mod tests {
     }
 
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
+
+    #[test]
+    fn save_validation_rejects_missing_or_orphan_containers_and_empty_escrow() {
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        let id = market
+            .list_at_quote(seller, PLACE, Good::Wheat, 10, 1.0)
+            .unwrap();
+        let object = crate::locations::ObjectId(uuid::Uuid::new_v4());
+        market.bind_order(id, object);
+        market.validate_save().unwrap();
+        let mut invalid = market.clone();
+        invalid.containers.remove(&id);
+        assert!(invalid.validate_save().is_err());
+        let mut invalid = market.clone();
+        invalid.bind_order(OrderId(999), object);
+        assert!(invalid.validate_save().is_err());
+        market.orders.get_mut(&id).unwrap().units = 0;
+        assert!(market.validate_save().is_err());
+    }
 
     #[test]
     fn lower_local_sales_do_not_replace_the_established_baseline() {

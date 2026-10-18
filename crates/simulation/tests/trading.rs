@@ -748,19 +748,22 @@ fn purchases_cannot_buy_sub_coin_value_without_a_coin_and_preserve_stock() {
 }
 
 #[test]
-fn owned_workshop_sells_incidental_goods_and_customers_visit_without_production_access() {
+fn owned_workshop_sells_compatible_goods_and_customers_visit_without_production_access() {
     use learning_lord_simulation::locations::{Location, Position};
     use learning_lord_simulation::marketplace::ShoppingList;
     use learning_lord_simulation::production::Recipe;
     let (universe, seller) = Universe::with_map(Map::default())
         .with_prices(
             learning_lord_simulation::marketplace::Prices::default()
-                .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
+                .with_price(learning_lord_simulation::marketplace::Good::Flour, 5.0)
                 .unwrap(),
         )
         .with_citizen(
             "Miller",
-            Citizen::new(0.0).unwrap().with_berries(100).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_good(Good::Flour, 100)
+                .unwrap(),
         )
         .unwrap();
     let (universe, mill) = universe.with_property(seller, Location::Mill).unwrap();
@@ -772,7 +775,7 @@ fn owned_workshop_sells_incidental_goods_and_customers_visit_without_production_
         .unwrap();
     assert_eq!(citizen(&universe, seller).selling_place(), mill);
     let listed = universe
-        .start_action(seller, CitizenAction::List(Good::Berries, 100))
+        .start_action(seller, CitizenAction::List(Good::Flour, 100))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
@@ -790,38 +793,38 @@ fn owned_workshop_sells_incidental_goods_and_customers_visit_without_production_
     assert_eq!(
         customer.start_action(CitizenAction::BuyAt {
             place: customer.home(),
-            list: ShoppingList::single(Good::Berries, 1),
+            list: ShoppingList::single(Good::Flour, 1),
         }),
         Err(SimulationError::PrivateProperty)
     );
     assert_eq!(
         customer.start_action(CitizenAction::BuyAt {
             place: learning_lord_simulation::locations::PlaceId(uuid::Uuid::nil()),
-            list: ShoppingList::single(Good::Berries, 1),
+            list: ShoppingList::single(Good::Flour, 1),
         }),
         Err(SimulationError::PlaceNotFound)
     );
     let market_only = listed
         .start_action(
             buyer,
-            CitizenAction::Buy(ShoppingList::single(Good::Berries, 100)),
+            CitizenAction::Buy(ShoppingList::single(Good::Flour, 100)),
         )
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(citizen(&market_only, buyer).berries_units(), 0);
+    assert_eq!(citizen(&market_only, buyer).units(Good::Flour), 0);
     let bought = market_only
         .start_action(
             buyer,
             CitizenAction::BuyAt {
                 place: mill,
-                list: ShoppingList::single(Good::Berries, 100),
+                list: ShoppingList::single(Good::Flour, 100),
             },
         )
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(citizen(&bought, buyer).berries_units(), 100);
+    assert_eq!(citizen(&bought, buyer).units(Good::Flour), 100);
     assert_eq!(citizen(&bought, seller).coins(), 1);
     let away = citizen(&bought, buyer)
         .with_position(Position { x: 1.0, y: 1.0 })
@@ -829,7 +832,7 @@ fn owned_workshop_sells_incidental_goods_and_customers_visit_without_production_
     assert_eq!(
         away.start_action(CitizenAction::BuyAt {
             place: mill,
-            list: ShoppingList::single(Good::Berries, 1)
+            list: ShoppingList::single(Good::Flour, 1)
         }),
         Err(SimulationError::WrongLocation)
     );

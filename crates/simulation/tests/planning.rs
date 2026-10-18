@@ -327,7 +327,7 @@ fn prediction_and_replanning_errors_preserve_original_state() {
         .unwrap();
     let snapshot = planned.clone();
     assert_eq!(
-        planned.advance(8 * TWO_HOURS_MS),
+        planned.advance(10 * TWO_HOURS_MS),
         Err(SimulationError::WellbeingOverflow)
     );
     assert_eq!(planned, snapshot);
@@ -338,7 +338,7 @@ fn prediction_and_replanning_errors_preserve_original_state() {
         .unwrap();
     let snapshot = universe.clone();
     assert_eq!(
-        universe.advance(8 * TWO_HOURS_MS),
+        universe.advance(10 * TWO_HOURS_MS),
         Err(SimulationError::WellbeingOverflow)
     );
     assert_eq!(universe, snapshot);

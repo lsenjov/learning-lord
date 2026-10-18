@@ -193,9 +193,14 @@ impl Plan {
     }
 
     fn start_action(&self, citizen: &Citizen, index: usize) -> Result<Citizen, SimulationError> {
+        let action = self
+            .actions
+            .get(index)
+            .copied()
+            .ok_or(SimulationError::PlanningFailed)?;
         let mut candidate = citizen.clone();
         self.claim_commercial_action(&mut candidate, index)?;
-        candidate.start_action(self.actions[index])
+        candidate.start_action(action)
     }
 
     pub(crate) fn maintenance_goal(&self) -> Option<Effect> {
@@ -557,6 +562,8 @@ pub(crate) struct PlanningRequest {
     roots: scheduler::Request<GoalEvaluation>,
     citizen: Arc<Citizen>,
     production: Vec<ProductionDecision>,
+    priority_listing: bool,
+    prior_elapsed: std::time::Duration,
 }
 
 impl PlanningRequest {
@@ -565,18 +572,35 @@ impl PlanningRequest {
     }
 
     pub(crate) fn elapsed(&self) -> std::time::Duration {
-        self.roots.elapsed()
+        self.prior_elapsed + self.roots.elapsed()
     }
 
     pub(crate) fn try_result(&mut self) -> Option<Result<Plan, SimulationError>> {
-        self.roots.try_result().map(|results| {
-            reduce_results(&self.citizen, std::mem::take(&mut self.production), results)
-        })
+        let results = self.roots.try_result()?;
+        let result = reduce_results(&self.citizen, std::mem::take(&mut self.production), results);
+        if self.priority_listing && result.as_ref().is_ok_and(|plan| plan.actions.is_empty()) {
+            let elapsed = self.elapsed();
+            match request_with_priority_listing(&self.citizen, false) {
+                Ok(mut fallback) => {
+                    fallback.prior_elapsed = elapsed;
+                    *self = fallback;
+                    None
+                }
+                Err(error) => Some(Err(error)),
+            }
+        } else {
+            Some(result)
+        }
     }
 
     fn wait(self) -> Result<Plan, SimulationError> {
         let results = self.roots.wait()?;
-        reduce_results(&self.citizen, self.production, results)
+        let plan = reduce_results(&self.citizen, self.production, results)?;
+        if self.priority_listing && plan.actions.is_empty() {
+            request_with_priority_listing(&self.citizen, false)?.wait()
+        } else {
+            Ok(plan)
+        }
     }
 }
 
@@ -585,6 +609,13 @@ pub fn plan(citizen: &Citizen) -> Result<Plan, SimulationError> {
 }
 
 pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationError> {
+    request_with_priority_listing(citizen, true)
+}
+
+fn request_with_priority_listing(
+    citizen: &Citizen,
+    allow_priority_listing: bool,
+) -> Result<PlanningRequest, SimulationError> {
     if citizen.active_action().is_some() || citizen.active_plan().is_some() {
         return Err(SimulationError::CitizenBusy);
     }
@@ -592,7 +623,8 @@ pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationEr
         .available_production_recipes()
         .map(|recipe| ProductionDecision::new(citizen, recipe))
         .collect();
-    let goals = root_goals(citizen)?;
+    let goals = root_goals_with_priority(citizen, allow_priority_listing)?;
+    let priority_listing = goals == [Effect::ListExcess];
     let citizen = Arc::new(citizen.clone());
     let jobs: Vec<scheduler::Job<GoalEvaluation>> = goals
         .into_iter()
@@ -618,15 +650,21 @@ pub(crate) fn request(citizen: &Citizen) -> Result<PlanningRequest, SimulationEr
         roots,
         citizen,
         production,
+        priority_listing,
+        prior_elapsed: std::time::Duration::ZERO,
     })
 }
 
-fn root_goals(citizen: &Citizen) -> Result<Vec<Effect>, SimulationError> {
+fn root_goals_with_priority(
+    citizen: &Citizen,
+    allow_priority_listing: bool,
+) -> Result<Vec<Effect>, SimulationError> {
     let clothing_choice = citizen.available_units(crate::marketplace::Good::FlaxGarment) > 0
         && citizen.clothing_need() > 0.0;
-    let standing_listing = citizen
-        .maintenance
-        .available(Effect::ListExcess, citizen.current_time_ms())
+    let standing_listing = allow_priority_listing
+        && citizen
+            .maintenance
+            .available(Effect::ListExcess, citizen.current_time_ms())
         && !clothing_choice
         && citizen.production_targets().is_some()
         && citizen.thirst() < crate::production::URGENT_HUNGER
@@ -895,11 +933,22 @@ fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
         .available_production_recipes()
         .map(|recipe| ProductionDecision::new(citizen, recipe))
         .collect::<Vec<_>>();
-    let results = root_goals(citizen)?
+    let goals = root_goals_with_priority(citizen, true)?;
+    let priority_listing = goals == [Effect::ListExcess];
+    let results = goals
         .into_iter()
         .map(|goal| evaluate_goal(citizen, goal, production.clone()))
         .collect();
-    reduce_results(citizen, production, results)
+    let plan = reduce_results(citizen, production.clone(), results)?;
+    if priority_listing && plan.actions.is_empty() {
+        let results = root_goals_with_priority(citizen, false)?
+            .into_iter()
+            .map(|goal| evaluate_goal(citizen, goal, production.clone()))
+            .collect();
+        reduce_results(citizen, production, results)
+    } else {
+        Ok(plan)
+    }
 }
 
 fn ordinary_goals() -> [Effect; 5] {
@@ -1023,6 +1072,8 @@ pub(crate) fn gated_request_fixture(
         roots,
         citizen,
         production: Vec::new(),
+        priority_listing: false,
+        prior_elapsed: std::time::Duration::ZERO,
     }
 }
 
@@ -1096,6 +1147,93 @@ mod tests {
 
     const MINUTE_MS: u64 = 60_000;
     const TWO_HOURS_MS: u64 = 2 * 60 * MINUTE_MS;
+
+    fn blocked_priority_listing() -> Citizen {
+        use crate::{
+            StartingRole,
+            locations::{Location, Map, ObjectKind, Position},
+            marketplace::Good,
+        };
+        let mut citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Tailor)
+            .with_good(Good::Berries, 20_000)
+            .unwrap();
+        let mut map = Map::default();
+        let market = map.public_place(Location::Market);
+        map.places_mut()
+            .get_mut(&market)
+            .unwrap()
+            .outdoor_objects
+            .retain(|object| object.kind != ObjectKind::PantryShelving);
+        let (map, _) = map
+            .with_place(
+                Location::Tailory,
+                Position::default(),
+                Some(citizen.id()),
+                "Tailory",
+            )
+            .unwrap();
+        citizen = citizen
+            .with_map(map)
+            .unwrap()
+            .with_home_good(Good::BreadRoll, 5)
+            .unwrap();
+        citizen.refresh_production_targets(true).unwrap();
+        citizen
+    }
+
+    #[test]
+    fn infeasible_priority_listing_uses_normal_roots_and_missing_actions_return_an_error() {
+        let citizen = blocked_priority_listing();
+        assert_eq!(
+            root_goals_with_priority(&citizen, true).unwrap(),
+            vec![Effect::ListExcess]
+        );
+        assert!(
+            goals::variants_after(
+                &Prediction::new(&citizen, Cooldowns::default()),
+                Effect::ListExcess
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let result = plan(&citizen).unwrap();
+        assert!(!result.actions().is_empty());
+        assert_ne!(result.goals()[0].goal, Effect::ListExcess);
+        assert!(citizen.start_planning().is_ok());
+        assert_eq!(
+            empty_plan().start_action(&citizen, 0),
+            Err(SimulationError::PlanningFailed)
+        );
+    }
+
+    #[test]
+    fn polled_listing_fallback_keeps_elapsed_time_and_cancels_its_current_phase() {
+        let citizen = blocked_priority_listing();
+        let mut pending = request(&citizen).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut elapsed = pending.elapsed();
+        while pending.priority_listing {
+            assert!(pending.try_result().is_none());
+            let next = pending.elapsed();
+            assert!(next >= elapsed);
+            elapsed = next;
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        pending.cancel();
+        assert!(pending.try_result().is_none());
+        let mut pending = request(&citizen).unwrap();
+        loop {
+            if let Some(result) = pending.try_result() {
+                assert!(!result.unwrap().actions().is_empty());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
 
     #[test]
     fn a_legacy_away_drink_plan_replans_before_consumption() {
