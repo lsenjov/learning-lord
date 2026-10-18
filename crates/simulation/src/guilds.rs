@@ -70,17 +70,36 @@ impl Citizen {
     }
     pub(crate) fn may_use_place(&self, place: &Place) -> bool {
         place.owner.is_some_and(|owner| self.may_use_owner(owner))
-            || self
-                .guilds
-                .values()
-                .any(|access| access.workshops.contains(&place.id))
+            || place
+                .objects()
+                .any(|object| self.may_use_object(place, object))
     }
-    pub(crate) fn workshop_fee_cost(&self, site: Option<PlaceId>, elapsed_ms: u64) -> f64 {
-        let site = site.or(self.designated_workplace);
+    pub(crate) fn workshop_fee_cost(
+        &self,
+        site: Option<PlaceId>,
+        recipe: crate::production::Recipe,
+        elapsed_ms: u64,
+    ) -> f64 {
+        let Some(site) = site.or(self.designated_workplace) else {
+            return 0.0;
+        };
+        let Ok(place) = self.map.place(site) else {
+            return 0.0;
+        };
+        let capability = crate::locations::ObjectKind::for_recipe(recipe);
+        let eligible = || {
+            place.objects().filter(|object| {
+                object.kind.same_capability(capability) && self.may_use_object(place, object)
+            })
+        };
+        let owner = eligible()
+            .find(|object| object.available(self.id))
+            .or_else(|| eligible().next())
+            .and_then(|object| place.object_owner(object.id));
         self.guilds
-            .values()
-            .filter(|access| site.is_some_and(|site| access.workshops.contains(&site)))
-            .map(|access| access.hourly_fee as f64 * elapsed_ms as f64 / FEE_HOUR_MS as f64)
+            .iter()
+            .filter(|(guild, access)| Some(**guild) == owner && access.workshops.contains(&site))
+            .map(|(_, access)| access.hourly_fee as f64 * elapsed_ms as f64 / FEE_HOUR_MS as f64)
             .sum()
     }
     pub(crate) fn accrue_workshop_fee(
@@ -88,10 +107,14 @@ impl Citizen {
         place: PlaceId,
         elapsed_ms: u64,
     ) -> Result<Option<(AgentId, Coins)>, SimulationError> {
+        let owner = self
+            .active_action()
+            .and_then(|active| active.claimed_objects().next())
+            .and_then(|id| self.map.place(place).ok()?.object_owner(id));
         let Some((payee, access)) = self
             .guilds
             .iter()
-            .find(|(_, access)| access.workshops.contains(&place))
+            .find(|(guild, access)| Some(**guild) == owner && access.workshops.contains(&place))
         else {
             return Ok(None);
         };
@@ -171,7 +194,14 @@ impl Universe {
             crate::guild_history::GuildHistory::new(universe.current_time_ms, 0),
         );
         for workshop in workshops {
-            universe.map.places_mut().get_mut(workshop).unwrap().owner = Some(id);
+            let place = universe.map.places_mut().get_mut(workshop).unwrap();
+            let previous = place.owner;
+            place.owner = Some(id);
+            for building in &mut place.buildings {
+                if Some(building.owner) == previous {
+                    building.owner = id;
+                }
+            }
         }
         for member in members {
             let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(member).unwrap().kind;
@@ -621,6 +651,12 @@ mod tests {
     fn concurrent_workers_share_account_fractions_without_pooling_independent_goods() {
         for shared in [false, true] {
             let (mut world, first, second, place, guild) = workshop(10);
+            let room = &mut world.map.places_mut().get_mut(&place).unwrap().buildings[0].rooms[0];
+            room.object_capacity += 1;
+            room.objects.push(crate::locations::Object::new(
+                crate::locations::ObjectKind::Loom,
+            ));
+            world.refresh_market();
             let account = if shared {
                 let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
                 let (next, household) = world
@@ -950,9 +986,123 @@ mod tests {
         }
         let (mut world, _, _, place, _) = workshop(0);
         world.map.places_mut().get_mut(&place).unwrap().kind = Location::Brewery;
-        world.map.places_mut().get_mut(&place).unwrap().batches =
-            vec![None; crate::brewing::BREWERY_SLOTS];
+
         world.refresh_market();
         assert!(Universe::from_save_str(&world.to_save_string().unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod object_access_tests {
+    use super::*;
+    use crate::{
+        CitizenAction, StartingRole,
+        locations::{Location, Map},
+        marketplace::Good,
+        production::{Recipe, Skill},
+        storage::GoodsOwner,
+    };
+
+    #[test]
+    fn guild_members_share_distinct_objects_but_cannot_use_a_busy_loom() {
+        let (world, first) = Universe::with_map(Map::default())
+            .with_citizen(
+                "First",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Weaver),
+            )
+            .unwrap();
+        let (world, second) = world
+            .with_citizen(
+                "Second",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Weaver),
+            )
+            .unwrap();
+        let (world, site) = world.with_property(first, Location::Weavery).unwrap();
+        let (mut world, _) = world
+            .with_guild("Weavers", &[first, second], &[site], 0)
+            .unwrap();
+        for (id, recipe) in [(first, Recipe::WeaveCloth), (second, Recipe::SpinThread)] {
+            for &(good, units) in recipe.inputs() {
+                world = world
+                    .with_stored_good(site, GoodsOwner::Agent(id), good, units)
+                    .unwrap();
+            }
+        }
+        let action = CitizenAction::ProduceAt {
+            place: site,
+            recipe: Recipe::WeaveCloth,
+        };
+        let world = world.start_action(first, action).unwrap();
+        assert_eq!(
+            world.start_action(second, action),
+            Err(SimulationError::MissingInputs)
+        );
+        let world = world
+            .start_action(
+                second,
+                CitizenAction::ProduceAt {
+                    place: site,
+                    recipe: Recipe::SpinThread,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
+            world
+        );
+    }
+
+    #[test]
+    fn private_equipment_at_a_guild_location_has_no_guild_fees_or_history() {
+        let (world, first) = Universe::with_map(Map::default())
+            .with_citizen(
+                "Worker",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Weaver)
+                    .with_skill_practice_ms(Skill::Milling, Some(0))
+                    .unwrap()
+                    .with_coins(100)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (world, site) = world.with_property(first, Location::Weavery).unwrap();
+        let (mut world, guild) = world.with_guild("Weavers", &[first], &[site], 10).unwrap();
+        world.map = world
+            .map
+            .with_building(site, Location::Mill, first, "Private mill")
+            .unwrap()
+            .0;
+        world.refresh_market();
+        world = world
+            .with_stored_good(site, GoodsOwner::Agent(first), Good::Wheat, 1000)
+            .unwrap();
+        let AgentKind::Citizen(worker) = &world.agents[&first].kind;
+        let action = CitizenAction::ProduceAt {
+            place: site,
+            recipe: Recipe::MillFlour,
+        };
+        let duration = worker.action_duration_ms(action).unwrap();
+        assert_eq!(
+            worker.workshop_fee_cost(Some(site), Recipe::MillFlour, duration),
+            0.0
+        );
+        let world = world
+            .start_action(first, action)
+            .unwrap()
+            .advance(duration)
+            .unwrap();
+        assert_eq!(world.guilds[&guild].coins, 0);
+        let day = &world.guild_history(guild).unwrap().current;
+        assert_eq!(day.fees_accrued, WorkshopFeeAccount::default());
+        assert!(day.contributions.is_empty());
+        assert_eq!(
+            Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
+            world
+        );
     }
 }

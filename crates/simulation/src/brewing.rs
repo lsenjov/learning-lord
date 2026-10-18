@@ -1,6 +1,6 @@
 use crate::{
     Citizen, CitizenAction, SimulationError,
-    locations::{Location, PlaceId},
+    locations::PlaceId,
     marketplace::Good,
     production::{Recipe, Skill, skill_duration_reduction},
 };
@@ -40,10 +40,17 @@ impl crate::locations::Map {
             .places_mut()
             .get_mut(&brewery)
             .ok_or(SimulationError::PlaceNotFound)?;
-        *place
-            .batches
-            .get_mut(slot)
-            .ok_or(SimulationError::MissingProperty)? = batch;
+        let object = place
+            .objects_mut()
+            .filter(|object| {
+                matches!(
+                    object.kind,
+                    crate::locations::ObjectKind::FermentationVessel { .. }
+                )
+            })
+            .nth(slot)
+            .ok_or(SimulationError::MissingProperty)?;
+        object.kind = crate::locations::ObjectKind::FermentationVessel { batch };
         Ok(())
     }
 }
@@ -55,14 +62,16 @@ impl Citizen {
         slot: usize,
     ) -> Result<Option<Batch>, SimulationError> {
         let place = self.map.place(brewery)?;
-        if place.kind != Location::Brewery {
-            return Err(SimulationError::MissingProperty);
-        }
-        if !self.may_use_place(place) {
+        if !self.may_use_object(
+            place,
+            place
+                .batch_object(slot)
+                .ok_or(SimulationError::MissingProperty)?,
+        ) {
             return Err(SimulationError::PrivateProperty);
         }
         place
-            .batches
+            .batches()
             .get(slot)
             .copied()
             .ok_or(SimulationError::MissingProperty)
@@ -80,9 +89,10 @@ impl Citizen {
         let site = action
             .required_place(self)
             .ok_or(SimulationError::MissingProperty)?;
-        if self.map.place(site)?.batches.iter().all(Option::is_some) {
+        if self.map.place(site)?.batches().iter().all(Option::is_some) {
             return Err(SimulationError::MissingInputs);
         }
+        self.action_objects(action)?;
         let duration = self.brewing_labor_duration(PREPARATION_MS)?;
         self.current_time_ms()
             .checked_add(duration)
@@ -90,17 +100,19 @@ impl Citizen {
             .ok_or(SimulationError::TimeOverflow)?;
         Ok(duration)
     }
-    pub(crate) fn start_brewing(&mut self, action: CitizenAction) -> Result<(), SimulationError> {
+    pub(crate) fn start_brewing(
+        &mut self,
+        action: CitizenAction,
+        vessel: crate::locations::ObjectId,
+    ) -> Result<(), SimulationError> {
         let site = action
             .required_place(self)
             .ok_or(SimulationError::MissingProperty)?;
         let slot = self
             .map
             .place(site)?
-            .batches
-            .iter()
-            .position(Option::is_none)
-            .ok_or(SimulationError::MissingInputs)?;
+            .batch_index(vessel)
+            .ok_or(SimulationError::MissingProperty)?;
         for &(good, units) in Recipe::BrewBeer.inputs() {
             self.consume_at(site, good, units)?;
         }
@@ -114,13 +126,15 @@ impl Citizen {
         let site = action
             .required_place(self)
             .ok_or(SimulationError::MissingProperty)?;
+        let vessel = self
+            .active_action()
+            .and_then(|active| active.claimed_objects().nth(1))
+            .ok_or(SimulationError::MissingProperty)?;
         let slot = self
             .map
             .place(site)?
-            .batches
-            .iter()
-            .position(|batch| *batch == Some(Batch::Preparing))
-            .ok_or(SimulationError::MissingInputs)?;
+            .batch_index(vessel)
+            .ok_or(SimulationError::MissingProperty)?;
         self.map.set_batch(
             site,
             slot,
@@ -146,6 +160,7 @@ impl Citizen {
         {
             return Err(SimulationError::MissingInputs);
         }
+        self.action_objects(CitizenAction::CollectBeer { brewery, slot })?;
         self.brewing_labor_duration(COLLECTION_MS)
     }
     pub(crate) fn collect_beer(
@@ -166,16 +181,19 @@ impl Citizen {
         let Ok(place) = self.map.place(brewery) else {
             return Vec::new();
         };
-        if !self.may_use_place(place) || place.kind != Location::Brewery {
+        if !self.may_use_place(place) || place.batches().is_empty() {
             return Vec::new();
         }
         place
-            .batches
+            .batches()
             .iter()
             .enumerate()
             .filter_map(|(slot, batch)| {
                 batch
-                    .filter(|batch| batch.ready(self.current_time_ms()))
+                    .filter(|batch| {
+                        batch.ready(self.current_time_ms())
+                            && self.beer_collection_duration(brewery, slot).is_ok()
+                    })
                     .map(|_| CitizenAction::CollectBeer { brewery, slot })
             })
             .collect()
@@ -185,7 +203,11 @@ impl Citizen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentKind, StartingRole, Universe, locations::Map, persistence::SaveError};
+    use crate::{
+        AgentKind, StartingRole, Universe,
+        locations::{Location, Map},
+        persistence::SaveError,
+    };
 
     #[test]
     fn prediction_counts_batches_once_and_never_reserves_consumed_inputs() {
@@ -220,7 +242,7 @@ mod tests {
                 .map
                 .place(site)
                 .unwrap()
-                .batches
+                .batches()
                 .iter()
                 .all(Option::is_none)
         );
@@ -278,13 +300,8 @@ mod tests {
             ));
         }
         let mut malformed = world.clone();
-        malformed
-            .map
-            .places_mut()
-            .get_mut(&site)
-            .unwrap()
-            .batches
-            .pop();
+        malformed.map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0].object_capacity =
+            0;
         assert!(matches!(
             Universe::from_save_str(&malformed.to_save_string().unwrap()),
             Err(SaveError::InvalidState(_))

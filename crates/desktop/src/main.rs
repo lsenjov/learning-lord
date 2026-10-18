@@ -507,7 +507,7 @@ fn crop_label(
         .map()
         .place(field)
         .ok()
-        .and_then(|place| place.plots.get(plot))
+        .and_then(|place| place.plots().get(plot))
         .and_then(|crop| *crop)
         .map(|crop| crop.kind.name())
         .or_else(|| {

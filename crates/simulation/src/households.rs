@@ -50,6 +50,7 @@ impl Citizen {
     }
     pub(crate) fn may_use_owner(&self, owner: AgentId) -> bool {
         owner == self.id
+            || owner == self.economic_id()
             || self
                 .household
                 .as_ref()
@@ -246,6 +247,7 @@ impl Universe {
             },
         );
         for member in members {
+            universe.map.assign_bedroom(home, *member)?;
             let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(member).unwrap().kind;
             citizen.home = home;
             citizen.position = universe.map.position(home);
@@ -607,11 +609,16 @@ mod tests {
                     CitizenAction::EquipClothing
                 }
             };
-            let started = world
-                .start_action(first, action)
-                .unwrap()
-                .start_action(second, action)
-                .unwrap();
+            let started = world.start_action(first, action).unwrap();
+            let started = if scenario == 1 {
+                assert_eq!(
+                    started.start_action(second, action),
+                    Err(SimulationError::MissingInputs)
+                );
+                started
+            } else {
+                started.start_action(second, action).unwrap()
+            };
             let AgentKind::Citizen(worker) = &started.agents[&first].kind;
             let elapsed = worker.active_action().unwrap().remaining_ms();
             let finished = started.advance(elapsed).unwrap();
@@ -702,6 +709,12 @@ mod tests {
         let (mut world, household) = world
             .with_household("Brewers", citizen.home(), &[first, second])
             .unwrap();
+        let room = &mut world.map.places_mut().get_mut(&brewery).unwrap().buildings[0].rooms[0];
+        room.object_capacity += 1;
+        room.objects.push(crate::locations::Object::new(
+            crate::locations::ObjectKind::BrewingEquipment,
+        ));
+        world.refresh_market();
         for &(good, units) in Recipe::BrewBeer.inputs() {
             world = world
                 .with_stored_good(brewery, GoodsOwner::Household(household), good, units * 2)

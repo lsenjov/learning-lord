@@ -55,7 +55,7 @@ fn preparation_consumes_inputs_now_and_collection_alone_produces_beer() {
     let started = world.start_action(id, prep(site)).unwrap();
     assert_eq!(citizen(&started, id).units(Good::Water), 3000);
     assert_eq!(
-        started.map().place(site).unwrap().batches[0],
+        started.map().place(site).unwrap().batches()[0],
         Some(Batch::Preparing)
     );
     assert_eq!(
@@ -68,7 +68,7 @@ fn preparation_consumes_inputs_now_and_collection_alone_produces_beer() {
     let done = loaded.advance(PREPARATION_MS / 2).unwrap();
     assert_eq!(citizen(&done, id).units(Good::Beer), 0);
     assert_eq!(
-        done.map().place(site).unwrap().batches[0],
+        done.map().place(site).unwrap().batches()[0],
         Some(Batch::Fermenting {
             ready_at_ms: PREPARATION_MS + FERMENTATION_MS
         })
@@ -99,7 +99,7 @@ fn preparation_consumes_inputs_now_and_collection_alone_produces_beer() {
     assert!(duration <= COLLECTION_MS);
     let half = started.advance(duration / 2).unwrap();
     assert_eq!(citizen(&half, id).units(Good::Beer), 0);
-    assert!(half.map().place(site).unwrap().batches[0].is_some());
+    assert!(half.map().place(site).unwrap().batches()[0].is_some());
     let collected = half.advance(duration - duration / 2).unwrap();
     assert_eq!(citizen(&collected, id).units(Good::Beer), 0);
     assert_eq!(
@@ -108,7 +108,7 @@ fn preparation_consumes_inputs_now_and_collection_alone_produces_beer() {
             .units(site, citizen(&collected, id).goods_owner(), Good::Beer),
         1000
     );
-    assert_eq!(collected.map().place(site).unwrap().batches[0], None);
+    assert_eq!(collected.map().place(site).unwrap().batches()[0], None);
     assert_eq!(
         collected.citizen_history(id).unwrap().current.produced[Good::Beer as usize],
         1000
@@ -312,7 +312,7 @@ fn preparation_plans_keep_fermentation_unattended_and_sync_the_map() {
         Some(Recipe::BrewBeer)
     );
     assert_eq!(
-        started.map().place(site).unwrap().batches[0],
+        started.map().place(site).unwrap().batches()[0],
         Some(Batch::Preparing)
     );
     let plan = worker.active_plan().unwrap().plan();
@@ -334,7 +334,7 @@ fn preparation_plans_keep_fermentation_unattended_and_sync_the_map() {
             .map()
             .place(site)
             .unwrap()
-            .batches
+            .batches()
             .iter()
             .flatten()
             .count()
@@ -372,8 +372,8 @@ fn independent_brewers_preserve_each_others_slots_when_plans_resume() {
     let map = world.map();
     for site in [first_site, second_site] {
         let place = map.place(site).unwrap();
-        assert_eq!(place.batches.iter().flatten().count(), 2);
-        assert!(place.batches.contains(&Some(Batch::Preparing)));
+        assert_eq!(place.batches().iter().flatten().count(), 2);
+        assert!(place.batches().contains(&Some(Batch::Preparing)));
     }
     assert_eq!(
         Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),

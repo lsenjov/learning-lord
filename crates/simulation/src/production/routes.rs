@@ -210,7 +210,13 @@ fn quote(
             .map(|good| (good, builder.needed[good as usize])),
     )
     .ok()?;
-    let fees = citizen.workshop_fee_cost(site, builder.duration_ms);
+    let fees = builder
+        .batches
+        .iter()
+        .map(|&recipe| {
+            citizen.workshop_fee_cost(site, recipe, recipe.duration_ms(citizen).unwrap_or(0))
+        })
+        .sum::<f64>();
     let purchase_coins = finite_purchase_cost(citizen, purchases)?;
     let surplus_value = Good::ALL
         .into_iter()
@@ -758,8 +764,14 @@ mod tests {
         let mut citizen = listed(citizen, Good::Cloth, 200, 40.0)
             .with_coins(0)
             .unwrap();
+        let guild = AgentId(uuid::Uuid::new_v4());
+        let place = citizen.map.places_mut().get_mut(&site).unwrap();
+        place.owner = Some(guild);
+        for building in &mut place.buildings {
+            building.owner = guild;
+        }
         citizen.guilds.insert(
-            AgentId(uuid::Uuid::new_v4()),
+            guild,
             crate::guilds::GuildAccess {
                 workshops: vec![site],
                 hourly_fee: 2,

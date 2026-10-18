@@ -345,7 +345,7 @@ pub(crate) fn action(
                 .map()
                 .place(field)
                 .ok()
-                .and_then(|p| p.plots.get(plot).copied().flatten())
+                .and_then(|p| p.plots().get(plot).copied().flatten())
                 .map(|crop| crop.kind)
                 .or_else(|| {
                     citizen.active_plan().and_then(|active| {

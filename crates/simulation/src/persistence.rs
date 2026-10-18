@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 8;
+pub const SAVE_VERSION: u32 = 9;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -108,7 +108,7 @@ impl Universe {
         let mut unsupported_version = None;
         let mut deserializer = ron::Deserializer::from_str(input)
             .map_err(|error| SaveError::Format(error.to_string()))?;
-        let mut universe = SaveLoader {
+        let universe = SaveLoader {
             unsupported_version: &mut unsupported_version,
         }
         .deserialize(&mut deserializer)
@@ -120,17 +120,12 @@ impl Universe {
             .end()
             .map_err(|error| SaveError::Format(deserializer.span_error(error).to_string()))?;
         universe.validate_save()?;
-        // Validate actions before adding plots so invalid legacy indices stay invalid.
-        expand_legacy_fields(&mut universe.map);
-        for (_, agent) in universe.agents.iter_mut() {
-            let AgentKind::Citizen(citizen) = &mut agent.kind;
-            expand_legacy_fields(&mut citizen.map);
-        }
         Ok(universe)
     }
 
     fn validate_save(&self) -> Result<(), SaveError> {
         self.map.validate_save()?;
+        self.validate_objects()?;
         self.market.validate_save()?;
         self.storage.validate_save()?;
         self.validate_households()?;
@@ -150,40 +145,6 @@ impl Universe {
                 ));
             }
             citizen.validate_save()?;
-            if let Some(active) = citizen.active_action() {
-                let action = active.action();
-                if action.production_recipe() == Some(crate::production::Recipe::BrewBeer) {
-                    let site = action
-                        .required_place(citizen)
-                        .ok_or(SaveError::InvalidState("missing preparation site"))?;
-                    if !self.map.place(site).is_ok_and(|place| {
-                        citizen.may_use_place(place)
-                            && place.kind == Location::Brewery
-                            && place
-                                .batches
-                                .iter()
-                                .filter(|batch| **batch == Some(crate::brewing::Batch::Preparing))
-                                .count()
-                                > 0
-                    }) {
-                        return Err(SaveError::InvalidState("invalid active preparation"));
-                    }
-                }
-                if let CitizenAction::CollectBeer { brewery, slot } = action
-                    && !self.map.place(brewery).is_ok_and(|place| {
-                        citizen.may_use_place(place)
-                            && place.kind == Location::Brewery
-                            && place
-                                .batches
-                                .get(slot)
-                                .copied()
-                                .flatten()
-                                .is_some_and(|batch| batch.ready(self.current_time_ms))
-                    })
-                {
-                    return Err(SaveError::InvalidState("invalid active collection"));
-                }
-            }
             self.citizen_histories[id].validate_save(self.current_time_ms)?;
         }
         for (id, rule) in &self.taxation.rules {
@@ -212,39 +173,6 @@ impl Universe {
                 || account.goods_owed().is_err()
         }) {
             return Err(SaveError::InvalidState("invalid tax account"));
-        }
-        for place in self
-            .map
-            .places()
-            .values()
-            .filter(|place| place.kind == Location::Brewery)
-        {
-            let owner = place
-                .owner
-                .ok_or(SaveError::InvalidState("unowned brewery"))?;
-            if !self.agents.contains_key(&owner) && !self.guilds.contains_key(&owner) {
-                return Err(SaveError::InvalidState("missing brewery owner"));
-            }
-            let preparing = place
-                .batches
-                .iter()
-                .filter(|batch| **batch == Some(crate::brewing::Batch::Preparing))
-                .count();
-            let active_prep = self
-                .agents
-                .values()
-                .filter(|agent| {
-                    let AgentKind::Citizen(citizen) = &agent.kind;
-                    citizen.active_action().is_some_and(|active| {
-                        active.action().production_recipe()
-                            == Some(crate::production::Recipe::BrewBeer)
-                            && active.action().required_place(citizen) == Some(place.id)
-                    })
-                })
-                .count();
-            if preparing != active_prep {
-                return Err(SaveError::InvalidState("orphan brewery preparation"));
-            }
         }
         self.validate_tax_reservations()?;
         Ok(())
@@ -574,14 +502,6 @@ impl Citizen {
     }
 }
 
-fn expand_legacy_fields(map: &mut crate::locations::Map) {
-    for (_, place) in map.places_mut().iter_mut() {
-        if place.kind == Location::Field && place.plots.len() == 12 {
-            place.plots.resize(crate::farming::FIELD_PLOTS, None);
-        }
-    }
-}
-
 fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result<(), SaveError> {
     if matches!(action, CitizenAction::Buy(list) | CitizenAction::BuyAt { list, .. } if !list.validate_bounds())
     {
@@ -597,7 +517,7 @@ fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result
         CitizenAction::CollectBeer { brewery, slot } => {
             if !map
                 .place(brewery)
-                .is_ok_and(|place| place.kind == Location::Brewery && slot < place.batches.len())
+                .is_ok_and(|place| slot < place.batches().len())
             {
                 return Err(SaveError::InvalidState("invalid brewing action"));
             }
@@ -609,7 +529,7 @@ fn validate_action(action: CitizenAction, map: &crate::locations::Map) -> Result
         | CitizenAction::Tend { field, plot, .. } => {
             let valid = map
                 .place(field)
-                .is_ok_and(|place| place.kind == Location::Field && plot < place.plots.len());
+                .is_ok_and(|place| plot < place.plots().len());
             if !valid || matches!(action, CitizenAction::Tend { stage, .. } if stage >= 2) {
                 return Err(SaveError::InvalidState("invalid crop action"));
             }
@@ -942,6 +862,7 @@ mod tests {
                 arrears: 3,
             },
         );
+        world.refresh_market();
         let loaded = round_trip(&world);
         assert_eq!(
             loaded.advance(123_456).unwrap(),
@@ -953,7 +874,11 @@ mod tests {
         let resize = |map: &mut Map| {
             for (_, place) in map.places_mut().iter_mut() {
                 if place.kind == Location::Field {
-                    place.plots.resize(count, None);
+                    place.outdoor_objects.resize_with(count, || {
+                        crate::locations::Object::new(crate::locations::ObjectKind::CropPlot {
+                            crop: None,
+                        })
+                    });
                 }
             }
         };
@@ -965,51 +890,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fields_expand_without_changing_crops_or_committed_plans() {
-        let (world, id) = Universe::with_map(Map::default())
-            .with_citizen(
-                "Hungry",
-                Citizen::with_needs(80.0, -100.0)
-                    .unwrap()
-                    .with_good(Good::BreadRoll, 10)
-                    .unwrap(),
-            )
-            .unwrap();
-        let (mut world, field) = world.with_property(id, Location::Field).unwrap();
-        world
-            .map
-            .set_crop(
-                field,
-                11,
-                Some(crate::farming::Crop {
-                    kind: CropKind::Cabbage,
-                    planted_at_ms: 0,
-                    tended: [true, false],
-                }),
-            )
-            .unwrap();
-        let mut world = world.start_planning(id).unwrap().advance(1000).unwrap();
-        resize_fields(&mut world, 12);
-        let AgentKind::Citizen(citizen) = &world.agents[&id].kind;
-        assert!(citizen.active_plan().is_some());
-        let loaded = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
-        let plots = &loaded.map.place(field).unwrap().plots;
-        assert_eq!(&plots[..12], &world.map.place(field).unwrap().plots);
-        assert_eq!(plots.len(), 24);
-        assert!(plots[12..].iter().all(Option::is_none));
-        resize_fields(&mut world, 24);
-        assert_eq!(loaded, world);
-        round_trip(&loaded);
-        assert_eq!(loaded.advance(1000).unwrap(), world.advance(1000).unwrap());
-    }
-
-    #[test]
     fn rejects_malformed_fields_and_out_of_range_legacy_actions() {
         let (world, id) = Universe::with_map(Map::default())
             .with_citizen("Farmer", Citizen::new(0.0).unwrap())
             .unwrap();
         let (world, field) = world.with_property(id, Location::Field).unwrap();
-        for count in [0, 11, 13, 23, 25] {
+        for count in [0, 11, 12, 13, 23, 25] {
             let mut invalid = world.clone();
             resize_fields(&mut invalid, count);
             assert!(matches!(
@@ -1286,6 +1172,7 @@ mod tests {
         let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&id).unwrap().kind;
         citizen.hunger = 0.0;
         citizen.active_action = Some(crate::ActiveAction {
+            claimed_objects: [None; 2],
             action: CitizenAction::Wait,
             duration_ms: 1,
             remaining_ms: 2,

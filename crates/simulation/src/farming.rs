@@ -128,11 +128,16 @@ impl Citizen {
     }
     pub fn crop(&self, field: PlaceId, plot: usize) -> Result<Option<Crop>, SimulationError> {
         let place = self.map.place(field)?;
-        if !self.may_use_place(place) {
+        if !self.may_use_object(
+            place,
+            place
+                .crop_object(plot)
+                .ok_or(SimulationError::MissingProperty)?,
+        ) {
             return Err(SimulationError::PrivateProperty);
         }
         place
-            .plots
+            .plots()
             .get(plot)
             .copied()
             .ok_or(SimulationError::MissingProperty)
@@ -148,9 +153,7 @@ impl Citizen {
             CitizenAction::Clear { field, plot } => (field, plot, HOUR_MS / 4),
             _ => return Err(SimulationError::MissingProperty),
         };
-        if self.claimed_crop_plots.contains(&(field, plot)) {
-            return Err(SimulationError::MissingInputs);
-        }
+        self.action_objects(action)?;
         let crop = self.crop(field, plot)?;
         let practice = self
             .skill_practice_ms(Skill::Farming)
@@ -248,7 +251,9 @@ impl Citizen {
         }
         let mut fields: Vec<_> = self
             .accessible_properties()
-            .filter(|place| !place.plots.is_empty() && field.is_none_or(|field| field == place.id))
+            .filter(|place| {
+                !place.plots().is_empty() && field.is_none_or(|field| field == place.id)
+            })
             .collect();
         fields.sort_by_key(|place| place.id.0);
         let mut existing = Vec::new();
@@ -262,7 +267,7 @@ impl Citizen {
                 continue;
             };
             arrived.market_time_ms = arrival_ms;
-            for (plot, crop) in field.plots.iter().enumerate() {
+            for (plot, crop) in field.plots().iter().enumerate() {
                 if let Some(crop) = crop {
                     let actions = [
                         CitizenAction::Tend {
@@ -467,7 +472,7 @@ mod tests {
             let crops: Vec<_> = map
                 .places()
                 .values()
-                .flat_map(|place| place.plots.iter().flatten())
+                .flat_map(|place| place.plots().iter().flatten())
                 .copied()
                 .collect();
             let produced: u64 = ids
@@ -629,7 +634,10 @@ mod tests {
     #[test]
     fn full_care_harvests_once_after_four_days() {
         let (citizen, field) = farmer();
-        assert_eq!(citizen.map().place(field).unwrap().plots.len(), FIELD_PLOTS);
+        assert_eq!(
+            citizen.map().place(field).unwrap().plots().len(),
+            FIELD_PLOTS
+        );
         let mut citizen = perform(
             citizen,
             CitizenAction::Plant {

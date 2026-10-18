@@ -343,8 +343,7 @@ pub(crate) fn stock_cap_batches(recipe: Recipe, citizen: &Citizen) -> Option<f64
         return Some(
             citizen
                 .accessible_properties()
-                .filter(|place| place.kind == Location::Brewery)
-                .map(|place| place.batches.len())
+                .map(|place| citizen.accessible_batches(place).count())
                 .sum::<usize>() as f64
                 * crate::brewing::FERMENTATION_MS as f64
                 / (crate::brewing::FERMENTATION_MS + recipe.duration_ms(citizen).ok()?) as f64,
@@ -388,13 +387,12 @@ pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
     if good == Good::Beer {
         stock += citizen
             .accessible_properties()
-            .map(|place| place.batches.iter().flatten().count() as f64 * 1000.0)
+            .map(|place| citizen.accessible_batches(place).flatten().count() as f64 * 1000.0)
             .sum::<f64>();
     }
     for place in citizen.accessible_properties() {
-        for crop in place
-            .plots
-            .iter()
+        for crop in citizen
+            .accessible_crops(place)
             .flatten()
             .filter(|crop| crop.kind.good() == good)
         {
@@ -418,7 +416,7 @@ pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
                 && let crate::CitizenAction::Tend { field, plot, stage } = active.action()
                 && field == place.id
                 && place
-                    .plots
+                    .plots()
                     .get(plot)
                     .is_some_and(|existing| existing.as_ref() == Some(crop))
             {
@@ -479,6 +477,7 @@ fn profit_with_inputs(
         - input_value(recipe, citizen, owned)?
         - citizen.workshop_fee_cost(
             site.or_else(|| citizen.production_place(recipe).ok()),
+            recipe,
             recipe.duration_ms(citizen).ok()?,
         );
     profit.is_finite().then_some(profit)
@@ -537,6 +536,7 @@ pub(crate) fn estimated_batch_cost(
     let cost = input_value(recipe, citizen, &owned)?
         + citizen.workshop_fee_cost(
             site.or_else(|| citizen.production_place(recipe).ok()),
+            recipe,
             recipe.duration_ms(citizen).ok()?,
         );
     cost.is_finite().then_some(cost)
@@ -670,12 +670,22 @@ pub(crate) fn projected_recipes_at(
     let mut empty_plots = citizen
         .accessible_properties()
         .filter(|place| site.is_none_or(|site| site == place.id))
-        .map(|place| place.plots.iter().filter(|plot| plot.is_none()).count())
+        .map(|place| {
+            citizen
+                .accessible_crops(place)
+                .filter(|plot| plot.is_none())
+                .count()
+        })
         .sum::<usize>();
     let mut free_brew_slots = citizen
         .accessible_properties()
         .filter(|place| site.is_none_or(|site| site == place.id))
-        .map(|place| place.batches.iter().filter(|slot| slot.is_none()).count())
+        .map(|place| {
+            citizen
+                .accessible_batches(place)
+                .filter(|slot| slot.is_none())
+                .count()
+        })
         .sum::<usize>();
     let mut elapsed = 0;
     let mut recipes = Vec::new();

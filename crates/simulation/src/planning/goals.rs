@@ -2715,7 +2715,7 @@ mod tests {
                 .map()
                 .place(brewery)
                 .unwrap()
-                .batches
+                .batches()
                 .iter()
                 .all(Option::is_some)
         );

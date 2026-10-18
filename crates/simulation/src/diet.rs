@@ -383,6 +383,7 @@ impl Citizen {
             return None;
         }
         let action = ActiveAction {
+            claimed_objects: [None; 2],
             stored_inputs: crate::marketplace::ShoppingList::default(),
             action: crate::CitizenAction::Eat,
             remaining_ms: duration_ms,
@@ -843,6 +844,7 @@ mod tests {
                 .unwrap();
             let duration = meal_ms.max(drink * crate::DRINK_DURATION_MS / crate::DRINK_WATER_GRAMS);
             let active = ActiveAction {
+                claimed_objects: [None; 2],
                 stored_inputs: crate::marketplace::ShoppingList::default(),
                 action: CitizenAction::Eat,
                 duration_ms: duration,

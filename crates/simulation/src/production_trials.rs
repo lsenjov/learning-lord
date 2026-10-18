@@ -353,6 +353,7 @@ impl Citizen {
                     .sum::<f64>()
                     + self.workshop_fee_cost(
                         site.or_else(|| self.production_place(recipe).ok()),
+                        recipe,
                         recipe.duration_ms(self).ok()?,
                     );
                 estimate.is_finite().then_some(estimate)
@@ -437,10 +438,11 @@ impl Citizen {
         let key = (self.economic_id(), good);
         let source = if recipe == Recipe::BrewBeer {
             action.required_place(self).and_then(|brewery| {
+                let vessel = self.action_objects(action).ok()?[1]?;
                 self.map
                     .place(brewery)
-                    .ok()
-                    .and_then(|place| place.batches.iter().position(Option::is_none))
+                    .ok()?
+                    .batch_index(vessel)
                     .map(|slot| CitizenAction::CollectBeer { brewery, slot })
             })
         } else {
@@ -1473,7 +1475,7 @@ impl crate::Universe {
                     Some(CitizenAction::Plant { field, plot, .. }) => {
                         self.map
                             .place(field)
-                            .is_ok_and(|place| place.plots.get(plot).is_some_and(Option::is_some))
+                            .is_ok_and(|place| place.plots().get(plot).is_some_and(Option::is_some))
                             || citizen
                                 .active_action
                                 .is_some_and(|active| Some(active.action) == trial.source)
@@ -1481,7 +1483,7 @@ impl crate::Universe {
                     Some(CitizenAction::CollectBeer { brewery, slot }) => self
                         .map
                         .place(brewery)
-                        .is_ok_and(|place| place.batches.get(slot).is_some_and(Option::is_some)),
+                        .is_ok_and(|place| place.batches().get(slot).is_some_and(Option::is_some)),
                     Some(source) => citizen
                         .active_action
                         .is_some_and(|active| active.action == source),

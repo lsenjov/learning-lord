@@ -558,7 +558,7 @@ pub fn refresh(
                 crate::navigation::render(details, &[crate::navigation::Fragment::text("Owner: "), owner], 15.0, MUTED);
                 if place.kind == Location::Field {
                     details.spawn(text("FIELD PLOTS", 15.0, MUTED));
-                    for (plot, crop) in place.plots.iter().enumerate() {
+                    for (plot, crop) in place.plots().iter().enumerate() {
                         let now = universe.current_time_ms();
                         if let Some(crop) = crop {
                             use crate::navigation::{Fragment as F, Target};
@@ -570,7 +570,7 @@ pub fn refresh(
                 }
                 if place.kind == Location::Brewery {
                     details.spawn(text("BREWERY SLOTS", 15.0, MUTED));
-                    for (slot, batch) in place.batches.iter().enumerate() {
+                    for (slot, batch) in place.batches().iter().enumerate() {
                         details.spawn(text(batch_readout(slot, *batch, universe.current_time_ms()), 15.0, TEXT));
                     }
                 }

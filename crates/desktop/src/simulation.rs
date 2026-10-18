@@ -1227,8 +1227,8 @@ mod tests {
             .values()
             .filter(|place| place.kind == learning_lord_simulation::locations::Location::Field)
         {
-            assert_eq!(place.plots.len(), 24);
-            assert!(place.plots.iter().all(Option::is_none));
+            assert_eq!(place.plots().len(), 24);
+            assert!(place.plots().iter().all(Option::is_none));
         }
         let started = Instant::now();
         let next = universe.advance(STEP_MS).unwrap();
@@ -1493,8 +1493,8 @@ mod tests {
             .find(|place| place.kind == Location::Brewery)
             .unwrap();
         assert_eq!(brewery.owner, Some(citizen.id()));
-        assert_eq!(brewery.batches.len(), BREWERY_SLOTS);
-        assert!(brewery.batches.iter().all(Option::is_none));
+        assert_eq!(brewery.batches().len(), BREWERY_SLOTS);
+        assert!(brewery.batches().iter().all(Option::is_none));
     }
 
     #[test]

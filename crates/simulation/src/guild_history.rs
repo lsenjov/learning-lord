@@ -83,13 +83,18 @@ impl Universe {
         &mut self,
         member: AgentId,
         place: PlaceId,
+        equipment_owner: Option<AgentId>,
         elapsed: u64,
         produced: [Quantity; Good::COUNT],
     ) -> Result<(), SimulationError> {
         let Some(guild) = self
             .guilds
             .values()
-            .find(|guild| guild.workshops.contains(&place) && guild.members.contains(&member))
+            .find(|guild| {
+                Some(guild.id) == equipment_owner
+                    && guild.workshops.contains(&place)
+                    && guild.members.contains(&member)
+            })
             .map(|guild| guild.id)
         else {
             return Ok(());

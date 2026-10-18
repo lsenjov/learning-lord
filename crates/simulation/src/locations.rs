@@ -73,8 +73,254 @@ pub struct Place {
     pub position: Position,
     pub owner: Option<AgentId>,
     pub name: String,
-    pub plots: Vec<Option<crate::farming::Crop>>,
-    pub batches: Vec<Option<crate::brewing::Batch>>,
+    pub buildings: Vec<Building>,
+    pub outdoor_objects: Vec<Object>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BuildingId(pub Uuid);
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RoomId(pub Uuid);
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ObjectId(pub Uuid);
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Building {
+    pub id: BuildingId,
+    pub name: String,
+    pub owner: AgentId,
+    pub rooms: Vec<Room>,
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Room {
+    pub id: RoomId,
+    pub name: String,
+    pub object_capacity: usize,
+    pub objects: Vec<Object>,
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Object {
+    pub id: ObjectId,
+    pub kind: ObjectKind,
+    pub workers: Vec<AgentId>,
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectKind {
+    Bed {
+        resident: AgentId,
+    },
+    BerryBushes,
+    Trees,
+    FishingSpot,
+    WaterSource,
+    Millstone,
+    Oven,
+    SpinningWheel,
+    Loom,
+    SewingTable,
+    BrewingEquipment,
+    FermentationVessel {
+        batch: Option<crate::brewing::Batch>,
+    },
+    CropPlot {
+        crop: Option<crate::farming::Crop>,
+    },
+}
+impl ObjectKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bed { .. } => "Bed",
+            Self::BerryBushes => "Berry bushes",
+            Self::Trees => "Trees",
+            Self::FishingSpot => "Fishing spot",
+            Self::WaterSource => "Water source",
+            Self::Millstone => "Millstone",
+            Self::Oven => "Oven",
+            Self::SpinningWheel => "Spinning wheel",
+            Self::Loom => "Loom",
+            Self::SewingTable => "Sewing table",
+            Self::BrewingEquipment => "Brewing equipment",
+            Self::FermentationVessel { .. } => "Fermentation vessel",
+            Self::CropPlot { .. } => "Crop plot",
+        }
+    }
+    pub fn unlimited_workers(self) -> bool {
+        matches!(
+            self,
+            Self::BerryBushes | Self::Trees | Self::FishingSpot | Self::WaterSource
+        )
+    }
+    pub(crate) fn for_recipe(recipe: crate::production::Recipe) -> Self {
+        use crate::production::Recipe;
+        match recipe {
+            Recipe::Forage => Self::BerryBushes,
+            Recipe::ChopWood => Self::Trees,
+            Recipe::CatchFish => Self::FishingSpot,
+            Recipe::FetchWater => Self::WaterSource,
+            Recipe::MillFlour => Self::Millstone,
+            Recipe::BakeRolls | Recipe::BakeBerryPie => Self::Oven,
+            Recipe::SpinThread => Self::SpinningWheel,
+            Recipe::WeaveCloth => Self::Loom,
+            Recipe::MakeClothingBlock | Recipe::AssembleGarment => Self::SewingTable,
+            Recipe::BrewBeer => Self::BrewingEquipment,
+            _ => Self::CropPlot { crop: None },
+        }
+    }
+    pub(crate) fn same_capability(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+}
+impl Object {
+    pub fn new(kind: ObjectKind) -> Self {
+        Self {
+            id: ObjectId(Uuid::new_v4()),
+            kind,
+            workers: Vec::new(),
+        }
+    }
+    pub(crate) fn available(&self, worker: AgentId) -> bool {
+        self.kind.unlimited_workers() || self.workers.is_empty() || self.workers == [worker]
+    }
+}
+macro_rules! slots {
+    ($name:ident, $method:ident, $variant:ident, $field:ident, $ty:ty) => {
+        pub struct $name<'a>(&'a Place);
+        impl<'a> $name<'a> {
+            pub fn iter(&self) -> impl Iterator<Item = &'a Option<$ty>> + 'a + use<'a> {
+                self.0.objects().filter_map(|object| match &object.kind {
+                    ObjectKind::$variant { $field } => Some($field),
+                    _ => None,
+                })
+            }
+            pub fn get(&self, index: usize) -> Option<&'a Option<$ty>> {
+                self.iter().nth(index)
+            }
+            pub fn len(&self) -> usize {
+                self.iter().count()
+            }
+            pub fn is_empty(&self) -> bool {
+                self.iter().next().is_none()
+            }
+            pub fn contains(&self, value: &Option<$ty>) -> bool {
+                self.iter().any(|slot| slot == value)
+            }
+        }
+        impl std::ops::Index<usize> for $name<'_> {
+            type Output = Option<$ty>;
+            fn index(&self, index: usize) -> &Self::Output {
+                self.get(index).expect("object slot exists")
+            }
+        }
+        impl Place {
+            pub fn $method(&self) -> $name<'_> {
+                $name(self)
+            }
+        }
+    };
+}
+slots!(CropSlots, plots, CropPlot, crop, crate::farming::Crop);
+slots!(
+    BatchSlots,
+    batches,
+    FermentationVessel,
+    batch,
+    crate::brewing::Batch
+);
+impl Place {
+    pub fn objects(&self) -> impl Iterator<Item = &Object> {
+        self.outdoor_objects.iter().chain(
+            self.buildings
+                .iter()
+                .flat_map(|building| building.rooms.iter().flat_map(|room| room.objects.iter())),
+        )
+    }
+    pub(crate) fn objects_mut(&mut self) -> impl Iterator<Item = &mut Object> {
+        self.outdoor_objects
+            .iter_mut()
+            .chain(self.buildings.iter_mut().flat_map(|building| {
+                building
+                    .rooms
+                    .iter_mut()
+                    .flat_map(|room| room.objects.iter_mut())
+            }))
+    }
+    pub fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.objects().find(|object| object.id == id)
+    }
+    pub fn object_owner(&self, id: ObjectId) -> Option<AgentId> {
+        self.buildings
+            .iter()
+            .find(|building| {
+                building
+                    .rooms
+                    .iter()
+                    .any(|room| room.objects.iter().any(|object| object.id == id))
+            })
+            .map(|building| building.owner)
+            .or_else(|| {
+                self.outdoor_objects
+                    .iter()
+                    .any(|object| object.id == id)
+                    .then_some(self.owner)
+                    .flatten()
+            })
+    }
+    pub fn object_room(&self, id: ObjectId) -> Option<RoomId> {
+        self.buildings
+            .iter()
+            .flat_map(|building| &building.rooms)
+            .find(|room| room.objects.iter().any(|object| object.id == id))
+            .map(|room| room.id)
+    }
+    pub(crate) fn crop_object(&self, index: usize) -> Option<&Object> {
+        self.objects()
+            .filter(|object| matches!(object.kind, ObjectKind::CropPlot { .. }))
+            .nth(index)
+    }
+    pub(crate) fn batch_index(&self, id: ObjectId) -> Option<usize> {
+        self.objects()
+            .filter(|object| matches!(object.kind, ObjectKind::FermentationVessel { .. }))
+            .position(|object| object.id == id)
+    }
+    pub(crate) fn batch_object(&self, index: usize) -> Option<&Object> {
+        self.objects()
+            .filter(|object| matches!(object.kind, ObjectKind::FermentationVessel { .. }))
+            .nth(index)
+    }
+}
+impl Building {
+    fn initial(kind: Location, owner: AgentId) -> Self {
+        use ObjectKind::*;
+        let kinds = match kind {
+            Location::Home => vec![Bed { resident: owner }],
+            Location::Mill => vec![Millstone],
+            Location::Bakery => vec![Oven],
+            Location::Weavery => vec![SpinningWheel, Loom],
+            Location::Tailory => vec![SewingTable],
+            Location::Brewery => std::iter::once(BrewingEquipment)
+                .chain(
+                    (0..crate::brewing::BREWERY_SLOTS).map(|_| FermentationVessel { batch: None }),
+                )
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self {
+            id: BuildingId(Uuid::new_v4()),
+            name: kind.name().into(),
+            owner,
+            rooms: vec![Room {
+                id: RoomId(Uuid::new_v4()),
+                name: if kind == Location::Home {
+                    "Bedroom"
+                } else {
+                    "Workroom"
+                }
+                .into(),
+                object_capacity: kinds.len(),
+                objects: kinds.into_iter().map(Object::new).collect(),
+            }],
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -163,10 +409,12 @@ impl Map {
             .places
             .get_mut(&field)
             .ok_or(SimulationError::PlaceNotFound)?;
-        *place
-            .plots
-            .get_mut(plot)
-            .ok_or(SimulationError::MissingProperty)? = crop;
+        let object = place
+            .objects_mut()
+            .filter(|object| matches!(object.kind, ObjectKind::CropPlot { .. }))
+            .nth(plot)
+            .ok_or(SimulationError::MissingProperty)?;
+        object.kind = ObjectKind::CropPlot { crop };
         Ok(())
     }
 
@@ -244,15 +492,35 @@ impl Map {
                 position,
                 owner,
                 name: name.into(),
-                batches: if kind == Location::Brewery {
-                    vec![None; crate::brewing::BREWERY_SLOTS]
+                buildings: if matches!(
+                    kind,
+                    Location::Home
+                        | Location::Mill
+                        | Location::Bakery
+                        | Location::Weavery
+                        | Location::Tailory
+                        | Location::Brewery
+                ) {
+                    vec![Building::initial(
+                        kind,
+                        owner.expect("private building owner"),
+                    )]
                 } else {
                     Vec::new()
                 },
-                plots: if kind == Location::Field {
-                    vec![None; crate::farming::FIELD_PLOTS]
-                } else {
-                    Vec::new()
+                outdoor_objects: match kind {
+                    Location::Forest => vec![
+                        Object::new(ObjectKind::BerryBushes),
+                        Object::new(ObjectKind::Trees),
+                    ],
+                    Location::River => vec![
+                        Object::new(ObjectKind::FishingSpot),
+                        Object::new(ObjectKind::WaterSource),
+                    ],
+                    Location::Field => (0..crate::farming::FIELD_PLOTS)
+                        .map(|_| Object::new(ObjectKind::CropPlot { crop: None }))
+                        .collect(),
+                    _ => Vec::new(),
                 },
             },
         );
@@ -263,19 +531,56 @@ impl Map {
 impl Map {
     pub(crate) fn validate_save(&self) -> Result<(), crate::persistence::SaveError> {
         use crate::persistence::SaveError;
+        let mut identities = std::collections::HashSet::new();
         for (id, place) in &self.places {
             if *id != place.id
                 || !place.position.valid()
+                || !identities.insert(id.0)
+                || (place.kind.is_public() || place.kind.is_town_owned()) != place.owner.is_none()
                 || (place.kind == Location::Field
-                    && ![12, crate::farming::FIELD_PLOTS].contains(&place.plots.len()))
-                || (place.kind != Location::Field && !place.plots.is_empty())
-                || (place.kind == Location::Brewery
-                    && (place.batches.len() != crate::brewing::BREWERY_SLOTS
-                        || place.owner.is_none()))
-                || (place.kind != Location::Brewery && !place.batches.is_empty())
-                || place.batches.iter().flatten().any(|batch| !batch.valid())
+                    && place.plots().len() != crate::farming::FIELD_PLOTS)
             {
                 return Err(SaveError::InvalidState("invalid map place"));
+            }
+            for building in &place.buildings {
+                if !identities.insert(building.id.0)
+                    || building.id.0.get_version_num() != 4
+                    || building.rooms.is_empty()
+                {
+                    return Err(SaveError::InvalidState("invalid building"));
+                }
+                for room in &building.rooms {
+                    if !identities.insert(room.id.0)
+                        || room.id.0.get_version_num() != 4
+                        || room.objects.len() > room.object_capacity
+                        || room.objects.iter().any(|object| {
+                            object.kind.unlimited_workers()
+                                || matches!(object.kind, ObjectKind::CropPlot { .. })
+                        })
+                    {
+                        return Err(SaveError::InvalidState("invalid room"));
+                    }
+                }
+            }
+            for object in place.objects() {
+                if !identities.insert(object.id.0)
+                    || object.id.0.get_version_num() != 4
+                    || (!object.kind.unlimited_workers() && object.workers.len() > 1)
+                    || object
+                        .workers
+                        .iter()
+                        .enumerate()
+                        .any(|(i, worker)| object.workers[..i].contains(worker))
+                    || matches!(object.kind, ObjectKind::FermentationVessel { batch: Some(batch) } if !batch.valid())
+                {
+                    return Err(SaveError::InvalidState("invalid object"));
+                }
+            }
+            if place.outdoor_objects.iter().any(|object| {
+                !object.kind.unlimited_workers()
+                    && !matches!(object.kind, ObjectKind::CropPlot { .. })
+            }) {
+                return Err(SaveError::InvalidState("indoor object outdoors"));
             }
         }
         for kind in [
@@ -290,6 +595,121 @@ impl Map {
                 .any(|place| place.kind == kind && place.owner.is_none())
             {
                 return Err(SaveError::InvalidState("missing public place"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Map {
+    pub fn with_building(
+        &self,
+        place: PlaceId,
+        kind: Location,
+        owner: AgentId,
+        name: impl Into<String>,
+    ) -> Result<(Self, BuildingId), SimulationError> {
+        if !matches!(
+            kind,
+            Location::Home
+                | Location::Mill
+                | Location::Bakery
+                | Location::Weavery
+                | Location::Tailory
+                | Location::Brewery
+        ) {
+            return Err(SimulationError::MissingProperty);
+        }
+        let mut map = self.clone();
+        let site = map
+            .places
+            .get_mut(&place)
+            .ok_or(SimulationError::PlaceNotFound)?;
+        let mut building = Building::initial(kind, owner);
+        building.name = name.into();
+        let id = building.id;
+        site.buildings.push(building);
+        Ok((map, id))
+    }
+    pub(crate) fn assign_bedroom(
+        &mut self,
+        home: PlaceId,
+        resident: AgentId,
+    ) -> Result<(), SimulationError> {
+        if self
+            .place(home)?
+            .objects()
+            .any(|object| object.kind == ObjectKind::Bed { resident })
+        {
+            return Ok(());
+        }
+        for (_, place) in self.places.iter_mut() {
+            for building in &mut place.buildings {
+                building.rooms.retain(|room| {
+                    !room
+                        .objects
+                        .iter()
+                        .any(|object| object.kind == ObjectKind::Bed { resident })
+                });
+            }
+            place
+                .buildings
+                .retain(|building| !building.rooms.is_empty());
+        }
+        let place = self
+            .places
+            .get_mut(&home)
+            .ok_or(SimulationError::PlaceNotFound)?;
+        let building = place
+            .buildings
+            .first_mut()
+            .ok_or(SimulationError::MissingProperty)?;
+        building.rooms.push(Room {
+            id: RoomId(Uuid::new_v4()),
+            name: "Bedroom".into(),
+            object_capacity: 1,
+            objects: vec![Object::new(ObjectKind::Bed { resident })],
+        });
+        Ok(())
+    }
+    pub(crate) fn release_objects(
+        &mut self,
+        site: PlaceId,
+        ids: [Option<ObjectId>; 2],
+        worker: AgentId,
+    ) {
+        if ids[0].is_none() {
+            return;
+        }
+        if let Some(place) = self.places.get_mut(&site) {
+            for object in place
+                .objects_mut()
+                .filter(|object| ids.contains(&Some(object.id)))
+            {
+                object.workers.retain(|id| *id != worker);
+            }
+        }
+    }
+    pub(crate) fn claim_objects(
+        &mut self,
+        place: PlaceId,
+        ids: [Option<ObjectId>; 2],
+        worker: AgentId,
+    ) -> Result<(), SimulationError> {
+        let place = self
+            .places
+            .get_mut(&place)
+            .ok_or(SimulationError::PlaceNotFound)?;
+        for id in ids.into_iter().flatten() {
+            let object = place
+                .objects_mut()
+                .find(|object| object.id == id)
+                .ok_or(SimulationError::MissingProperty)?;
+            if !object.available(worker) {
+                return Err(SimulationError::MissingInputs);
+            }
+            if !object.workers.contains(&worker) {
+                object.workers.push(worker);
             }
         }
         Ok(())

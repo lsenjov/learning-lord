@@ -69,16 +69,16 @@ fn multiple_farmers_and_fields_keep_independent_plots_through_elapsed_jumps() {
         },
     );
     assert_eq!(
-        world.map().place(field).unwrap().plots[0].unwrap().kind,
+        world.map().place(field).unwrap().plots()[0].unwrap().kind,
         CropKind::Wheat
     );
     assert_eq!(
-        world.map().place(other_field).unwrap().plots[0]
+        world.map().place(other_field).unwrap().plots()[0]
             .unwrap()
             .kind,
         CropKind::Flax
     );
-    assert!(world.map().place(second_field).unwrap().plots[5].is_some());
+    assert!(world.map().place(second_field).unwrap().plots()[5].is_some());
     let one_jump = world.advance(80 * HOUR_MS).unwrap();
     let split = world
         .advance(30 * HOUR_MS)
@@ -89,7 +89,14 @@ fn multiple_farmers_and_fields_keep_independent_plots_through_elapsed_jumps() {
     assert_eq!(citizen(&one_jump, first).map(), one_jump.map());
     assert_eq!(citizen(&one_jump, second).map(), one_jump.map());
     for field in [field, other_field, second_field] {
-        for crop in one_jump.map().place(field).unwrap().plots.iter().flatten() {
+        for crop in one_jump
+            .map()
+            .place(field)
+            .unwrap()
+            .plots()
+            .iter()
+            .flatten()
+        {
             assert_eq!(crop.status(one_jump.current_time_ms()), CropStatus::Dead);
         }
     }
@@ -119,7 +126,7 @@ fn harvest_reserves_socage_on_actual_yield_and_records_crop_labor_and_output() {
                 crop: CropKind::Wheat,
             },
         );
-        let planted_at = world.map().place(field).unwrap().plots[0]
+        let planted_at = world.map().place(field).unwrap().plots()[0]
             .unwrap()
             .planted_at_ms;
         assert_eq!(
@@ -183,7 +190,7 @@ fn harvest_reserves_socage_on_actual_yield_and_records_crop_labor_and_output() {
             expected
         );
         assert_eq!(predicted.crop(field, 0).unwrap(), None);
-        assert_eq!(world.map().place(field).unwrap().plots[0], None);
+        assert_eq!(world.map().place(field).unwrap().plots()[0], None);
         let history = world.citizen_history(id).unwrap();
         assert_eq!(history.current.produced[Good::Wheat as usize], expected);
         assert!(history.current.activity.production_ms > 0);
