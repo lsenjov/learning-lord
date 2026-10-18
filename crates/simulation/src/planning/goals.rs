@@ -221,6 +221,7 @@ pub(super) struct Prediction {
     pub commercial_actions: Vec<usize>,
     pub action_durations_ms: Vec<u64>,
     pub elapsed_ms: u64,
+    waiting: Citizen,
     score: WeightedWellbeing,
     goal_score: WeightedWellbeing,
     pub cooldowns: Cooldowns,
@@ -230,8 +231,12 @@ pub(super) struct Prediction {
 
 impl Prediction {
     pub fn new(citizen: &Citizen, cooldowns: Cooldowns) -> Self {
+        let mut waiting = citizen.clone();
+        waiting.active_action = None;
+        waiting.active_plan = None;
         Self {
             citizen: citizen.clone(),
+            waiting,
             actions: Vec::new(),
             commercial_actions: Vec::new(),
             action_durations_ms: Vec::new(),
@@ -308,15 +313,13 @@ impl Prediction {
                 let step = current.active_action().unwrap().next_boundary_ms();
                 let advanced = current.advance_predicted(step)?;
                 let to = advanced.planning_wellbeing()?;
-                next.score.add(from, to, step)?;
-                next.goal_score.add(from, to, step)?;
+                next.score_step(from, to, step)?;
                 current = advanced;
                 from = to;
                 remaining -= step;
             }
         } else {
-            next.score.add(before, after, duration)?;
-            next.goal_score.add(before, after, duration)?;
+            next.score_step(before, after, duration)?;
         }
         if action.production_recipe() != Some(crate::production::Recipe::Forage)
             && !matches!(action, CitizenAction::Travel(_))
@@ -328,6 +331,30 @@ impl Prediction {
         next.elapsed_ms += duration;
         next.cooldowns = self.cooldowns.after(action, duration);
         Ok(Some(next))
+    }
+
+    fn score_step(
+        &mut self,
+        before: f64,
+        after: f64,
+        duration: u64,
+    ) -> Result<(), SimulationError> {
+        let waiting_before = self.waiting.planning_wellbeing()?;
+        // Keep the counterfactual free of production-trial reconciliation and market changes.
+        self.waiting.advance_needs(duration, None)?;
+        self.waiting.market_time_ms = self
+            .waiting
+            .market_time_ms
+            .checked_add(duration)
+            .ok_or(SimulationError::TimeOverflow)?;
+        let waiting_after = self.waiting.planning_wellbeing()?;
+        let before = before - waiting_before;
+        let after = after - waiting_after;
+        if !before.is_finite() || !after.is_finite() {
+            return Err(SimulationError::WellbeingOverflow);
+        }
+        self.score.add(before, after, duration)?;
+        self.goal_score.add(before, after, duration)
     }
 
     fn perform_commercial(
@@ -1753,6 +1780,7 @@ pub(super) fn variants_after(
 ) -> Result<Vec<Prediction>, SimulationError> {
     let mut initial = Prediction::new(&prefix.citizen, prefix.cooldowns);
     initial.blocked_requests = prefix.blocked_requests.clone();
+    initial.waiting = prefix.waiting.clone();
     initial.score = prefix.score;
     initial.last_gathering_order = prefix.last_gathering_order;
     variants_from(initial, goal, prefix.actions.len())
@@ -3569,6 +3597,81 @@ mod tests {
     }
 
     #[test]
+    fn waiting_scores_exactly_zero_even_when_needs_cross_thresholds() {
+        for need in [-110.0, -1.0, 0.0, 100.0] {
+            let source = Citizen::with_needs(need, need)
+                .unwrap()
+                .with_thirst(need)
+                .unwrap()
+                .with_home_good(Good::Fish, 3)
+                .unwrap();
+            let waited = best_variant(&source, Effect::Wait, Cooldowns::default(), 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(waited.average().unwrap(), 0.0);
+            assert_eq!(
+                waited.waiting.planning_wellbeing(),
+                waited.citizen.planning_wellbeing()
+            );
+            assert_eq!(waited.waiting.market_time_ms, waited.citizen.market_time_ms);
+        }
+    }
+
+    #[test]
+    fn production_scores_its_gain_after_shared_need_deterioration_cancels() {
+        let source = Citizen::with_needs(100.0, 100.0)
+            .unwrap()
+            .with_thirst(100.0)
+            .unwrap();
+        let action = CitizenAction::ProduceAt {
+            place: source
+                .map()
+                .public_place(crate::locations::Location::Forest),
+            recipe: crate::production::Recipe::Forage,
+        };
+        let produced = Prediction::new(&source, Cooldowns::default())
+            .perform(action, 0)
+            .unwrap()
+            .unwrap();
+        assert!(
+            produced.citizen.planning_wellbeing().unwrap() < source.planning_wellbeing().unwrap()
+        );
+        let gain = produced.citizen.planning_wellbeing().unwrap()
+            - produced.waiting.planning_wellbeing().unwrap();
+        assert!(gain > 0.0);
+        assert!((produced.average().unwrap() - gain * 0.5).abs() < 1e-12);
+        assert_eq!(produced.waiting.market(), source.market());
+        assert_eq!(produced.waiting.berries_units(), source.berries_units());
+    }
+
+    #[test]
+    fn second_goal_preserves_the_original_uninterrupted_waiting_baseline() {
+        let source = Citizen::new(80.0)
+            .unwrap()
+            .with_home_good(Good::BreadRoll, 30)
+            .unwrap()
+            .with_home_good(Good::Water, 1000)
+            .unwrap();
+        let eaten = best_variant(&source, Effect::ReduceHunger, Cooldowns::default(), 0)
+            .unwrap()
+            .unwrap();
+        let waited = best_variant_after(&eaten, Effect::Wait).unwrap().unwrap();
+        let mut replay = eaten.clone();
+        for action in &waited.actions {
+            replay = replay.perform(*action, 0).unwrap().unwrap();
+        }
+        assert_eq!(waited.average().unwrap(), replay.average().unwrap());
+        assert_eq!(waited.waiting, replay.waiting);
+        assert_eq!(waited.waiting.home_drink_units(), source.home_drink_units());
+        assert!(waited.goal_average().unwrap() > 0.0);
+        let reset = best_variant(&eaten.citizen, Effect::Wait, eaten.cooldowns, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reset.average().unwrap(), 0.0);
+        assert_ne!(waited.waiting.hunger(), reset.waiting.hunger());
+    }
+
+    #[test]
     fn waiting_keeps_position_and_advances_needs_before_the_second_goal() {
         let mut citizen = Citizen::new(0.0)
             .unwrap()
@@ -5371,9 +5474,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!((direct.average().unwrap() - split.average().unwrap()).abs() < 1e-12);
-        let rate_per_ms = 100.0 / (24.0 * 60.0 * 60_000.0);
-        let expected = -30.0 - 2.0 * 45_000.0 * rate_per_ms;
-        assert!((direct.average().unwrap() - expected).abs() < 1e-12);
+        assert_eq!(direct.average().unwrap(), 0.0);
         assert_eq!(direct.score.elapsed_ms, 90_000);
     }
 
@@ -5774,10 +5875,7 @@ mod tests {
             .perform(CitizenAction::Produce(crate::production::Recipe::Forage), 0)
             .unwrap()
             .unwrap();
-        assert!(
-            (gathered.average().unwrap() - (-20.0 - crate::THIRST_PER_HOUR / 4.0 + 0.05)).abs()
-                < 1e-12
-        );
+        assert!((gathered.average().unwrap() - 0.05).abs() < 1e-12);
     }
 
     #[test]
@@ -5801,15 +5899,22 @@ mod tests {
             let first_step = active.next_boundary_ms();
             let middle = started.advance_predicted(first_step).unwrap();
             let final_state = started.advance_predicted(duration).unwrap();
-            let initial_score = started.planning_wellbeing().unwrap();
-            let middle_score = middle.planning_wellbeing().unwrap();
+            let waiting_middle = source.advance_predicted(first_step).unwrap();
+            let initial_score =
+                started.planning_wellbeing().unwrap() - source.planning_wellbeing().unwrap();
+            let middle_score =
+                middle.planning_wellbeing().unwrap() - waiting_middle.planning_wellbeing().unwrap();
             let expected = if action == CitizenAction::Eat {
                 assert!(active.meal_units.iter().filter(|units| **units > 0).count() > 1);
                 assert!(first_step < duration);
                 let end = middle.advance_predicted(duration - first_step).unwrap();
+                let waiting_end = waiting_middle
+                    .advance_predicted(duration - first_step)
+                    .unwrap();
+                let end_score =
+                    end.planning_wellbeing().unwrap() - waiting_end.planning_wellbeing().unwrap();
                 ((initial_score * 0.5 + middle_score * 0.5) * first_step as f64
-                    + (middle_score * 0.5 + end.planning_wellbeing().unwrap() * 0.5)
-                        * (duration - first_step) as f64)
+                    + (middle_score * 0.5 + end_score * 0.5) * (duration - first_step) as f64)
                     / duration as f64
             } else {
                 assert_eq!(first_step, duration);

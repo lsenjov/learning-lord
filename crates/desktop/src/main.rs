@@ -695,7 +695,7 @@ fn decision_rows(
         }
     }
     lines.push(
-        "\nChosen by full-plan time-weighted action endpoint averages.\nEach sequence leads to its goal's best full plan.\nGoal avg scores only the sequence shown.\nRepeated gathering segments form one order.",
+        "\nChosen by average wellbeing gain over equal-duration waiting.\nFull plans use one waiting baseline from their starting state.\nGoal gain scores only the sequence shown.\nRepeated gathering segments form one order.",
     );
     lines.0
 }
@@ -845,7 +845,7 @@ fn forecast_rows(
     }
     vec![
         vec![F::text(format!(
-            "{} | Goal avg {:.2} | Plan avg {:.2} | Future food +{:.2}",
+            "{} | Goal gain {:.2} | Plan gain {:.2} | Future food +{:.2}",
             citizens::duration(forecast.duration_ms),
             forecast.average_wellbeing,
             forecast.full_plan_wellbeing,
@@ -1055,8 +1055,8 @@ mod tests {
         assert!(text.contains("Sleep"));
         assert!(text.contains("Production"));
         assert_eq!(text.matches("[chosen first]").count(), 1);
-        assert!(text.contains("Goal avg"));
-        assert!(text.contains("Plan avg"));
+        assert!(text.contains("Goal gain"));
+        assert!(text.contains("Plan gain"));
         assert!(text.contains("berries 2.000"));
         assert_eq!(
             decision_readout(
@@ -1104,7 +1104,7 @@ mod tests {
         let text = production_location_readout(&location, &citizen).join("\n");
         assert!(text.contains("North workshop [best production option]"));
         assert!(!text.contains("chosen"));
-        assert!(text.contains("02:00:00 | Goal avg 12.50 | Plan avg 15.25"));
+        assert!(text.contains("02:00:00 | Goal gain 12.50 | Plan gain 15.25"));
         assert!(text.ends_with("Forage"));
         location.selected = true;
         let text = production_location_readout(&location, &citizen).join("\n");

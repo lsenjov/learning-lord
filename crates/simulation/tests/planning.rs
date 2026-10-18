@@ -20,13 +20,16 @@ fn assert_close(actual: f64, expected: f64) {
 
 fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
     let mut predicted = original.clone();
+    let mut waiting = original.clone();
     let mut contribution = 0.0;
     let mut elapsed = 0;
     for &action in actions {
-        let before = predicted.personal_wellbeing().unwrap();
+        let before =
+            predicted.personal_wellbeing().unwrap() - waiting.personal_wellbeing().unwrap();
         let duration = predicted.action_duration_ms(action).unwrap();
         predicted = predict_action(&predicted, action);
-        let after = predicted.personal_wellbeing().unwrap();
+        waiting = waiting.advance(duration).unwrap();
+        let after = predicted.personal_wellbeing().unwrap() - waiting.personal_wellbeing().unwrap();
         contribution += (before + after) * 0.5 * duration as f64;
         elapsed += duration;
     }
@@ -112,7 +115,7 @@ fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
 #[test]
 fn large_finite_scores_can_be_averaged_without_overflowing() {
     let citizen = Citizen::with_hunger_rate(-f64::MAX, 0.0).unwrap();
-    assert_eq!(plan(&citizen).unwrap().average_wellbeing(), -f64::MAX);
+    assert_eq!(plan(&citizen).unwrap().average_wellbeing(), 0.0);
 }
 
 #[test]

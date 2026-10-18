@@ -11,7 +11,9 @@ pub const EAT_PLAN_COOLDOWN_MS: u64 = 4 * 60 * 60 * 1000;
 pub struct GoalForecast {
     pub actions: Vec<CitizenAction>,
     pub duration_ms: u64,
+    /// Average planning wellbeing gain over equal-duration passive waiting.
     pub average_wellbeing: f64,
+    /// Gain for the full sequence, with an uninterrupted baseline from its start.
     pub full_plan_wellbeing: f64,
     pub future_food_benefit: f64,
 }
@@ -236,6 +238,7 @@ impl Plan {
         &self.actions
     }
 
+    /// Average planning wellbeing gain over equal-duration passive waiting.
     pub fn average_wellbeing(&self) -> f64 {
         self.average_wellbeing
     }

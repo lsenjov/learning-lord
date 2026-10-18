@@ -124,8 +124,9 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
         .unwrap()
         .advance(8 * 3_600_000)
         .unwrap();
+    let waiting = source.advance(8 * 3_600_000).unwrap();
     let expected =
-        (source.personal_wellbeing().unwrap() + predicted.personal_wellbeing().unwrap()) * 0.5;
+        (predicted.personal_wellbeing().unwrap() - waiting.personal_wellbeing().unwrap()) * 0.5;
     assert!(
         (chosen
             .decision()
