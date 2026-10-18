@@ -501,6 +501,43 @@ fn object_row(
         .position(|other| other.id == object.id)
         .unwrap_or(0)
         + 1;
+    if object.kind.is_storage() {
+        let empty = !universe
+            .storage()
+            .contents()
+            .keys()
+            .any(|key| key.object == object.id)
+            && !universe
+                .market()
+                .orders()
+                .any(|order| universe.market().order_container(order.id) == Some(object.id));
+        let label = if same_kind().count() > 1 {
+            format!("{} {ordinal}", object.kind.name())
+        } else {
+            object.kind.name().into()
+        };
+        let accepted = Good::ALL
+            .into_iter()
+            .filter(|good| object.kind.accepts(*good))
+            .map(Good::name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tooltip = format!(
+            "Accepts: {accepted}\nUnlimited quantity{}",
+            if object.kind.single_good() {
+                "; one good at a time"
+            } else {
+                ""
+            }
+        );
+        return (
+            vec![F::text(format!(
+                "{label}{}",
+                if empty { " | Empty" } else { "" }
+            ))],
+            tooltip,
+        );
+    }
     let now = universe.current_time_ms();
     let mut tooltip = String::new();
     let mut fragments = match object.kind {
@@ -577,7 +614,28 @@ fn render_object(
             Interaction::None,
             crate::tooltip::Tooltip(tooltip),
         ))
-        .with_children(|row| crate::navigation::render(row, &fragments, 14.0, TEXT));
+        .with_children(|row| {
+            crate::navigation::render(row, &fragments, 14.0, TEXT);
+            let contents = if object.kind.is_storage() {
+                object_storage_rows(universe, place.id, object.id)
+            } else {
+                Vec::new()
+            };
+            if !contents.is_empty() {
+                row.spawn(Node {
+                    margin: UiRect::left(px(12)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(2),
+                    flex_shrink: 0.0,
+                    ..default()
+                })
+                .with_children(|rows| {
+                    for contents in contents {
+                        crate::navigation::render(rows, &contents, 14.0, TEXT);
+                    }
+                });
+            }
+        });
 }
 
 fn render_hierarchy(parent: &mut ChildSpawnerCommands, universe: &Universe, place: &Place) {
@@ -731,13 +789,10 @@ pub fn refresh(
                     details.spawn(text("One shared rule applies to every private location of this type, including future locations.", 14.0, MUTED));
                 }
                 if state.location_type.is_none() && let Some(place) = place {
-                let place_id = place.id;
                 details.spawn(text(&place.name, 23.0, TEXT));
                 let owner = if place.kind.is_town_owned() { crate::navigation::Fragment::text("Town") } else { place.owner.map_or_else(|| crate::navigation::Fragment::text("Public"), |id| crate::navigation::account(universe, id)) };
                 crate::navigation::render(details, &[crate::navigation::Fragment::text("Owner: "), owner], 15.0, MUTED);
                 render_hierarchy(details, universe, place);
-                details.spawn(text("STOCK BY OWNER", 15.0, MUTED));
-                for row in stock_rows(universe, place_id) { crate::navigation::render(details, &row, 15.0, TEXT); }
                 details.spawn(text("LOCAL TRANSFERS", 15.0, MUTED));
                 details.spawn(text("Citizen must be at this location and stationary. Working ingredients remain reserved.", 13.0, MUTED));
                 row(details, |row| {
@@ -1272,6 +1327,84 @@ pub(crate) fn stop_editing(state: &mut State) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum StorageOwner {
+    Account(AgentId),
+    Town,
+    Caravan,
+}
+
+fn object_storage_rows(
+    universe: &Universe,
+    place: PlaceId,
+    object: learning_lord_simulation::locations::ObjectId,
+) -> Vec<Vec<crate::navigation::Fragment>> {
+    use crate::navigation::{self as nav, Fragment as F};
+    use learning_lord_simulation::marketplace::MarketParty;
+    let mut contents = std::collections::HashMap::<(StorageOwner, Good), [u64; 4]>::new();
+    for (key, units) in universe
+        .storage()
+        .contents()
+        .iter()
+        .filter(|(key, _)| key.stock.place == place && key.object == object)
+    {
+        let owner = match key.stock.owner {
+            GoodsOwner::Agent(id) | GoodsOwner::Household(id) => StorageOwner::Account(id),
+            GoodsOwner::Town => StorageOwner::Town,
+        };
+        let tax = universe.storage().object_tax_reserved(*key);
+        let work = universe.storage().object_work_reserved(*key);
+        let quantities = contents.entry((owner, key.stock.good)).or_default();
+        quantities[0] =
+            quantities[0].saturating_add(units.saturating_sub(tax).saturating_sub(work));
+        quantities[1] = quantities[1].saturating_add(tax);
+        quantities[2] = quantities[2].saturating_add(work);
+    }
+    for order in universe.market().orders().filter(|order| {
+        order.place == place && universe.market().order_container(order.id) == Some(object)
+    }) {
+        let owner = match order.seller {
+            MarketParty::Citizen(id) | MarketParty::Household(id) => StorageOwner::Account(id),
+            MarketParty::Caravan => StorageOwner::Caravan,
+        };
+        let quantities = contents.entry((owner, order.good)).or_default();
+        quantities[3] = quantities[3].saturating_add(order.units);
+    }
+    let mut rows: Vec<_> = contents
+        .into_iter()
+        .map(|((owner, good), quantities)| {
+            let owner = match owner {
+                StorageOwner::Account(id) => nav::account(universe, id),
+                StorageOwner::Town => F::text("Town"),
+                StorageOwner::Caravan => F::text("Caravan"),
+            };
+            let mut row = vec![
+                owner,
+                F::text(" | "),
+                F::good(good),
+                F::text(format!(
+                    " | {} available",
+                    crate::quantity_label(good, quantities[0])
+                )),
+            ];
+            for (label, units) in ["tax", "work", "sale"]
+                .into_iter()
+                .zip(quantities[1..].iter())
+            {
+                if *units > 0 {
+                    row.push(F::text(format!(
+                        " | {label} {}",
+                        crate::quantity_label(good, *units)
+                    )));
+                }
+            }
+            row
+        })
+        .collect();
+    rows.sort_by_key(|row| nav::plain(row));
+    rows
+}
+
 pub(crate) fn stock_rows(
     universe: &Universe,
     place: PlaceId,
@@ -1291,14 +1424,29 @@ pub(crate) fn stock_rows(
         let reserved = universe
             .storage()
             .reserved_units(place, key.owner, key.good);
+        let work = universe
+            .storage()
+            .contents()
+            .keys()
+            .filter(|physical| physical.stock == *key)
+            .map(|physical| universe.storage().object_work_reserved(*physical))
+            .fold(0_u64, u64::saturating_add);
         rows.push(vec![
             owner,
             F::text(" | "),
             F::good(key.good),
             F::text(format!(
-                " | {} available | {} tax reserved",
-                crate::quantity_label(key.good, units.saturating_sub(reserved)),
-                crate::quantity_label(key.good, reserved)
+                " | {} available | {} tax reserved{}",
+                crate::quantity_label(
+                    key.good,
+                    units.saturating_sub(reserved).saturating_sub(work)
+                ),
+                crate::quantity_label(key.good, reserved),
+                if work > 0 {
+                    format!(" | {} work reserved", crate::quantity_label(key.good, work))
+                } else {
+                    String::new()
+                }
             )),
         ]);
     }
@@ -2089,6 +2237,167 @@ mod tests {
         let readout = stocks(&universe, place);
         assert!(readout.contains("Ada | Wheat | 10 g available"));
         assert!(readout.contains("Town | Wheat | 20 g available"));
+    }
+
+    #[test]
+    fn shared_storage_rows_merge_each_owners_stock_work_and_sale_escrow() {
+        use learning_lord_simulation::{Citizen, CitizenAction, StartingRole, locations::Map};
+        let (world, first) = Universe::with_map(Map::default())
+            .with_citizen(
+                "Eira",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Weaver),
+            )
+            .unwrap();
+        let (world, second) = world
+            .with_citizen(
+                "Jori",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Weaver),
+            )
+            .unwrap();
+        let (world, site) = world.with_property(first, Location::Weavery).unwrap();
+        let (world, _) = world
+            .with_guild("Guild", &[first, second], &[site], 0)
+            .unwrap();
+        let world = world
+            .with_stored_good(site, GoodsOwner::Agent(first), Good::Thread, 600)
+            .unwrap()
+            .with_stored_good(site, GoodsOwner::Agent(second), Good::Thread, 600)
+            .unwrap();
+        let world = world
+            .with_designated_workplace(first, site)
+            .unwrap()
+            .with_designated_workplace(second, site)
+            .unwrap();
+        let world = world
+            .start_action(
+                first,
+                CitizenAction::ProduceAt {
+                    place: site,
+                    recipe: Recipe::WeaveCloth,
+                },
+            )
+            .unwrap()
+            .start_action(second, CitizenAction::List(Good::Thread, 200))
+            .unwrap()
+            .advance(learning_lord_simulation::TRADE_DURATION_MS)
+            .unwrap();
+        let map = world.map();
+        let place = map.place(site).unwrap();
+        let chest = place
+            .objects()
+            .find(|object| object.kind == ObjectKind::TextileChest)
+            .unwrap();
+        let rows = object_storage_rows(&world, site, chest.id);
+        assert_eq!(rows.len(), 2);
+        let eira = rows
+            .iter()
+            .find(|row| crate::navigation::plain(row).starts_with("Eira"))
+            .unwrap();
+        let jori = rows
+            .iter()
+            .find(|row| crate::navigation::plain(row).starts_with("Jori"))
+            .unwrap();
+        assert!(crate::navigation::plain(eira).contains("work "));
+        let aggregate = stock_rows(&world, site);
+        let aggregate = aggregate
+            .iter()
+            .find(|row| crate::navigation::plain(row).starts_with("Eira"))
+            .unwrap();
+        let work = Recipe::WeaveCloth
+            .inputs()
+            .iter()
+            .find(|(good, _)| *good == Good::Thread)
+            .unwrap()
+            .1;
+        assert!(crate::navigation::plain(aggregate).contains(&format!(
+            "{} available",
+            crate::quantity_label(Good::Thread, 600 - work)
+        )));
+        assert!(crate::navigation::plain(aggregate).contains(&format!(
+            "{} work reserved",
+            crate::quantity_label(Good::Thread, work)
+        )));
+        assert_eq!(
+            crate::navigation::plain(jori),
+            "Jori | Thread | 400 g available | sale 200 g"
+        );
+        for (row, id) in [(eira, first), (jori, second)] {
+            assert!(row.iter().any(|fragment|fragment.target==Some(crate::navigation::Target::Citizen(id))));
+            assert!(
+                row.iter().any(|fragment| fragment.target
+                    == Some(crate::navigation::Target::Good(Good::Thread)))
+            );
+            assert!(!crate::navigation::plain(row).contains("tax 0"));
+        }
+        let (header, tooltip) = object_row(&world, place, chest);
+        assert_eq!(crate::navigation::plain(&header), "Textile chest");
+        assert!(tooltip.contains("Thread"));
+        assert!(tooltip.contains("Unlimited quantity"));
+    }
+
+    #[test]
+    fn storage_rows_show_physical_tax_reservations_and_empty_storage_has_no_worker_label() {
+        use learning_lord_simulation::{Citizen, CitizenAction, StartingRole, locations::Map};
+        let inputs = Recipe::SpinThread.inputs();
+        let mut citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Weaver);
+        for &(good, units) in inputs {
+            citizen = citizen.with_good(good, units).unwrap();
+        }
+        let (world, worker) = Universe::with_map(Map::default())
+            .with_citizen("Weaver", citizen)
+            .unwrap();
+        let (world, site) = world.with_property(worker, Location::Weavery).unwrap();
+        let (world, _) = world
+            .with_tax_rule(
+                site,
+                "Thread share",
+                TaxKind::Socage {
+                    rates: [(Good::Thread, TaxRate::new(5000).unwrap())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .unwrap();
+        let started = world
+            .start_action(
+                worker,
+                CitizenAction::ProduceAt {
+                    place: site,
+                    recipe: Recipe::SpinThread,
+                },
+            )
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &started.agents()[&worker].kind;
+        let world = started
+            .advance(citizen.active_action().unwrap().duration_ms())
+            .unwrap();
+        let map = world.map();
+        let place = map.place(site).unwrap();
+        let chest = place
+            .objects()
+            .find(|object| object.kind == ObjectKind::TextileChest)
+            .unwrap();
+        let rows = object_storage_rows(&world, site, chest.id);
+        assert_eq!(rows.len(), 1);
+        assert!(crate::navigation::plain(&rows[0]).contains(" | tax "));
+        assert!(!crate::navigation::plain(&rows[0]).contains("work "));
+        assert!(!crate::navigation::plain(&rows[0]).contains("sale "));
+        let market = map.place(map.public_place(Location::Market)).unwrap();
+        let bin = market
+            .objects()
+            .find(|object| object.kind == ObjectKind::DryGoodsBin)
+            .unwrap();
+        let (header, tooltip) = object_row(&world, market, bin);
+        let text = crate::navigation::plain(&header);
+        assert!(text.ends_with(" | Empty"));
+        assert!(!text.contains("Workers"));
+        assert!(tooltip.contains("one good at a time"));
     }
 
     #[test]
