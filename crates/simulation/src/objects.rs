@@ -186,15 +186,15 @@ impl crate::Universe {
                 return Err(invalid());
             }
             for object in place.objects() {
-                if let ObjectKind::Bed { resident } = object.kind {
-                    if !self.agents.contains_key(&resident) {
-                        return Err(invalid());
-                    }
+                if let ObjectKind::Bed { resident } = object.kind
+                    && !self.agents.contains_key(&resident)
+                {
+                    return Err(invalid());
                 }
-                if let ObjectKind::CropPlot { crop: Some(crop) } = object.kind {
-                    if crop.planted_at_ms > self.current_time_ms {
-                        return Err(invalid());
-                    }
+                if let ObjectKind::CropPlot { crop: Some(crop) } = object.kind
+                    && crop.planted_at_ms > self.current_time_ms
+                {
+                    return Err(invalid());
                 }
                 if matches!(
                     object.kind,

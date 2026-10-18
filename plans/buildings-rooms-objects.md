@@ -18,3 +18,11 @@ Two independent review passes identified and resolved malformed-save validation,
 Preparation can use auxiliary equipment in another room at the same location without extra travel; `current_room` reports the main equipment room. Generated breweries keep all their equipment in one workroom.
 
 The manual five-day fresh-town profile passed: 10.34 seconds advancement, 10.47 seconds including setup. The preserved HEAD profile took 33.39 seconds advancement. These are different randomized worlds and equipment contention changes work opportunities, so this is a regression smoke check rather than a controlled speed comparison.
+
+## Step 2 evidence
+
+Locations now render buildings and their owner links, nested rooms with installed object capacity and distinct worker counts, and individual objects with persistent state, worker occupancy/capacity, and citizen links. Household beds identify their designated residents. Public objects show unlimited worker capacity. Outdoor crop plots use compact rows with tending windows and readiness details in hover tooltips. This replaces the previous standalone plot/brewery sections; stock, transfer, tax controls, and navigation remain available below.
+
+An independent UI review reported no findings. Targeted Locations tests passed (26), followed by the full desktop suite (148 passed, 1 ignored). Workspace build and strict Clippy across all targets passed. Two equivalent save-validation conditions were collapsed into let-chains to satisfy Clippy.
+
+Native captures of the shared household home, guild weavery, field, brewery, and forest were inspected: the hierarchy fits and scrolls without overlap, with no application console errors. Additional captures verified occupied brewing equipment and vessel count as one room worker, fermentation persists with zero workers, crop hover tooltips visibly show tending windows and readiness time, and the 720 by 480 minimum layout wraps without overlap. Step 2 is complete and ready to commit.

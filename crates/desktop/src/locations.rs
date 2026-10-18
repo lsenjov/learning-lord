@@ -15,7 +15,7 @@ use learning_lord_simulation::{
     AgentId, AgentKind, Universe,
     brewing::Batch,
     farming::{Crop, CropStatus},
-    locations::{Location, PlaceId},
+    locations::{Location, Object, ObjectKind, Place, PlaceId, Room},
     marketplace::Good,
     production::Recipe,
     storage::GoodsOwner,
@@ -471,6 +471,185 @@ pub(crate) fn treasury(universe: &Universe) -> String {
         .join("\n")
 }
 
+fn room_readout(room: &Room) -> String {
+    let workers: std::collections::HashSet<_> = room
+        .objects
+        .iter()
+        .flat_map(|object| &object.workers)
+        .collect();
+    format!(
+        "{} | Objects {}/{} | Workers {}",
+        room.name,
+        room.objects.len(),
+        room.object_capacity,
+        workers.len()
+    )
+}
+
+fn object_row(
+    universe: &Universe,
+    place: &Place,
+    object: &Object,
+) -> (Vec<crate::navigation::Fragment>, String) {
+    use crate::navigation::{Fragment as F, Target};
+    let same_kind = || {
+        place.objects().filter(|other| {
+            std::mem::discriminant(&other.kind) == std::mem::discriminant(&object.kind)
+        })
+    };
+    let ordinal = same_kind()
+        .position(|other| other.id == object.id)
+        .unwrap_or(0)
+        + 1;
+    let now = universe.current_time_ms();
+    let mut tooltip = String::new();
+    let mut fragments = match object.kind {
+        ObjectKind::Bed { resident } => vec![
+            F::text("Bed | Resident: "),
+            F::entity(name(universe, resident), Target::Citizen(resident)),
+        ],
+        ObjectKind::CropPlot { crop } => {
+            tooltip = plot_readout(ordinal - 1, crop, now);
+            match crop {
+                None => vec![F::text(format!("Plot {ordinal} | Empty"))],
+                Some(crop) => {
+                    let status = match crop.status(now) {
+                        CropStatus::Growing => "Growing",
+                        CropStatus::Ready => "Ready",
+                        CropStatus::Dead => "Dead",
+                    };
+                    vec![
+                        F::text(format!("Plot {ordinal} | ")),
+                        F::entity(crop.kind.name(), Target::Good(crop.kind.good())),
+                        F::text(format!(
+                            " | {status} | {} {}",
+                            crop.expected_yield(now),
+                            crop.kind.good().unit_name()
+                        )),
+                    ]
+                }
+            }
+        }
+        ObjectKind::FermentationVessel { batch } => {
+            if let Some(Batch::Fermenting { ready_at_ms }) = batch {
+                tooltip = format!("Ready: {}", crate::format_clock(ready_at_ms));
+            }
+            vec![F::text(
+                batch_readout(ordinal - 1, batch, now).replacen("Slot", "Vessel", 1),
+            )]
+        }
+        kind => vec![F::text(if same_kind().count() > 1 {
+            format!("{} {ordinal}", kind.name())
+        } else {
+            kind.name().into()
+        })],
+    };
+    let capacity = if object.kind.unlimited_workers() {
+        "unlimited"
+    } else {
+        "1"
+    };
+    fragments.push(F::text(format!(
+        " | Workers {}/{capacity}",
+        object.workers.len()
+    )));
+    for (index, worker) in object.workers.iter().enumerate() {
+        fragments.push(F::text(if index == 0 { ": " } else { ", " }));
+        fragments.push(F::entity(name(universe, *worker), Target::Citizen(*worker)));
+    }
+    (fragments, tooltip)
+}
+
+fn render_object(
+    parent: &mut ChildSpawnerCommands,
+    universe: &Universe,
+    place: &Place,
+    object: &Object,
+) {
+    let (fragments, tooltip) = object_row(universe, place, object);
+    parent
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                ..default()
+            },
+            Interaction::None,
+            crate::tooltip::Tooltip(tooltip),
+        ))
+        .with_children(|row| crate::navigation::render(row, &fragments, 14.0, TEXT));
+}
+
+fn render_hierarchy(parent: &mut ChildSpawnerCommands, universe: &Universe, place: &Place) {
+    use crate::navigation::Fragment as F;
+    if place.buildings.is_empty() && place.outdoor_objects.is_empty() {
+        return;
+    }
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|content| {
+            content.spawn(text("BUILDINGS & OBJECTS", 15.0, MUTED));
+            for building in &place.buildings {
+                crate::navigation::render(
+                    content,
+                    &[
+                        F::text(format!("{} | Owner: ", building.name)),
+                        crate::navigation::account(universe, building.owner),
+                    ],
+                    15.0,
+                    TEXT,
+                );
+                content
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(3),
+                        margin: UiRect::left(px(12)),
+                        flex_shrink: 0.0,
+                        ..default()
+                    })
+                    .with_children(|rooms| {
+                        for room in &building.rooms {
+                            rooms.spawn(text(room_readout(room), 14.0, MUTED));
+                            rooms
+                                .spawn(Node {
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: px(2),
+                                    margin: UiRect::left(px(12)),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                })
+                                .with_children(|objects| {
+                                    for object in &room.objects {
+                                        render_object(objects, universe, place, object);
+                                    }
+                                });
+                        }
+                    });
+            }
+            if !place.outdoor_objects.is_empty() {
+                content.spawn(text("Outdoors", 14.0, MUTED));
+                content
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(2),
+                        margin: UiRect::left(px(12)),
+                        flex_shrink: 0.0,
+                        ..default()
+                    })
+                    .with_children(|objects| {
+                        for object in &place.outdoor_objects {
+                            render_object(objects, universe, place, object);
+                        }
+                    });
+            }
+        });
+}
+
 pub fn refresh(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
@@ -556,24 +735,7 @@ pub fn refresh(
                 details.spawn(text(&place.name, 23.0, TEXT));
                 let owner = if place.kind.is_town_owned() { crate::navigation::Fragment::text("Town") } else { place.owner.map_or_else(|| crate::navigation::Fragment::text("Public"), |id| crate::navigation::account(universe, id)) };
                 crate::navigation::render(details, &[crate::navigation::Fragment::text("Owner: "), owner], 15.0, MUTED);
-                if place.kind == Location::Field {
-                    details.spawn(text("FIELD PLOTS", 15.0, MUTED));
-                    for (plot, crop) in place.plots().iter().enumerate() {
-                        let now = universe.current_time_ms();
-                        if let Some(crop) = crop {
-                            use crate::navigation::{Fragment as F, Target};
-                            let status = match crop.status(now) { CropStatus::Growing => "Growing", CropStatus::Ready => "Ready", CropStatus::Dead => "Dead" };
-                            crate::navigation::render(details, &[F::text(format!("Plot {} | ", plot+1)), F::entity(crop.kind.name(), Target::Good(crop.kind.good())), F::text(format!(" | {status} | Expected {} {}", crop.expected_yield(now), crop.kind.good().unit_name()))], 15.0, TEXT);
-                            details.spawn(text(plot_readout(plot, Some(*crop), now).lines().skip(1).collect::<Vec<_>>().join("\n"), 15.0, TEXT));
-                        } else { details.spawn(text(plot_readout(plot, None, now), 15.0, TEXT)); }
-                    }
-                }
-                if place.kind == Location::Brewery {
-                    details.spawn(text("BREWERY SLOTS", 15.0, MUTED));
-                    for (slot, batch) in place.batches().iter().enumerate() {
-                        details.spawn(text(batch_readout(slot, *batch, universe.current_time_ms()), 15.0, TEXT));
-                    }
-                }
+                render_hierarchy(details, universe, place);
                 details.spawn(text("STOCK BY OWNER", 15.0, MUTED));
                 for row in stock_rows(universe, place_id) { crate::navigation::render(details, &row, 15.0, TEXT); }
                 details.spawn(text("LOCAL TRANSFERS", 15.0, MUTED));
@@ -1962,5 +2124,151 @@ mod tests {
         app.update();
         assert!(app.world().resource::<State>().draft.is_none());
         assert!(!app.world().resource::<State>().editing());
+    }
+    #[test]
+    fn object_rows_distinguish_persistent_batches_from_workers_and_count_room_workers_once() {
+        use learning_lord_simulation::{Citizen, CitizenAction, StartingRole};
+        let mut brewer = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Brewer);
+        for &(good, units) in Recipe::BrewBeer.inputs() {
+            brewer = brewer.with_good(good, units).unwrap();
+        }
+        let (world, worker) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_citizen("Brewer", brewer)
+                .unwrap();
+        let (world, site) = world.with_property(worker, Location::Brewery).unwrap();
+        let world = world
+            .start_action(
+                worker,
+                CitizenAction::ProduceAt {
+                    place: site,
+                    recipe: Recipe::BrewBeer,
+                },
+            )
+            .unwrap();
+        let map = world.map();
+        let place = map.place(site).unwrap();
+        let room = &place.buildings[0].rooms[0];
+        assert_eq!(room_readout(room), "Workroom | Objects 5/5 | Workers 1");
+        let vessel = room
+            .objects
+            .iter()
+            .find(|object| {
+                matches!(
+                    object.kind,
+                    ObjectKind::FermentationVessel {
+                        batch: Some(Batch::Preparing)
+                    }
+                )
+            })
+            .unwrap();
+        let (fragments, _) = object_row(&world, place, vessel);
+        assert_eq!(
+            crate::navigation::plain(&fragments),
+            "Vessel 1 | Preparing | Workers 1/1: Brewer"
+        );
+        assert!(fragments.iter().any(|fragment| fragment.target == Some(crate::navigation::Target::Citizen(worker))));
+        let world = world
+            .advance(learning_lord_simulation::brewing::PREPARATION_MS)
+            .unwrap();
+        let map = world.map();
+        let place = map.place(site).unwrap();
+        let vessel = place
+            .objects()
+            .find(|object| object.id == vessel.id)
+            .unwrap();
+        let (fragments, tooltip) = object_row(&world, place, vessel);
+        assert_eq!(
+            crate::navigation::plain(&fragments),
+            "Vessel 1 | Fermenting | 48h 00m remaining | Workers 0/1"
+        );
+        assert!(tooltip.starts_with("Ready: "));
+        assert_eq!(
+            room_readout(&place.buildings[0].rooms[0]),
+            "Workroom | Objects 5/5 | Workers 0"
+        );
+    }
+
+    #[test]
+    fn hierarchy_renders_resident_owner_links_and_keeps_crop_care_in_tooltips() {
+        use learning_lord_simulation::{Citizen, CitizenAction, StartingRole, farming::CropKind};
+        let (world, worker) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_citizen(
+                    "Farmer",
+                    Citizen::new(0.0)
+                        .unwrap()
+                        .with_starting_role(StartingRole::Farmer),
+                )
+                .unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents()[&worker].kind;
+        let home = citizen.home();
+        let (world, field) = world.with_property(worker, Location::Field).unwrap();
+        let world = world
+            .start_action(
+                worker,
+                CitizenAction::Plant {
+                    field,
+                    plot: 0,
+                    crop: CropKind::Wheat,
+                },
+            )
+            .unwrap()
+            .advance(learning_lord_simulation::farming::HOUR_MS)
+            .unwrap();
+        let map = world.map();
+        let places = [
+            map.place(home).unwrap().clone(),
+            map.place(field).unwrap().clone(),
+            map.place(map.public_place(Location::Forest))
+                .unwrap()
+                .clone(),
+        ];
+        let mut app = App::new();
+        app.add_systems(Startup, move |mut commands: Commands| {
+            commands.spawn(Node::default()).with_children(|parent| {
+                for place in &places {
+                    render_hierarchy(parent, &world, place);
+                }
+            });
+        });
+        app.update();
+        let labels: Vec<_> = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.clone())
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "Bedroom | Objects 1/1 | Workers 0")
+        );
+        assert!(labels.iter().any(|label| label == "Bed | Resident: "));
+        assert!(labels.iter().any(|label| label == "Berry bushes"));
+        assert!(labels.iter().any(|label| label == " | Workers 0/unlimited"));
+        assert!(!labels.iter().any(|label| label.contains("Tend 1:")));
+        assert!(
+            app.world_mut()
+                .query::<&crate::tooltip::Tooltip>()
+                .iter(app.world())
+                .any(|tooltip| tooltip.0.contains("Tend 1:") && tooltip.0.contains("Tend 2:"))
+        );
+        assert!(
+            app.world_mut()
+                .query::<&crate::navigation::Target>()
+                .iter(app.world())
+                .filter(|target| **target == crate::navigation::Target::Citizen(worker))
+                .count()
+                >= 2
+        );
+        assert!(
+            app.world_mut()
+                .query::<&crate::navigation::Target>()
+                .iter(app.world())
+                .any(|target| *target == crate::navigation::Target::Good(Good::Wheat))
+        );
     }
 }
