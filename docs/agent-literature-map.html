@@ -1,0 +1,1115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="A broad reading map for Learning Lord: 90 concepts across agent decision-making, economics, social simulation and evaluation.">
+    <title>Agents, economies &amp; societies — Learning Lord reading map</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #faf9f5;
+        --ink: #202923;
+        --muted: #526057;
+        --line: #d7ddd5;
+        --accent: #24654c;
+        --wash: #edf2eb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-padding-top: 1.5rem;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 16px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      }
+      a {
+        color: var(--accent);
+        text-decoration-thickness: 1px;
+        text-underline-offset: .18em;
+      }
+      a:hover {
+        color: #123e2d;
+      }
+      a:focus-visible {
+        outline: 3px solid var(--accent);
+        outline-offset: 4px;
+      }
+      p {
+        margin: .75rem 0;
+      }
+      strong {
+        font-weight: 650;
+      }
+      cite {
+        font-style: normal;
+      }
+      h1,h2,h3 {
+        line-height: 1.15;
+        text-wrap: balance;
+      }
+      h1 {
+        font: 600 clamp(2.35rem,5vw,4.2rem)/1.05 Georgia,serif;
+        letter-spacing: -.035em;
+        margin: .7rem 0 1.1rem;
+        max-width: 15ch;
+      }
+      h2 {
+        font: 600 clamp(1.65rem,3vw,2.15rem)/1.15 Georgia,serif;
+        letter-spacing: -.02em;
+        margin: 0 0 .7rem;
+      }
+      h3 {
+        font-size: 1.05rem;
+        margin: 0 0 .6rem;
+      }
+      header {
+        border-top: 7px solid var(--accent);
+        padding: 3rem 0 2rem;
+      }
+      .wrap {
+        max-width: 1280px;
+        margin: auto;
+        padding: 0 2.5rem;
+      }
+      .kicker {
+        font-size: .78rem;
+        font-weight: 700;
+        letter-spacing: .13em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+      .lede {
+        font-size: 1.15rem;
+        max-width: 70ch;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 235px minmax(0,1fr);
+        gap: 3rem;
+        align-items: start;
+      }
+      .contents {
+        position: sticky;
+        top: 1.3rem;
+        max-height: calc(100vh - 2.6rem);
+        overflow: auto;
+        padding: 0 1rem 1rem 0;
+        font-size: .82rem;
+      }
+      .contents ol {
+        padding-left: 1.5rem;
+        margin: .8rem 0;
+      }
+      .contents li {
+        padding: .19rem 0;
+      }
+      .contents a {
+        text-decoration: none;
+      }
+      .contents a:hover {
+        text-decoration: underline;
+      }
+      .contents .major {
+        display: block;
+        padding: .4rem 0;
+        border-top: 1px solid var(--line);
+        font-weight: 650;
+      }
+      main {
+        min-width: 0;
+      }
+      main>section {
+        padding: 2rem 0;
+        border-top: 1px solid var(--line);
+      }
+      .opening {
+        padding-top: 0;
+      }
+      ul,ol {
+        padding-left: 1.4rem;
+      }
+      li+li {
+        margin-top: .35rem;
+      }
+      .anchors {
+        font-size: .9rem;
+        color: var(--muted);
+      }
+      .starter {
+        background: var(--wash);
+        padding: 1.25rem 1.5rem;
+        margin: 1.5rem 0;
+      }
+      .starter ol {
+        margin: .6rem 0 0;
+      }
+      .section-meta {
+        display: flex;
+        gap: .75rem;
+        align-items: baseline;
+        font-size: .8rem;
+        font-weight: 650;
+        color: var(--accent);
+        margin: 0 0 .5rem;
+      }
+      .section-meta span+span {
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .intro {
+        color: var(--muted);
+        margin-bottom: 1.2rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: .92rem;
+        line-height: 1.5;
+        table-layout: fixed;
+        margin: 1rem 0 1.3rem;
+      }
+      th,td {
+        text-align: left;
+        vertical-align: top;
+        padding: .65rem .75rem;
+        border-bottom: 1px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+      thead th {
+        font-size: .76rem;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--muted);
+        border-top: 1px solid var(--line);
+      }
+      th:first-child {
+        width: 36%;
+        padding-left: 0;
+      }
+      td {
+        padding-right: 0;
+      }
+      .concept-number {
+        font-size: .77rem;
+        color: var(--accent);
+        font-weight: 500;
+        display: inline-block;
+        min-width: 1.8rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .readings {
+        font-size: .94rem;
+      }
+      .connection {
+        border-left: 3px solid #9caf9d;
+        padding-left: 1rem;
+        margin-top: 1.1rem;
+        font-size: .94rem;
+      }
+      .back {
+        font-size: .8rem;
+        display: inline-block;
+        margin-top: .6rem;
+      }
+      .route li {
+        padding-left: .3rem;
+        margin-bottom: .8rem;
+      }
+      footer {
+        font-size: .83rem;
+        color: var(--muted);
+        padding: 1.5rem 0 3rem;
+      }
+      .skip {
+        position: absolute;
+        top: -5rem;
+        left: 1rem;
+        background: var(--paper);
+        padding: .6rem;
+        z-index: 2;
+      }
+      .skip:focus {
+        top: 1rem;
+      }
+      @media(max-width:1000px) {
+        .wrap {
+          padding: 0 1.5rem;
+        }
+        .layout {
+          grid-template-columns: 200px minmax(0,1fr);
+          gap: 1.7rem;
+        }
+      }
+      @media(max-width:760px) {
+        header {
+          padding: 2rem 0 1.5rem;
+        }
+        .wrap {
+          padding: 0 1.1rem;
+        }
+        .layout {
+          display: block;
+        }
+        .contents {
+          position: static;
+          max-height: none;
+          padding: 0 0 1.3rem;
+        }
+        .contents ol {
+          columns: 2;
+          column-gap: 1.6rem;
+        }
+        .contents li {
+          break-inside: avoid;
+        }
+        .contents .major {
+          display: inline-block;
+          margin-right: 1rem;
+          border: 0;
+        }
+        main>section {
+          padding: 1.65rem 0;
+        }
+        table {
+          font-size: .9rem;
+        }
+        th,td {
+          padding: .6rem .35rem;
+        }
+        th:first-child {
+          width: 40%;
+        }
+        .concept-number {
+          display: block;
+        }
+        .starter {
+          padding: 1rem 1.1rem;
+        }
+      }
+      @media(max-width:420px) {
+        .contents ol {
+          columns: 1;
+        }
+        th:first-child {
+          width: 42%;
+        }
+      }
+      @media(prefers-reduced-motion:no-preference) {
+        html {
+          scroll-behavior: smooth;
+        }
+      }
+      @media print {
+        @page {
+          margin: 16mm;
+        }
+        body {
+          background: #fff;
+          color: #111;
+          font-size: 10pt;
+          line-height: 1.4;
+        }
+        .wrap {
+          max-width: none;
+          padding: 0;
+        }
+        header {
+          padding: 10pt 0;
+          border-top-width: 3pt;
+        }
+        h1 {
+          font-size: 28pt;
+          max-width: none;
+        }
+        h2 {
+          font-size: 19pt;
+        }
+        h3 {
+          font-size: 12pt;
+        }
+        .layout {
+          display: block;
+        }
+        .contents {
+          position: static;
+          max-height: none;
+          font-size: 9pt;
+          padding: 0 0 10pt;
+        }
+        .contents ol {
+          columns: 2;
+        }
+        .contents .major {
+          display: inline-block;
+          margin-right: 12pt;
+          border: 0;
+        }
+        .skip,.back {
+          display: none;
+        }
+        main>section {
+          padding: 16pt 0;
+        }
+        h2,h3,.section-meta {
+          break-after: avoid;
+        }
+        tr,.readings p,.connection {
+          break-inside: avoid;
+        }
+        table {
+          font-size: 9pt;
+        }
+        .starter {
+          background: none;
+          border: 1px solid #bbb;
+          padding: 10pt;
+        }
+        a {
+          color: #111;
+          text-decoration: underline;
+        }
+        .intro,.anchors,.kicker,.section-meta,.concept-number {
+          color: #333;
+        }
+        footer {
+          padding-bottom: 0;
+        }
+      }
+    </style>
+  </head>
+  <body><a class="skip" href="#main">Skip to reading map</a>
+    <header id="top">
+      <div class="wrap">
+        <div class="kicker">Learning Lord · Reading map
+        </div>
+        <h1>Agents, economies<br>&amp; societies</h1>
+        <p class="lede">90 concepts across 15 areas, connecting individual decisions to the economy and society they create.</p>
+      </div>
+    </header>
+    <div class="wrap layout">
+      <nav class="contents" aria-label="Contents" id="contents">
+        <h3>Contents</h3><a class="major" href="#overview">Overview &amp; five starting reads</a>
+        <ol>
+          <li><a href="#topic-1">Model purpose and emergence</a></li>
+          <li><a href="#topic-2">Needs, preferences and utility</a></li>
+          <li><a href="#topic-3">Ways to organize decisions</a></li>
+          <li><a href="#topic-4">Time, planning horizons and delayed benefits</a></li>
+          <li><a href="#topic-5">Uncertainty, knowledge and learning</a></li>
+          <li><a href="#topic-6">Bounded rationality and behavioral economics</a></li>
+          <li><a href="#topic-7">Economic choice and valuation</a></li>
+          <li><a href="#topic-8">Markets and exchange</a></li>
+          <li><a href="#topic-9">Production, inventory and logistics</a></li>
+          <li><a href="#topic-10">Organizations and institutions</a></li>
+          <li><a href="#topic-11">Relationships, cooperation and social networks</a></li>
+          <li><a href="#topic-12">System dynamics and economic stability</a></li>
+          <li><a href="#topic-13">Space, ecology and resource constraints</a></li>
+          <li><a href="#topic-14">Character, narrative and understandable behavior</a></li>
+          <li><a href="#topic-15">Evaluation and scientific discipline</a></li>
+        </ol><a class="major" href="#reading-route">Suggested reading route</a>
+      </nav>
+      <main id="main">
+        <section id="overview" class="opening" aria-labelledby="overview-title">
+          <h2 id="overview-title">A map before a deep dive</h2>
+          <p>Your project sits at the intersection of <strong>game AI, agent-based economics, operations research and social simulation</strong>. Reading across those fields should be more useful than searching for one “better agent algorithm.”</p>
+          <p>This is a browsing map: skim the concepts, follow whatever catches your interest, and leave the technical papers until you want depth. The connections to Learning Lord are my interpretation, not claims made by the authors.</p>
+          <p>From the implementation and design notes, I see three particularly useful questions:</p>
+          <ul>
+            <li><strong>Which possibilities do citizens consider?</strong> Your planner constructs a restricted set of alternatives. Better scoring cannot select a useful plan that was never generated.</li>
+            <li><strong>What makes an outcome valuable?</strong> Needs, wealth, reserves, future food benefits and household interests interact. Those choices define the citizens’ motivations.</li>
+            <li><strong>What happens when everyone follows those rules?</strong> Individually reasonable decisions can still produce shortages, inactivity, inequality or unstable prices.</li>
+          </ul>
+          <p>The current implementation combines goal construction, forward prediction and wellbeing scoring; it also contains policies for provisioning, production and selling. Broader relationship ambitions and employment proposals extend beyond what is currently implemented.</p>
+          <p class="anchors">Repository anchors: <a href="../crates/simulation/src/planning.rs">planner</a> · <a href="../crates/simulation/src/planning/goals.rs">prediction scoring</a> · <a href="../plans/ticking.md">relationship objectives</a> · <a href="../plans/businesses-and-employment.md">deferred employment design</a></p>
+          <aside class="starter" aria-labelledby="five-title">
+            <h3 id="five-title">If you only open five things initially</h3>
+            <ol>
+              <li><a href="https://www.jasss.org/11/4/12.html">Epstein’s <cite>Why Model?</cite></a> — the purpose of a simulation.</li>
+              <li><a href="https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter04_Behavior_Selection_Algorithms.pdf">The <cite>Game AI Pro</cite> behavior-selection overview</a> — individual behavior.</li>
+              <li><a href="https://books.core-econ.org/the-economy/en/index.html">CORE’s introductory economics text</a> — markets and economic choice.</li>
+              <li><a href="https://www.ocw.mit.edu/courses/esd-260j-logistics-systems-fall-2006/pages/lecture-notes/">MIT’s inventory lectures</a> — practical production and provisioning.</li>
+              <li><a href="https://www.nobelprize.org/prizes/economic-sciences/2009/ostrom/lecture/">Ostrom’s lecture</a> — collective organization.</li>
+            </ol>
+          </aside>
+        </section>
+        <section id="topic-1" aria-labelledby="title-1">
+          <p class="section-meta">01 / 15 <span>Concepts 1–6</span></p>
+          <h2 id="title-1">Model purpose and emergence</h2>
+          <p class="intro">These help decide what “improvement” means before adding more machinery.</p>
+          <table aria-label="Concepts in Model purpose and emergence">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">01</span> Agent-based modeling</th>
+                <td>Represent individuals and their interactions, then observe the society they produce. This is already your basic approach.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">02</span> Generative explanation</th>
+                <td>Ask whether plausible local rules can generate a particular social pattern, such as specialization or inequality.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">03</span> Emergence</th>
+                <td>Town-level behavior can appear without any citizen intending it. A shortage need not have a single responsible agent.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">04</span> Heterogeneity</th>
+                <td>Differences in resources, preferences, skills and information can matter more than making every citizen smarter.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">05</span> Descriptive versus normative models</th>
+                <td>Modeling how people behave differs from designing agents that make economically optimal choices.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">06</span> Minimal models</th>
+                <td>A deliberately small economy can reveal a mechanism more clearly than a richly detailed town.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Joshua Epstein, <a href="https://www.jasss.org/11/4/12.html"><cite>Why Model?</cite></a> — a short, accessible essay about the many purposes of simulation.</p>
+            <p><strong>Explore:</strong> Epstein and Axtell, <a href="https://doi.org/10.7551/mitpress/3374.001.0001"><cite>Growing Artificial Societies</cite></a> — a book-length example of building social phenomena from interacting agents. Leigh Tesfatsion’s <a href="https://faculty.sites.iastate.edu/tesfatsi/archive/tesfatsi/aapplic.htm">agent-based computational economics reading map</a> is a useful directory when a particular economic topic catches your attention.</p>
+          </div>
+          <p class="connection">For your project, the immediate lesson is to distinguish “interesting behavior,” “believable behavior” and “evidence about real societies.” Each needs a different standard of success.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-2" aria-labelledby="title-2">
+          <p class="section-meta">02 / 15 <span>Concepts 7–12</span></p>
+          <h2 id="title-2">Needs, preferences and utility</h2>
+          <p class="intro">This is especially relevant because wellbeing is the common currency of your decisions.</p>
+          <table aria-label="Concepts in Needs, preferences and utility">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">07</span> Utility functions</th>
+                <td>A numerical representation of preferences. The formula determines what citizens are willing to sacrifice for what.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">08</span> Diminishing marginal utility</th>
+                <td>The next coin or loaf may matter less than the previous one. This changes accumulation and consumption incentives.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">09</span> Homeostasis</th>
+                <td>Behavior regulates internal conditions such as hunger and thirst around acceptable ranges.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">10</span> Anticipatory regulation</th>
+                <td>Prepare before a need becomes urgent: fill the pantry before hunger, rather than merely react afterward.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">11</span> Multiple objectives and constraints</th>
+                <td>Survival, comfort, wealth and obligations can be traded off—or some can be protected by explicit limits.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">12</span> Hysteresis and inertia</th>
+                <td>Require a meaningful improvement before switching activities, avoiding constant changes of mind.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> David “Rez” Graham, <a href="https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter09_An_Introduction_to_Utility_Theory.pdf"><cite>An Introduction to Utility Theory</cite></a> — practical game-AI discussion of scoring, response curves, selection and inertia.</p>
+            <p><strong>Explore:</strong> Keramati and Gutkin, <a href="https://elifesciences.org/articles/04811"><cite>Homeostatic reinforcement learning for integrating reward collection and physiological stability</cite></a> — a technical account connecting internal needs to reward-seeking behavior.</p>
+          </div>
+          <p class="connection">A question worth keeping beside these readings: is wealth itself satisfying, or valuable because of the future options it buys? Your answer substantially changes the model.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-3" aria-labelledby="title-3">
+          <p class="section-meta">03 / 15 <span>Concepts 13–18</span></p>
+          <h2 id="title-3">Ways to organize decisions</h2>
+          <p class="intro">These are alternatives and combinations, not successive upgrades.</p>
+          <table aria-label="Concepts in Ways to organize decisions">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">13</span> Finite-state machines</th>
+                <td>Explicit modes such as working, shopping and resting; straightforward when transitions remain manageable.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">14</span> Behavior trees</th>
+                <td>Compose priorities, conditions and actions into a reactive hierarchy. Useful for dependable routines.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">15</span> Goal-oriented action planning</th>
+                <td>Construct action sequences from prerequisites and effects. Closely related to your resource-acquisition search.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">16</span> Hierarchical task networks</th>
+                <td>Decompose “provision household” into known methods, reducing the amount of open-ended search.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">17</span> Belief–desire–intention architectures</th>
+                <td>Separate what an agent believes, wants and has committed to doing.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">18</span> Hybrid architectures</th>
+                <td>Combine routines, emergency reactions and deliberative planning, giving each a suitable job.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Dawe and colleagues, <a href="https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter04_Behavior_Selection_Algorithms.pdf"><cite>Behavior Selection Algorithms: An Overview</cite></a> — a useful comparison before choosing an architecture.</p>
+            <p><strong>Explore:</strong> Rao and Georgeff, <a href="https://cdn.aaai.org/ICMAS/1995/ICMAS95-042.pdf"><cite>BDI Agents: From Theory to Practice</cite></a>. For a more practical hierarchy example, Troy Humphreys’ <cite>Exploring HTN Planners through Example</cite> is available in the <a href="https://www.gameaipro.com/">Game AI Pro collection</a>.</p>
+          </div>
+          <p class="connection">My strongest simplification candidate here is routines for repeated maintenance, with planning reserved for consequential choices. That is a design option to evaluate, not a recommendation to replace your planner immediately.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-4" aria-labelledby="title-4">
+          <p class="section-meta">04 / 15 <span>Concepts 19–24</span></p>
+          <h2 id="title-4">Time, planning horizons and delayed benefits</h2>
+          <p class="intro">Your production questions connect directly to these concepts.</p>
+          <table aria-label="Concepts in Time, planning horizons and delayed benefits">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">19</span> Receding-horizon control</th>
+                <td>Predict ahead, execute part of the plan, then reconsider using the actual state.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">20</span> Terminal value</th>
+                <td>Estimate what the state at the prediction boundary is worth beyond that boundary.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">21</span> Discounted versus average reward</th>
+                <td>Different ways to compare benefits over time; they can favor different behavior.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">22</span> Temporal abstraction</th>
+                <td>Treat a shopping trip or production job as a meaningful activity rather than many isolated steps.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">23</span> Semi-Markov decision processes</th>
+                <td>A framework for decisions whose actions take different amounts of time.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">24</span> Reward shaping</th>
+                <td>Add guidance to help decision-making; poorly chosen guidance can change the objective itself.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start conceptually:</strong> Rawlings, Mayne and Diehl, <a href="https://sites.chemengr.ucsb.edu/~jbraw/mpc/"><cite>Model Predictive Control: Theory, Computation, and Design</cite></a> — skim the introduction and finite-horizon discussion; the mathematics gets substantial.</p>
+            <p><strong>Explore:</strong> Sutton, Precup and Singh, <a href="https://www.sciencedirect.com/science/article/pii/S0004370299000521"><cite>Between MDPs and semi-MDPs</cite></a>, on temporally extended actions; Ng, Harada and Russell, <a href="https://ai.stanford.edu/~ang/papers/shaping-icml99.pdf"><cite>Policy invariance under reward transformations</cite></a>, on when reward shaping preserves an objective.</p>
+          </div>
+          <p class="connection">For Learning Lord, these readings illuminate the difference between giving inputs credit for future usefulness and paying the citizen for work that has not happened. The shaping theorem does not automatically apply to your current scoring scheme.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-5" aria-labelledby="title-5">
+          <p class="section-meta">05 / 15 <span>Concepts 25–30</span></p>
+          <h2 id="title-5">Uncertainty, knowledge and learning</h2>
+          <p class="intro">Prediction and learning are separate capabilities.</p>
+          <table aria-label="Concepts in Uncertainty, knowledge and learning">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">25</span> Partial observability</th>
+                <td>Citizens act on what they know, which may differ from the complete simulation state.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">26</span> Belief updating</th>
+                <td>Revise expectations after observing sales, shortages or another citizen’s behavior.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">27</span> Risk-sensitive choice</th>
+                <td>Reliable food supply may be preferable to a higher average return with a starvation risk.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">28</span> Exploration versus exploitation</th>
+                <td>Trying an uncertain product or price can be worthwhile because it teaches something.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">29</span> Model-based versus model-free learning</th>
+                <td>Learn a world model for planning, or learn useful behavior directly from experience.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">30</span> Monte Carlo tree search</th>
+                <td>Sample possible continuations when enumerating every future is too expensive.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Sutton and Barto, <a href="https://www.incompleteideas.net/book/bookdraft2018mar21.pdf"><cite>Reinforcement Learning: An Introduction</cite></a> — chapters 1–3 for the vocabulary, chapter 8 for planning and learning. Reading these does not commit you to neural networks.</p>
+            <p><strong>Explore:</strong> Poole and Mackworth’s <a href="https://www.artint.info/3e/html/ArtInt3e.Ch12.S5.html"><cite>Planning with Uncertainty</cite></a>, and Browne and colleagues’ <a href="https://research.monash.edu/en/publications/a-survey-of-monte-carlo-tree-search-methods/"><cite>A Survey of Monte Carlo Tree Search Methods</cite></a>.</p>
+          </div>
+          <p class="connection">Your seller trials already make exploration relevant. A useful distinction is whether a trial’s value comes only from immediate receipts or also from what it reveals about demand.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-6" aria-labelledby="title-6">
+          <p class="section-meta">06 / 15 <span>Concepts 31–36</span></p>
+          <h2 id="title-6">Bounded rationality and behavioral economics</h2>
+          <p class="intro">For believable people, consider the limits and shortcuts of decision-making.</p>
+          <table aria-label="Concepts in Bounded rationality and behavioral economics">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">31</span> Bounded rationality</th>
+                <td>Decisions are limited by knowledge, time and computational capacity.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">32</span> Satisficing</th>
+                <td>Stop searching when an option is good enough, rather than always finding the maximum.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">33</span> Aspiration levels</th>
+                <td>“Enough” can depend on experience and expectations, allowing standards to change.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">34</span> Habits and routines</th>
+                <td>Reuse successful behavior until circumstances give a reason to reconsider it.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">35</span> Reference dependence and loss aversion</th>
+                <td>Outcomes can feel good or bad relative to an expected state, rather than absolute wealth.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">36</span> Framing and judgment heuristics</th>
+                <td>The presentation of a choice and simple mental shortcuts can influence decisions.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Herbert Simon, <a href="https://www.nobelprize.org/uploads/2018/06/simon-lecture.pdf"><cite>Rational Decision-Making in Business Organizations</cite></a> — particularly relevant to your preference for simple, general rules.</p>
+            <p><strong>Explore:</strong> Daniel Kahneman, <a href="https://www.nobelprize.org/uploads/2018/06/kahnemann-lecture.pdf"><cite>Maps of Bounded Rationality</cite></a>, on intuitive judgment and choice.</p>
+          </div>
+          <p class="connection">I would read Simon before adding psychological biases. Limited but understandable competence is a stronger starting point than making agents irrational in assorted ways.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-7" aria-labelledby="title-7">
+          <p class="section-meta">07 / 15 <span>Concepts 37–42</span></p>
+          <h2 id="title-7">Economic choice and valuation</h2>
+          <p class="intro">These help disentangle several issues currently grouped under profitability.</p>
+          <table aria-label="Concepts in Economic choice and valuation">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">37</span> Opportunity cost</th>
+                <td>The cost of an action includes the best alternative it prevents, including other uses of time.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">38</span> Comparative advantage</th>
+                <td>Specialization depends on relative opportunity costs, not simply who is fastest at each task.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">39</span> Marginal analysis</th>
+                <td>Decide whether the next batch is worthwhile; average profitability may answer a different question.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">40</span> Sunk costs</th>
+                <td>Past, unrecoverable expenditure should not alone determine what to do next.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">41</span> Relevant value versus accounting value</th>
+                <td>Historical cost, replacement cost, sale proceeds and personal usefulness answer different questions.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">42</span> Make-or-buy decisions</th>
+                <td>Compare complete acquisition routes, including travel, capacity and alternative uses of labor.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> OpenStax’s <a href="https://openstax.org/books/principles-economics-3e/pages/2-key-concepts-and-summary">overview of scarcity and opportunity cost</a> and <a href="https://openstax.org/books/principles-economics-3e/pages/33-1-absolute-and-comparative-advantage">comparative advantage</a>.</p>
+            <p><strong>Explore:</strong> Its managerial-accounting sections on <a href="https://openstax.org/books/principles-managerial-accounting/pages/10-1-identify-relevant-information-for-decision-making">relevant information</a> and <a href="https://openstax.org/books/principles-managerial-accounting/pages/10-3-evaluate-and-determine-whether-to-make-or-buy-a-component">make-or-buy decisions</a>.</p>
+          </div>
+          <p class="connection">My main takeaway for your design: one price does not have to serve every purpose. Using separate concepts can simplify reasoning even when it adds a little data.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-8" aria-labelledby="title-8">
+          <p class="section-meta">08 / 15 <span>Concepts 43–48</span></p>
+          <h2 id="title-8">Markets and exchange</h2>
+          <p class="intro">A collection of profitable recipes does not automatically become a functioning economy.</p>
+          <table aria-label="Concepts in Markets and exchange">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">43</span> Reservation prices</th>
+                <td>A buyer’s maximum willingness to pay and a seller’s minimum acceptable price need not match.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">44</span> Price discovery</th>
+                <td>Prices develop from offers, trades and learning; an asking price is not evidence of a completed sale.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">45</span> Market clearing and rationing</th>
+                <td>When supply and demand differ, prices are only one mechanism; availability and allocation also matter.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">46</span> Search and transaction costs</th>
+                <td>Finding a supplier, traveling and arranging exchange can make a cheap good expensive to acquire.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">47</span> Market power</th>
+                <td>A sole miller or indispensable supplier can influence terms differently from one of many competitors.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">48</span> Matching and auction mechanisms</th>
+                <td>Rules determine which buyer meets which seller and who obtains scarce stock.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> CORE Econ, <a href="https://books.core-econ.org/the-economy/en/index.html"><cite>The Economy 2.0</cite></a> — browse the microeconomics units on firms, customers, supply and demand, and market failures.</p>
+            <p><strong>Explore:</strong> Easley and Kleinberg’s chapters on auctions and matching markets in <a href="https://www.cs.cornell.edu/home/kleinber/networks-book/"><cite>Networks, Crowds, and Markets</cite></a>.</p>
+          </div>
+          <p class="connection">For your town, first-come purchasing, supplier locations and limited stock are already economic institutions. They deserve as much attention as the price-update formula.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-9" aria-labelledby="title-9">
+          <p class="section-meta">09 / 15 <span>Concepts 49–54</span></p>
+          <h2 id="title-9">Production, inventory and logistics</h2>
+          <p class="intro">This may offer the most immediately useful reading for your recent problems.</p>
+          <table aria-label="Concepts in Production, inventory and logistics">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">49</span> Reorder-point policies</th>
+                <td>Replenish when stock reaches a threshold, accounting for how long replacement takes.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">50</span> Safety stock</th>
+                <td>Hold a buffer against uncertain demand or supply rather than targeting only average requirements.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">51</span> Economic order quantity and lot sizing</th>
+                <td>Balance frequent small purchases against larger purchases that tie up resources.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">52</span> Setup costs and batching</th>
+                <td>Travel and preparation can make several batches together preferable to isolated production.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">53</span> Bottlenecks and capacity</th>
+                <td>Output depends on constrained workers, equipment or slots, not merely available ingredients.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">54</span> Bullwhip effects</th>
+                <td>Delayed information and replenishment reactions can amplify small demand changes up a supply chain.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> MIT’s <a href="https://www.ocw.mit.edu/courses/esd-260j-logistics-systems-fall-2006/pages/lecture-notes/">Logistics Systems lecture notes</a>, particularly inventory management and safety stock.</p>
+            <p><strong>Explore interactively:</strong> John Sterman’s <a href="https://web.mit.edu/jsterman/www/SDG/beergame.html">Beer Distribution Game material</a>, which introduces supply-chain behavior through a deceptively simple setting.</p>
+          </div>
+          <p class="connection">This literature gives you principled alternatives to choosing “two hours” or “twelve hours” of ingredients by intuition. It also explains why an individually sensible restocking policy can destabilize suppliers.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-10" aria-labelledby="title-10">
+          <p class="section-meta">10 / 15 <span>Concepts 55–60</span></p>
+          <h2 id="title-10">Organizations and institutions</h2>
+          <p class="intro">Your households, guilds and proposed businesses lead into these concepts.</p>
+          <table aria-label="Concepts in Organizations and institutions">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">55</span> Household production</th>
+                <td>A household coordinates consumption, unpaid work and shared resources—not just a pooled bank account.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">56</span> Transaction-cost economics</th>
+                <td>Some activities are easier to coordinate inside an organization than through repeated market transactions.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">57</span> Principal–agent problems</th>
+                <td>An employer’s objectives and an employee’s objectives differ, especially when effort is hard to observe.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">58</span> Collective action and free riding</th>
+                <td>Members benefit from shared work while potentially preferring someone else to perform it.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">59</span> Commons governance</th>
+                <td>Shared resources can be managed through local rules, monitoring and sanctions.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">60</span> Polycentric governance</th>
+                <td>Households, guilds and town authorities can govern overlapping activities at different scales.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Elinor Ostrom, <a href="https://www.nobelprize.org/prizes/economic-sciences/2009/ostrom/lecture/"><cite>Beyond Markets and States</cite></a> — a particularly good match for your interest in collectives.</p>
+            <p><strong>Explore:</strong> Ronald Coase’s <a href="https://www.nobelprize.org/prizes/economic-sciences/1991/coase/lecture/">Nobel lecture</a>, and CORE’s discussion of <a href="https://books.core-econ.org/the-economy-v1/book/text/06.html">firms, owners, managers and employees</a>.</p>
+          </div>
+          <p class="connection">A useful challenge to your design: household allegiance, employment and guild membership need not be variations of the same relationship weight. They grant different rights and create different obligations.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-11" aria-labelledby="title-11">
+          <p class="section-meta">11 / 15 <span>Concepts 61–66</span></p>
+          <h2 id="title-11">Relationships, cooperation and social networks</h2>
+          <p class="intro">Separate different social mechanisms before combining them.</p>
+          <table aria-label="Concepts in Relationships, cooperation and social networks">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">61</span> Repeated games and reciprocity</th>
+                <td>Future interaction can make cooperation worthwhile even when immediate selfishness would pay.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">62</span> Trust and reputation</th>
+                <td>Personal experience and reports from others affect willingness to trade, lend or cooperate.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">63</span> Social preferences</th>
+                <td>Agents may care directly about others’ outcomes, fairness or group success.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">64</span> Homophily and network formation</th>
+                <td>Similar people tend to connect; those connections can reinforce similarity.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">65</span> Strong and weak ties</th>
+                <td>Close relationships provide support; weaker connections can introduce new information and opportunities.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">66</span> Diffusion and social learning</th>
+                <td>Practices, information and expectations spread through contact rather than appearing everywhere simultaneously.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Easley and Kleinberg, <a href="https://www.cs.cornell.edu/home/kleinber/networks-book/"><cite>Networks, Crowds, and Markets</cite></a> — browse chapters 3–6 and the later chapters on information cascades and diffusion. The authors provide a free draft and individual chapters.</p>
+            <p><strong>Explore a game implementation:</strong> McCoy and colleagues, <a href="https://ojs.aaai.org/index.php/AIIDE/article/view/12454"><cite>Comme il Faut: A System for Authoring Playable Social Models</cite></a>, which represents reusable social norms and interactions.</p>
+          </div>
+          <p class="connection">Your relationship notes already ask about cooperation strengthening attachment and exploitation weakening it. This area offers vocabulary for distinguishing liking someone, trusting them, owing them and identifying with their group.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-12" aria-labelledby="title-12">
+          <p class="section-meta">12 / 15 <span>Concepts 67–72</span></p>
+          <h2 id="title-12">System dynamics and economic stability</h2>
+          <p class="intro">Zoom out from individual choices to the behavior of the whole town.</p>
+          <table aria-label="Concepts in System dynamics and economic stability">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">67</span> Stocks and flows</th>
+                <td>Inventory is a stock; production and consumption are flows. Confusing them produces misleading diagnostics.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">68</span> Reinforcing and balancing feedback</th>
+                <td>Some loops amplify change; others resist it. Both can operate simultaneously.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">69</span> Delays and oscillation</th>
+                <td>Slow production and price responses can create recurring shortages and gluts.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">70</span> Path dependence</th>
+                <td>Early events can push otherwise similar towns onto persistently different trajectories.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">71</span> Liquidity constraints and coordination failures</th>
+                <td>Useful work can remain undone because participants cannot finance inputs or coordinate complementary actions.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">72</span> Resilience and redundancy</th>
+                <td>Spare capacity and multiple suppliers may look inefficient until a disruption occurs.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Donella Meadows, <a href="https://donellameadows.org/archives/leverage-points-places-to-intervene-in-a-system/"><cite>Leverage Points: Places to Intervene in a System</cite></a> — accessible and useful when deciding whether to adjust a number or change a rule.</p>
+            <p><strong>Explore:</strong> MIT’s <a href="https://ocw.mit.edu/courses/15-871-introduction-to-system-dynamics-fall-2013/"><cite>Introduction to System Dynamics</cite></a> and Tesfatsion’s <a href="https://faculty.sites.iastate.edu/tesfatsi/archive/tesfatsi/aapplic.htm">economic modeling research areas</a>.</p>
+          </div>
+          <p class="connection">For Learning Lord, this suggests observing distributions and time series: inventories, unmet needs, productive hours, cash availability and supplier dependence. A single citizen’s winning plan cannot explain the whole economy.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-13" aria-labelledby="title-13">
+          <p class="section-meta">13 / 15 <span>Concepts 73–78</span></p>
+          <h2 id="title-13">Space, ecology and resource constraints</h2>
+          <p class="intro">Physical and spatial constraints can create meaningful economic decisions.</p>
+          <table aria-label="Concepts in Space, ecology and resource constraints">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">73</span> Spatial accessibility</th>
+                <td>Goods can exist in the town yet be practically inaccessible because of distance or permissions.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">74</span> Congestion and queues</th>
+                <td>Shared workshops and services introduce waiting, which changes the value of otherwise attractive choices.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">75</span> Renewable-resource dynamics</th>
+                <td>Fishing and foraging can depend on replenishing stocks rather than unlimited action opportunities.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">76</span> Carrying capacity</th>
+                <td>An environment can support only so much sustained consumption under particular technologies and rules.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">77</span> Common-pool depletion</th>
+                <td>Individually beneficial extraction can undermine the resource everyone depends on.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">78</span> Seasonality and disturbance</th>
+                <td>Predictable cycles and occasional shocks create reasons for storage, diversification and cooperation.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start by experimenting:</strong> The <a href="https://ccl.northwestern.edu/netlogo/models/">NetLogo Models Library</a> offers small, inspectable models. Try <a href="https://ccl.northwestern.edu/netlogo/models/WolfSheepPredation">Wolf Sheep Predation</a> for resource feedback, plus the traffic and segregation models for spatial interactions.</p>
+            <p><strong>Explore a game perspective:</strong> Tarn Adams, <a href="https://www.gameaipro.com/GameAIPro2/GameAIPro2_Chapter41_Simulation_Principles_from_Dwarf_Fortress.pdf"><cite>Simulation Principles from Dwarf Fortress</cite></a>.</p>
+          </div>
+          <p class="connection">I would treat these as possible sources of meaningful constraints. Add them when they create decisions you want, rather than because more physical detail automatically seems better.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-14" aria-labelledby="title-14">
+          <p class="section-meta">14 / 15 <span>Concepts 79–84</span></p>
+          <h2 id="title-14">Character, narrative and understandable behavior</h2>
+          <p class="intro">For interesting citizens and player experience, consider how behavior becomes legible.</p>
+          <table aria-label="Concepts in Character, narrative and understandable behavior">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">79</span> Character intentionality</th>
+                <td>Actions feel coherent when an observer can understand the goal behind them.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">80</span> Persistent personality</th>
+                <td>Stable differences in priorities and habits create recognizable individuals.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">81</span> Episodic memory and relationships</th>
+                <td>Specific past events can explain present behavior more clearly than an unexplained relationship score.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">82</span> Social practices and roles</th>
+                <td>Reusable situations—hosting, bargaining, apologizing—create structure without scripting every encounter.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">83</span> Emergent narrative and drama management</th>
+                <td>Stories can arise from simulation, or a separate system can influence pacing and opportunities.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">84</span> Generative agents</th>
+                <td>Language-based memory, reflection and planning offer another approach to believable social behavior.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Mateas and McCoy, <a href="https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter43_An_Architecture_for_Character-Rich_Social_Simulation.pdf"><cite>An Architecture for Character-Rich Social Simulation</cite></a>.</p>
+            <p><strong>Explore:</strong> Riedl and Young, <a href="https://arxiv.org/abs/1401.3841"><cite>Narrative Planning: Balancing Plot and Character</cite></a>, and Park and colleagues, <a href="https://arxiv.org/abs/2304.03442"><cite>Generative Agents: Interactive Simulacra of Human Behavior</cite></a>.</p>
+          </div>
+          <p class="connection">The latter is worth knowing about, but I would not infer that you should put language models inside your economy. Its memory-and-reflection ideas are interesting independently; believable conversation does not establish sound economic behavior.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="topic-15" aria-labelledby="title-15">
+          <p class="section-meta">15 / 15 <span>Concepts 85–90</span></p>
+          <h2 id="title-15">Evaluation and scientific discipline</h2>
+          <p class="intro">These help tell improvements from attractive anecdotes.</p>
+          <table aria-label="Concepts in Evaluation and scientific discipline">
+            <thead>
+              <tr>
+                <th scope="col">Concept</th>
+                <th scope="col">Meaning and relevance here</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="concept-number">85</span> Verification versus validation</th>
+                <td>Correctly implementing rules differs from showing that those rules represent the intended phenomenon.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">86</span> Pattern-oriented modeling</th>
+                <td>Evaluate several patterns together, rather than tuning until one chosen citizen behaves as desired.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">87</span> Sensitivity analysis</th>
+                <td>Discover which parameters meaningfully change outcomes and where behavior changes abruptly.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">88</span> Structural uncertainty and equifinality</th>
+                <td>Different rules can generate similar visible outcomes; matching one result does not identify its cause.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">89</span> Controlled simulation experiments</th>
+                <td>Compare interventions across matched starting states and repeated runs; isolate which mechanism changes behavior.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="concept-number">90</span> Scheduling and reproducibility</th>
+                <td>Update order, randomness and simultaneous-action rules can affect results and must be explicit.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="readings">
+            <p><strong>Start:</strong> Grimm and colleagues, <a href="https://www.jasss.org/23/2/7.html"><cite>The ODD Protocol for Describing Agent-Based and Other Simulation Models</cite></a>. Its categories help separate purpose, entities, scheduling, assumptions and observation.</p>
+            <p><strong>Explore:</strong> ten Broeke, van Voorn and Ligtenberg, <a href="https://www.jasss.org/19/1/5/5.pdf"><cite>Which Sensitivity Analysis Method Should I Use for My Agent-Based Model?</cite></a>.</p>
+          </div>
+          <p class="connection">Your existing saved-state comparisons and decision diagnostics are a good foundation. The next conceptual step is testing whether an explanation survives changes in starting wealth, supply, population and timing.</p><a class="back" href="#contents">Back to contents ↑</a>
+        </section>
+        <section id="reading-route" aria-labelledby="route-title">
+          <h2 id="route-title">A suggested reading route</h2>
+          <ol class="route">
+            <li><strong>Epstein + the behavior-selection overview:</strong> establish what you want the model to accomplish and recognize the available architectures. <a href="#topic-1">Model purpose</a> · <a href="#topic-3">Decision architectures</a></li>
+            <li><strong>CORE economics + inventory management:</strong> build vocabulary for the production and trade problems already present. <a href="#topic-8">Markets</a> · <a href="#topic-9">Inventory</a></li>
+            <li><strong>Simon + the time-horizon material:</strong> consider how much reasoning citizens actually need, and how to account for consequences beyond their immediate plan. <a href="#topic-6">Bounded rationality</a> · <a href="#topic-4">Planning horizons</a></li>
+            <li><strong>Ostrom + social networks:</strong> develop households, guilds, cooperation and institutions on clearer foundations. <a href="#topic-10">Institutions</a> · <a href="#topic-11">Social networks</a></li>
+            <li><strong>Narrative research + simulation evaluation:</strong> make behavior understandable while checking that appealing stories are supported by the mechanics. <a href="#topic-14">Narrative</a> · <a href="#topic-15">Evaluation</a></li>
+          </ol>
+          <p>The biggest opportunity I see is <strong>separating motivations, practical routines, economic accounting and prediction</strong>. Your current wellbeing score is carrying parts of all four. Reading these fields should help you decide which responsibilities belong together—and where a simpler rule would produce clearer, more convincing behavior.</p>
+        </section>
+        <footer>Learning Lord reading map · Prepared from the project discussion. Repository links are relative to this document.
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>
