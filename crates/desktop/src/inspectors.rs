@@ -247,7 +247,10 @@ mod tests {
         let mut app = app();
         app.init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<bevy::input_focus::InputFocus>()
-            .add_systems(Update, citizens::handle_selection);
+            .add_systems(
+                Update,
+                (citizens::handle_selection, citizens::refresh_cards).chain(),
+            );
         for kind in [
             WindowKind::Citizens,
             WindowKind::Locations,
@@ -256,6 +259,32 @@ mod tests {
             app.world_mut().resource_mut::<Windows>().open(kind);
         }
         app.update();
+        let menu = app
+            .world_mut()
+            .query::<(&Text, &ChildOf)>()
+            .iter(app.world())
+            .find(|(text, _)| text.0 == "Profession v")
+            .unwrap()
+            .1
+            .parent();
+        app.world_mut()
+            .entity_mut(menu)
+            .insert(Interaction::Pressed);
+        app.update();
+        app.world_mut().entity_mut(menu).insert(Interaction::None);
+        let none = app
+            .world_mut()
+            .query::<(&Text, &ChildOf)>()
+            .iter(app.world())
+            .find(|(text, _)| text.0 == "None")
+            .unwrap()
+            .1
+            .parent();
+        app.world_mut()
+            .entity_mut(none)
+            .insert(Interaction::Pressed);
+        app.update();
+        app.world_mut().entity_mut(none).insert(Interaction::None);
         let ids = citizens::sorted_agents(&app.world().resource::<DisplaySnapshot>().0.universe)
             .iter()
             .map(|(id, _)| *id)
@@ -266,7 +295,17 @@ mod tests {
             .iter(app.world())
             .collect::<Vec<_>>();
         assert_eq!(cards.len(), ids.len());
+        let back = app
+            .world_mut()
+            .query_filtered::<Entity, With<citizens::Back>>()
+            .single(app.world())
+            .unwrap();
         for (index, card) in cards.iter().enumerate() {
+            app.world_mut()
+                .entity_mut(back)
+                .insert(Interaction::Pressed);
+            app.update();
+            app.world_mut().entity_mut(back).insert(Interaction::None);
             app.world_mut()
                 .entity_mut(*card)
                 .insert(Interaction::Pressed);

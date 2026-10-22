@@ -1,3 +1,5 @@
+mod roster;
+
 use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, text};
 use bevy::{
     input::mouse::{MouseScrollUnit, MouseWheel},
@@ -15,6 +17,7 @@ pub struct Selection(pub Option<AgentId>);
 pub struct RosterState {
     generation: u64,
     pub(crate) detail: bool,
+    view: roster::View,
 }
 
 #[derive(Resource, Default)]
@@ -24,7 +27,7 @@ pub struct PlanDisplay {
 }
 
 #[derive(Component)]
-pub struct Card(usize);
+pub struct Card(roster::Target);
 #[derive(Component)]
 pub struct Summary(usize, usize);
 #[derive(Component)]
@@ -38,7 +41,7 @@ pub(crate) struct SkillsLabel;
 #[derive(Resource, Default)]
 pub struct SkillsExpanded(bool);
 #[derive(Component)]
-pub(crate) struct RosterContent(usize);
+struct RosterContent(Vec<roster::Target>);
 #[derive(Clone, Copy)]
 pub enum Need {
     Hunger,
@@ -117,71 +120,7 @@ const COLUMNS: [(&str, f32); 5] = [
     ("Wellbeing", 18.0),
 ];
 
-fn cell(parent: &mut ChildSpawnerCommands, width: f32, label: &str, color: Color) -> Entity {
-    parent
-        .spawn(Node {
-            width: percent(width),
-            min_width: px(0),
-            padding: UiRect::horizontal(px(6)),
-            flex_shrink: 0.0,
-            ..default()
-        })
-        .with_children(|cell| {
-            cell.spawn(text(label, 14.0, color));
-        })
-        .id()
-}
-
-fn roster_rows(parent: &mut ChildSpawnerCommands, count: usize, values: Option<&[[String; 5]]>) {
-    if count == 0 {
-        parent.spawn(text("No citizens", 14.0, MUTED));
-    }
-    for slot in 0..count {
-        parent
-            .spawn((
-                Button,
-                Card(slot),
-                Node {
-                    min_height: px(27),
-                    width: percent(100),
-                    align_items: AlignItems::Center,
-                    flex_shrink: 0.0,
-                    ..default()
-                },
-                BackgroundColor(PANEL),
-            ))
-            .with_children(|row| {
-                for (column, (_, width)) in COLUMNS.iter().enumerate() {
-                    row.spawn((
-                        Node {
-                            width: percent(*width),
-                            min_width: px(0),
-                            padding: UiRect::horizontal(px(6)),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                        crate::tooltip::Tooltip(String::new()),
-                        Interaction::None,
-                        bevy::ui::FocusPolicy::Pass,
-                    ))
-                    .with_children(|cell| {
-                        cell.spawn((
-                            text(
-                                values
-                                    .and_then(|rows| rows.get(slot))
-                                    .map_or("", |row| row[column].as_str()),
-                                14.0,
-                                TEXT,
-                            ),
-                            Summary(slot, column),
-                        ));
-                    });
-                }
-            });
-    }
-}
-
-pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
+pub fn spawn_roster(parent: &mut ChildSpawnerCommands, _count: usize) {
     parent
         .spawn((
             Screen(false),
@@ -198,6 +137,7 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
             RelativeCursorPosition::default(),
         ))
         .with_children(|table| {
+            roster::controls(table);
             table
                 .spawn(Node {
                     min_height: px(29),
@@ -208,9 +148,7 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
                     ..default()
                 })
                 .with_children(|row| {
-                    for (label, width) in COLUMNS {
-                        cell(row, width, label, MUTED);
-                    }
+                    roster::headings(row);
                 });
             table
                 .spawn((
@@ -225,9 +163,9 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands, count: usize) {
                     },
                     ScrollPosition::default(),
                     RelativeCursorPosition::default(),
-                    RosterContent(count),
+                    RosterContent(Vec::new()),
                 ))
-                .with_children(|rows| roster_rows(rows, count, None));
+                .with_children(|rows| roster::spawn_rows(rows, &[]));
         });
 }
 
@@ -322,7 +260,7 @@ pub fn handle_selection(
     cards: Query<(&Interaction, &Card), Changed<Interaction>>,
     back: Query<&Interaction, (With<Back>, Changed<Interaction>)>,
     toggles: Query<&Interaction, (With<SkillsToggle>, Changed<Interaction>)>,
-    mut skills: Option<ResMut<SkillsExpanded>>,
+    (mut skills, controls): (Option<ResMut<SkillsExpanded>>, roster::Controls),
     shortcuts: crate::KeyboardShortcuts,
     mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
@@ -331,6 +269,7 @@ pub fn handle_selection(
         page.generation = snapshot.0.generation;
         selection.0 = agents.first().map(|(id, _)| *id);
         page.detail = false;
+        page.view = roster::View::default();
     }
     if selection
         .0
@@ -353,16 +292,52 @@ pub fn handle_selection(
             skills.0 = !skills.0;
         }
     }
+    let menu_was_open = page.view.menu;
+    let mut control_pressed = false;
+    for (interaction, control) in &controls.choices {
+        if page.detail || *interaction != Interaction::Pressed {
+            continue;
+        }
+        control_pressed = true;
+        match control.0 {
+            roster::Choice::Group => page.view.menu = !page.view.menu,
+            roster::Choice::SelectGroup(grouping) => {
+                if !menu_was_open || !page.view.menu {
+                    continue;
+                }
+                if page.view.grouping != grouping {
+                    page.view.open.clear();
+                }
+                page.view.grouping = grouping;
+                page.view.menu = false;
+            }
+            roster::Choice::Sort(sort) => page.view.sort_by(sort),
+            roster::Choice::CollapseAll => page.view.open.clear(),
+            roster::Choice::OpenAll => {
+                if page.view.grouping != roster::Grouping::None {
+                    roster::open_all(&snapshot.0.universe, &mut page.view);
+                }
+            }
+        }
+    }
     for (interaction, card) in &cards {
-        if *interaction == Interaction::Pressed {
-            let next = agents.get(card.0).map(|(id, _)| *id);
-            if selection.0 != next {
-                selection.0 = next;
+        if control_pressed || page.detail || *interaction != Interaction::Pressed {
+            continue;
+        }
+        match &card.0 {
+            roster::Target::Group(key) => {
+                if !page.view.open.remove(key) {
+                    page.view.open.insert(key.clone());
+                }
             }
-            page.detail = next.is_some();
-            if let (Some(_), Some(windows)) = (next, windows.as_mut()) {
-                windows.open(crate::floating_ui::WindowKind::Citizens);
+            roster::Target::Citizen(id) if snapshot.0.universe.agents().contains_key(id) => {
+                selection.0 = Some(*id);
+                page.detail = true;
+                if let Some(windows) = windows.as_mut() {
+                    windows.open(crate::floating_ui::WindowKind::Citizens);
+                }
             }
+            _ => {}
         }
     }
     for (slot, key) in [
@@ -560,66 +535,23 @@ impl Need {
     }
 }
 
-#[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct RosterQueries<'w, 's> {
-    contents: Query<'w, 's, (Entity, &'static mut RosterContent)>,
-    tips: Query<'w, 's, (&'static Children, &'static mut crate::tooltip::Tooltip)>,
-}
-
 pub fn refresh_cards(
     mut commands: Commands,
-    (snapshot, selection): (Res<DisplaySnapshot>, Res<Selection>),
-    mut summaries: Query<(&Summary, &mut Text), Without<NeedLabel>>,
-    mut labels: Query<(&NeedLabel, &mut Text, &mut TextColor), Without<Summary>>,
+    (snapshot, selection, state): (Res<DisplaySnapshot>, Res<Selection>, Res<RosterState>),
+    mut summaries: roster::SummaryTexts,
+    mut labels: roster::NeedTexts,
     mut fills: Query<(&NeedFill, &mut Node, &mut BackgroundColor), Without<Card>>,
     mut cards: Query<(&Card, &Interaction, &mut BackgroundColor), Without<NeedFill>>,
-    mut roster: RosterQueries,
+    mut roster: roster::Queries,
 ) {
     let universe = &snapshot.0.universe;
-    let agents = sorted_agents(universe);
-    let refresh_values =
-        snapshot.is_changed() || summaries.iter().any(|(_, value)| value.0.is_empty());
-    let values = if refresh_values {
-        agents
-            .iter()
-            .map(|(_, agent)| overview_values(universe, agent))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    for (entity, mut content) in &mut roster.contents {
-        if content.0 != agents.len() {
-            commands
-                .entity(entity)
-                .despawn_children()
-                .with_children(|parent| roster_rows(parent, agents.len(), Some(&values)));
-            content.0 = agents.len();
-        }
-    }
-    if refresh_values {
-        for (summary, mut value) in &mut summaries {
-            let next = values
-                .get(summary.0)
-                .map_or_else(String::new, |cells| cells[summary.1].clone());
-            if value.0 != next {
-                value.0 = next;
-            }
-        }
-    }
-    for (children, mut tip) in &mut roster.tips {
-        let Some((summary, _)) = children.iter().find_map(|child| summaries.get(child).ok()) else {
-            continue;
-        };
-        let Some((_, agent)) = agents.get(summary.0) else {
-            continue;
-        };
-        let AgentKind::Citizen(citizen) = &agent.kind;
-        tip.0 = match summary.1 {
-            2 | 3 => citizen.household_id().map_or_else(String::new, |id| format!("H | {}. Coins and wealth belong to the shared household account.", crate::locations::name(universe, id))),
-            4 => "Needs wellbeing: hunger, thirst, sleep, clothing, diet and reserve contributions. Excludes wealth.".into(),
-            _ => String::new(),
-        };
-    }
+    roster.refresh(
+        &mut commands,
+        universe,
+        &state.view,
+        &mut summaries,
+        snapshot.is_changed() || state.is_changed(),
+    );
     let citizen = selected_agent(universe, selection.0).map(|agent| {
         let AgentKind::Citizen(citizen) = &agent.kind;
         citizen
@@ -677,10 +609,7 @@ pub fn refresh_cards(
     for (card, interaction, mut color) in &mut cards {
         color.0 = if *interaction == Interaction::Hovered {
             Color::srgb(0.16, 0.23, 0.26)
-        } else if agents
-            .get(card.0)
-            .is_some_and(|(id, _)| Some(*id) == selection.0)
-        {
+        } else if matches!(&card.0, roster::Target::Citizen(id) if Some(*id) == selection.0) {
             SELECTED
         } else {
             PANEL
@@ -1560,6 +1489,7 @@ mod tests {
             )
                 .chain(),
         );
+        app.world_mut().resource_mut::<RosterState>().view.grouping = roster::Grouping::None;
         app.update();
         assert!(!app.world().resource::<RosterState>().detail);
         let tabs = app
@@ -1572,7 +1502,7 @@ mod tests {
             .world_mut()
             .query::<(Entity, &Card)>()
             .iter(app.world())
-            .find(|(_, card)| card.0 == 1)
+            .find(|(_, card)| matches!(card.0, roster::Target::Citizen(id) if id == sorted_agents(&app.world().resource::<DisplaySnapshot>().0.universe)[1].0))
             .unwrap()
             .0;
         app.world_mut().entity_mut(row).insert(Interaction::Pressed);
@@ -1854,11 +1784,15 @@ mod tests {
         .init_resource::<RosterState>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_systems(Update, handle_selection);
-        let card = app.world_mut().spawn((Card(0), Interaction::None)).id();
-        for (slot, id) in ids.iter().enumerate() {
+        let card = app
+            .world_mut()
+            .spawn((Card(roster::Target::Citizen(ids[0])), Interaction::None))
+            .id();
+        for id in &ids {
+            app.world_mut().resource_mut::<RosterState>().detail = false;
             app.world_mut()
                 .entity_mut(card)
-                .insert((Card(slot), Interaction::Pressed));
+                .insert((Card(roster::Target::Citizen(*id)), Interaction::Pressed));
             app.update();
             assert_eq!(app.world().resource::<Selection>().0, Some(*id));
             app.world_mut().entity_mut(card).insert(Interaction::None);
@@ -1905,7 +1839,7 @@ mod tests {
         .add_systems(Update, handle_selection);
         let card = app
             .world_mut()
-            .spawn((Card(dara_slot), Interaction::Pressed))
+            .spawn((Card(roster::Target::Citizen(dara)), Interaction::Pressed))
             .id();
         app.update();
         assert_eq!(app.world().resource::<Selection>().0, Some(dara));
