@@ -588,7 +588,7 @@ fn deliver_reserves(
             .map(|good| (good, initial.citizen.carried_available_units(good))),
     )?;
     if list.items().next().is_none() {
-        return Ok(None);
+        return Ok(Some(initial.clone()));
     }
     let mut ready = initial.clone();
     let home = ready.citizen.home();
@@ -615,20 +615,9 @@ fn pantry_categories(citizen: &Citizen) -> [f64; 4] {
 }
 
 fn provisioning_needed(citizen: &Citizen) -> bool {
-    let members = citizen.supplied_members() as f64;
-    let mut categories = [0.0; 4];
-    for good in Good::FOOD.into_iter().chain([Good::Beer]) {
-        for (total, per_unit) in categories.iter_mut().zip(good.diet_per_unit()) {
-            *total += citizen.stored_available_units(citizen.home(), good) as f64 * per_unit;
-        }
-    }
-    citizen.home_food_nutrition() < 100.0 * members
+    citizen.home_food_nutrition() < 100.0 * citizen.supplied_members() as f64
         || citizen.home_drink_units() < 400 * citizen.supplied_members()
-        || categories
-            .into_iter()
-            .filter(|points| *points >= 25.0 * members)
-            .count()
-            < 3
+        || reserve_units(citizen, Good::FlaxGarment) < citizen.spare_clothing_target()
 }
 
 fn basket_cost(citizen: &Citizen, units: &[crate::Quantity; Good::COUNT]) -> Option<crate::Coins> {
@@ -933,50 +922,32 @@ fn provision_household(
         return Ok(Vec::new());
     };
     let mut delivered = food_delivery;
-    if reserve_units(&acquired.citizen, Good::FlaxGarment) == 0
+    let missing_spares = acquired
+        .citizen
+        .spare_clothing_target()
+        .saturating_sub(reserve_units(&acquired.citizen, Good::FlaxGarment));
+    if missing_spares > 0
         && reserve_food_nutrition(&acquired.citizen) >= basic_food
         && reserve_drink_units(&acquired.citizen) >= basic_drink
     {
-        let place = acquired
-            .citizen
-            .market()
-            .next_purchase_stop(
-                acquired.citizen.market_party(),
-                &acquired.citizen.map(),
-                acquired.citizen.position(),
-                crate::marketplace::ShoppingList::single(Good::FlaxGarment, 1),
-                Some(acquired.citizen.coins()),
-            )
-            .map(|(place, _)| place)
-            .filter(|place| acquired.citizen.map().position(*place) == acquired.citizen.position());
         let mut ready = acquired.clone();
         ready.cooldowns.buy = 0;
-        let with_spare = if ready.citizen.withdrawable_units(Good::FlaxGarment) > 0 {
-            collect_listed_inputs(&ready, Good::FlaxGarment, 1, 0, prior_actions)?
-        } else if let Some(place) = place {
-            ready.perform(
-                CitizenAction::BuyAt {
-                    place,
-                    list: crate::marketplace::ShoppingList::single(Good::FlaxGarment, 1),
-                },
-                prior_actions,
-            )?
-        } else {
-            None
-        };
-        if let Some(with_spare) = with_spare
-            && let Some(spare_delivery) = deliver_reserves(&with_spare, prior_actions)?
-        {
-            let mut waiting = initial.citizen.clone();
-            waiting.advance_needs(spare_delivery.elapsed_ms - initial.elapsed_ms, None)?;
-            if spare_delivery.citizen.planning_wellbeing()? > waiting.planning_wellbeing()? + 1e-9 {
-                delivered = spare_delivery;
-            }
+        let with_spare = acquire_provisioning_list(
+            &ready,
+            crate::marketplace::ShoppingList::single(Good::FlaxGarment, missing_spares),
+            prior_actions,
+        )?;
+        if let Some(spare_delivery) = deliver_reserves(&with_spare, prior_actions)? {
+            delivered = spare_delivery;
         }
     }
     let chosen_requests = *delivered.blocked_requests.borrow();
     record_blocked_purchase(initial, chosen_requests)?;
-    Ok(vec![delivered])
+    Ok(if delivered.actions.len() > initial.actions.len() {
+        vec![delivered]
+    } else {
+        Vec::new()
+    })
 }
 
 fn gather_provisions(
@@ -2129,6 +2100,8 @@ pub(super) fn need_eligible(citizen: &Citizen, goal: Effect) -> bool {
         Effect::ReduceHunger => citizen.hunger() > 0.0,
         Effect::ReduceThirst => citizen.thirst() > 0.0,
         Effect::ReduceTiredness => citizen.tiredness() > 0.0,
+        Effect::ReduceClothingNeed => citizen.garment_condition().unwrap_or(0.0) <= 0.1,
+        Effect::ReplenishReserves => provisioning_needed(citizen),
         _ => true,
     }
 }
@@ -2230,6 +2203,30 @@ fn variants_from(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clothing_thresholds_and_spare_only_replenishment() {
+        let source = reserve_shopper(10000, &[(Good::FlaxGarment, 10, 1.0)])
+            .with_home_good(Good::BreadRoll, 10)
+            .unwrap()
+            .with_home_good(Good::Water, 1200)
+            .unwrap()
+            .with_garment_condition(Some(0.2))
+            .unwrap();
+        assert!(!need_eligible(&source, Effect::ReduceClothingNeed));
+        assert!(need_eligible(&source, Effect::ReplenishReserves));
+        let supplied =
+            provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
+        assert_eq!(supplied.len(), 1);
+        assert_eq!(supplied[0].citizen.home_units(Good::FlaxGarment), 1);
+        assert!(!provisioning_needed(&supplied[0].citizen));
+        assert!(need_eligible(
+            &source.with_garment_condition(Some(0.1)).unwrap(),
+            Effect::ReduceClothingNeed
+        ));
+        let surplus = source.with_home_good(Good::FlaxGarment, 2).unwrap();
+        assert_eq!(surplus.excess_goods().unwrap().units(Good::FlaxGarment), 1);
+    }
+
     #[test]
     fn listing_trip_splits_competing_dry_goods_and_unrelated_goods_with_real_travel() {
         use crate::locations::{Location, Map, Position};
@@ -2412,22 +2409,20 @@ mod tests {
     }
 
     #[test]
-    fn missing_diversity_publishes_one_selected_basket_without_delivery() {
+    fn missing_diversity_alone_does_not_trigger_replenishment() {
         let source = reserve_shopper(1000, &[])
             .with_home_good(Good::BreadRoll, 100)
             .unwrap()
             .with_home_good(Good::Water, 1200)
+            .unwrap()
+            .with_garment_condition(Some(1.0))
             .unwrap();
         let initial = Prediction::new(&source, Cooldowns::default());
         assert!(provision_household(&initial, 0).unwrap().is_empty());
-        let requested = *initial.blocked_requests.borrow();
-        assert_eq!(requested.units(Good::BreadRoll), 0);
-        assert_eq!(requested.units(Good::Water), 0);
-        let categories = Good::FOOD
-            .into_iter()
-            .filter(|good| requested.units(*good) > 0)
-            .count();
-        assert_eq!(categories, 2);
+        assert_eq!(
+            *initial.blocked_requests.borrow(),
+            crate::marketplace::ShoppingList::default()
+        );
     }
 
     #[test]
@@ -2560,7 +2555,7 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_spare_does_not_add_a_separate_trip_or_prevent_delivery() {
+    fn replenishment_acquires_a_remote_spare_and_delivers_it() {
         use crate::locations::{Location, Position};
         let source = reserve_shopper(1000, &[])
             .with_good(Good::BreadRoll, 30)
@@ -2593,21 +2588,26 @@ mod tests {
         let supplied =
             provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
         assert!(supplied[0].citizen.home_food_nutrition() >= 300.0);
-        assert_eq!(supplied[0].citizen.home_units(Good::FlaxGarment), 0);
-        assert!(!supplied[0].actions.contains(&CitizenAction::Travel(remote)));
+        assert_eq!(supplied[0].citizen.home_units(Good::FlaxGarment), 1);
+        assert!(supplied[0].actions.contains(&CitizenAction::Travel(remote)));
     }
 
     #[test]
     fn listing_after_provisioning_retains_the_three_category_pantry() {
         let mut source = reserve_shopper(
             1000,
-            &[(Good::Cabbage, 20, 2.0), (Good::Berries, 10000, 2.0)],
+            &[
+                (Good::Cabbage, 20, 2.0),
+                (Good::Berries, 10000, 2.0),
+                (Good::FlaxGarment, 1, 1.0),
+            ],
         )
         .with_home_good(Good::BreadRoll, 100)
         .unwrap()
         .with_home_good(Good::Water, 1200)
         .unwrap();
         source.diet = [100.0; 4];
+        source.garment_condition = Some(0.2);
         let supplied =
             provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
         let listed = supplied[0]
@@ -2634,6 +2634,7 @@ mod tests {
             allegiance: 0.0,
             other_carried: [10000; Good::COUNT],
             other_consumption_value: 0.0,
+            other_clothing_replacements: 0,
         });
         assert!(provisioning_needed(&source));
         assert!(source.urgent_provisioning());
@@ -2665,6 +2666,7 @@ mod tests {
             allegiance: 0.0,
             other_carried: [0; Good::COUNT],
             other_consumption_value: 0.0,
+            other_clothing_replacements: 0,
         });
         let list = provisioning_basket(&source, 3, false).unwrap();
         let nutrition: f64 = list
@@ -2730,6 +2732,7 @@ mod tests {
         .with_home_good(Good::Water, 400)
         .unwrap();
         source.diet = [0.0; 4];
+        source.garment_condition = Some(1.0);
         assert!(!provisioning_needed(&source));
         assert!(
             provision_household(&Prediction::new(&source, Cooldowns::default()), 0)
@@ -4646,6 +4649,7 @@ mod tests {
             allegiance: 0.0,
             other_carried: [0; Good::COUNT],
             other_consumption_value: 0.0,
+            other_clothing_replacements: 0,
         });
         let (map, mill) = worker
             .map()

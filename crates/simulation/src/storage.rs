@@ -940,6 +940,7 @@ mod transport_tests {
                     allegiance: 0.0,
                     other_carried: [0; Good::COUNT],
                     other_consumption_value: 0.0,
+                    other_clothing_replacements: 0,
                 });
             }
             let owner = citizen.goods_owner();

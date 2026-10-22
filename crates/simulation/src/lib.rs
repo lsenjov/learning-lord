@@ -1171,8 +1171,19 @@ impl Citizen {
         Ok(reserve)
     }
 
+    pub(crate) fn spare_clothing_target(&self) -> u64 {
+        u64::from(self.garment_condition().unwrap_or(0.0) <= 0.2)
+            + self
+                .household
+                .as_ref()
+                .map_or(0, |household| household.other_clothing_replacements)
+    }
+
     pub fn reserved_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
         let mut reserve = self.production_ingredient_reserve()?;
+        reserve[Good::FlaxGarment as usize] = reserve[Good::FlaxGarment as usize]
+            .checked_add(self.spare_clothing_target())
+            .ok_or(SimulationError::InventoryOverflow)?;
         if let Some(place) = self.current_storage_place()
             && let Some((_, target)) = self.workplace_supplies.get(&place)
         {
@@ -2980,6 +2991,7 @@ impl Universe {
                         citizen.units(Good::ALL[index])
                     }),
                     citizen.consumption_value(),
+                    citizen.garment_condition().unwrap_or(0.0) <= 0.2,
                 )
             })
             .collect();
@@ -3020,9 +3032,11 @@ impl Universe {
                 citizen.coins = household.coins;
                 context.other_carried = [0; Good::COUNT];
                 context.other_consumption_value = 0.0;
-                for (id, account, units, consuming) in &carried {
+                context.other_clothing_replacements = 0;
+                for (id, account, units, consuming, clothing_replacement) in &carried {
                     if *account == context.id && *id != citizen.id {
                         context.other_consumption_value += consuming;
+                        context.other_clothing_replacements += u64::from(*clothing_replacement);
                         for (index, units) in units.iter().enumerate() {
                             context.other_carried[index] =
                                 context.other_carried[index].saturating_add(*units);

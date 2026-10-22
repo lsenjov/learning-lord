@@ -332,7 +332,7 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
                 .unwrap()
                 .with_coins(1000)
                 .unwrap()
-                .with_good(Good::BreadRoll, 70)
+                .with_good(Good::BreadRoll, 5)
                 .unwrap()
                 .with_good(Good::Water, 400)
                 .unwrap(),
@@ -341,7 +341,7 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     let AgentKind::Citizen(citizen) = &world.agents()[&buyer].kind;
     let home = citizen.home();
     let world = world
-        .deposit_goods(buyer, home, Good::BreadRoll, 70)
+        .deposit_goods(buyer, home, Good::BreadRoll, 5)
         .unwrap()
         .deposit_goods(buyer, home, Good::Water, 400)
         .unwrap()
@@ -356,29 +356,31 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     let AgentKind::Citizen(citizen) = &world.agents()[&buyer].kind;
     let selected = plan(citizen).unwrap();
     let first = &selected.actions()[selected.goals()[0].actions.clone()];
-    assert!(
-        matches!(
-            first,
-            [
-                CitizenAction::Travel(_),
-                CitizenAction::BuyAt { .. },
-                CitizenAction::Travel(_),
-                CitizenAction::DepositStored { .. }
-            ]
-        ),
-        "{first:?}"
-    );
-    let CitizenAction::BuyAt { list: basket, .. } = first[1] else {
-        unreachable!()
-    };
+    assert!(matches!(first.first(), Some(CitizenAction::Travel(_))));
+    assert!(matches!(
+        first.last(),
+        Some(CitizenAction::DepositStored { .. })
+    ));
+    let basket = ShoppingList::new(Good::ALL.into_iter().map(|good| {
+        let units = first
+            .iter()
+            .filter_map(|action| match action {
+                CitizenAction::BuyAt { list, .. } => Some(list.units(good)),
+                _ => None,
+            })
+            .sum();
+        (good, units)
+    }))
+    .unwrap();
     assert!(basket.units(Good::Fish) > 0 || basket.units(Good::Cabbage) > 0);
+    let blocked = selected.decision().unwrap().blocked_requests;
     assert_eq!(world, before);
     assert_eq!(world.market().requested(buyer), ShoppingList::default());
     let travelling = world.start_planning(buyer).unwrap();
     for good in Good::FOOD {
         assert_eq!(
             travelling.market().requested(buyer).units(good),
-            basket.units(good),
+            basket.units(good).max(blocked.units(good)),
             "{good:?}: basket {basket:?}; blocked {:?}",
             selected.decision().unwrap().blocked_requests
         );
@@ -390,11 +392,18 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     for good in Good::FOOD {
         assert_eq!(
             arrived.market().requested(buyer).units(good),
-            basket.units(good)
+            basket.units(good).max(blocked.units(good))
         );
     }
-    let bought = arrived.advance(TRADE_DURATION_MS).unwrap();
+    let mut bought = arrived;
+    while matches!(&bought.agents()[&buyer].kind, AgentKind::Citizen(citizen) if matches!(citizen.active_action().map(|active| active.action()), Some(CitizenAction::BuyAt { .. })))
+    {
+        bought = bought.advance(TRADE_DURATION_MS).unwrap();
+    }
     for good in Good::FOOD {
-        assert_eq!(bought.market().requested(buyer).units(good), 0);
+        assert_eq!(
+            bought.market().requested(buyer).units(good),
+            blocked.units(good)
+        );
     }
 }

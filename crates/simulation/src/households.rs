@@ -6,8 +6,6 @@ use crate::{
 };
 use imbl::HashMap;
 
-pub const MAINTENANCE_COOLDOWN_MS: u64 = 6 * 60 * 60 * 1000;
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Household {
     pub id: AgentId,
@@ -25,6 +23,8 @@ pub(crate) struct HouseholdContext {
     pub allegiance: f64,
     pub other_carried: [Quantity; Good::COUNT],
     pub other_consumption_value: f64,
+    #[serde(default)]
+    pub other_clothing_replacements: u64,
 }
 
 impl Citizen {
@@ -257,6 +257,7 @@ impl Universe {
                 allegiance: 1.0,
                 other_carried: [0; Good::COUNT],
                 other_consumption_value: 0.0,
+                other_clothing_replacements: 0,
             });
             citizen.coins = coins;
         }

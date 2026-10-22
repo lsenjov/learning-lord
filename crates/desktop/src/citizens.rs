@@ -1067,12 +1067,20 @@ fn section_rows(
             let maintenance = citizen.household_id().map_or(citizen.maintenance(), |id| {
                 &universe.households()[&id].maintenance
             });
-            for (name, task) in [
-                ("Replenishment", &maintenance.replenishment),
-                ("Listing excess", &maintenance.listing),
+            for (name, goal, task) in [
+                (
+                    "Replenishment",
+                    learning_lord_simulation::planning::goals::Effect::ReplenishReserves,
+                    &maintenance.replenishment,
+                ),
+                (
+                    "Listing excess",
+                    learning_lord_simulation::planning::goals::Effect::ListExcess,
+                    &maintenance.listing,
+                ),
             ] {
-                rows.push(ReadoutRow { tooltip: "Maintenance has a six-hour cooldown. Claimant is the worker committed to that task.".into(),
-                    ..ReadoutRow::rich(vec![F::text(format!("{name}: {} cooldown | Claimant ", duration(task.remaining_ms(universe.current_time_ms())))), task.claimant.map_or_else(|| F::text("None"), |id| navigation::account(universe, id)), F::text(" (i)")]) });
+                rows.push(ReadoutRow { tooltip: "Listing has a twelve-hour interval; replenishment follows stock thresholds. Claimant is the worker committed to that task.".into(),
+                    ..ReadoutRow::rich(vec![F::text(format!("{name}: {} cooldown | Claimant ", duration(task.remaining_ms(goal, universe.current_time_ms())))), task.claimant.map_or_else(|| F::text("None"), |id| navigation::account(universe, id)), F::text(" (i)")]) });
             }
             rows
         }

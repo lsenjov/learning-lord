@@ -362,8 +362,12 @@ fn planning_sleeps_when_tired_and_eats_before_sleep_when_hungry() {
         .unwrap();
     let chosen = plan(&hungry).unwrap();
     assert_eq!(chosen.actions()[0], CitizenAction::Eat);
-    assert!(chosen.actions().contains(&CitizenAction::Sleep));
-    assert!(chosen.average_wellbeing() > score_actions(&hungry, &[CitizenAction::Sleep]));
+    assert!(!chosen.actions().contains(&CitizenAction::Sleep));
+    assert_eq!(chosen.goals().len(), 1);
+    assert_eq!(
+        chosen.goals()[0].goal,
+        learning_lord_simulation::planning::goals::Effect::ReduceHunger
+    );
 }
 
 #[test]

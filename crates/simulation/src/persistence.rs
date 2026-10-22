@@ -302,7 +302,7 @@ impl Universe {
                             .as_ref()
                             .is_some_and(|plan| plan.maintenance_goal() == Some(goal))
                 });
-                if !valid || task.remaining_ms(self.current_time_ms) > 0 {
+                if !valid || task.remaining_ms(goal, self.current_time_ms) > 0 {
                     return Err(SaveError::InvalidState(
                         "invalid committed maintenance claim",
                     ));

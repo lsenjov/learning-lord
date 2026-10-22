@@ -351,17 +351,25 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
     if workplaces.is_empty() {
         label(parent, "None");
     }
-    parent.spawn(text("MAINTENANCE (6-hour cooldown)", 14.0, MUTED));
-    for (name, task) in [
-        ("Replenishment", &household.maintenance.replenishment),
-        ("Listing excess", &household.maintenance.listing),
+    parent.spawn(text("MAINTENANCE", 14.0, MUTED));
+    for (name, goal, task) in [
+        (
+            "Replenishment",
+            learning_lord_simulation::planning::goals::Effect::ReplenishReserves,
+            &household.maintenance.replenishment,
+        ),
+        (
+            "Listing excess",
+            learning_lord_simulation::planning::goals::Effect::ListExcess,
+            &household.maintenance.listing,
+        ),
     ] {
         row(parent, |row| {
             label(
                 row,
                 format!(
                     "{name}: {} cooldown remaining | Committed worker:",
-                    citizens::duration(task.remaining_ms(universe.current_time_ms()))
+                    citizens::duration(task.remaining_ms(goal, universe.current_time_ms()))
                 ),
             );
             if let Some(claimant) = task.claimant {
@@ -669,16 +677,14 @@ pub(crate) fn refresh(
                             .map(|g| (c.units(g), c.tax_reserved_units(g)))
                     })
                     .collect::<Vec<_>>(),
-                citizens::duration(
-                    h.maintenance
-                        .replenishment
-                        .remaining_ms(universe.current_time_ms())
-                ),
-                citizens::duration(
-                    h.maintenance
-                        .listing
-                        .remaining_ms(universe.current_time_ms())
-                ),
+                citizens::duration(h.maintenance.replenishment.remaining_ms(
+                    learning_lord_simulation::planning::goals::Effect::ReplenishReserves,
+                    universe.current_time_ms()
+                )),
+                citizens::duration(h.maintenance.listing.remaining_ms(
+                    learning_lord_simulation::planning::goals::Effect::ListExcess,
+                    universe.current_time_ms()
+                )),
                 universe
                     .map()
                     .places()
@@ -1148,7 +1154,7 @@ mod tests {
             stock_label.as_str(),
             "Ada's field",
             "Owner:",
-            "MAINTENANCE (6-hour cooldown)",
+            "MAINTENANCE",
             "Committed worker:",
         ] {
             assert!(labels.contains(expected), "missing {expected}: {labels}");

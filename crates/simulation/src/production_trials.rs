@@ -1088,6 +1088,7 @@ mod tests {
                 allegiance: 1.0,
                 other_carried: [0; Good::COUNT],
                 other_consumption_value: 0.0,
+                other_clothing_replacements: 0,
             });
         }
         first
@@ -1650,6 +1651,7 @@ mod depletion_tests {
             allegiance: 1.0,
             other_carried: [0; Good::COUNT],
             other_consumption_value: 0.0,
+            other_clothing_replacements: 0,
         });
         worker
             .start_trial_production(CitizenAction::Produce(Recipe::SpinThread))
@@ -1870,6 +1872,7 @@ mod depletion_tests {
             allegiance: 1.0,
             other_carried: [0; Good::COUNT],
             other_consumption_value: 0.0,
+            other_clothing_replacements: 0,
         });
         worker.set_inventory_units(Good::Thread, 200);
         worker.complete_trial_output(action);

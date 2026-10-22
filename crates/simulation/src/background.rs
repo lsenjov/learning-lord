@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn first_goal_final_action_submits_without_projecting_the_forecast_goal() {
+    fn goal_final_action_submits_at_its_completion() {
         let source = Citizen::with_needs(60.0, 100.0)
             .unwrap()
             .with_home_good(crate::marketplace::Good::Berries, 310)
@@ -348,7 +348,7 @@ mod tests {
             .start_planning()
             .unwrap();
         let execution = source.active_plan().unwrap();
-        assert_eq!(execution.plan().goals().len(), 2);
+        assert_eq!(execution.plan().goals().len(), 1);
         assert_eq!(execution.committed_actions_end(), 1);
         let remaining = source.active_action().unwrap().remaining_ms();
         let (boundary, projected, index) = project(&source, 0).unwrap().unwrap();

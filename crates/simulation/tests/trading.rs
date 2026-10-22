@@ -175,7 +175,8 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
         "{:?}",
         chosen.actions()
     );
-    assert!(chosen.actions().contains(&CitizenAction::Eat));
+    assert!(!chosen.actions().contains(&CitizenAction::Eat));
+    assert_eq!(chosen.goals().len(), 1);
     assert_eq!(source.market().orders().count(), 1);
     assert!(source.market().trades().is_empty());
     let bought = source
@@ -424,7 +425,8 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
         "{:?}",
         chosen.actions()
     );
-    assert!(chosen.actions().contains(&CitizenAction::Eat));
+    assert!(!chosen.actions().contains(&CitizenAction::Eat));
+    assert_eq!(chosen.goals().len(), 1);
     assert!(universe.market().trades().is_empty());
 }
 

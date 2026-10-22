@@ -1,6 +1,6 @@
 use crate::{AgentId, planning::goals::Effect};
 
-pub const MAINTENANCE_COOLDOWN_MS: u64 = 6 * 60 * 60 * 1000;
+pub const LISTING_INTERVAL_MS: u64 = 12 * 60 * 60 * 1000;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaintenanceTask {
@@ -10,16 +10,19 @@ pub struct MaintenanceTask {
 }
 
 impl MaintenanceTask {
-    pub fn remaining_ms(&self, now_ms: u64) -> u64 {
+    pub fn remaining_ms(&self, goal: Effect, now_ms: u64) -> u64 {
+        if goal != Effect::ListExcess {
+            return 0;
+        }
         self.completed_at_ms.map_or(0, |completed| {
             completed
-                .saturating_add(MAINTENANCE_COOLDOWN_MS)
+                .saturating_add(LISTING_INTERVAL_MS)
                 .saturating_sub(now_ms)
         })
     }
 
-    pub fn available(&self, now_ms: u64) -> bool {
-        self.claimant.is_none() && self.remaining_ms(now_ms) == 0
+    pub fn available(&self, goal: Effect, now_ms: u64) -> bool {
+        self.claimant.is_none() && self.remaining_ms(goal, now_ms) == 0
     }
 }
 
@@ -47,14 +50,20 @@ impl MaintenanceState {
     }
 
     pub fn available(&self, goal: Effect, now_ms: u64) -> bool {
-        self.task(goal).is_none_or(|task| task.available(now_ms))
+        self.task(goal).is_none_or(|task| {
+            task.claimant.is_none()
+                && (goal == Effect::ReplenishReserves || task.remaining_ms(goal, now_ms) == 0)
+        })
     }
 
     pub fn claim(&mut self, goal: Effect, worker: AgentId, now_ms: u64) -> bool {
+        if !self.available(goal, now_ms) {
+            return false;
+        }
         let Some(task) = self.task_mut(goal) else {
             return true;
         };
-        if !task.available(now_ms) {
+        if task.claimant.is_some() {
             return false;
         }
         task.claimant = Some(worker);
@@ -241,6 +250,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn listing_waits_twelve_hours_but_replenishment_has_no_timer() {
+        let worker = AgentId(uuid::Uuid::new_v4());
+        let mut state = MaintenanceState::default();
+        for goal in [Effect::ListExcess, Effect::ReplenishReserves] {
+            assert!(state.claim(goal, worker, 0));
+            state.record_work(goal, worker);
+            state.finish(goal, worker, 100, true);
+        }
+        assert!(state.available(Effect::ReplenishReserves, 100));
+        assert!(!state.available(Effect::ListExcess, 100 + 12 * 60 * 60 * 1000 - 1));
+        assert!(state.available(Effect::ListExcess, 100 + 12 * 60 * 60 * 1000));
+    }
+
+    #[test]
     fn committed_claims_are_shared_and_cooldowns_are_independent() {
         let first = AgentId(uuid::Uuid::new_v4());
         let second = AgentId(uuid::Uuid::new_v4());
@@ -250,8 +273,8 @@ mod tests {
         assert!(state.claim(Effect::ReplenishReserves, second, 100));
         state.record_work(Effect::ListExcess, first);
         state.finish(Effect::ListExcess, first, 500, true);
-        assert!(!state.available(Effect::ListExcess, 500 + MAINTENANCE_COOLDOWN_MS - 1));
-        assert!(state.available(Effect::ListExcess, 500 + MAINTENANCE_COOLDOWN_MS));
+        assert!(!state.available(Effect::ListExcess, 500 + LISTING_INTERVAL_MS - 1));
+        assert!(state.available(Effect::ListExcess, 500 + LISTING_INTERVAL_MS));
         assert_eq!(state.replenishment.claimant, Some(second));
     }
 

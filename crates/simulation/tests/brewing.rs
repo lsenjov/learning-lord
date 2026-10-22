@@ -19,8 +19,6 @@ fn brewer_batches(batches: u64) -> (Universe, AgentId, PlaceId) {
         .with_thirst(-100.0)
         .unwrap()
         .with_garment_condition(Some(1.0))
-        .unwrap()
-        .with_good(Good::Berries, 930)
         .unwrap();
     for &(good, units) in Recipe::BrewBeer.inputs() {
         worker = worker.with_good(good, units * batches).unwrap();
@@ -29,7 +27,16 @@ fn brewer_batches(batches: u64) -> (Universe, AgentId, PlaceId) {
         .with_citizen("Brewer", worker)
         .unwrap();
     let (world, brewery) = world.with_property(id, Location::Brewery).unwrap();
-    (world, id, brewery)
+    (stock_home(world, id), id, brewery)
+}
+fn stock_home(world: Universe, id: AgentId) -> Universe {
+    let worker = citizen(&world, id);
+    let (home, owner) = (worker.home(), worker.goods_owner());
+    world
+        .with_stored_good(home, owner, Good::Berries, 310)
+        .unwrap()
+        .with_stored_good(home, owner, Good::Water, 400)
+        .unwrap()
 }
 fn citizen(world: &Universe, id: AgentId) -> &Citizen {
     let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
@@ -354,14 +361,13 @@ fn independent_brewers_preserve_each_others_slots_when_plans_resume() {
         .with_thirst(-100.0)
         .unwrap()
         .with_garment_condition(Some(1.0))
-        .unwrap()
-        .with_good(Good::Berries, 930)
         .unwrap();
     for &(good, units) in Recipe::BrewBeer.inputs() {
         worker = worker.with_good(good, units * 2).unwrap();
     }
     let (world, second) = world.with_citizen("Second brewer", worker).unwrap();
     let (world, second_site) = world.with_property(second, Location::Brewery).unwrap();
+    let world = stock_home(world, second);
     let world = world.with_prices(world.prices().with_price(Good::Beer, 1000.0).unwrap());
     let world = world
         .start_planning(first)
@@ -408,7 +414,9 @@ fn finished_batches_are_offered_by_production_planning() {
         .unwrap()
         .with_thirst(-210.0)
         .unwrap()
-        .with_starting_role(StartingRole::Brewer);
+        .with_starting_role(StartingRole::Brewer)
+        .with_garment_condition(Some(1.0))
+        .unwrap();
     let (map, site) = worker
         .map()
         .with_place(
@@ -422,23 +430,40 @@ fn finished_batches_are_offered_by_production_planning() {
     for &(good, units) in Recipe::BrewBeer.inputs() {
         worker = worker.with_good(good, units).unwrap();
     }
-    let worker = perform(worker, prep(site))
-        .advance(FERMENTATION_MS)
+    let (world, id) = Universe::with_map(worker.map().clone())
+        .with_citizen("Mature brewer", worker)
         .unwrap();
-    let plan = learning_lord_simulation::planning::plan(&worker).unwrap();
-    assert!(
-        plan.decision()
-            .unwrap()
-            .candidates
-            .iter()
-            .filter_map(|candidate| candidate.forecast.as_ref())
-            .any(
-                |forecast| forecast.actions.contains(&CitizenAction::CollectBeer {
-                    brewery: site,
-                    slot: 0
-                })
-            )
-    );
+    let world = world
+        .start_action(id, prep(site))
+        .unwrap()
+        .advance(PREPARATION_MS + FERMENTATION_MS)
+        .unwrap();
+    let home = citizen(&world, id).home();
+    let owner = citizen(&world, id).goods_owner();
+    let mut world = world
+        .with_stored_good(home, owner, Good::Berries, 930)
+        .unwrap()
+        .with_stored_good(home, owner, Good::Water, 4000)
+        .unwrap()
+        .start_planning(id)
+        .unwrap();
+    for _ in 0..200 {
+        let worker = citizen(&world, id);
+        let plan = worker.active_plan().unwrap().plan();
+        if plan.actions().contains(&CitizenAction::CollectBeer {
+            brewery: site,
+            slot: 0,
+        }) {
+            assert_eq!(
+                plan.goals()[0].goal,
+                learning_lord_simulation::planning::goals::Effect::Production
+            );
+            return;
+        }
+        let duration = worker.active_action().unwrap().remaining_ms();
+        world = world.advance(duration).unwrap();
+    }
+    panic!("mature beer was not collected after higher priorities were satisfied");
 }
 #[test]
 fn foreign_breweries_reject_preparation_and_collection() {

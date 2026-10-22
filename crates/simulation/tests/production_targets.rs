@@ -557,6 +557,15 @@ fn decision_snapshots_inputs_targets_and_observed_production() {
         &[(Good::Berries, 930)],
         0,
     );
+    let home = citizen(&universe, id).home();
+    let owner = citizen(&universe, id).goods_owner();
+    let universe = universe
+        .deposit_goods(id, home, Good::Berries, 930)
+        .unwrap()
+        .with_stored_good(home, owner, Good::Berries, 310)
+        .unwrap()
+        .with_stored_good(home, owner, Good::Water, 400)
+        .unwrap();
     let universe = universe.start_planning(id).unwrap();
     let worker = citizen(&universe, id);
     let decision = worker.active_plan().unwrap().plan().decision().unwrap();
@@ -578,7 +587,8 @@ fn decision_snapshots_inputs_targets_and_observed_production() {
             .unwrap()
             .plan()
             .actions()
-            .contains(&CitizenAction::Produce(Recipe::ChopWood))
+            .iter()
+            .any(|action| action.production_recipe() == Some(Recipe::ChopWood))
     );
     let snapshot = decision.clone();
     let later = universe.advance(1).unwrap();
@@ -632,7 +642,7 @@ fn decision_proves_missing_supplies_without_claiming_missing_water_is_unavailabl
 }
 
 #[test]
-fn decision_observes_recipe_only_reached_in_later_goals() {
+fn decision_leaves_production_unattempted_when_listing_is_selected() {
     let (universe, id) = producer(
         Universe::with_map(Map::default()).with_prices(
             learning_lord_simulation::marketplace::Prices::default()
@@ -644,6 +654,15 @@ fn decision_observes_recipe_only_reached_in_later_goals() {
         &[(Good::Berries, 930), (Good::Wood, 400)],
         0,
     );
+    let home = citizen(&universe, id).home();
+    let owner = citizen(&universe, id).goods_owner();
+    let universe = universe
+        .deposit_goods(id, home, Good::Berries, 930)
+        .unwrap()
+        .with_stored_good(home, owner, Good::Berries, 310)
+        .unwrap()
+        .with_stored_good(home, owner, Good::Water, 400)
+        .unwrap();
     let universe = universe.start_planning(id).unwrap();
     let plan = citizen(&universe, id).active_plan().unwrap().plan();
     let decision = plan.decision().unwrap();
@@ -651,20 +670,24 @@ fn decision_observes_recipe_only_reached_in_later_goals() {
         decision.selected_goal,
         learning_lord_simulation::planning::goals::Effect::ListExcess
     );
-    assert!(decision.candidates.iter().all(|c| {
-        c.forecast
-            .as_ref()
-            .unwrap()
-            .actions
+    assert!(
+        decision
+            .candidates
             .iter()
-            .all(|a| !matches!(a, CitizenAction::Produce(_)))
-    }));
+            .filter_map(|c| c.forecast.as_ref())
+            .all(|forecast| {
+                forecast
+                    .actions
+                    .iter()
+                    .all(|a| !matches!(a, CitizenAction::Produce(_)))
+            })
+    );
     let wheat = decision
         .production
         .iter()
         .find(|d| d.recipe == Recipe::ChopWood)
         .unwrap();
     assert!(!wheat.prefix_attempted);
-    assert!(wheat.feasible_sequence_found);
-    assert!(wheat.best_competing_score.is_some());
+    assert!(!wheat.feasible_sequence_found);
+    assert!(wheat.best_competing_score.is_none());
 }
