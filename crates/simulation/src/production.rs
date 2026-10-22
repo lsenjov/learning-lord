@@ -641,6 +641,7 @@ pub(crate) fn projected_recipes_at(
     site: Option<PlaceId>,
     horizon_ms: u64,
 ) -> Result<Vec<Recipe>, SimulationError> {
+    let candidates = projection_candidates(citizen, site);
     let mut owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
     let mut stock = std::array::from_fn::<_, { Good::COUNT }, _>(|index| {
         production_stock(Good::ALL[index], citizen)
@@ -690,11 +691,9 @@ pub(crate) fn projected_recipes_at(
     let mut elapsed = 0;
     let mut recipes = Vec::new();
     while elapsed < horizon_ms {
-        let next = citizen
-            .available_production_recipes()
-            .filter(|&recipe| {
-                site.is_none_or(|place| citizen.validate_production_site(place, recipe).is_ok())
-            })
+        let next = candidates
+            .iter()
+            .copied()
             .filter_map(|recipe| {
                 if !citizen.eligible_sale_replenishment(recipe, site) {
                     return None;
@@ -833,6 +832,19 @@ pub(crate) fn projected_recipes_at(
     Ok(recipes)
 }
 
+fn projection_candidates(citizen: &Citizen, site: Option<PlaceId>) -> Vec<Recipe> {
+    match site {
+        Some(place) => Recipe::ALL
+            .into_iter()
+            .filter(|recipe| {
+                recipe.duration_ms(citizen).is_ok()
+                    && citizen.validate_production_site(place, *recipe).is_ok()
+            })
+            .collect(),
+        None => citizen.available_production_recipes().collect(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn ranked_recipes(citizen: &Citizen) -> Vec<Recipe> {
     ranked_recipes_at(citizen, None)
@@ -905,6 +917,66 @@ pub(crate) fn period_start(period: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_candidates_preserve_global_and_site_eligibility() {
+        let citizen = quoted_weaver(0);
+        let foreign_owner = crate::AgentId(uuid::Uuid::new_v4());
+        let (map, foreign) = citizen
+            .map()
+            .with_place(
+                Location::Weavery,
+                citizen.position(),
+                Some(foreign_owner),
+                "Foreign",
+            )
+            .unwrap();
+        let public = map.public_place(Location::Market);
+        let (map, _) = map
+            .with_building(public, Location::Weavery, citizen.id(), "Public workshop")
+            .unwrap();
+        let (map, town) = map
+            .with_place(Location::Warehouse, citizen.position(), None, "Town")
+            .unwrap();
+        let (map, _) = map
+            .with_building(town, Location::Weavery, citizen.id(), "Town workshop")
+            .unwrap();
+        let citizen = citizen.with_map(map).unwrap();
+        let mut sites: Vec<_> = citizen.map().places().keys().copied().map(Some).collect();
+        sites.extend([None, Some(PlaceId(uuid::Uuid::new_v4()))]);
+        for role in [
+            StartingRole::Farmer,
+            StartingRole::Miller,
+            StartingRole::Woodcutter,
+            StartingRole::Baker,
+            StartingRole::Weaver,
+            StartingRole::Tailor,
+            StartingRole::Fisher,
+            StartingRole::Brewer,
+        ] {
+            let citizen = citizen.clone().with_starting_role(role);
+            for &site in &sites {
+                let previous: Vec<_> = citizen
+                    .available_production_recipes()
+                    .filter(|&recipe| {
+                        site.is_none_or(|place| {
+                            citizen.validate_production_site(place, recipe).is_ok()
+                        })
+                    })
+                    .collect();
+                assert_eq!(
+                    projection_candidates(&citizen, site),
+                    previous,
+                    "{role:?} {site:?}"
+                );
+            }
+        }
+        assert!(projection_candidates(&citizen, Some(public)).contains(&Recipe::WeaveCloth));
+        assert!(projection_candidates(&citizen, Some(foreign)).is_empty());
+        assert!(projection_candidates(&citizen, Some(town)).is_empty());
+        let forest = citizen.map().public_place(Location::Forest);
+        assert!(projection_candidates(&citizen, Some(forest)).contains(&Recipe::Forage));
+    }
 
     #[test]
     fn physical_site_projection_uses_its_own_socage_and_net_dependencies() {
