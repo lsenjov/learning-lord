@@ -627,7 +627,11 @@ mod tests {
         let place_count = universe.map().places().len();
         let agents = citizens::sorted_agents(&universe);
         let ada = agents[0].0;
-        let bram = agents[1].0;
+        let bram = agents
+            .iter()
+            .find(|(_, agent)| agent.name == "Bram")
+            .unwrap()
+            .0;
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,

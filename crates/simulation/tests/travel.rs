@@ -126,6 +126,25 @@ fn site_actions_and_eating_require_arrival_but_waiting_does_not() {
 }
 
 #[test]
+fn generated_map_spacing_matches_site_sizes() {
+    for (kind, expected) in [
+        (Location::Home, 20.0),
+        (Location::Mill, 20.0),
+        (Location::Bakery, 20.0),
+        (Location::Weavery, 20.0),
+        (Location::Tailory, 20.0),
+        (Location::Brewery, 20.0),
+        (Location::Market, 20.0),
+        (Location::Warehouse, 20.0),
+        (Location::Field, 100.0),
+        (Location::Forest, 200.0),
+        (Location::River, 200.0),
+    ] {
+        assert_eq!(kind.minimum_spacing_metres(), expected);
+    }
+}
+
+#[test]
 fn each_universe_has_a_distinct_map_and_citizens_start_at_home() {
     let first = Universe::default();
     let second = Universe::default();
@@ -140,7 +159,13 @@ fn each_universe_has_a_distinct_map_and_citizens_start_at_home() {
         for (index, place) in places.iter().enumerate() {
             assert!(place.position.x.abs() <= 1000.0 && place.position.y.abs() <= 1000.0);
             for other in &places[index + 1..] {
-                assert!(place.position.distance(other.position) >= 200.0);
+                assert!(
+                    place.position.distance(other.position)
+                        >= place
+                            .kind
+                            .minimum_spacing_metres()
+                            .max(other.kind.minimum_spacing_metres())
+                );
             }
         }
         let AgentKind::Citizen(citizen) = &inhabited.agents()[&id].kind;

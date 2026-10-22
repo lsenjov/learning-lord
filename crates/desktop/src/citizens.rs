@@ -1629,7 +1629,7 @@ mod tests {
             .query_filtered::<&Text, With<Summary>>()
             .iter(app.world())
             .collect::<Vec<_>>();
-        assert_eq!(cells.len(), 50);
+        assert_eq!(cells.len(), 150);
         assert!(cells.iter().all(|text| !text.0.is_empty()));
         assert!(
             !app.world_mut()
@@ -1839,7 +1839,7 @@ mod tests {
     fn every_citizen_is_reachable_and_restart_resets_selection() {
         let universe = simulation::new_universe().unwrap();
         let ids: Vec<_> = sorted_agents(&universe).iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids.len(), 10);
+        assert_eq!(ids.len(), 30);
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
@@ -1882,9 +1882,13 @@ mod tests {
                 .map(|(_, agent)| agent.name.as_str())
                 .take(6)
                 .collect::<Vec<_>>(),
-            ["Ada", "Bram", "Cleo", "Dara", "Eira", "Finn"]
+            ["Ada", "Arlo", "Beni", "Bram", "Cleo", "Cora"]
         );
-        let dara = sorted[3].0;
+        let dara_slot = sorted
+            .iter()
+            .position(|(_, agent)| agent.name == "Dara")
+            .unwrap();
+        let dara = sorted[dara_slot].0;
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
@@ -1899,7 +1903,10 @@ mod tests {
         .init_resource::<RosterState>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_systems(Update, handle_selection);
-        let card = app.world_mut().spawn((Card(3), Interaction::Pressed)).id();
+        let card = app
+            .world_mut()
+            .spawn((Card(dara_slot), Interaction::Pressed))
+            .id();
         app.update();
         assert_eq!(app.world().resource::<Selection>().0, Some(dara));
         app.world_mut().entity_mut(card).insert(Interaction::None);
@@ -1933,7 +1940,7 @@ mod tests {
                 .universe
                 .agents()[&selected]
                 .name,
-            "Bram"
+            "Arlo"
         );
     }
 

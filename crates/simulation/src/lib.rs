@@ -2376,7 +2376,7 @@ impl Universe {
         if citizen.map != self.map {
             let (map, home) = universe.map.with_place(
                 Location::Home,
-                universe.map.next_position(),
+                universe.map.next_position(Location::Home),
                 Some(id),
                 format!("{name}'s home"),
             )?;
@@ -2425,7 +2425,7 @@ impl Universe {
             .ok_or(SimulationError::AgentNotFound)?;
         let (map, id) = self.map.with_place(
             kind,
-            self.map.next_position(),
+            self.map.next_position(kind),
             Some(owner),
             format!("{}'s {}", agent.name, kind.name()),
         )?;

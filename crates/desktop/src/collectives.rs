@@ -876,7 +876,12 @@ mod tests {
             60.try_into().unwrap(),
         );
         let snapshot = worker.snapshot();
-        let guild = snapshot.universe.guilds().values().next().unwrap();
+        let guild = snapshot
+            .universe
+            .guilds()
+            .values()
+            .find(|guild| guild.name == "Weavers’ Guild")
+            .unwrap();
         let id = guild.id;
         let members = guild.members.clone();
         let mut state = State::default();

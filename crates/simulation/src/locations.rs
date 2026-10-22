@@ -58,6 +58,13 @@ impl Location {
             Self::Warehouse => "Warehouse",
         }
     }
+    pub fn minimum_spacing_metres(self) -> f64 {
+        match self {
+            Self::Forest | Self::River => 200.0,
+            Self::Field => 100.0,
+            _ => 20.0,
+        }
+    }
     pub fn is_town_owned(self) -> bool {
         self == Self::Warehouse
     }
@@ -456,14 +463,14 @@ impl Map {
         };
         for kind in [Location::Forest, Location::River, Location::Market] {
             map = map
-                .with_place(kind, map.next_position(), None, kind.name())
+                .with_place(kind, map.next_position(kind), None, kind.name())
                 .unwrap()
                 .0;
         }
         map = map
             .with_place(
                 Location::Warehouse,
-                map.next_position(),
+                map.next_position(Location::Warehouse),
                 None,
                 "Town warehouse",
             )
@@ -524,7 +531,7 @@ impl Map {
     pub fn position(&self, id: PlaceId) -> Position {
         self.place(id).expect("place exists").position
     }
-    pub fn next_position(&self) -> Position {
+    pub fn next_position(&self, kind: Location) -> Position {
         if !self.random_positions {
             return Position::default();
         }
@@ -534,11 +541,12 @@ impl Map {
                 x: rng.random_range(-850.0..=850.0),
                 y: rng.random_range(-850.0..=850.0),
             };
-            if self
-                .places
-                .values()
-                .all(|place| position.distance(place.position) >= 200.0)
-            {
+            if self.places.values().all(|place| {
+                position.distance(place.position)
+                    >= kind
+                        .minimum_spacing_metres()
+                        .max(place.kind.minimum_spacing_metres())
+            }) {
                 return position;
             }
         }
