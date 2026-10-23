@@ -247,6 +247,7 @@ mod tests {
                 .all(Option::is_none)
         );
         assert_eq!(started.reserved_goods().unwrap().units(Good::Wheat), 600);
+        crate::production::assert_production_stocks_match(&started);
         assert_eq!(
             crate::production::production_stock(Good::Beer, &started),
             1000.0
@@ -255,6 +256,7 @@ mod tests {
         let actual = started.advance(PREPARATION_MS).unwrap();
         assert_eq!(predicted, actual);
         assert_eq!(predicted.units(Good::Beer), 0);
+        crate::production::assert_production_stocks_match(&predicted);
         assert_eq!(
             crate::production::production_stock(Good::Beer, &predicted),
             1000.0

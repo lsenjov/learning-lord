@@ -396,38 +396,96 @@ pub(crate) fn production_stock(good: Good, citizen: &Citizen) -> f64 {
             .flatten()
             .filter(|crop| crop.kind.good() == good)
         {
-            let travel_ms = (citizen.position().distance(place.position)
-                * crate::locations::WALK_MS_PER_METRE)
-                .ceil() as u64;
-            let tending_ms = citizen
-                .skill_practice_ms(Skill::Farming)
-                .map(|practice| {
-                    (crate::farming::HOUR_MS as f64 / 2.0
-                        * (1.0 - skill_duration_reduction(practice)))
-                    .ceil() as u64
-                })
-                .unwrap_or(u64::MAX);
-            let finish = citizen
-                .current_time_ms()
-                .saturating_add(travel_ms)
-                .saturating_add(tending_ms);
-            let mut tending_finish = [finish; 2];
-            if let Some(active) = citizen.active_action()
-                && let crate::CitizenAction::Tend { field, plot, stage } = active.action()
-                && field == place.id
-                && place
-                    .plots()
-                    .get(plot)
-                    .is_some_and(|existing| existing.as_ref() == Some(crop))
-            {
-                tending_finish[stage] = citizen
-                    .current_time_ms()
-                    .saturating_add(active.remaining_ms());
-            }
-            stock += crop.planned_yield(citizen.current_time_ms(), tending_finish) as f64;
+            stock += planned_crop_stock(citizen, place, crop);
         }
     }
     stock
+}
+
+fn planned_crop_stock(
+    citizen: &Citizen,
+    place: &crate::locations::Place,
+    crop: &crate::farming::Crop,
+) -> f64 {
+    let travel_ms = (citizen.position().distance(place.position)
+        * crate::locations::WALK_MS_PER_METRE)
+        .ceil() as u64;
+    let tending_ms = citizen
+        .skill_practice_ms(Skill::Farming)
+        .map(|practice| {
+            (crate::farming::HOUR_MS as f64 / 2.0 * (1.0 - skill_duration_reduction(practice)))
+                .ceil() as u64
+        })
+        .unwrap_or(u64::MAX);
+    let finish = citizen
+        .current_time_ms()
+        .saturating_add(travel_ms)
+        .saturating_add(tending_ms);
+    let mut tending_finish = [finish; 2];
+    if let Some(active) = citizen.active_action()
+        && let crate::CitizenAction::Tend { field, plot, stage } = active.action()
+        && field == place.id
+        && place
+            .plots()
+            .get(plot)
+            .is_some_and(|existing| existing.as_ref() == Some(crop))
+    {
+        tending_finish[stage] = citizen
+            .current_time_ms()
+            .saturating_add(active.remaining_ms());
+    }
+    crop.planned_yield(citizen.current_time_ms(), tending_finish) as f64
+}
+
+fn production_stocks(citizen: &Citizen) -> [f64; Good::COUNT] {
+    let mut stock =
+        std::array::from_fn(|index| citizen.economic_owned_units(Good::ALL[index]) as f64);
+    if let Some(active) = citizen.active_action()
+        && let Some(recipe) = active.action().production_recipe()
+        && recipe != Recipe::BrewBeer
+    {
+        for good in Good::ALL {
+            let inputs = recipe
+                .inputs()
+                .iter()
+                .filter(|(input, _)| *input == good)
+                .map(|(_, units)| *units as f64)
+                .sum::<f64>();
+            stock[good as usize] = (stock[good as usize] - inputs).max(0.0);
+            stock[good as usize] += recipe
+                .outputs()
+                .iter()
+                .filter(|(output, _)| *output == good)
+                .map(|(_, units)| *units as f64)
+                .sum::<f64>();
+        }
+    }
+    if let Some(active) = citizen.active_action()
+        && let crate::CitizenAction::Plant { crop, .. } = active.action()
+    {
+        stock[crop.good() as usize] += crop.recipe().outputs()[0].1 as f64;
+    }
+    let mut beer = 0.0;
+    for place in citizen.accessible_properties() {
+        beer += citizen.accessible_batches(place).flatten().count() as f64 * 1000.0;
+        for crop in citizen.accessible_crops(place).flatten() {
+            stock[crop.kind.good() as usize] += planned_crop_stock(citizen, place, crop);
+        }
+    }
+    stock[Good::Beer as usize] += beer;
+    stock
+}
+
+#[cfg(test)]
+pub(crate) fn assert_production_stocks_match(citizen: &Citizen) {
+    let stock = production_stocks(citizen);
+    for good in Good::ALL {
+        assert_eq!(
+            stock[good as usize].to_bits(),
+            production_stock(good, citizen).to_bits(),
+            "{good:?}"
+        );
+    }
 }
 
 fn stock_batches(recipe: Recipe, citizen: &Citizen) -> Option<f64> {
@@ -643,9 +701,7 @@ pub(crate) fn projected_recipes_at(
 ) -> Result<Vec<Recipe>, SimulationError> {
     let candidates = projection_candidates(citizen, site);
     let mut owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
-    let mut stock = std::array::from_fn::<_, { Good::COUNT }, _>(|index| {
-        production_stock(Good::ALL[index], citizen)
-    });
+    let mut stock = production_stocks(citizen);
     if let Some(active) = citizen.active_action()
         && let Some(recipe) = active.action().production_recipe()
         && recipe != Recipe::BrewBeer
@@ -917,6 +973,108 @@ pub(crate) fn period_start(period: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_stock_accounts_for_active_production_and_input_clamping() {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Miller);
+        let (map, mill) = citizen
+            .map()
+            .with_place(
+                Location::Mill,
+                citizen.position(),
+                Some(citizen.id()),
+                "Mill",
+            )
+            .unwrap();
+        let citizen = citizen
+            .with_map(map)
+            .unwrap()
+            .with_good(Good::Wheat, 600)
+            .unwrap();
+        let active = citizen
+            .start_action(crate::CitizenAction::ProduceAt {
+                place: mill,
+                recipe: Recipe::MillFlour,
+            })
+            .unwrap();
+        assert_production_stocks_match(&active);
+        assert_eq!(production_stocks(&active)[Good::Wheat as usize], 300.0);
+        assert_eq!(production_stocks(&active)[Good::Flour as usize], 240.0);
+        let mut short = active;
+        short.set_inventory_units(Good::Wheat, 0);
+        assert_production_stocks_match(&short);
+        assert_eq!(production_stocks(&short)[Good::Wheat as usize], 0.0);
+    }
+
+    #[test]
+    fn bulk_stock_separates_crop_goods_and_excludes_private_fields() {
+        use crate::farming::{Crop, CropKind};
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Farmer);
+        let foreign_owner = crate::AgentId(uuid::Uuid::new_v4());
+        let mut map = citizen.map().clone();
+        for owner in [citizen.id(), foreign_owner] {
+            let (next, field) = map
+                .with_place(Location::Field, citizen.position(), Some(owner), "Field")
+                .unwrap();
+            map = next;
+            for (plot, kind) in [CropKind::Wheat, CropKind::Flax].into_iter().enumerate() {
+                map.set_crop(
+                    field,
+                    plot,
+                    Some(Crop {
+                        kind,
+                        planted_at_ms: 0,
+                        tended: [false; 2],
+                    }),
+                )
+                .unwrap();
+            }
+        }
+        let citizen = citizen.with_map(map).unwrap();
+        assert_production_stocks_match(&citizen);
+        let stocks = production_stocks(&citizen);
+        assert_eq!(stocks[Good::Wheat as usize], 600.0);
+        assert_eq!(stocks[Good::Flax as usize], 600.0);
+    }
+
+    #[test]
+    fn bulk_stock_preserves_rounding_with_large_inventory_and_separate_batches() {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Brewer)
+            .with_good(Good::Beer, (1_u64 << 60) + 129)
+            .unwrap();
+        let mut map = citizen.map().clone();
+        for name in ["First", "Second", "Third"] {
+            let (next, brewery) = map
+                .with_place(
+                    Location::Brewery,
+                    citizen.position(),
+                    Some(citizen.id()),
+                    name,
+                )
+                .unwrap();
+            map = next;
+            map.set_batch(
+                brewery,
+                0,
+                Some(crate::brewing::Batch::Fermenting {
+                    ready_at_ms: crate::brewing::FERMENTATION_MS,
+                }),
+            )
+            .unwrap();
+        }
+        let citizen = citizen.with_map(map).unwrap();
+        assert_production_stocks_match(&citizen);
+        assert_eq!(
+            production_stocks(&citizen)[Good::Beer as usize],
+            citizen.economic_owned_units(Good::Beer) as f64 + 3000.0
+        );
+    }
 
     #[test]
     fn projection_candidates_preserve_global_and_site_eligibility() {
@@ -1373,8 +1531,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(production_stock(Good::Wheat, &planted), 600.0);
+        assert_production_stocks_match(&planted);
         let completed = planted.advance(crate::farming::HOUR_MS).unwrap();
         assert_eq!(production_stock(Good::Wheat, &completed), 600.0);
+        assert_production_stocks_match(&completed);
     }
 
     #[test]
@@ -1406,10 +1566,12 @@ mod tests {
         let mut citizen = citizen.with_map(map).unwrap();
         citizen.market_time_ms = 48 * HOUR_MS - HOUR_MS / 2;
         assert_eq!(production_stock(Good::Wheat, &citizen), 600.0);
+        assert_production_stocks_match(&citizen);
         let remote = citizen
             .with_position(crate::locations::Position { x: 100.0, y: 0.0 })
             .unwrap();
         assert_eq!(production_stock(Good::Wheat, &remote), 375.0);
+        assert_production_stocks_match(&remote);
         let tending = citizen
             .start_action(crate::CitizenAction::Tend {
                 field,
@@ -1420,10 +1582,13 @@ mod tests {
             .advance(HOUR_MS / 4)
             .unwrap();
         assert_eq!(production_stock(Good::Wheat, &tending), 600.0);
+        assert_production_stocks_match(&tending);
         citizen.market_time_ms += HOUR_MS / 4;
         assert_eq!(production_stock(Good::Wheat, &citizen), 375.0);
+        assert_production_stocks_match(&citizen);
         citizen.market_time_ms = 72 * HOUR_MS - HOUR_MS / 4;
         assert_eq!(production_stock(Good::Wheat, &citizen), 0.0);
+        assert_production_stocks_match(&citizen);
     }
 
     #[test]

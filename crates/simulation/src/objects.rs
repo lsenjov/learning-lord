@@ -853,6 +853,7 @@ mod tests {
                 }
             ]
         );
+        crate::production::assert_production_stocks_match(worker(&world, second));
         assert_eq!(
             crate::production::production_stock(Good::Beer, worker(&world, second)),
             2000.0
