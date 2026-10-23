@@ -565,6 +565,7 @@ impl ProductionPrices {
             site,
             stock_fraction(recipe, citizen).is_some_and(|fraction| fraction >= 1.0),
             &self.owned,
+            routes::InputSupply::Available,
         )
         .is_some()
     }
@@ -576,15 +577,28 @@ impl ProductionPrices {
         site: Option<PlaceId>,
         export: bool,
         owned: &[Quantity; Good::COUNT],
+        supply: routes::InputSupply,
     ) -> Option<ProductionRouteQuote> {
-        let routes = routes::method_routes_with_owned(recipe, citizen, site, export, self, owned);
+        let routes =
+            routes::method_routes_with_owned(recipe, citizen, site, export, self, owned, supply);
+        let purchasable = |route: &ProductionRouteQuote| {
+            route
+                .purchases
+                .items()
+                .all(|(good, units)| units == 0 || self.purchasable[good as usize])
+        };
         [routes.buy, routes.make]
             .into_iter()
             .flatten()
             .filter(|route| {
                 route.net_revenue > 0.0 && route.profit / route.net_revenue >= self.minimum_margin
             })
-            .max_by(|a, b| a.profit_per_hour().total_cmp(&b.profit_per_hour()))
+            // Missing offers must generate demand without displacing a chain we can already make.
+            .max_by(|a, b| {
+                purchasable(a)
+                    .cmp(&purchasable(b))
+                    .then_with(|| a.profit_per_hour().total_cmp(&b.profit_per_hour()))
+            })
     }
 
     fn batch_cost(&self, recipe: Recipe, citizen: &Citizen, site: Option<PlaceId>) -> Option<f64> {
@@ -874,8 +888,14 @@ pub(crate) fn projected_route_blocks_at(
                     .map(|&(good, units)| stock[good as usize] / units as f64)
                     .max_by(f64::total_cmp)?;
                 let fraction = batches / cap;
-                let route =
-                    prices.preferred_route(recipe, citizen, site, fraction >= 1.0, &owned)?;
+                let route = prices.preferred_route(
+                    recipe,
+                    citizen,
+                    site,
+                    fraction >= 1.0,
+                    &owned,
+                    routes::InputSupply::Projected,
+                )?;
                 if route
                     .ordered_batches
                     .iter()
@@ -971,8 +991,14 @@ pub(crate) fn ranked_recipes_at_prices(
                 return None;
             }
             let fraction = stock_fraction(recipe, citizen)?;
-            let route =
-                prices.preferred_route(recipe, citizen, site, fraction >= 1.0, &prices.owned)?;
+            let route = prices.preferred_route(
+                recipe,
+                citizen,
+                site,
+                fraction >= 1.0,
+                &prices.owned,
+                routes::InputSupply::Available,
+            )?;
             let first = *route.ordered_batches.first()?;
             let rate = route.profit / route.duration_ms as f64;
             Some((first, fraction / rate, rate))
@@ -1730,6 +1756,8 @@ mod tests {
             .with_price(Good::Wood, 1.0)
             .unwrap()
             .with_price(Good::BreadRoll, 100.0)
+            .unwrap()
+            .with_price(Good::BerryPie, 0.01)
             .unwrap();
         for _ in 0..12 {
             market

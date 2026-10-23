@@ -3262,6 +3262,51 @@ mod tests {
     }
 
     #[test]
+    fn production_site_uses_feasible_make_over_cheaper_unlisted_intermediate() {
+        use crate::{
+            locations::{Location, Position},
+            production::Recipe,
+        };
+        let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(crate::StartingRole::Weaver)
+            .with_good(Good::Flax, 1600)
+            .unwrap();
+        let worker = worker.with_prices(
+            worker
+                .prices()
+                .with_price(Good::Thread, 1.0)
+                .unwrap()
+                .with_price(Good::Cloth, 200.0)
+                .unwrap(),
+        );
+        let (map, site) = worker
+            .map()
+            .with_place(
+                Location::Weavery,
+                Position::default(),
+                Some(worker.id()),
+                "Weavery",
+            )
+            .unwrap();
+        let worker = worker.with_map(map).unwrap();
+        assert!(crate::production::recipe_profit(Recipe::SpinThread, &worker).unwrap() < 0.0);
+        let variant = site_candidate(&worker, site);
+        let recipes: Vec<_> = variant
+            .actions
+            .iter()
+            .filter_map(|action| action.production_recipe())
+            .collect();
+        assert_eq!(&recipes[..2], &[Recipe::SpinThread, Recipe::WeaveCloth]);
+        assert!(
+            !variant.actions.iter().any(|action| matches!(
+                action,
+                CitizenAction::Buy(_) | CitizenAction::BuyAt { .. }
+            ))
+        );
+    }
+
+    #[test]
     fn production_site_bakery_mixes_recipes_without_other_site_work() {
         use crate::{locations::Location, production::Recipe};
         let worker = baker();

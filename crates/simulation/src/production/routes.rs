@@ -7,6 +7,12 @@ use crate::{
 
 const MAX_ROUTE_BATCHES: usize = 128;
 
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum InputSupply {
+    Available,
+    Projected,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ProductionRouteQuote {
     pub profit: f64,
@@ -55,7 +61,15 @@ pub(super) fn method_routes(
     export: bool,
     prices: &ProductionPrices,
 ) -> ProductionRoutes {
-    method_routes_with_owned(recipe, citizen, site, export, prices, &prices.owned)
+    method_routes_with_owned(
+        recipe,
+        citizen,
+        site,
+        export,
+        prices,
+        &prices.owned,
+        InputSupply::Available,
+    )
 }
 
 pub(super) fn method_routes_with_owned(
@@ -65,9 +79,10 @@ pub(super) fn method_routes_with_owned(
     export: bool,
     prices: &ProductionPrices,
     owned: &[Quantity; Good::COUNT],
+    supply: InputSupply,
 ) -> ProductionRoutes {
     let site = site.or_else(|| citizen.production_place(recipe).ok());
-    let buy = quote(recipe, citizen, site, export, false, prices, owned);
+    let buy = quote(recipe, citizen, site, export, false, prices, owned, supply);
     let make = site
         .filter(|_| {
             recipe
@@ -75,7 +90,7 @@ pub(super) fn method_routes_with_owned(
                 .iter()
                 .any(|&(good, _)| supplier(good, citizen, site).is_some())
         })
-        .and_then(|_| quote(recipe, citizen, site, export, true, prices, owned))
+        .and_then(|_| quote(recipe, citizen, site, export, true, prices, owned, supply))
         .filter(|route| !route.intermediate_batches.is_empty());
     let prefer_make = make.as_ref().is_some_and(|make| {
         buy.as_ref()
@@ -191,6 +206,7 @@ fn quote(
     make: bool,
     prices: &ProductionPrices,
     owned: &[Quantity; Good::COUNT],
+    supply: InputSupply,
 ) -> Option<ProductionRouteQuote> {
     citizen.validate_production_site(site?, recipe).ok()?;
     let mut builder = RouteBuilder {
@@ -213,9 +229,10 @@ fn quote(
             .map(|good| (good, builder.needed[good as usize])),
     )
     .ok()?;
-    if purchases
-        .items()
-        .any(|(good, units)| !prices.purchasable[good as usize] && units > 0)
+    if supply == InputSupply::Available
+        && purchases
+            .items()
+            .any(|(good, units)| !prices.purchasable[good as usize] && units > 0)
     {
         return None;
     }
@@ -356,6 +373,7 @@ mod tests {
             true,
             &prices,
             &prices.owned,
+            InputSupply::Available,
         )
         .unwrap();
         assert!((route.net_revenue - 1000.0).abs() < 1e-8);
@@ -367,7 +385,8 @@ mod tests {
                     &citizen,
                     Some(site),
                     false,
-                    &prices.owned
+                    &prices.owned,
+                    InputSupply::Available
                 )
                 .is_none()
         );
@@ -382,6 +401,7 @@ mod tests {
             true,
             &prices,
             &prices.owned,
+            InputSupply::Available,
         )
         .unwrap();
         assert!((taxed.net_revenue - 550.0).abs() < 1e-8);
@@ -399,6 +419,7 @@ mod tests {
             true,
             &prices,
             &prices.owned,
+            InputSupply::Available,
         )
         .unwrap();
         assert!((capped.net_revenue - 100.0).abs() < 1e-8);
@@ -410,7 +431,8 @@ mod tests {
                     &citizen,
                     Some(site),
                     false,
-                    &prices.owned
+                    &prices.owned,
+                    InputSupply::Available
                 )
                 .is_some()
         );

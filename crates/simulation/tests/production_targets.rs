@@ -53,6 +53,56 @@ fn targets(universe: &Universe, id: AgentId) -> ProductionTargets {
     ProductionTargets::calculate(citizen(universe, id), universe.current_time_ms()).unwrap()
 }
 
+#[test]
+fn absent_weaver_inputs_still_generate_affordable_market_demand() {
+    let worker = Citizen::new(0.0)
+        .unwrap()
+        .with_starting_role(StartingRole::Weaver)
+        .with_garment_condition(Some(1.0))
+        .unwrap()
+        .with_coins(2993)
+        .unwrap();
+    let (universe, id) = Universe::with_map(Map::default())
+        .with_citizen("Weaver", worker)
+        .unwrap();
+    let (universe, _) = universe
+        .with_property(id, Recipe::SpinThread.location())
+        .unwrap();
+    let worker = citizen(&universe, id);
+    let home = worker.home();
+    let owner = worker.goods_owner();
+    let universe = universe
+        .with_stored_good(home, owner, Good::BreadRoll, 30)
+        .unwrap()
+        .with_stored_good(home, owner, Good::Water, 400)
+        .unwrap();
+    assert!(
+        !universe
+            .market()
+            .orders()
+            .any(|order| matches!(order.good, Good::Flax | Good::Thread))
+    );
+    let planned = universe.start_planning(id).unwrap();
+    let worker = citizen(&planned, id);
+    let decision = worker.active_plan().unwrap().plan().decision().unwrap();
+    let projection = decision
+        .candidates
+        .iter()
+        .flat_map(|goal| &goal.production_locations)
+        .find(|location| location.place == worker.production_place(Recipe::SpinThread).unwrap())
+        .unwrap()
+        .projection
+        .as_ref()
+        .unwrap();
+    assert!(!projection.recipes.is_empty());
+    assert!(projection.purchases.units(Good::Flax) > 0);
+    assert!(decision.blocked_requests.units(Good::Flax) > 0);
+    assert!(planned.market().requested(id).units(Good::Flax) > 0);
+    assert!(planned.market().unmet_units(Good::Flax) > 0);
+    assert!(planned.market().affordable_request(id).units(Good::Flax) > 0);
+    assert_eq!(worker.units(Good::Flax), 0);
+}
+
 fn working_ms(target: &ProductionTargets, worker: &Citizen) -> u64 {
     target
         .batches()
