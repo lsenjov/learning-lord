@@ -1768,6 +1768,25 @@ impl Market {
         if boundary <= self.period_start_ms {
             return Ok(());
         }
+        let mut remaining = self.period_activity.map(|activity| activity.traded_units);
+        let mut quoted_values = [0.0; Good::COUNT];
+        // Period volumes distinguish trades on either side of a close sharing its timestamp.
+        for trade in self.trades.iter().rev() {
+            if remaining.iter().all(|units| *units == 0) {
+                break;
+            }
+            let index = trade.good as usize;
+            if remaining[index] == 0 {
+                continue;
+            }
+            remaining[index] = remaining[index]
+                .checked_sub(trade.units)
+                .ok_or(SimulationError::InvalidQuantity)?;
+            quoted_values[index] += trade.units as f64 * trade.quoted_price;
+        }
+        if remaining.iter().any(|units| *units != 0) {
+            return Err(SimulationError::InvalidQuantity);
+        }
         for good in Good::ALL {
             let traded = self.period_activity[good as usize];
             let before = self.prices.price(good).unwrap();
@@ -1792,9 +1811,12 @@ impl Market {
             if let Some(accepted) = accepted_local_price {
                 self.last_local_prices[good as usize] = Some((boundary, accepted));
             }
-            let after = accepted_local_price.map_or(before, |accepted| {
+            let after = if traded.traded_units > 0 {
+                let accepted = quoted_values[good as usize] / traded.traded_units as f64;
                 (before * 0.75 + accepted * 0.25).max(MIN_QUOTED_PRICE)
-            });
+            } else {
+                before
+            };
             self.prices = self.prices.with_price(good, after)?;
             self.history.push_back(DailyMarketActivity {
                 local_quoted_value: traded.local_quoted_value,
@@ -2304,6 +2326,63 @@ mod tests {
     }
 
     #[test]
+    fn reference_weights_all_trade_directions_and_survives_save_at_close() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let good = Good::BreadRoll;
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(good, 10.0).unwrap();
+        market
+            .set_caravan_policy(CaravanPolicy {
+                import_tariff_basis_points: 5000,
+                export_tariff_basis_points: 3333,
+                ..CaravanPolicy::default()
+            })
+            .unwrap();
+        market.list_at_quote(seller, PLACE, good, 1, 2.1).unwrap();
+        market
+            .purchase(buyer, PLACE, (good, 1), 100, UPDATE_TIME_MS, true)
+            .unwrap();
+        market.list_at_quote(seller, PLACE, good, 4, 1.1).unwrap();
+        market.caravans(PLACE, UPDATE_TIME_MS).unwrap();
+        assert_eq!(market.period_activity[good as usize].exported_units, 2);
+        market.withdraw(seller, PLACE, good, 2).unwrap();
+        market
+            .list_at_quote(MarketParty::Caravan, PLACE, good, 3, 20.1)
+            .unwrap();
+        market
+            .purchase(buyer, PLACE, (good, 3), 100, UPDATE_TIME_MS, true)
+            .unwrap();
+        let encoded = ron::to_string(&market).unwrap();
+        let mut market: Market = ron::from_str(&encoded).unwrap();
+        market.update(UPDATE_TIME_MS).unwrap();
+        let expected = 7.5 + (2.1 + 2.0 * 1.1 + 3.0 * 20.1) / 6.0 * 0.25;
+        assert!((market.prices.price(good).unwrap() - expected).abs() < 1e-12);
+        assert_eq!(
+            market.history().back().unwrap().accepted_local_price,
+            Some(2.1)
+        );
+        assert_eq!(
+            market.last_local_prices[good as usize],
+            Some((UPDATE_TIME_MS, 2.1))
+        );
+
+        market
+            .list_at_quote(MarketParty::Caravan, PLACE, good, 1, 30.1)
+            .unwrap();
+        market
+            .purchase(buyer, PLACE, (good, 1), 100, UPDATE_TIME_MS, true)
+            .unwrap();
+        market.update(UPDATE_TIME_MS + DAY_MS).unwrap();
+        assert!(
+            (market.prices.price(good).unwrap() - (expected * 0.75 + 30.1 * 0.25)).abs() < 1e-12
+        );
+        let after = market.prices;
+        market.update(UPDATE_TIME_MS + 2 * DAY_MS).unwrap();
+        assert_eq!(market.prices, after);
+    }
+
+    #[test]
     fn planned_bounds_reject_higher_quotes_and_limit_the_budget() {
         let seller = AgentId(uuid::Uuid::from_u128(1));
         let buyer = MarketParty::Citizen(AgentId(uuid::Uuid::from_u128(2)));
@@ -2670,7 +2749,10 @@ mod tests {
         assert!(purchase.payments.is_empty());
         market.refresh_affordability(&[(buyer, 0)]);
         market.update(UPDATE_TIME_MS + 3 * DAY_MS).unwrap();
-        assert_eq!(market.prices.price(Good::Thread), Some(10.0049));
+        assert_eq!(
+            market.prices.price(Good::Thread),
+            Some(10.0049 * 0.75 + 175.5 * 0.25)
+        );
         let history = market.history().back().unwrap();
         assert_eq!(
             (
@@ -2697,7 +2779,30 @@ mod tests {
     }
 
     #[test]
-    fn caravan_quotes_and_unmet_demand_do_not_move_the_reference() {
+    fn unfilled_local_and_caravan_quotes_and_unmet_demand_keep_reference() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let buyer = AgentId(uuid::Uuid::from_u128(2));
+        let good = Good::BreadRoll;
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(good, 10.0).unwrap();
+        market.list_at_quote(seller, PLACE, good, 20, 5.0).unwrap();
+        market
+            .list_at_quote(MarketParty::Caravan, PLACE, good, 30, 20.0)
+            .unwrap();
+        market
+            .set_request(buyer, ShoppingList::single(good, 10))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 1000)]);
+        market.update(UPDATE_TIME_MS).unwrap();
+        assert_eq!(market.prices.price(good), Some(10.0));
+        let day = market.history().back().unwrap();
+        assert_eq!(day.remaining_supply_units, 50);
+        assert_eq!(day.unmet_demand_units, 10);
+        assert_eq!(day.traded_units, 0);
+    }
+
+    #[test]
+    fn caravan_purchases_move_the_reference_by_executed_quote() {
         for quote in [9.0, 10.0, f64::from_bits(10.0_f64.to_bits() + 1)] {
             let buyer = AgentId(uuid::Uuid::from_u128(1));
             let mut market = Market::default();
@@ -2724,7 +2829,10 @@ mod tests {
                 .unwrap();
             market.refresh_affordability(&[(buyer, 1000)]);
             market.update(UPDATE_TIME_MS).unwrap();
-            assert_eq!(market.prices.price(Good::BreadRoll), Some(10.0));
+            assert_eq!(
+                market.prices.price(Good::BreadRoll),
+                Some(7.5 + quote * 0.25)
+            );
             let history = market.history().back().unwrap();
             assert_eq!(
                 (
