@@ -251,9 +251,7 @@ impl Citizen {
         let place = site
             .or_else(|| self.production_place(recipe).ok())
             .unwrap_or(self.selling_place());
-        let socage = self
-            .production_socage_rate_at(place, recipe, good)
-            .basis_points();
+        let socage = self.production_socage_rate_at(place, good).basis_points();
         let units = gross
             .saturating_sub((u128::from(gross) * u128::from(socage)).div_ceil(10_000) as Quantity);
         let income = self
@@ -397,10 +395,7 @@ impl Citizen {
             cost_quantity: quantity
                 .saturating_sub(
                     (quantity as u128
-                        * u128::from(
-                            self.production_socage_rate_at(place, recipe, good)
-                                .basis_points(),
-                        ))
+                        * u128::from(self.production_socage_rate_at(place, good).basis_points()))
                     .div_ceil(10_000) as Quantity,
                 )
                 .max(1),

@@ -636,22 +636,11 @@ impl Citizen {
             .copied()
             .unwrap_or_else(|| taxation::TaxRate::new(0).unwrap())
     }
-    pub fn production_socage_rate_at(
-        &self,
-        place: PlaceId,
-        recipe: production::Recipe,
-        good: Good,
-    ) -> taxation::TaxRate {
+    pub fn production_socage_rate_at(&self, place: PlaceId, good: Good) -> taxation::TaxRate {
         self.site_socage_rates
             .get(&(place, good))
             .copied()
-            .unwrap_or_else(|| {
-                if self.production_place(recipe).ok() == Some(place) {
-                    self.production_socage_rate(recipe, good)
-                } else {
-                    taxation::TaxRate::new(0).unwrap()
-                }
-            })
+            .unwrap_or_else(|| taxation::TaxRate::new(0).unwrap())
     }
 
     pub fn with_good(&self, good: Good, units: Quantity) -> Result<Self, SimulationError> {
@@ -3396,6 +3385,28 @@ impl Citizen {
 mod tests {
     use super::*;
     use rand::SeedableRng;
+
+    #[test]
+    fn missing_site_socage_rate_does_not_fall_back_to_recipe_rate() {
+        let mut worker = Citizen::new(0.0).unwrap();
+        let recipe = production::Recipe::ChopWood;
+        let place = worker.production_place(recipe).unwrap();
+        worker
+            .socage_rates
+            .insert((recipe, Good::Wood), taxation::TaxRate::new(5000).unwrap());
+        assert_eq!(
+            worker
+                .production_socage_rate(recipe, Good::Wood)
+                .basis_points(),
+            5000
+        );
+        assert_eq!(
+            worker
+                .production_socage_rate_at(place, Good::Wood)
+                .basis_points(),
+            0
+        );
+    }
 
     fn baker_with_targets() -> Citizen {
         let worker = Citizen::new(0.0)

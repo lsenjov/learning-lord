@@ -511,7 +511,7 @@ fn output_value(
                         - f64::from(
                             site.map_or_else(
                                 || citizen.production_socage_rate(recipe, good),
-                                |place| citizen.production_socage_rate_at(place, recipe, good),
+                                |place| citizen.production_socage_rate_at(place, good),
                             )
                             .basis_points(),
                         ) / 10_000.0)
@@ -616,7 +616,7 @@ fn usable_output(
     let rate = u64::from(
         site.map_or_else(
             || citizen.production_socage_rate(recipe, good),
-            |place| citizen.production_socage_rate_at(place, recipe, good),
+            |place| citizen.production_socage_rate_at(place, good),
         )
         .basis_points(),
     );

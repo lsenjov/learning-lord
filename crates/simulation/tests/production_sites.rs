@@ -3,7 +3,7 @@ use learning_lord_simulation::{
     locations::{Location, Map, PlaceId, Position},
     marketplace::Good,
     production::{Recipe, Skill},
-    taxation::{TaxKind, TaxRate},
+    taxation::{TaxKind, TaxRate, TaxScope},
 };
 
 fn citizen(world: &Universe, id: AgentId) -> &Citizen {
@@ -50,7 +50,7 @@ fn explicit_production_uses_the_selected_colocated_workshop_and_its_tax_rule() {
     );
     assert_eq!(
         worker
-            .production_socage_rate_at(chosen, Recipe::MillFlour, Good::Flour)
+            .production_socage_rate_at(chosen, Good::Flour)
             .basis_points(),
         5000
     );
@@ -183,4 +183,96 @@ fn explicit_production_requires_arrival_and_preserves_legacy_actions() {
             .start_action(CitizenAction::Produce(Recipe::MillFlour))
             .is_ok()
     );
+}
+
+#[test]
+fn site_socage_lookup_matches_stacked_rules_and_survives_save_roundtrip() {
+    let (world, id) = Universe::with_map(Map::default())
+        .with_citizen("Miller", Citizen::new(0.0).unwrap())
+        .unwrap();
+    let (world, first) = world.with_property(id, Location::Mill).unwrap();
+    let (world, second) = world.with_property(id, Location::Mill).unwrap();
+    let default = citizen(&world, id)
+        .production_place(Recipe::MillFlour)
+        .unwrap();
+    let other = if default == first { second } else { first };
+    for place in [default, other] {
+        assert_eq!(
+            citizen(&world, id)
+                .production_socage_rate_at(place, Good::Flour)
+                .basis_points(),
+            0
+        );
+    }
+    let (world, _) = world
+        .with_tax_rule(
+            default,
+            "Local flour",
+            TaxKind::Socage {
+                rates: [(Good::Flour, TaxRate::new(2000).unwrap())]
+                    .into_iter()
+                    .collect(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        citizen(&world, id)
+            .production_socage_rate(Recipe::MillFlour, Good::Flour)
+            .basis_points(),
+        2000
+    );
+    assert_eq!(
+        citizen(&world, id)
+            .production_socage_rate_at(other, Good::Flour)
+            .basis_points(),
+        0
+    );
+    let (world, _) = world
+        .with_scoped_tax_rule(
+            TaxScope::LocationType(Location::Mill),
+            "Mill flour",
+            TaxKind::Socage {
+                rates: [(Good::Flour, TaxRate::new(3000).unwrap())]
+                    .into_iter()
+                    .collect(),
+            },
+        )
+        .unwrap();
+    let loaded = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+    for snapshot in [&world, &loaded] {
+        let worker = citizen(snapshot, id);
+        for (place, expected) in [(default, 5000), (other, 3000)] {
+            assert_eq!(
+                worker
+                    .production_socage_rate_at(place, Good::Flour)
+                    .basis_points(),
+                expected
+            );
+            assert_eq!(
+                snapshot.socage_rate(place, Good::Flour).basis_points(),
+                expected
+            );
+            assert_eq!(
+                worker
+                    .production_socage_rate_at(place, Good::Wheat)
+                    .basis_points(),
+                0
+            );
+        }
+        assert_eq!(
+            worker
+                .production_socage_rate_at(
+                    snapshot.map().public_place(Location::Forest),
+                    Good::Flour
+                )
+                .basis_points(),
+            0
+        );
+        assert_eq!(
+            worker
+                .production_socage_rate(Recipe::MillFlour, Good::Flour)
+                .basis_points(),
+            5000
+        );
+    }
 }
