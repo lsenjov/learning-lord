@@ -316,6 +316,7 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         for (good, units) in learning_lord_simulation::production::starting_inputs(role).items() {
             citizen = citizen.with_good(good, units)?;
         }
+        citizen = citizen.with_good(Good::Water, citizen.units(Good::Water) + 7 * 400)?;
         let (next, id) = universe.with_citizen(name, citizen)?;
         universe = next;
         ids.push(id);
@@ -1433,6 +1434,10 @@ mod tests {
                 assert_eq!(
                     pantry_allocation(&universe, citizen, Good::BreadRoll),
                     70 * members as u64
+                );
+                assert_eq!(
+                    pantry_allocation(&universe, citizen, Good::Water),
+                    7 * 400 * members as u64
                 );
                 if let Some(id) = citizen.household_id() {
                     assert!(
