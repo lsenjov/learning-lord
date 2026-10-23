@@ -282,6 +282,21 @@ fn projected_mixed_targets_preserve_desired_work_beyond_the_current_cash() {
             ],
             coins,
         );
+        let (mut universe, supplier) = producer(
+            universe,
+            "Input supplier",
+            StartingRole::Miller,
+            &[
+                (Good::Flour, 1000),
+                (Good::Wood, 1000),
+                (Good::Water, 1000),
+                (Good::Berries, 1000),
+            ],
+            0,
+        );
+        for good in [Good::Flour, Good::Wood, Good::Water, Good::Berries] {
+            universe = list(universe, supplier, good, 1000);
+        }
         let target = targets(&universe, baker);
         let bread = target.remaining_batches(Recipe::BakeRolls);
         let pie = target.remaining_batches(Recipe::BakeBerryPie);
@@ -399,7 +414,7 @@ fn personal_food_reserve_is_shared_across_edible_goods_and_does_not_block_eating
 }
 
 #[test]
-fn expensive_replacement_asks_do_not_hide_profitable_owned_input_work() {
+fn competitive_replacement_asks_value_owned_inputs_and_can_exclude_production() {
     let (universe, seller) = producer(
         Universe::with_map(Map::default()),
         "Seller",
@@ -423,12 +438,12 @@ fn expensive_replacement_asks_do_not_hide_profitable_owned_input_work() {
         ],
         0,
     );
-    assert!(recipe_profit(Recipe::BakeRolls, citizen(&universe, baker)).unwrap() > 0.0);
+    assert!(recipe_profit(Recipe::BakeRolls, citizen(&universe, baker)).unwrap() < 0.0);
     let target = targets(&universe, baker);
     assert_eq!(
         target.remaining_batches(Recipe::BakeRolls)
             + target.remaining_batches(Recipe::BakeBerryPie),
-        1
+        0
     );
 }
 

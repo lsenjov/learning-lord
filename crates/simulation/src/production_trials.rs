@@ -286,33 +286,13 @@ impl Citizen {
         )
     }
 
-    pub(crate) fn eligible_production_trial(&self, recipe: Recipe, site: Option<PlaceId>) -> bool {
-        let (good, _) = recipe.outputs()[0];
-        if crate::production::recipe_profit_for_site(recipe, self, site)
-            .is_none_or(|profit| profit > 0.0)
-        {
-            return false;
-        }
-        if self
-            .excess_goods()
-            .is_ok_and(|excess| excess.units(good) > 0)
-        {
-            return false;
-        }
-        if let Some(trial) = self.market.production_trial(self.economic_id(), good) {
-            return trial.worker == self.id && trial.phase == TrialPhase::Preparing;
-        }
-        let Some(cost) = crate::production::estimated_batch_cost(recipe, self, site) else {
-            return false;
-        };
-        let Some(viable) = self.minimum_viable_trial_price(recipe, cost, site) else {
-            return false;
-        };
-        let selling = self
-            .market
-            .known_trial_price(self.economic_id(), self.selling_place(), good);
-        self.market
-            .trial_eligible(self.economic_id(), good, viable, selling)
+    pub(crate) fn eligible_production_trial(
+        &self,
+        _recipe: Recipe,
+        _site: Option<PlaceId>,
+    ) -> bool {
+        // New commercial work must meet its margin; historical trials still reconcile below.
+        false
     }
 
     pub(crate) fn claim_production_trial(
@@ -719,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn commercial_plan_claims_each_speculative_output() {
+    fn committed_plan_does_not_create_trials_when_prices_fall() {
         let mut citizen = weaver();
         citizen = citizen.with_prices(citizen.prices.with_price(Good::Cloth, 0.01).unwrap());
         let result = crate::planning::adopt_commercial_fixture(
@@ -735,18 +715,18 @@ mod tests {
             result
                 .market
                 .production_trial(result.economic_id(), Good::Thread)
-                .is_some()
+                .is_none()
         );
         assert!(
             result
                 .market
                 .production_trial(result.economic_id(), Good::Cloth)
-                .is_some()
+                .is_none()
         );
     }
 
     #[test]
-    fn stale_commercial_claim_abandons_plan_without_world_error() {
+    fn committed_plan_leaves_another_workers_trial_untouched() {
         let mut citizen = weaver();
         citizen
             .claim_production_trial(Recipe::SpinThread, None)
@@ -759,12 +739,21 @@ mod tests {
             .get_mut(&(account, Good::Thread))
             .unwrap()
             .worker = AgentId(uuid::Uuid::new_v4());
+        let claimed = citizen
+            .market
+            .production_trial(account, Good::Thread)
+            .unwrap()
+            .clone();
         let result = crate::planning::resume_commercial_fixture(
             citizen,
             CitizenAction::Produce(Recipe::SpinThread),
         )
         .unwrap();
-        assert!(result.active_action().is_none());
+        assert!(result.active_action().is_some());
+        assert_eq!(
+            result.market.production_trial(account, Good::Thread),
+            Some(&claimed)
+        );
         assert!(
             result
                 .market
@@ -774,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_failed_commercial_trial_does_not_manufacture_unlocked_stock() {
+    fn committed_plan_does_not_requalify_against_failed_trial_history() {
         let mut citizen = weaver();
         citizen
             .claim_production_trial(Recipe::SpinThread, None)
@@ -800,7 +789,7 @@ mod tests {
             CitizenAction::Produce(Recipe::SpinThread),
         )
         .unwrap();
-        assert!(result.active_action().is_none());
+        assert!(result.active_action().is_some());
         assert!(
             result
                 .market
@@ -831,7 +820,7 @@ mod tests {
         assert!(
             (crate::production::recipe_profit_for_site(Recipe::SpinThread, &citizen, None)
                 .unwrap()
-                - 20.0)
+                + 199.9)
                 .abs()
                 < 1e-9
         );
@@ -839,7 +828,7 @@ mod tests {
         assert!(
             (crate::production::recipe_profit_for_site(Recipe::SpinThread, &citizen, None)
                 .unwrap()
-                + 20.0)
+                + 239.9)
                 .abs()
                 < 1e-9
         );
@@ -880,29 +869,8 @@ mod tests {
     }
 
     #[test]
-    fn future_canary_retry_waits_for_preparation_and_rechecks_shared_claim() {
+    fn input_purchases_do_not_enable_new_speculative_trials() {
         let mut citizen = weaver().with_coins(500).unwrap();
-        citizen
-            .claim_production_trial(Recipe::SpinThread, None)
-            .unwrap();
-        let account = citizen.economic_id();
-        let mut trial = citizen
-            .market
-            .production_trials
-            .active
-            .remove(&(account, Good::Thread))
-            .unwrap();
-        trial.committed_viable_price = 1500.0;
-        trial.committed_cost = 300.0;
-        trial.sold_units = trial.quantity;
-        trial.remaining = 0;
-        citizen.market.production_trials.results.insert(
-            (account, Good::Thread),
-            TrialResult {
-                trial,
-                profitable: false,
-            },
-        );
         citizen.set_inventory_units(Good::Flax, 0);
         let place = citizen.selling_place();
         citizen
@@ -924,56 +892,23 @@ mod tests {
             .unwrap()
             .advance_predicted(crate::TRADE_DURATION_MS)
             .unwrap();
-        assert!(prepared.eligible_production_trial(Recipe::SpinThread, None));
-        let result = crate::planning::adopt_commercial_fixture(
-            &citizen,
-            vec![
-                CitizenAction::BuyAt {
-                    place,
-                    list: crate::marketplace::ShoppingList::single(Good::Flax, 200),
-                },
-                CitizenAction::Produce(Recipe::SpinThread),
-            ],
-            vec![1],
-        );
-        let adopted = result.unwrap();
+        assert!(!prepared.eligible_production_trial(Recipe::SpinThread, None));
+        let resumed = crate::planning::resume_commercial_fixture(
+            prepared,
+            CitizenAction::Produce(Recipe::SpinThread),
+        )
+        .unwrap();
+        assert!(resumed.active_action().is_some());
         assert!(
-            adopted
+            resumed
                 .market
-                .production_trial(account, Good::Thread)
+                .production_trial(resumed.economic_id(), Good::Thread)
                 .is_none()
         );
-        let prepared = adopted.advance_predicted(crate::TRADE_DURATION_MS).unwrap();
-        let started = crate::planning::resume_commercial_fixture(
-            prepared.clone(),
-            CitizenAction::Produce(Recipe::SpinThread),
-        )
-        .unwrap();
-        let trial = started
-            .market
-            .production_trial(account, Good::Thread)
-            .unwrap();
-        assert_eq!(trial.phase, TrialPhase::AwaitingOutput);
-        assert_eq!(trial.committed_cost, 200.0);
-        let mut competed = prepared;
-        competed.market = started.market.clone();
-        competed
-            .market
-            .production_trials
-            .active
-            .get_mut(&(account, Good::Thread))
-            .unwrap()
-            .worker = AgentId(uuid::Uuid::new_v4());
-        let rejected = crate::planning::resume_commercial_fixture(
-            competed,
-            CitizenAction::Produce(Recipe::SpinThread),
-        )
-        .unwrap();
-        assert!(rejected.active_action().is_none());
     }
 
     #[test]
-    fn adopting_production_refreshes_ingredient_reserves_before_canary_commitment() {
+    fn adopting_production_refreshes_targets_without_creating_a_canary() {
         let mut citizen = weaver().with_good(Good::Thread, 200).unwrap();
         citizen = citizen.with_prices(citizen.prices.with_price(Good::Cloth, 0.01).unwrap());
         let site = citizen.production_place(Recipe::SpinThread).unwrap();
@@ -995,21 +930,23 @@ mod tests {
             vec![0],
         )
         .unwrap();
-        assert_eq!(
+        assert!(
             started
                 .market
                 .production_trial(started.economic_id(), Good::Thread)
-                .unwrap()
-                .phase,
-            TrialPhase::AwaitingOutput
+                .is_none()
+        );
+        assert_eq!(
+            started.production_targets.as_ref().unwrap().site,
+            Some(site)
         );
         assert!(started.active_action().is_some());
     }
 
     #[test]
-    fn stale_commercial_plan_with_new_surplus_does_not_create_a_ready_canary_or_manufacture() {
+    fn committed_plan_keeps_qualification_when_surplus_changes() {
         let citizen = weaver();
-        assert!(citizen.eligible_production_trial(Recipe::SpinThread, None));
+        assert!(!citizen.eligible_production_trial(Recipe::SpinThread, None));
         let citizen = citizen.with_good(Good::Thread, 200).unwrap();
         assert!(!citizen.eligible_production_trial(Recipe::SpinThread, None));
         let stock_before = citizen.economic_owned_units(Good::Thread);
@@ -1019,7 +956,7 @@ mod tests {
             CitizenAction::Produce(Recipe::SpinThread),
         )
         .unwrap();
-        assert!(resumed.active_action().is_none());
+        assert!(resumed.active_action().is_some());
         assert_eq!(resumed.economic_owned_units(Good::Thread), stock_before);
         assert_eq!(resumed.market, market_before);
         assert!(
@@ -1031,10 +968,12 @@ mod tests {
     }
 
     #[test]
-    fn unprofitable_recipe_is_a_bounded_candidate_and_cost_is_frozen() {
+    fn unprofitable_recipe_is_excluded_and_historical_trial_cost_stays_frozen() {
         let mut citizen = weaver();
         assert!(crate::production::recipe_profit(Recipe::SpinThread, &citizen).unwrap() < 0.0);
-        assert!(crate::production::ranked_recipes_at(&citizen, None).contains(&Recipe::SpinThread));
+        assert!(
+            !crate::production::ranked_recipes_at(&citizen, None).contains(&Recipe::SpinThread)
+        );
         citizen
             .claim_production_trial(Recipe::SpinThread, None)
             .unwrap();
@@ -1592,7 +1531,7 @@ mod depletion_tests {
                 .production_trial_result(citizen.economic_id(), Good::Thread)
                 .is_none()
         );
-        assert!(citizen.eligible_production_trial(Recipe::SpinThread, None));
+        assert!(!citizen.eligible_production_trial(Recipe::SpinThread, None));
     }
 
     #[test]
@@ -1846,7 +1785,7 @@ mod depletion_tests {
         citizen
             .sale_income_basis_points
             .insert((selling_place, Good::Thread), 0);
-        assert!(citizen.eligible_production_trial(Recipe::SpinThread, None));
+        assert!(!citizen.eligible_production_trial(Recipe::SpinThread, None));
         assert!(citizen.eligible_sale_replenishment(Recipe::SpinThread, None));
     }
 

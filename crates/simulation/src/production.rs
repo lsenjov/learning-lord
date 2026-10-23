@@ -311,6 +311,14 @@ impl ProductionTargets {
         now_ms: u64,
         site: Option<PlaceId>,
     ) -> Result<Self, SimulationError> {
+        Self::calculate_at_with_blocks(citizen, now_ms, site).map(|(targets, _)| targets)
+    }
+
+    pub(crate) fn calculate_at_with_blocks(
+        citizen: &Citizen,
+        now_ms: u64,
+        site: Option<PlaceId>,
+    ) -> Result<(Self, Vec<Vec<Recipe>>), SimulationError> {
         let mut target = Self {
             calculated_at_ms: now_ms,
             remaining_batches: [0; Recipe::COUNT],
@@ -320,7 +328,8 @@ impl ProductionTargets {
         let active = citizen
             .active_action()
             .and_then(|active| active.action().production_recipe());
-        target.projected_order = projected_recipes_at(citizen, site, DAILY_CAPACITY_MS)?;
+        let blocks = projected_route_blocks_at(citizen, site, DAILY_CAPACITY_MS)?;
+        target.projected_order = blocks.iter().flatten().copied().collect();
         for &recipe in &target.projected_order {
             target.remaining_batches[recipe as usize] += 1;
         }
@@ -328,7 +337,7 @@ impl ProductionTargets {
             target.remaining_batches[recipe as usize] += 1;
             target.projected_order.insert(0, recipe);
         }
-        Ok(target)
+        Ok((target, blocks))
     }
 }
 
@@ -500,6 +509,172 @@ pub(crate) fn stock_fraction(recipe: Recipe, citizen: &Citizen) -> Option<f64> {
     Some(stock_batches(recipe, citizen)? / stock_cap_batches(recipe, citizen)?)
 }
 
+#[derive(Clone)]
+pub(crate) struct ProductionPrices {
+    inputs: [f64; Good::COUNT],
+    purchasable: [bool; Good::COUNT],
+    owned: [Quantity; Good::COUNT],
+    stock: Option<[f64; Good::COUNT]>,
+    outputs: [f64; Good::COUNT],
+    minimum_margin: f64,
+}
+
+impl ProductionPrices {
+    pub(crate) fn snapshot(citizen: &Citizen) -> Self {
+        let reference = |good| citizen.prices().price(good).unwrap_or(f64::NAN);
+        Self {
+            stock: None,
+            owned: std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index])),
+            purchasable: std::array::from_fn(|index| {
+                citizen
+                    .market()
+                    .lowest_purchase_quote(citizen.market_party(), Good::ALL[index], &citizen.map())
+                    .is_some()
+            }),
+            inputs: std::array::from_fn(|index| {
+                let good = Good::ALL[index];
+                citizen
+                    .market()
+                    .lowest_purchase_quote(citizen.market_party(), good, &citizen.map())
+                    .unwrap_or_else(|| reference(good))
+            }),
+            outputs: std::array::from_fn(|index| {
+                let good = Good::ALL[index];
+                citizen
+                    .market()
+                    .lowest_listed_quote(good, &citizen.map())
+                    .unwrap_or_else(|| reference(good))
+            }),
+            minimum_margin: f64::from(
+                citizen
+                    .market()
+                    .production_adjustment_rate(citizen.economic_id()),
+            ) / 100.0,
+        }
+    }
+
+    pub(crate) fn meets_margin(
+        &self,
+        recipe: Recipe,
+        citizen: &Citizen,
+        site: Option<PlaceId>,
+    ) -> bool {
+        self.preferred_route(
+            recipe,
+            citizen,
+            site,
+            stock_fraction(recipe, citizen).is_some_and(|fraction| fraction >= 1.0),
+            &self.owned,
+        )
+        .is_some()
+    }
+
+    fn preferred_route(
+        &self,
+        recipe: Recipe,
+        citizen: &Citizen,
+        site: Option<PlaceId>,
+        export: bool,
+        owned: &[Quantity; Good::COUNT],
+    ) -> Option<ProductionRouteQuote> {
+        let routes = routes::method_routes_with_owned(recipe, citizen, site, export, self, owned);
+        [routes.buy, routes.make]
+            .into_iter()
+            .flatten()
+            .filter(|route| {
+                route.net_revenue > 0.0 && route.profit / route.net_revenue >= self.minimum_margin
+            })
+            .max_by(|a, b| a.profit_per_hour().total_cmp(&b.profit_per_hour()))
+    }
+
+    fn input_value(&self, recipe: Recipe) -> f64 {
+        recipe
+            .inputs()
+            .iter()
+            .map(|&(good, units)| {
+                self.inputs[good as usize] * units as f64 / good.units_per_price_unit() as f64
+            })
+            .sum()
+    }
+
+    fn revenue(
+        &self,
+        recipe: Recipe,
+        citizen: &Citizen,
+        site: Option<PlaceId>,
+        export: bool,
+    ) -> Option<f64> {
+        recipe
+            .outputs()
+            .iter()
+            .map(|&(good, units)| {
+                let price = if export {
+                    if !citizen.market().caravan_policy().exports[good as usize].allowed {
+                        return None;
+                    }
+                    citizen.market().effective_export_threshold(good)?
+                } else {
+                    self.outputs[good as usize]
+                };
+                let tax = site
+                    .map_or_else(
+                        || citizen.production_socage_rate(recipe, good),
+                        |place| citizen.production_socage_rate_at(place, good),
+                    )
+                    .basis_points();
+                let income = citizen
+                    .sale_income_basis_points
+                    .get(&(citizen.selling_place(), good))
+                    .copied()
+                    .unwrap_or(0);
+                Some(
+                    price * units as f64 / good.units_per_price_unit() as f64
+                        * (1.0 - f64::from(tax) / 10_000.0)
+                        * (1.0 - f64::from(income) / 10_000.0),
+                )
+            })
+            .try_fold(0.0, |sum, value| Some(sum + value?))
+    }
+
+    fn profit(
+        &self,
+        recipe: Recipe,
+        citizen: &Citizen,
+        site: Option<PlaceId>,
+        export: bool,
+    ) -> Option<f64> {
+        let revenue = self.revenue(recipe, citizen, site, export)?;
+        let fees = citizen.workshop_fee_cost(
+            site.or_else(|| citizen.production_place(recipe).ok()),
+            recipe,
+            recipe.duration_ms(citizen).ok()?,
+        );
+        let profit = revenue - self.input_value(recipe) - fees;
+        profit.is_finite().then_some(profit)
+    }
+
+    #[cfg(test)]
+    fn qualifying_profit(
+        &self,
+        recipe: Recipe,
+        citizen: &Citizen,
+        site: Option<PlaceId>,
+        export: bool,
+    ) -> Option<f64> {
+        let revenue = self.revenue(recipe, citizen, site, export)?;
+        let profit = self.profit(recipe, citizen, site, export)?;
+        (revenue > 0.0 && profit / revenue >= self.minimum_margin).then_some(profit)
+    }
+}
+
+pub(crate) fn meets_production_margin(
+    recipe: Recipe,
+    citizen: &Citizen,
+    site: Option<PlaceId>,
+) -> bool {
+    ProductionPrices::snapshot(citizen).meets_margin(recipe, citizen, site)
+}
+
 pub fn recipe_profit(recipe: Recipe, citizen: &Citizen) -> Option<f64> {
     recipe_profit_at(recipe, citizen, stock_fraction(recipe, citizen)? >= 1.0)
 }
@@ -509,121 +684,30 @@ pub(crate) fn recipe_profit_for_site(
     citizen: &Citizen,
     site: Option<PlaceId>,
 ) -> Option<f64> {
-    let owned = owned_recipe_inputs(recipe, citizen);
-    profit_with_inputs(
+    ProductionPrices::snapshot(citizen).profit(
         recipe,
         citizen,
         site,
-        &owned,
         stock_fraction(recipe, citizen)? >= 1.0,
     )
 }
 
 fn recipe_profit_at(recipe: Recipe, citizen: &Citizen, export: bool) -> Option<f64> {
-    let owned = owned_recipe_inputs(recipe, citizen);
-    profit_with_inputs(recipe, citizen, None, &owned, export)
+    ProductionPrices::snapshot(citizen).profit(recipe, citizen, None, export)
 }
 
-fn profit_with_inputs(
-    recipe: Recipe,
-    citizen: &Citizen,
-    site: Option<PlaceId>,
-    owned: &[Quantity; Good::COUNT],
-    export: bool,
-) -> Option<f64> {
-    let profit = output_value(recipe, citizen, site, export)?
-        - input_value(recipe, citizen, owned)?
-        - citizen.workshop_fee_cost(
-            site.or_else(|| citizen.production_place(recipe).ok()),
-            recipe,
-            recipe.duration_ms(citizen).ok()?,
-        );
-    profit.is_finite().then_some(profit)
-}
-
-fn output_value(
-    recipe: Recipe,
-    citizen: &Citizen,
-    site: Option<PlaceId>,
-    export: bool,
-) -> Option<f64> {
-    recipe
-        .outputs()
-        .iter()
-        .map(|&(good, units)| {
-            let price = if export {
-                if !citizen.market().caravan_policy().exports[good as usize].allowed {
-                    return None;
-                }
-                citizen.market().effective_export_threshold(good)?
-            } else {
-                citizen.market().known_trial_price(
-                    citizen.economic_id(),
-                    citizen.selling_place(),
-                    good,
-                )
-            };
-            Some(
-                price * units as f64 / good.units_per_price_unit() as f64
-                    * (1.0
-                        - f64::from(
-                            site.map_or_else(
-                                || citizen.production_socage_rate(recipe, good),
-                                |place| citizen.production_socage_rate_at(place, good),
-                            )
-                            .basis_points(),
-                        ) / 10_000.0)
-                    * (1.0
-                        - f64::from(
-                            citizen
-                                .sale_income_basis_points
-                                .get(&(citizen.selling_place(), good))
-                                .copied()
-                                .unwrap_or(0),
-                        ) / 10_000.0),
-            )
-        })
-        .try_fold(0.0, |sum, value| Some(sum + value?))
-}
 pub(crate) fn estimated_batch_cost(
     recipe: Recipe,
     citizen: &Citizen,
     site: Option<PlaceId>,
 ) -> Option<f64> {
-    let owned = owned_recipe_inputs(recipe, citizen);
-    let cost = input_value(recipe, citizen, &owned)?
+    let cost = ProductionPrices::snapshot(citizen).input_value(recipe)
         + citizen.workshop_fee_cost(
             site.or_else(|| citizen.production_place(recipe).ok()),
             recipe,
             recipe.duration_ms(citizen).ok()?,
         );
     cost.is_finite().then_some(cost)
-}
-
-fn owned_recipe_inputs(recipe: Recipe, citizen: &Citizen) -> [Quantity; Good::COUNT] {
-    let mut owned = [0; Good::COUNT];
-    for &(good, _) in recipe.inputs() {
-        owned[good as usize] = citizen.usable_owned_units(good);
-    }
-    owned
-}
-
-fn input_value(recipe: Recipe, citizen: &Citizen, owned: &[Quantity; Good::COUNT]) -> Option<f64> {
-    let mut value = 0.0;
-    let missing =
-        crate::marketplace::ShoppingList::new(recipe.inputs().iter().map(|&(good, units)| {
-            let held = units.min(owned[good as usize]);
-            value += citizen.prices().value(good, held).unwrap_or(f64::NAN);
-            (good, units - held)
-        }))
-        .ok()?;
-    value += citizen.market().estimated_purchase_cost_from(
-        citizen.id(),
-        &citizen.map(),
-        citizen.position(),
-        missing,
-    )? as f64;
-    value.is_finite().then_some(value)
 }
 
 pub(crate) fn recipe_requirements(
@@ -699,8 +783,24 @@ pub(crate) fn projected_recipes_at(
     site: Option<PlaceId>,
     horizon_ms: u64,
 ) -> Result<Vec<Recipe>, SimulationError> {
+    Ok(projected_route_blocks_at(citizen, site, horizon_ms)?
+        .into_iter()
+        .flatten()
+        .collect())
+}
+
+pub(crate) fn projected_route_blocks_at(
+    citizen: &Citizen,
+    site: Option<PlaceId>,
+    horizon_ms: u64,
+) -> Result<Vec<Vec<Recipe>>, SimulationError> {
     let candidates = projection_candidates(citizen, site);
-    let mut owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
+    let mut prices = ProductionPrices::snapshot(citizen);
+    let eligible: [bool; Recipe::COUNT] = std::array::from_fn(|index| {
+        candidates.contains(&Recipe::ALL[index])
+            && citizen.eligible_sale_replenishment(Recipe::ALL[index], site)
+    });
+    let mut owned = prices.owned;
     let mut stock = production_stocks(citizen);
     if let Some(active) = citizen.active_action()
         && let Some(recipe) = active.action().production_recipe()
@@ -710,9 +810,7 @@ pub(crate) fn projected_recipes_at(
             owned[good as usize] = owned[good as usize].saturating_sub(units);
         }
     }
-    // Start with no fractional tax credit so future supplies never rely on an unobserved carry.
     let mut tax_carry = [0_u64; Good::COUNT];
-    let mut quoted = citizen.clone();
     let crop_choices: Vec<_> = site
         .map_or_else(
             || citizen.farming_actions(),
@@ -745,16 +843,15 @@ pub(crate) fn projected_recipes_at(
         })
         .sum::<usize>();
     let mut elapsed = 0;
-    let mut recipes = Vec::new();
+    let mut blocks = Vec::new();
     while elapsed < horizon_ms {
+        prices.stock = Some(stock);
         let next = candidates
             .iter()
             .copied()
             .filter_map(|recipe| {
-                if !citizen.eligible_sale_replenishment(recipe, site) {
-                    return None;
-                }
-                if recipe == Recipe::BrewBeer && free_brew_slots == 0 {
+                if !eligible[recipe as usize] || recipe == Recipe::BrewBeer && free_brew_slots == 0
+                {
                     return None;
                 }
                 if let Some(kind) = crop_kind(recipe)
@@ -769,123 +866,63 @@ pub(crate) fn projected_recipes_at(
                     .map(|&(good, units)| stock[good as usize] / units as f64)
                     .max_by(f64::total_cmp)?;
                 let fraction = batches / cap;
-                if routes::preferred_manufacturing(recipe, &quoted, site, &owned, fraction >= 1.0)
-                    .is_some_and(|route| {
-                        route.intermediate_batches.iter().all(|&(supplier, _)| {
-                            if !citizen.eligible_sale_replenishment(supplier, site) {
-                                return false;
-                            }
-                            let supplier_fraction = supplier
-                                .outputs()
-                                .iter()
-                                .map(|&(good, units)| stock[good as usize] / units as f64)
-                                .max_by(f64::total_cmp)
-                                .unwrap_or(0.0)
-                                / stock_cap_batches(supplier, citizen).unwrap_or(1.0);
-                            let profit = profit_with_inputs(
-                                supplier,
-                                &quoted,
-                                site,
-                                &owned,
-                                supplier_fraction >= 1.0,
-                            );
-                            profit.is_some_and(|profit| profit > 0.0)
-                                || !recipes.contains(&supplier)
-                                    && citizen.eligible_production_trial(supplier, site)
-                        })
-                    })
+                let route =
+                    prices.preferred_route(recipe, citizen, site, fraction >= 1.0, &owned)?;
+                if route
+                    .ordered_batches
+                    .iter()
+                    .any(|batch| !eligible[*batch as usize])
                 {
                     return None;
                 }
-                let profit = profit_with_inputs(recipe, &quoted, site, &owned, fraction >= 1.0)?;
-                let duration = recipe.duration_ms(citizen).ok()?;
-                if horizon_ms == DAILY_CAPACITY_MS && duration > horizon_ms.saturating_sub(elapsed)
+                if horizon_ms == DAILY_CAPACITY_MS
+                    && route.duration_ms > horizon_ms.saturating_sub(elapsed)
                 {
                     return None;
                 }
-                let rate = profit / duration as f64;
-                if rate > 0.0 {
-                    Some((recipe, fraction / rate, rate, duration))
-                } else if !recipes.contains(&recipe)
-                    && citizen.eligible_production_trial(recipe, site)
-                {
-                    Some((recipe, f64::INFINITY, rate, duration))
-                } else {
-                    None
-                }
+                let rate = route.profit / route.duration_ms as f64;
+                Some((recipe, fraction / rate, rate, route))
             })
             .min_by(|(a, af, ar, _), (b, bf, br, _)| {
                 af.total_cmp(bf)
                     .then_with(|| br.total_cmp(ar))
                     .then_with(|| (*a as usize).cmp(&(*b as usize)))
             });
-        let Some((recipe, _, _, duration)) = next else {
+        let Some((_, _, _, route)) = next else {
             break;
         };
-        recipes.push(recipe);
-        elapsed += duration;
-        if recipe == Recipe::BrewBeer {
-            free_brew_slots = free_brew_slots.saturating_sub(1);
-        }
-        if crop_kind(recipe).is_some() {
-            empty_plots = empty_plots.saturating_sub(1);
-        }
-        let mut missing = crate::marketplace::ShoppingList::new(
-            recipe
-                .inputs()
-                .iter()
-                .map(|&(good, units)| (good, units.saturating_sub(owned[good as usize]))),
-        )?;
-        let mut position = citizen.position();
-        while let Some((place, basket)) = quoted.market().next_purchase_stop(
-            citizen.market_party(),
-            &citizen.map(),
-            position,
-            missing,
-            None,
-        ) {
-            let mut remaining = Vec::new();
-            for (good, units) in basket.items() {
-                let purchase = quoted.market.purchase(
-                    citizen.market_party(),
-                    place,
-                    (good, units),
-                    Coins::MAX,
-                    citizen.current_time_ms(),
-                    false,
-                )?;
-                remaining.push((good, purchase.units));
+        elapsed += route.duration_ms;
+        for &recipe in &route.ordered_batches {
+            if recipe == Recipe::BrewBeer {
+                free_brew_slots = free_brew_slots.saturating_sub(1);
             }
-            let bought = crate::marketplace::ShoppingList::new(remaining)?;
-            missing = crate::marketplace::ShoppingList::new(
-                missing
-                    .items()
-                    .map(|(good, units)| (good, units.saturating_sub(bought.units(good)))),
-            )?;
-            position = citizen.map().position(place);
-        }
-        for &(good, units) in recipe.inputs() {
-            let consumed = units.min(owned[good as usize]);
-            owned[good as usize] -= consumed;
-            stock[good as usize] = (stock[good as usize] - consumed as f64).max(0.0);
-        }
-        for &(good, units) in recipe.outputs() {
-            stock[good as usize] += units as f64;
-            if crop_kind(recipe).is_none() && recipe != Recipe::BrewBeer {
-                owned[good as usize] = owned[good as usize]
-                    .checked_add(usable_output(
-                        recipe,
-                        good,
-                        units,
-                        citizen,
-                        site,
-                        &mut tax_carry,
-                    ))
-                    .ok_or(SimulationError::InventoryOverflow)?;
+            if crop_kind(recipe).is_some() {
+                empty_plots = empty_plots.saturating_sub(1);
+            }
+            for &(good, units) in recipe.inputs() {
+                let consumed = units.min(owned[good as usize]);
+                owned[good as usize] -= consumed;
+                stock[good as usize] = (stock[good as usize] - consumed as f64).max(0.0);
+            }
+            for &(good, units) in recipe.outputs() {
+                stock[good as usize] += units as f64;
+                if crop_kind(recipe).is_none() && recipe != Recipe::BrewBeer {
+                    owned[good as usize] = owned[good as usize]
+                        .checked_add(usable_output(
+                            recipe,
+                            good,
+                            units,
+                            citizen,
+                            site,
+                            &mut tax_carry,
+                        ))
+                        .ok_or(SimulationError::InventoryOverflow)?;
+                }
             }
         }
+        blocks.push(route.ordered_batches);
     }
-    Ok(recipes)
+    Ok(blocks)
 }
 
 fn projection_candidates(citizen: &Citizen, site: Option<PlaceId>) -> Vec<Recipe> {
@@ -907,50 +944,40 @@ pub(crate) fn ranked_recipes(citizen: &Citizen) -> Vec<Recipe> {
 }
 
 pub(crate) fn ranked_recipes_at(citizen: &Citizen, site: Option<PlaceId>) -> Vec<Recipe> {
-    let mut recipes: Vec<_> = citizen
-        .available_production_recipes()
-        .filter(|&recipe| {
-            site.is_none_or(|place| citizen.validate_production_site(place, recipe).is_ok())
-        })
+    ranked_recipes_at_prices(citizen, site, &ProductionPrices::snapshot(citizen))
+}
+
+pub(crate) fn ranked_recipes_at_prices(
+    citizen: &Citizen,
+    site: Option<PlaceId>,
+    prices: &ProductionPrices,
+) -> Vec<Recipe> {
+    let mut choices: Vec<_> = projection_candidates(citizen, site)
+        .into_iter()
         .filter_map(|recipe| {
             if !citizen.eligible_sale_replenishment(recipe, site) {
                 return None;
             }
-            let owned = std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index]));
-            if routes::preferred_manufacturing(
-                recipe,
-                citizen,
-                site,
-                &owned,
-                stock_fraction(recipe, citizen)? >= 1.0,
-            )
-            .is_some_and(|route| {
-                route.intermediate_batches.iter().all(|&(supplier, _)| {
-                    citizen.eligible_sale_replenishment(supplier, site)
-                        && (recipe_profit_for_site(supplier, citizen, site)
-                            .is_some_and(|profit| profit > 0.0)
-                            || citizen.eligible_production_trial(supplier, site))
-                })
-            }) {
-                return None;
-            }
-            let rate = recipe_profit_for_site(recipe, citizen, site)?
-                / recipe.duration_ms(citizen).ok()? as f64;
-            if rate > 0.0 {
-                Some((recipe, stock_fraction(recipe, citizen)? / rate, rate))
-            } else if citizen.eligible_production_trial(recipe, site) {
-                Some((recipe, f64::INFINITY, rate))
-            } else {
-                None
-            }
+            let fraction = stock_fraction(recipe, citizen)?;
+            let route =
+                prices.preferred_route(recipe, citizen, site, fraction >= 1.0, &prices.owned)?;
+            let first = *route.ordered_batches.first()?;
+            let rate = route.profit / route.duration_ms as f64;
+            Some((first, fraction / rate, rate))
         })
         .collect();
-    recipes.sort_by(|(a, af, ar), (b, bf, br)| {
+    choices.sort_by(|(a, af, ar), (b, bf, br)| {
         af.total_cmp(bf)
             .then_with(|| br.total_cmp(ar))
             .then_with(|| (*a as usize).cmp(&(*b as usize)))
     });
-    recipes.into_iter().map(|(recipe, _, _)| recipe).collect()
+    let mut recipes = Vec::new();
+    for (recipe, _, _) in choices {
+        if !recipes.contains(&recipe) {
+            recipes.push(recipe);
+        }
+    }
+    recipes
 }
 
 pub(crate) fn work_period(time_ms: u64) -> u64 {
@@ -973,6 +1000,104 @@ pub(crate) fn period_start(period: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_snapshot_values_owned_inputs_at_competitive_prices_and_stays_fixed() {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Weaver);
+        let place = citizen.selling_place();
+        let mut market = citizen.market().clone();
+        let seller = crate::AgentId(uuid::Uuid::new_v4());
+        market
+            .list_at_quote(seller, place, Good::Flax, 1, 17.0)
+            .unwrap();
+        market
+            .list_at_quote(seller, place, Good::Thread, 1, 31.0)
+            .unwrap();
+        let citizen = citizen.with_market(market);
+        let prices = ProductionPrices::snapshot(&citizen);
+        assert_eq!(prices.inputs[Good::Flax as usize], 17.0);
+        assert_eq!(prices.outputs[Good::Thread as usize], 31.0);
+        let held = citizen.with_good(Good::Flax, 10000).unwrap();
+        assert_eq!(
+            prices.input_value(Recipe::SpinThread),
+            ProductionPrices::snapshot(&held).input_value(Recipe::SpinThread)
+        );
+        let mut market = held.market().clone();
+        market
+            .list_at_quote(
+                crate::AgentId(uuid::Uuid::new_v4()),
+                place,
+                Good::Flax,
+                10000,
+                3.0,
+            )
+            .unwrap();
+        let changed = held.with_market(market);
+        assert_eq!(prices.inputs[Good::Flax as usize], 17.0);
+        assert_eq!(
+            ProductionPrices::snapshot(&changed).inputs[Good::Flax as usize],
+            3.0
+        );
+    }
+
+    #[test]
+    fn production_margin_is_profit_over_net_revenue_after_taxes() {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Weaver);
+        let mut prices = ProductionPrices {
+            inputs: [0.0; Good::COUNT],
+            purchasable: [false; Good::COUNT],
+            owned: [0; Good::COUNT],
+            stock: None,
+            outputs: [0.0; Good::COUNT],
+            minimum_margin: 0.05,
+        };
+        prices.outputs[Good::Thread as usize] = 100.0;
+        prices.inputs[Good::Flax as usize] = 95.0;
+        let revenue = prices
+            .revenue(Recipe::SpinThread, &citizen, None, false)
+            .unwrap();
+        let profit = prices
+            .profit(Recipe::SpinThread, &citizen, None, false)
+            .unwrap();
+        assert!((profit / revenue - 0.05).abs() < 1e-12);
+        assert!(
+            prices
+                .qualifying_profit(Recipe::SpinThread, &citizen, None, false)
+                .is_some()
+        );
+        prices.inputs[Good::Flax as usize] = 95.01;
+        assert!(
+            prices
+                .qualifying_profit(Recipe::SpinThread, &citizen, None, false)
+                .is_none()
+        );
+        let mut taxed = citizen;
+        taxed
+            .sale_income_basis_points
+            .insert((taxed.selling_place(), Good::Thread), 5000);
+        prices.inputs[Good::Flax as usize] = 47.5;
+        assert_eq!(
+            prices
+                .revenue(Recipe::SpinThread, &taxed, None, false)
+                .unwrap(),
+            revenue * 0.5
+        );
+        assert!(
+            prices
+                .qualifying_profit(Recipe::SpinThread, &taxed, None, false)
+                .is_some()
+        );
+        prices.inputs[Good::Flax as usize] = 48.0;
+        assert!(
+            prices
+                .qualifying_profit(Recipe::SpinThread, &taxed, None, false)
+                .is_none()
+        );
+    }
 
     #[test]
     fn bulk_stock_accounts_for_active_production_and_input_clamping() {
@@ -1145,6 +1270,7 @@ mod tests {
             .unwrap()
             .with_good(Good::Water, 10000)
             .unwrap();
+        citizen = citizen.with_prices(citizen.prices().with_price(Good::Cloth, 250.0).unwrap());
         let first = citizen.production_place(Recipe::WeaveCloth).unwrap();
         let (map, second) = citizen
             .map()
@@ -1168,7 +1294,10 @@ mod tests {
         );
         assert_eq!(
             projected_recipes_at(&citizen, Some(second), DAILY_CAPACITY_MS).unwrap(),
-            vec![Recipe::WeaveCloth; 7]
+            vec![
+                Recipe::WeaveCloth;
+                (DAILY_CAPACITY_MS / Recipe::WeaveCloth.duration_ms(&citizen).unwrap()) as usize
+            ]
         );
         citizen.site_socage_rates.insert(
             (second, Good::Thread),
@@ -1359,36 +1488,18 @@ mod tests {
     }
 
     #[test]
-    fn listed_inputs_use_reference_value_and_only_shortfalls_pay_rounded_quotes() {
-        let owned = quoted_weaver(1440);
-        assert!(
-            (recipe_profit(Recipe::WeaveCloth, &owned).unwrap() - (35.124 - 4.468)).abs() < 1e-10
-        );
-        let missing = quoted_weaver(0);
-        assert!(
-            (recipe_profit(Recipe::WeaveCloth, &missing).unwrap() - (35.124 - 36.0)).abs() < 1e-10
-        );
-        let partial = quoted_weaver(100);
-        assert!(
-            (recipe_profit(Recipe::WeaveCloth, &partial).unwrap() - (35.124 - 2.234 - 18.0)).abs()
-                < 1e-10
-        );
-        let mut reserved = missing.with_good(Good::Thread, 200).unwrap();
+    fn owned_and_missing_inputs_use_the_same_competitive_valuation() {
+        let expected = 35.124 - 35.1;
+        for owned in [0, 100, 1440] {
+            let citizen = quoted_weaver(owned);
+            assert!(
+                (recipe_profit(Recipe::WeaveCloth, &citizen).unwrap() - expected).abs() < 1e-10
+            );
+            assert!(!meets_production_margin(Recipe::WeaveCloth, &citizen, None));
+        }
+        let mut reserved = quoted_weaver(0).with_good(Good::Thread, 200).unwrap();
         reserved.tax_reserved.insert(Good::Thread, 200);
-        assert_eq!(
-            recipe_profit(Recipe::WeaveCloth, &reserved),
-            recipe_profit(Recipe::WeaveCloth, &missing)
-        );
-        let mut remote = missing.clone();
-        let place = remote.map().public_place(Location::River);
-        remote
-            .market
-            .list(remote.id(), place, Good::Thread, 200)
-            .unwrap();
-        assert_eq!(
-            recipe_profit(Recipe::WeaveCloth, &remote),
-            recipe_profit(Recipe::WeaveCloth, &owned)
-        );
+        assert!((recipe_profit(Recipe::WeaveCloth, &reserved).unwrap() - expected).abs() < 1e-10);
     }
 
     #[test]
@@ -1466,45 +1577,44 @@ mod tests {
             .with_good(Good::Water, 10000)
             .unwrap();
         citizen.tax_reserved.insert(Good::Berries, 5520);
+        citizen
+            .market
+            .list_at_quote(
+                crate::AgentId(uuid::Uuid::new_v4()),
+                citizen.selling_place(),
+                Good::Berries,
+                10000,
+                0.1,
+            )
+            .unwrap();
+
         let recipes = projected_recipes(&citizen, DAILY_CAPACITY_MS).unwrap();
         assert!(recipes.contains(&Recipe::BakeBerryPie));
         assert!(!recipes.contains(&Recipe::Forage));
     }
 
     #[test]
-    fn owned_profit_does_not_subsidise_later_import_batches() {
-        let citizen = quoted_weaver(1400)
-            .with_good(Good::Berries, 10000)
-            .unwrap()
-            .with_good(Good::Water, 10000)
-            .unwrap();
-        let recipes = projected_recipes(&citizen, DAILY_CAPACITY_MS).unwrap();
-        assert!(recipe_profit(Recipe::SpinThread, &citizen).unwrap() < 0.0);
-        let mut expected = vec![Recipe::WeaveCloth; 7];
-        expected.extend([Recipe::SpinThread, Recipe::WeaveCloth]);
-        assert_eq!(recipes, expected);
-        let covered = quoted_weaver(800);
-        assert!(
-            covered
-                .production_restock_requirements()
+    fn owned_inventory_does_not_bypass_minimum_margin() {
+        for owned in [0, 200, 800, 1400] {
+            let citizen = quoted_weaver(owned)
+                .with_good(Good::Berries, 10000)
                 .unwrap()
-                .items()
-                .next()
-                .is_none()
-        );
-        let short = quoted_weaver(200);
-        let projected = projected_recipes(&short, DAILY_CAPACITY_MS).unwrap();
-        let spun = projected
-            .iter()
-            .filter(|&&recipe| recipe == Recipe::SpinThread)
-            .count();
-        let woven = projected
-            .iter()
-            .filter(|&&recipe| recipe == Recipe::WeaveCloth)
-            .count();
-        assert!(spun <= 1);
-        // Newly spun thread can fund another owned-input batch; imported thread still loses money.
-        assert!(woven <= 1 + spun);
+                .with_good(Good::Water, 10000)
+                .unwrap();
+            assert!(
+                projected_recipes(&citizen, DAILY_CAPACITY_MS)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                citizen
+                    .production_restock_requirements()
+                    .unwrap()
+                    .items()
+                    .next()
+                    .is_none()
+            );
+        }
     }
 
     #[test]
@@ -1649,7 +1759,7 @@ mod tests {
         let crate::AgentKind::Citizen(citizen) = &universe.agents()[&buyer].kind;
         let citizen = citizen.with_market(market);
         let targets = ProductionTargets::calculate(&citizen, 0).unwrap();
-        assert_eq!(targets.remaining_batches(Recipe::BakeRolls), 10);
+        assert_eq!(targets.remaining_batches(Recipe::BakeRolls), 11);
     }
 
     use crate::{StartingRole, marketplace::Prices};

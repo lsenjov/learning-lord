@@ -392,6 +392,7 @@ impl Universe {
             (AgentId, PlaceId),
             ([Quantity; Good::COUNT], [Quantity; Good::COUNT]),
         > = std::collections::HashMap::new();
+        let mut own_requirements = std::collections::HashMap::new();
         for agent in self.agents.values() {
             let AgentKind::Citizen(citizen) = &agent.kind;
             let Some(place) = citizen.designated_workplace else {
@@ -400,6 +401,7 @@ impl Universe {
             let entry = requirements
                 .entry((citizen.economic_id(), place))
                 .or_insert(([0; Good::COUNT], [0; Good::COUNT]));
+            let mut own = [crate::marketplace::ShoppingList::default(); 2];
             for (index, horizon) in [
                 crate::production::PRODUCTION_BLOCK_MS,
                 crate::production::DAILY_CAPACITY_MS,
@@ -411,6 +413,7 @@ impl Universe {
                     crate::production::projected_recipes_at(citizen, Some(place), horizon)?;
                 let stock =
                     crate::production::recipe_requirements_at(citizen, Some(place), &recipes)?;
+                own[index] = stock;
                 for (good, units) in stock.items() {
                     let target = if index == 0 {
                         &mut entry.0
@@ -422,10 +425,17 @@ impl Universe {
                         .ok_or(SimulationError::InventoryOverflow)?;
                 }
             }
+            own_requirements.insert(citizen.id, (place, own));
         }
         for (_, agent) in self.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
             citizen.workplace_supplies.clear();
+            citizen.own_workplace_supplies.clear();
+            if let Some((place, own)) = own_requirements.get(&citizen.id) {
+                citizen
+                    .own_workplace_supplies
+                    .insert(*place, (own[0], own[1]));
+            }
             for ((account, place), (threshold, target)) in &requirements {
                 if *account != citizen.economic_id() {
                     continue;
@@ -775,6 +785,10 @@ mod tests {
         world = world.with_designated_workplace(members[0], bakery).unwrap();
         let AgentKind::Citizen(one) = &world.agents[&members[0]].kind;
         let (one_threshold, one_target) = one.stocking_requirements_at(Some(bakery)).unwrap();
+        assert_eq!(
+            one.own_workplace_supplies.get(&bakery),
+            Some(&(one_threshold, one_target))
+        );
         for &worker in &members[1..] {
             world = world.with_designated_workplace(worker, bakery).unwrap();
         }
@@ -798,6 +812,13 @@ mod tests {
             .unwrap();
         assert_eq!(world.market.requested(household).units(Good::Wheat), 100);
         assert_eq!(world.market.requested(household).units(Good::Flour), 200);
+        let mut legacy = world.clone();
+        for (_, agent) in legacy.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.own_workplace_supplies.clear();
+        }
+        let loaded = Universe::from_save_str(&legacy.to_save_string().unwrap()).unwrap();
+        assert_eq!(loaded, world);
     }
 }
 #[cfg(test)]

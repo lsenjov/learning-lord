@@ -179,16 +179,7 @@ impl Plan {
             CitizenAction::Plant { crop, .. } => Some(crop.recipe()),
             action => action.production_recipe(),
         };
-        if let Some(recipe) = recipe {
-            let site = action.required_place(citizen);
-            let Some(profit) = crate::production::recipe_profit_for_site(recipe, citizen, site)
-            else {
-                return Err(SimulationError::MissingInputs);
-            };
-            if profit <= 0.0 && !citizen.eligible_production_trial(recipe, site) {
-                return Err(SimulationError::MissingInputs);
-            }
-            citizen.claim_production_trial(recipe, site)?;
+        if recipe.is_some() {
             citizen.start_trial_production(action)?;
         }
         Ok(())
@@ -1452,6 +1443,51 @@ mod tests {
         for citizen in [busy, overflow] {
             let expected = sequential_reference(&citizen).unwrap_err();
             assert_eq!(plan(&citizen).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn committed_production_purchase_bounds_survive_save_and_market_changes() {
+        use crate::marketplace::{Good, Market, ShoppingList};
+        let source = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
+        let place = source.selling_place();
+        let mut ceilings = [0.0; Good::COUNT];
+        ceilings[Good::Flour as usize] = 11.0;
+        let list = ShoppingList::single(Good::Flour, 100).with_quote_ceilings(ceilings, 100);
+        let execution = ActivePlan {
+            plan: Plan {
+                actions: vec![CitizenAction::BuyAt { place, list }],
+                commercial_actions: Vec::new(),
+                action_durations_ms: vec![crate::TRADE_DURATION_MS],
+                goals: vec![PlanGoal {
+                    goal: Effect::Production,
+                    actions: 0..1,
+                }],
+                average_wellbeing: 0.0,
+                decision: None,
+            },
+            action_index: 0,
+            elapsed_ms: 0,
+        };
+        let saved = ron::to_string(&execution).unwrap();
+        let loaded: ActivePlan = ron::from_str(&saved).unwrap();
+        assert_eq!(loaded, execution);
+        for (quote, expected) in [(10.5, 100), (12.0, 0)] {
+            let mut market = Market::default();
+            market
+                .list_at_quote(
+                    crate::AgentId(uuid::Uuid::new_v4()),
+                    place,
+                    Good::Flour,
+                    100,
+                    quote,
+                )
+                .unwrap();
+            let citizen = source.with_market(market);
+            let started = loaded.plan.start_action(&citizen, 0).unwrap();
+            let finished = started.advance_predicted(crate::TRADE_DURATION_MS).unwrap();
+            assert_eq!(finished.available_units(Good::Flour), expected);
+            assert_eq!(loaded.plan.actions, execution.plan.actions);
         }
     }
 

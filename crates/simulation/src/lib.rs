@@ -327,6 +327,9 @@ pub struct Citizen {
     maintenance: maintenance::MaintenanceState,
     designated_workplace: Option<PlaceId>,
     workplace_supplies: HashMap<PlaceId, (marketplace::ShoppingList, marketplace::ShoppingList)>,
+    #[serde(default)]
+    own_workplace_supplies:
+        HashMap<PlaceId, (marketplace::ShoppingList, marketplace::ShoppingList)>,
     incoming_supplies: HashMap<PlaceId, marketplace::ShoppingList>,
     market_request: marketplace::ShoppingList,
     request_group: Option<PlaceId>,
@@ -407,6 +410,7 @@ impl Citizen {
             maintenance: maintenance::MaintenanceState::default(),
             designated_workplace: None,
             workplace_supplies: HashMap::new(),
+            own_workplace_supplies: HashMap::new(),
             incoming_supplies: HashMap::new(),
             market_request: marketplace::ShoppingList::default(),
             request_group: None,
@@ -3422,6 +3426,19 @@ mod tests {
             .unwrap();
         let AgentKind::Citizen(worker) = &universe.agents()[&id].kind;
         let mut worker = worker.clone();
+        let seller = AgentId(uuid::Uuid::new_v4());
+        for good in [Good::Flour, Good::Wood, Good::Water, Good::Berries] {
+            worker
+                .market
+                .list_at_quote(
+                    seller,
+                    worker.selling_place(),
+                    good,
+                    100000,
+                    worker.prices.price(good).unwrap(),
+                )
+                .unwrap();
+        }
         worker.production_targets =
             Some(production::ProductionTargets::calculate(&worker, 0).unwrap());
         worker

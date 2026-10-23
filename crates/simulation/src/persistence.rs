@@ -108,7 +108,7 @@ impl Universe {
         let mut unsupported_version = None;
         let mut deserializer = ron::Deserializer::from_str(input)
             .map_err(|error| SaveError::Format(error.to_string()))?;
-        let universe = SaveLoader {
+        let mut universe = SaveLoader {
             unsupported_version: &mut unsupported_version,
         }
         .deserialize(&mut deserializer)
@@ -120,6 +120,16 @@ impl Universe {
             .end()
             .map_err(|error| SaveError::Format(deserializer.span_error(error).to_string()))?;
         universe.validate_save()?;
+        if universe.agents.values().any(|agent| {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            citizen
+                .designated_workplace
+                .is_some_and(|place| !citizen.own_workplace_supplies.contains_key(&place))
+        }) {
+            universe
+                .refresh_workplace_supplies()
+                .map_err(|_| SaveError::InvalidState("cannot refresh workplace supplies"))?;
+        }
         Ok(universe)
     }
 

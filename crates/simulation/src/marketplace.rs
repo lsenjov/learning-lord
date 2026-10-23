@@ -240,6 +240,9 @@ impl ShoppingList {
         place: PlaceId,
         budget: Coins,
     ) -> Result<Self, SimulationError> {
+        if self.purchase_bounds.is_some() {
+            return Ok(self);
+        }
         let mut cost: Coins = 0;
         let mut quote_ceilings = [0.0; Good::COUNT];
         for (good, units) in self.items() {
@@ -260,6 +263,23 @@ impl ShoppingList {
             spending_budget: cost.min(budget).max(0),
         });
         Ok(self)
+    }
+
+    pub(crate) fn with_quote_ceilings(
+        mut self,
+        quote_ceilings: [f64; Good::COUNT],
+        budget: Coins,
+    ) -> Self {
+        self.purchase_bounds = Some(PurchaseBounds {
+            quote_ceilings,
+            spending_budget: budget.max(0),
+        });
+        self
+    }
+
+    pub(crate) fn with_units_from(mut self, list: Self) -> Self {
+        self.units = list.units;
+        self
     }
 
     #[cfg(test)]
@@ -577,16 +597,62 @@ impl Market {
     }
 
     pub(crate) fn ensure_seller_adjustment_rate(&mut self, account: AgentId) -> u8 {
-        let rate = account
-            .0
-            .as_bytes()
-            .iter()
-            .copied()
-            .find(|byte| *byte < 250)
-            .unwrap_or(0)
-            % 10
-            + 1;
+        let rate = self.production_adjustment_rate(account);
         *self.seller_rates.entry(account).or_insert(rate)
+    }
+
+    pub(crate) fn production_adjustment_rate(&self, account: AgentId) -> u8 {
+        self.seller_rates.get(&account).copied().unwrap_or_else(|| {
+            account
+                .0
+                .as_bytes()
+                .iter()
+                .copied()
+                .find(|byte| *byte < 250)
+                .unwrap_or(0)
+                % 10
+                + 1
+        })
+    }
+
+    pub(crate) fn lowest_purchase_quote(
+        &self,
+        buyer: MarketParty,
+        good: Good,
+        map: &crate::locations::Map,
+    ) -> Option<f64> {
+        self.orders()
+            .filter(|order| {
+                order.units > 0
+                    && order.good == good
+                    && order.seller != buyer
+                    && self.purchasable(order)
+                    && map
+                        .places()
+                        .get(&order.place)
+                        .is_some_and(|place| place.kind != crate::locations::Location::Home)
+            })
+            .map(|order| order.quoted_price)
+            .min_by(f64::total_cmp)
+    }
+
+    pub(crate) fn lowest_listed_quote(
+        &self,
+        good: Good,
+        map: &crate::locations::Map,
+    ) -> Option<f64> {
+        self.orders()
+            .filter(|order| {
+                order.units > 0
+                    && order.good == good
+                    && self.purchasable(order)
+                    && map
+                        .places()
+                        .get(&order.place)
+                        .is_some_and(|place| place.kind != crate::locations::Location::Home)
+            })
+            .map(|order| order.quoted_price)
+            .min_by(f64::total_cmp)
     }
 
     pub fn seller_adjustment_rate(&self, account: AgentId) -> Option<u8> {
@@ -1019,7 +1085,7 @@ impl Market {
     ) -> Option<(PlaceId, ShoppingList)> {
         let mut destination = None;
         let mut basket = Vec::new();
-        let mut remaining_budget = budget;
+        let mut remaining_budget = budget.map(|budget| budget.min(list.spending_budget()));
         for (good, wanted) in list.items() {
             let mut orders: Vec<_> = self
                 .orders()
@@ -1027,6 +1093,7 @@ impl Market {
                     order.units > 0
                         && order.good == good
                         && order.seller != buyer
+                        && order.quoted_price <= list.quote_ceiling(good)
                         && self.purchasable(order)
                         && map
                             .places()
@@ -1058,7 +1125,14 @@ impl Market {
                 .fold(0_u64, |sum, order| sum.saturating_add(order.units))
                 .min(wanted);
             let fill = self
-                .fill_plan(buyer, Some(place), good, units, remaining_budget)
+                .fill_plan_at_quote(
+                    buyer,
+                    Some(place),
+                    good,
+                    units,
+                    remaining_budget,
+                    list.quote_ceiling(good),
+                )
                 .ok()?;
             if fill.units == 0 {
                 continue;
@@ -1069,7 +1143,10 @@ impl Market {
             }
             basket.push((good, fill.units));
         }
-        Some((destination?, ShoppingList::new(basket).ok()?))
+        Some((
+            destination?,
+            list.with_units_from(ShoppingList::new(basket).ok()?),
+        ))
     }
 
     pub(crate) fn estimated_purchase_cost_from(
@@ -1353,6 +1430,7 @@ impl Market {
         }
         Ok(withdrawn)
     }
+    #[cfg(test)]
     pub(crate) fn purchase(
         &mut self,
         buyer: impl Into<MarketParty>,
@@ -3126,6 +3204,67 @@ mod tests {
             .purchase(buyer, PLACE, (Good::Wheat, 300), 1, 0, false)
             .unwrap();
         assert_eq!((purchase.units, purchase.coins), (77, 1));
+    }
+
+    #[test]
+    fn explicit_purchase_bounds_survive_planning_and_limit_partial_stops() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::default();
+        let place = map.public_place(Location::Market);
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market
+            .list_at_quote(buyer, place, Good::Wheat, 1000, 1.0)
+            .unwrap();
+        market
+            .list_at_quote(seller, place, Good::Wheat, 50, 10.0)
+            .unwrap();
+        market
+            .list_at_quote(seller, place, Good::Wheat, 1000, 12.0)
+            .unwrap();
+        assert_eq!(
+            market.lowest_purchase_quote(buyer.into(), Good::Wheat, &map),
+            Some(10.0)
+        );
+        assert_eq!(market.lowest_listed_quote(Good::Wheat, &map), Some(1.0));
+        let mut ceilings = [0.0; Good::COUNT];
+        ceilings[Good::Wheat as usize] = 11.0;
+        let list = ShoppingList::single(Good::Wheat, 1000).with_quote_ceilings(ceilings, 100);
+        let bounded = list
+            .with_purchase_bounds(&market, buyer.into(), place, 100)
+            .unwrap();
+        assert_eq!(bounded, list);
+        let (_, basket) = market
+            .next_purchase_stop(buyer.into(), &map, Position::default(), list, Some(100))
+            .unwrap();
+        assert_eq!(basket.units(Good::Wheat), 50);
+        assert_eq!(basket.quote_ceiling(Good::Wheat), 11.0);
+        assert_eq!(basket.quote_ceiling(Good::Flour), 0.0);
+        let saved = ron::to_string(&basket).unwrap();
+        assert_eq!(ron::from_str::<ShoppingList>(&saved).unwrap(), basket);
+        market
+            .list_at_quote(seller, place, Good::Flour, 100, 1.0)
+            .unwrap();
+        assert!(
+            market
+                .next_purchase_stop(
+                    buyer.into(),
+                    &map,
+                    Position::default(),
+                    ShoppingList::single(Good::Flour, 100).with_quote_ceilings(ceilings, 100),
+                    Some(100)
+                )
+                .is_none()
+        );
+        market
+            .list_at_quote(seller, place, Good::Wheat, 100, 10.5)
+            .unwrap();
+        let (_, next) = market
+            .next_purchase_stop(buyer.into(), &map, Position::default(), list, Some(100))
+            .unwrap();
+        assert_eq!(next.units(Good::Wheat), 150);
+        assert_eq!(next.quote_ceiling(Good::Wheat), 11.0);
     }
 
     #[test]

@@ -1192,10 +1192,16 @@ mod tests {
             buy: None,
             make: Some(ProductionRouteQuote {
                 profit: 90.0,
+                net_revenue: 100.0,
                 duration_ms: 16_200_000,
                 purchase_coins: 10,
                 purchases: ShoppingList::new([(Good::Cloth, 200)]).unwrap(),
                 intermediate_batches: vec![(Recipe::MakeClothingBlock, 8)],
+                ordered_batches: [
+                    vec![Recipe::MakeClothingBlock; 8],
+                    vec![Recipe::AssembleGarment],
+                ]
+                .concat(),
             }),
             prefer_make: true,
         };

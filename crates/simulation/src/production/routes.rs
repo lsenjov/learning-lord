@@ -1,4 +1,4 @@
-use super::{Recipe, crop_kind, output_value, usable_output};
+use super::{ProductionPrices, Recipe, crop_kind, usable_output};
 use crate::{
     Citizen, Coins, Quantity,
     locations::PlaceId,
@@ -10,10 +10,14 @@ const MAX_ROUTE_BATCHES: usize = 128;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ProductionRouteQuote {
     pub profit: f64,
+    #[serde(default)]
+    pub net_revenue: f64,
     pub duration_ms: u64,
     pub purchase_coins: Coins,
     pub purchases: ShoppingList,
     pub intermediate_batches: Vec<(Recipe, Quantity)>,
+    #[serde(default)]
+    pub ordered_batches: Vec<Recipe>,
 }
 
 impl ProductionRouteQuote {
@@ -40,17 +44,30 @@ pub(crate) fn production_routes(
         citizen,
         site,
         super::stock_fraction(recipe, citizen).is_some_and(|fraction| fraction >= 1.0),
+        &ProductionPrices::snapshot(citizen),
     )
 }
 
-fn method_routes(
+pub(super) fn method_routes(
     recipe: Recipe,
     citizen: &Citizen,
     site: Option<PlaceId>,
     export: bool,
+    prices: &ProductionPrices,
+) -> ProductionRoutes {
+    method_routes_with_owned(recipe, citizen, site, export, prices, &prices.owned)
+}
+
+pub(super) fn method_routes_with_owned(
+    recipe: Recipe,
+    citizen: &Citizen,
+    site: Option<PlaceId>,
+    export: bool,
+    prices: &ProductionPrices,
+    owned: &[Quantity; Good::COUNT],
 ) -> ProductionRoutes {
     let site = site.or_else(|| citizen.production_place(recipe).ok());
-    let buy = quote(recipe, citizen, site, export, false);
+    let buy = quote(recipe, citizen, site, export, false, prices, owned);
     let make = site
         .filter(|_| {
             recipe
@@ -58,7 +75,7 @@ fn method_routes(
                 .iter()
                 .any(|&(good, _)| supplier(good, citizen, site).is_some())
         })
-        .and_then(|_| quote(recipe, citizen, site, export, true))
+        .and_then(|_| quote(recipe, citizen, site, export, true, prices, owned))
         .filter(|route| !route.intermediate_batches.is_empty());
     let prefer_make = make.as_ref().is_some_and(|make| {
         buy.as_ref()
@@ -70,23 +87,6 @@ fn method_routes(
         make,
         prefer_make,
     }
-}
-
-pub(super) fn preferred_manufacturing(
-    recipe: Recipe,
-    citizen: &Citizen,
-    site: Option<PlaceId>,
-    owned: &[Quantity; Good::COUNT],
-    export: bool,
-) -> Option<ProductionRouteQuote> {
-    let site = site.or_else(|| citizen.production_place(recipe).ok());
-    if !has_missing_supplier(recipe, citizen, site, owned) {
-        return None;
-    }
-    let routes = method_routes(recipe, citizen, site, export);
-    routes
-        .make
-        .filter(|route| routes.prefer_make && route.profit > 0.0)
 }
 
 fn supplier(good: Good, citizen: &Citizen, site: Option<PlaceId>) -> Option<Recipe> {
@@ -102,22 +102,14 @@ fn supplier(good: Good, citizen: &Citizen, site: Option<PlaceId>) -> Option<Reci
     producers.next().is_none().then_some(recipe)
 }
 
-fn has_missing_supplier(
-    recipe: Recipe,
-    citizen: &Citizen,
-    site: Option<PlaceId>,
-    owned: &[Quantity; Good::COUNT],
-) -> bool {
-    recipe.inputs().iter().any(|&(good, units)| {
-        units > owned[good as usize] && supplier(good, citizen, site).is_some()
-    })
-}
-
 struct RouteBuilder<'a> {
     citizen: &'a Citizen,
     site: Option<PlaceId>,
     made: [Quantity; Good::COUNT],
     needed: [Quantity; Good::COUNT],
+    owned: [Quantity; Good::COUNT],
+    owned_value: f64,
+    prices: &'a ProductionPrices,
     tax_carry: [u64; Good::COUNT],
     stack: Vec<Recipe>,
     batches: Vec<Recipe>,
@@ -131,6 +123,11 @@ impl RouteBuilder<'_> {
         let made = remaining.min(self.made[index]);
         self.made[index] -= made;
         remaining -= made;
+        let owned = remaining.min(self.owned[index]);
+        self.owned[index] -= owned;
+        remaining -= owned;
+        self.owned_value +=
+            self.prices.inputs[index] * owned as f64 / good.units_per_price_unit() as f64;
         if remaining == 0 {
             return Some(());
         }
@@ -192,6 +189,8 @@ fn quote(
     site: Option<PlaceId>,
     export: bool,
     make: bool,
+    prices: &ProductionPrices,
+    owned: &[Quantity; Good::COUNT],
 ) -> Option<ProductionRouteQuote> {
     citizen.validate_production_site(site?, recipe).ok()?;
     let mut builder = RouteBuilder {
@@ -199,6 +198,9 @@ fn quote(
         site,
         made: [0; Good::COUNT],
         needed: [0; Good::COUNT],
+        owned: *owned,
+        owned_value: 0.0,
+        prices,
         tax_carry: [0; Good::COUNT],
         stack: Vec::new(),
         batches: Vec::new(),
@@ -211,6 +213,12 @@ fn quote(
             .map(|good| (good, builder.needed[good as usize])),
     )
     .ok()?;
+    if purchases
+        .items()
+        .any(|(good, units)| !prices.purchasable[good as usize] && units > 0)
+    {
+        return None;
+    }
     let fees = builder
         .batches
         .iter()
@@ -218,16 +226,56 @@ fn quote(
             citizen.workshop_fee_cost(site, recipe, recipe.duration_ms(citizen).unwrap_or(0))
         })
         .sum::<f64>();
-    let purchase_coins = finite_purchase_cost(citizen, purchases)?;
+    let purchase_coins = finite_purchase_cost(prices, purchases)?;
     let surplus_value = Good::ALL
         .into_iter()
-        .map(|good| citizen.prices().value(good, builder.made[good as usize]))
+        .map(|good| {
+            let units = builder.made[good as usize];
+            if units == 0 {
+                return Some(0.0);
+            }
+            let producer = supplier(good, citizen, site)?;
+            let output_units = producer
+                .outputs()
+                .iter()
+                .find(|(output, _)| *output == good)?
+                .1;
+            let cap = super::stock_cap_batches(producer, citizen)? * output_units as f64;
+            let stock = prices.stock.as_ref().map_or_else(
+                || super::production_stock(good, citizen),
+                |stock| stock[good as usize],
+            );
+            let local_units = (cap - stock).clamp(0.0, units as f64);
+            let export_price = if citizen.market().caravan_policy().exports[good as usize].allowed {
+                citizen
+                    .market()
+                    .effective_export_threshold(good)
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let value = (local_units * prices.outputs[good as usize]
+                + (units as f64 - local_units) * export_price)
+                / good.units_per_price_unit() as f64;
+            Some(
+                value
+                    * (1.0
+                        - f64::from(
+                            citizen
+                                .sale_income_basis_points
+                                .get(&(citizen.selling_place(), good))
+                                .copied()
+                                .unwrap_or(0),
+                        ) / 10_000.0),
+            )
+        })
         .try_fold(0.0, |sum, value| Some(sum + value?))?;
-    let profit =
-        output_value(recipe, citizen, site, export)? + surplus_value - purchase_coins as f64 - fees;
+    let net_revenue = prices.revenue(recipe, citizen, site, export)? + surplus_value;
+    let profit = net_revenue - purchase_coins as f64 - builder.owned_value - fees;
     if !profit.is_finite() {
         return None;
     }
+    let ordered_batches = builder.batches.clone();
     builder.batches.pop();
     let intermediate_batches = Recipe::ALL
         .into_iter()
@@ -242,49 +290,23 @@ fn quote(
         .collect();
     Some(ProductionRouteQuote {
         profit,
+        net_revenue,
         duration_ms: builder.duration_ms,
         purchase_coins,
         purchases,
         intermediate_batches,
+        ordered_batches,
     })
 }
 
-fn finite_purchase_cost(citizen: &Citizen, mut remaining: ShoppingList) -> Option<Coins> {
-    let mut market = citizen.market().clone();
-    let mut position = citizen.position();
-    let mut cost: Coins = 0;
-    while let Some((place, basket)) = market.next_purchase_stop(
-        citizen.market_party(),
-        &citizen.map(),
-        position,
-        remaining,
-        None,
-    ) {
-        for (good, units) in basket.items() {
-            let purchase = market
-                .purchase(
-                    citizen.market_party(),
-                    place,
-                    (good, units),
-                    Coins::MAX,
-                    citizen.current_time_ms(),
-                    false,
-                )
-                .ok()?;
-            if purchase.units != units {
-                return None;
-            }
-            cost = cost.checked_add(purchase.coins)?;
-        }
-        remaining = ShoppingList::new(
-            remaining
-                .items()
-                .map(|(good, units)| (good, units.saturating_sub(basket.units(good)))),
-        )
-        .ok()?;
-        position = citizen.map().position(place);
-    }
-    remaining.items().next().is_none().then_some(cost)
+fn finite_purchase_cost(prices: &ProductionPrices, remaining: ShoppingList) -> Option<Coins> {
+    let cost: f64 = remaining
+        .items()
+        .map(|(good, units)| {
+            prices.inputs[good as usize] * units as f64 / good.units_per_price_unit() as f64
+        })
+        .sum();
+    (cost.is_finite() && cost >= 0.0 && cost < Coins::MAX as f64).then_some(cost.ceil() as Coins)
 }
 
 #[cfg(test)]
@@ -293,6 +315,106 @@ mod tests {
     use crate::{
         AgentId, StartingRole, locations::Location, marketplace::Prices, production::Skill,
     };
+
+    #[test]
+    fn surplus_is_included_in_route_margin_revenue_and_pays_income_tax() {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Baker)
+            .with_skill_practice_ms(Skill::Milling, Some(0))
+            .unwrap();
+        let (map, site) = citizen
+            .map()
+            .with_place(
+                Location::Bakery,
+                citizen.position(),
+                Some(citizen.id()),
+                "Bakery",
+            )
+            .unwrap();
+        let mut citizen = citizen.with_map(map).unwrap();
+        let room = &mut citizen.map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0];
+        room.object_capacity += 1;
+        room.objects.push(crate::locations::Object::new(
+            crate::locations::ObjectKind::for_recipe(Recipe::MillFlour),
+        ));
+        let mut prices = ProductionPrices::snapshot(&citizen);
+        prices.inputs = [0.0; Good::COUNT];
+        prices.outputs = [0.0; Good::COUNT];
+        prices.owned = [0; Good::COUNT];
+        prices.purchasable = [true; Good::COUNT];
+        prices.minimum_margin = 0.1;
+        prices.inputs[Good::Wheat as usize] = 950.0 / 0.3;
+        prices.inputs[Good::Flour as usize] = 900.0 / 0.14;
+        prices.outputs[Good::Flour as usize] = 900.0 / 0.14;
+        prices.outputs[Good::BreadRoll as usize] = 10.0;
+        let route = quote(
+            Recipe::BakeRolls,
+            &citizen,
+            Some(site),
+            false,
+            true,
+            &prices,
+            &prices.owned,
+        )
+        .unwrap();
+        assert!((route.net_revenue - 1000.0).abs() < 1e-8);
+        assert!(route.profit / route.net_revenue < prices.minimum_margin);
+        assert!(
+            prices
+                .preferred_route(
+                    Recipe::BakeRolls,
+                    &citizen,
+                    Some(site),
+                    false,
+                    &prices.owned
+                )
+                .is_none()
+        );
+        citizen
+            .sale_income_basis_points
+            .insert((citizen.selling_place(), Good::Flour), 5000);
+        let taxed = quote(
+            Recipe::BakeRolls,
+            &citizen,
+            Some(site),
+            false,
+            true,
+            &prices,
+            &prices.owned,
+        )
+        .unwrap();
+        assert!((taxed.net_revenue - 550.0).abs() < 1e-8);
+        let mut stock = [0.0; Good::COUNT];
+        stock[Good::Flour as usize] = f64::MAX;
+        prices.stock = Some(stock);
+        let mut policy = citizen.market.caravan_policy();
+        policy.exports[Good::Flour as usize].allowed = false;
+        citizen.market.set_caravan_policy(policy).unwrap();
+        let capped = quote(
+            Recipe::BakeRolls,
+            &citizen,
+            Some(site),
+            false,
+            true,
+            &prices,
+            &prices.owned,
+        )
+        .unwrap();
+        assert!((capped.net_revenue - 100.0).abs() < 1e-8);
+        prices.inputs[Good::Wheat as usize] = 1.0;
+        assert!(
+            prices
+                .preferred_route(
+                    Recipe::BakeRolls,
+                    &citizen,
+                    Some(site),
+                    false,
+                    &prices.owned
+                )
+                .is_some()
+        );
+    }
 
     #[test]
     fn supplier_matches_global_lookup_across_skills_and_site_access() {
@@ -441,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn method_estimates_ignore_inventory_and_cash_but_use_complete_batches() {
+    fn route_costs_value_owned_inputs_and_make_only_missing_batches() {
         let (citizen, site) = tailor();
         let citizen = listed(
             listed(citizen, Good::Cloth, 1000, 40.0),
@@ -462,19 +584,34 @@ mod tests {
         assert!(expected.prefer_make);
         for blocks in [0, 4, 8] {
             for cloth in [0, 200] {
-                for coins in [0, 1000] {
-                    let varied = citizen
-                        .with_good(Good::FlaxBlock, blocks)
-                        .unwrap()
-                        .with_good(Good::Cloth, cloth)
-                        .unwrap()
-                        .with_coins(coins)
-                        .unwrap();
+                let varied = citizen
+                    .with_good(Good::FlaxBlock, blocks)
+                    .unwrap()
+                    .with_good(Good::Cloth, cloth)
+                    .unwrap();
+                let routes = production_routes(Recipe::AssembleGarment, &varied, Some(site));
+                assert_eq!(routes.buy.as_ref().unwrap().profit, -60.0);
+                if blocks == 8 {
+                    assert!(routes.make.is_none());
+                } else {
+                    let make = routes.make.as_ref().unwrap();
                     assert_eq!(
-                        production_routes(Recipe::AssembleGarment, &varied, Some(site)),
-                        expected
+                        make.profit,
+                        100.0 - blocks as f64 * 20.0 - (8 - blocks) as f64
+                    );
+                    assert_eq!(
+                        make.intermediate_batches,
+                        vec![(Recipe::MakeClothingBlock, 8 - blocks)]
                     );
                 }
+                assert_eq!(
+                    production_routes(
+                        Recipe::AssembleGarment,
+                        &varied.with_coins(0).unwrap(),
+                        Some(site)
+                    ),
+                    routes
+                );
             }
         }
         let full = citizen
@@ -483,7 +620,7 @@ mod tests {
             .with_coins(0)
             .unwrap();
         assert!(
-            super::super::ranked_recipes_at(&full, Some(site)).contains(&Recipe::AssembleGarment)
+            !super::super::ranked_recipes_at(&full, Some(site)).contains(&Recipe::AssembleGarment)
         );
         let produced = full
             .start_action(crate::CitizenAction::ProduceAt {
@@ -498,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn prices_finite_depth_with_rounded_seller_payments_and_groups_route_leaf_purchases() {
+    fn method_prices_use_lowest_snapshot_quote_without_consuming_market_depth() {
         let (citizen, site) = tailor();
         let citizen = listed(
             listed(
@@ -512,7 +649,7 @@ mod tests {
             1.1,
         );
         let routes = production_routes(Recipe::AssembleGarment, &citizen, Some(site));
-        assert_eq!(routes.buy.unwrap().purchase_coins, 141);
+        assert_eq!(routes.buy.unwrap().purchase_coins, 8);
         let make = routes.make.unwrap();
         assert_eq!(make.purchase_coins, 1);
         assert_eq!(make.purchases.units(Good::Cloth), 200);
@@ -524,12 +661,12 @@ mod tests {
                 .make
                 .unwrap()
                 .purchase_coins,
-            2
+            1
         );
     }
 
     #[test]
-    fn method_estimates_require_full_finite_supply_but_actual_shortfalls_use_cash() {
+    fn method_estimates_allow_partial_supply_but_actual_purchases_use_cash() {
         let (citizen, site) = tailor();
         let citizen = listed(citizen, Good::FlaxBlock, 4, 10.0)
             .with_good(Good::FlaxBlock, 4)
@@ -537,7 +674,7 @@ mod tests {
             .with_coins(40)
             .unwrap();
         let routes = production_routes(Recipe::AssembleGarment, &citizen, Some(site));
-        assert!(routes.buy.is_none());
+        assert_eq!(routes.buy.as_ref().unwrap().purchase_coins, 40);
         assert!(routes.make.is_none());
         assert!(!routes.prefer_make);
         assert!(
@@ -573,7 +710,7 @@ mod tests {
                 .make
                 .unwrap()
                 .purchase_coins,
-            8
+            4
         );
     }
 
@@ -742,7 +879,7 @@ mod tests {
                 .make
                 .unwrap()
                 .intermediate_batches,
-            vec![(Recipe::MakeClothingBlock, 8)]
+            vec![(Recipe::MakeClothingBlock, 4)]
         );
         let recipes = super::super::projected_recipes_at(
             &citizen,
@@ -768,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn short_projection_starts_ordinary_blocks_without_buying_a_longer_chain() {
+    fn short_projection_finishes_its_first_qualified_chain() {
         let (citizen, site) = tailor();
         let citizen = listed(
             listed(citizen, Good::Cloth, 10000, 40.0),
@@ -782,60 +919,24 @@ mod tests {
             super::super::PRODUCTION_BLOCK_MS,
         )
         .unwrap();
-        assert_eq!(recipes, vec![Recipe::MakeClothingBlock; 4]);
+        let mut expected = vec![Recipe::MakeClothingBlock; 8];
+        expected.push(Recipe::AssembleGarment);
+        assert_eq!(recipes, expected);
         let requirements =
             super::super::recipe_requirements_at(&citizen, Some(site), &recipes).unwrap();
         assert_eq!(requirements.units(Good::FlaxBlock), 0);
-        assert_eq!(requirements.units(Good::Cloth), 100);
+        assert_eq!(requirements.units(Good::Cloth), 200);
     }
 
     #[test]
-    fn infeasible_ordinary_upstream_work_falls_back_to_profitable_buying() {
+    fn reference_valuation_does_not_create_an_unlisted_buy_route() {
         let (citizen, site) = tailor();
-        let prices = citizen.prices().with_price(Good::FlaxBlock, 0.1).unwrap();
-        let mut citizen = listed(
-            listed(citizen, Good::Cloth, 200, 40.0)
-                .with_good(Good::Cloth, 200)
-                .unwrap()
-                .with_prices(prices),
-            Good::FlaxBlock,
-            100,
-            12.0,
-        );
-        assert!(production_routes(Recipe::AssembleGarment, &citizen, Some(site)).prefer_make);
-        assert!(
-            super::super::recipe_profit_for_site(Recipe::MakeClothingBlock, &citizen, Some(site))
-                .unwrap()
-                < 0.0
-        );
-        citizen
-            .claim_production_trial(Recipe::MakeClothingBlock, Some(site))
-            .unwrap();
-        citizen
-            .start_trial_production(crate::CitizenAction::ProduceAt {
-                place: site,
-                recipe: Recipe::MakeClothingBlock,
-            })
-            .unwrap();
-        assert!(!citizen.eligible_production_trial(Recipe::MakeClothingBlock, Some(site)));
-        assert!(
-            super::super::ranked_recipes_at(&citizen, Some(site))
-                .contains(&Recipe::AssembleGarment)
-        );
-        let recipes = super::super::projected_recipes_at(
-            &citizen,
-            Some(site),
-            super::super::PRODUCTION_BLOCK_MS,
-        )
-        .unwrap();
-        assert!(!recipes.contains(&Recipe::MakeClothingBlock));
-        assert!(recipes.contains(&Recipe::AssembleGarment));
-        assert!(
-            super::super::recipe_requirements_at(&citizen, Some(site), &recipes)
-                .unwrap()
-                .units(Good::FlaxBlock)
-                > 0
-        );
+        let citizen = listed(citizen, Good::Cloth, 1, 40.0);
+        let routes = production_routes(Recipe::AssembleGarment, &citizen, Some(site));
+        assert!(routes.buy.is_none());
+        assert!(routes.make.is_some());
+        assert!(routes.prefer_make);
+        assert_eq!(routes.make.unwrap().purchase_coins, 8);
     }
 
     #[test]
@@ -888,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_make_route_preserves_existing_direct_demand_estimate() {
+    fn no_purchase_route_leaves_reference_valuation_but_no_production() {
         let (citizen, site) = tailor();
         let routes = production_routes(Recipe::AssembleGarment, &citizen, Some(site));
         assert!(routes.buy.is_none());
@@ -898,7 +999,7 @@ mod tests {
                 .is_some()
         );
         assert!(
-            super::super::ranked_recipes_at(&citizen, Some(site))
+            !super::super::ranked_recipes_at(&citizen, Some(site))
                 .contains(&Recipe::AssembleGarment)
         );
     }
