@@ -587,6 +587,16 @@ impl ProductionPrices {
             .max_by(|a, b| a.profit_per_hour().total_cmp(&b.profit_per_hour()))
     }
 
+    fn batch_cost(&self, recipe: Recipe, citizen: &Citizen, site: Option<PlaceId>) -> Option<f64> {
+        let cost = self.input_value(recipe)
+            + citizen.workshop_fee_cost(
+                site.or_else(|| citizen.production_place(recipe).ok()),
+                recipe,
+                recipe.duration_ms(citizen).ok()?,
+            );
+        cost.is_finite().then_some(cost)
+    }
+
     fn input_value(&self, recipe: Recipe) -> f64 {
         recipe
             .inputs()
@@ -701,13 +711,7 @@ pub(crate) fn estimated_batch_cost(
     citizen: &Citizen,
     site: Option<PlaceId>,
 ) -> Option<f64> {
-    let cost = ProductionPrices::snapshot(citizen).input_value(recipe)
-        + citizen.workshop_fee_cost(
-            site.or_else(|| citizen.production_place(recipe).ok()),
-            recipe,
-            recipe.duration_ms(citizen).ok()?,
-        );
-    cost.is_finite().then_some(cost)
+    ProductionPrices::snapshot(citizen).batch_cost(recipe, citizen, site)
 }
 
 pub(crate) fn recipe_requirements(
@@ -798,7 +802,11 @@ pub(crate) fn projected_route_blocks_at(
     let mut prices = ProductionPrices::snapshot(citizen);
     let eligible: [bool; Recipe::COUNT] = std::array::from_fn(|index| {
         candidates.contains(&Recipe::ALL[index])
-            && citizen.eligible_sale_replenishment(Recipe::ALL[index], site)
+            && citizen.eligible_sale_replenishment_with_cost(
+                Recipe::ALL[index],
+                site,
+                prices.batch_cost(Recipe::ALL[index], citizen, site),
+            )
     });
     let mut owned = prices.owned;
     let mut stock = production_stocks(citizen);
@@ -955,7 +963,11 @@ pub(crate) fn ranked_recipes_at_prices(
     let mut choices: Vec<_> = projection_candidates(citizen, site)
         .into_iter()
         .filter_map(|recipe| {
-            if !citizen.eligible_sale_replenishment(recipe, site) {
+            if !citizen.eligible_sale_replenishment_with_cost(
+                recipe,
+                site,
+                prices.batch_cost(recipe, citizen, site),
+            ) {
                 return None;
             }
             let fraction = stock_fraction(recipe, citizen)?;

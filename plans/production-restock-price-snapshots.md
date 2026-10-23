@@ -24,3 +24,5 @@ Targeted tests cover reference fallbacks, own listing exclusion for input buying
 - No outstanding high or medium review findings. The low documentation finding for historical trial eligibility was fixed.
 - Profiling and implementation commit are coordinated by the root agent.
 - Fresh replay baseline median: 12.419088 seconds (three runs).
+
+- Initial implementation replay median: 12.639605 seconds versus 12.419088 seconds baseline. Profiling found repeated complete price snapshots from historical sale-replenishment checks. A reviewed follow-up reuses the existing projection snapshot for batch costs and eligibility, preserving historical trial and invalid-cost behavior. Follow-up validation passed all 387 unit tests; independent review found no issues. Follow-up profiling is in progress.

@@ -267,13 +267,27 @@ impl Citizen {
         price.is_finite().then_some(price)
     }
 
+    #[cfg(test)]
     pub(crate) fn eligible_sale_replenishment(
         &self,
         recipe: Recipe,
         site: Option<PlaceId>,
     ) -> bool {
+        self.eligible_sale_replenishment_with_cost(
+            recipe,
+            site,
+            crate::production::estimated_batch_cost(recipe, self, site),
+        )
+    }
+
+    pub(crate) fn eligible_sale_replenishment_with_cost(
+        &self,
+        recipe: Recipe,
+        site: Option<PlaceId>,
+        cost: Option<f64>,
+    ) -> bool {
         let good = recipe.outputs()[0].0;
-        let Some(cost) = crate::production::estimated_batch_cost(recipe, self, site) else {
+        let Some(cost) = cost else {
             return false;
         };
         self.market.replenishment_eligible(
@@ -646,6 +660,35 @@ mod tests {
                     .with_price(Good::Thread, 1.0)
                     .unwrap(),
             )
+    }
+
+    #[test]
+    fn replenishment_reuses_frozen_cost_and_preserves_failed_trial_rules() {
+        let mut citizen = weaver();
+        citizen
+            .claim_production_trial(Recipe::SpinThread, None)
+            .unwrap();
+        let key = (citizen.economic_id(), Good::Thread);
+        let trial = citizen
+            .market
+            .production_trials
+            .active
+            .remove(&key)
+            .unwrap();
+        citizen.market.production_trials.results.insert(
+            key,
+            TrialResult {
+                trial,
+                profitable: false,
+            },
+        );
+        let cost = crate::production::estimated_batch_cost(Recipe::SpinThread, &citizen, None);
+        assert!(!citizen.eligible_sale_replenishment_with_cost(Recipe::SpinThread, None, cost));
+        assert!(!citizen.eligible_sale_replenishment(Recipe::SpinThread, None));
+        citizen = citizen.with_prices(citizen.prices.with_price(Good::Flax, 1.0).unwrap());
+        assert!(citizen.eligible_sale_replenishment(Recipe::SpinThread, None));
+        assert!(!citizen.eligible_sale_replenishment_with_cost(Recipe::SpinThread, None, cost));
+        assert!(!citizen.eligible_sale_replenishment_with_cost(Recipe::SpinThread, None, None));
     }
 
     #[test]
