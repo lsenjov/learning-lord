@@ -9,4 +9,8 @@ Step 1 complete: projected route valuation permits absent offers while current-r
 
 Validation: 576 simulation tests passed (388 unit and 188 integration), 6 ignored; formatting and workspace all-target checks passed. Independent review cleared the implementation and final fixture corrections with no findings.
 
-Step 2: checking the latest Xena save against the release build.
+Step 2 complete: release-build diagnostics loaded `saves/universe-1792730886.997440530.ron.gz` and replanned Xena in a temporary copy. With zero flax listings, her weavery projects 17 spins and 7 weaves and requests 3,400g flax. The same quantity reaches blocked requests, accepted market requests, and affordable unmet demand. There is also a 200g blocked thread request from attempted production preparation.
+
+Advancing that copy to the next caravan visit produces 3,200g of caravan-owned flax listings, confirmed by the current period's 3,200g imported activity. Thus demand now causes real imports rather than depending on pre-existing listings. The original save is untouched. Local diagnostic evidence: `target/xena-demand-fixed-imports.log`.
+
+Implementation commit: `c9fb005`. Both plan steps are complete; no outstanding review findings.
