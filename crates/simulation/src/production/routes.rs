@@ -91,11 +91,12 @@ pub(super) fn preferred_manufacturing(
 
 fn supplier(good: Good, citizen: &Citizen, site: Option<PlaceId>) -> Option<Recipe> {
     let site = site?;
-    let mut producers = citizen.available_production_recipes().filter(|&recipe| {
-        crop_kind(recipe).is_none()
+    let mut producers = Recipe::ALL.into_iter().filter(|&recipe| {
+        recipe.outputs().iter().any(|&(output, _)| output == good)
+            && crop_kind(recipe).is_none()
             && recipe != Recipe::BrewBeer
+            && recipe.duration_ms(citizen).is_ok()
             && citizen.validate_production_site(site, recipe).is_ok()
-            && recipe.outputs().iter().any(|&(output, _)| output == good)
     });
     let recipe = producers.next()?;
     producers.next().is_none().then_some(recipe)
@@ -292,6 +293,108 @@ mod tests {
     use crate::{
         AgentId, StartingRole, locations::Location, marketplace::Prices, production::Skill,
     };
+
+    #[test]
+    fn supplier_matches_global_lookup_across_skills_and_site_access() {
+        let citizen = Citizen::new(0.0).unwrap();
+        let foreign_owner = AgentId(uuid::Uuid::new_v4());
+        let mut map = citizen.map().clone();
+        for owner in [citizen.id(), citizen.id(), foreign_owner] {
+            for kind in [
+                Location::Field,
+                Location::Mill,
+                Location::Bakery,
+                Location::Weavery,
+                Location::Tailory,
+                Location::Brewery,
+            ] {
+                map = map
+                    .with_place(kind, citizen.position(), Some(owner), "Workshop")
+                    .unwrap()
+                    .0;
+            }
+        }
+        let public = map.public_place(Location::Market);
+        map = map
+            .with_building(public, Location::Tailory, citizen.id(), "Public workshop")
+            .unwrap()
+            .0;
+        let (next_map, town) = map
+            .with_place(Location::Warehouse, citizen.position(), None, "Town")
+            .unwrap();
+        map = next_map
+            .with_building(town, Location::Tailory, citizen.id(), "Town workshop")
+            .unwrap()
+            .0;
+        let citizen = citizen.with_map(map).unwrap();
+        let mut sites: Vec<_> = citizen.map().places().keys().copied().map(Some).collect();
+        sites.extend([None, Some(PlaceId(uuid::Uuid::new_v4()))]);
+        let mut unskilled = citizen.clone();
+        for skill in Skill::ALL {
+            unskilled = unskilled.with_skill_practice_ms(skill, None).unwrap();
+        }
+        let mut workers = vec![unskilled.clone()];
+        for skill in Skill::ALL {
+            for practice in [0, super::super::MAX_SKILL_PRACTICE_MS] {
+                workers.push(
+                    unskilled
+                        .with_skill_practice_ms(skill, Some(practice))
+                        .unwrap(),
+                );
+            }
+        }
+        let mut guild_worker = citizen.clone();
+        guild_worker.guilds.insert(
+            foreign_owner,
+            crate::guilds::GuildAccess {
+                workshops: sites.iter().flatten().copied().collect(),
+                hourly_fee: 2,
+            },
+        );
+        for skill in Skill::ALL {
+            guild_worker = guild_worker.with_skill_practice_ms(skill, Some(0)).unwrap();
+        }
+        workers.push(guild_worker);
+        for (worker_index, citizen) in workers.iter().enumerate() {
+            for &site in &sites {
+                for good in Good::ALL {
+                    let previous = site.and_then(|site| {
+                        let mut producers =
+                            citizen.available_production_recipes().filter(|&recipe| {
+                                crop_kind(recipe).is_none()
+                                    && recipe != Recipe::BrewBeer
+                                    && citizen.validate_production_site(site, recipe).is_ok()
+                                    && recipe.outputs().iter().any(|&(output, _)| output == good)
+                            });
+                        let recipe = producers.next()?;
+                        producers.next().is_none().then_some(recipe)
+                    });
+                    assert_eq!(
+                        supplier(good, citizen, site),
+                        previous,
+                        "worker {worker_index}, {site:?}, {good:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(supplier(Good::Berries, &unskilled, Some(public)), None);
+        assert_eq!(
+            supplier(
+                Good::Berries,
+                &unskilled,
+                Some(unskilled.map().public_place(Location::Forest))
+            ),
+            Some(Recipe::Forage)
+        );
+        assert_eq!(
+            supplier(Good::FlaxBlock, workers.last().unwrap(), Some(public)),
+            Some(Recipe::MakeClothingBlock)
+        );
+        assert_eq!(
+            supplier(Good::FlaxBlock, workers.last().unwrap(), Some(town)),
+            None
+        );
+    }
 
     fn tailor() -> (Citizen, PlaceId) {
         let citizen = Citizen::new(0.0)
