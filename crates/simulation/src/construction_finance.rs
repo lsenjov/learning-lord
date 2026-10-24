@@ -65,7 +65,33 @@ impl Universe {
         base_ms: u64,
         wood: Quantity,
     ) -> Result<Coins, SimulationError> {
+        self.construction_estimate_for_client(
+            crate::construction::ConstructionClient::Account(client),
+            place,
+            base_ms,
+            wood,
+        )
+    }
+
+    pub(crate) fn construction_estimate_for_client(
+        &self,
+        client: crate::construction::ConstructionClient,
+        place: crate::locations::PlaceId,
+        base_ms: u64,
+        wood: Quantity,
+    ) -> Result<Coins, SimulationError> {
         use crate::production::{Skill, skill_duration_reduction};
+        let unit_price = |account: Option<AgentId>, good: Good| {
+            account.map_or_else(
+                || {
+                    self.prices()
+                        .price(good)
+                        .unwrap_or_else(|| good.core_price())
+                        / good.units_per_price_unit() as f64
+                },
+                |account| self.construction_estimated_unit_price(account, good),
+            )
+        };
         if base_ms == 0 {
             return if wood == 0 {
                 Ok(0)
@@ -82,7 +108,7 @@ impl Universe {
                     * crate::locations::WALK_MS_PER_METRE
                     / HOUR_MS;
                 workers.push((
-                    budget.account,
+                    Some(budget.account),
                     budget.hourly_earnings_target,
                     1.0 - skill_duration_reduction(practice),
                     travel,
@@ -93,15 +119,12 @@ impl Universe {
             // A missing profession must not make labour appear free to clients.
             let food = Good::FOOD
                 .into_iter()
-                .map(|good| {
-                    self.construction_estimated_unit_price(client, good)
-                        / good.nutrition_per_unit().unwrap()
-                })
+                .map(|good| unit_price(client.account(), good) / good.nutrition_per_unit().unwrap())
                 .min_by(f64::total_cmp)
                 .unwrap();
             let daily = crate::HUNGER_PER_HOUR * 24.0 * food
-                + 400.0 * self.construction_estimated_unit_price(client, Good::Water);
-            workers.push((client, daily / FALLBACK_EARNING_HOURS, 1.0, 0.0));
+                + 400.0 * unit_price(client.account(), Good::Water);
+            workers.push((client.account(), daily / FALLBACK_EARNING_HOURS, 1.0, 0.0));
         }
         let portion_ms = crate::construction::MILESTONE_BASE_MS;
         let mut elapsed = 0;
@@ -115,8 +138,7 @@ impl Universe {
             let mut quotes: Vec<_> = workers
                 .iter()
                 .map(|(account, hourly, factor, travel)| {
-                    portion_wood as f64
-                        * self.construction_estimated_unit_price(*account, Good::Wood)
+                    portion_wood as f64 * unit_price(*account, Good::Wood)
                         + (hours * factor + travel + if portion_wood > 0 { 2.0 } else { 0.0 })
                             * hourly
                 })

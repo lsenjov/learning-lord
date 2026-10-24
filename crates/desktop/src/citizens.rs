@@ -451,14 +451,19 @@ fn construction_plan_rows(
     citizen: &Citizen,
 ) -> Vec<PlanRow> {
     let mut fragments = vec![crate::navigation::Fragment::text(format!(
-        "Construction: {} at ",
+        "{}: {} at ",
+        if project.repair.is_some() {
+            "Repair"
+        } else {
+            "Construction"
+        },
         project.item.name()
     ))];
     fragments.push(crate::navigation::place(citizen, project.place));
     fragments.push(crate::navigation::Fragment::text(format!(
         "  |  Work {}/{}",
         duration(project.completed_base_ms),
-        duration(project.item.base_hours() * learning_lord_simulation::construction::HOUR_MS)
+        duration(project.total_base_ms)
     )));
     let mut rows = vec![PlanRow {
         label: crate::navigation::plain(&fragments),
@@ -747,7 +752,7 @@ pub fn refresh_plan(
     }
     let rows = selected_agent(&snapshot.0.universe, selection.0).map_or_else(Vec::new, |agent| {
         let AgentKind::Citizen(citizen) = &agent.kind;
-        plan_rows(&snapshot.0.universe, selection.0.unwrap(), citizen)
+        plan_rows(&snapshot.0.universe, citizen.id(), citizen)
     });
     if cached.selected != selection.0 {
         for mut position in &mut scroll {

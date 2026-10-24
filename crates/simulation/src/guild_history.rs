@@ -28,6 +28,7 @@ pub struct DailyGuildHistory {
     pub closing_coins: Coins,
     pub payments_received: Coins,
     pub expenses_paid: Coins,
+    pub construction: crate::construction::ConstructionCash,
     /// Exact accrued amount; `unpaid` holds whole coins, regardless of settlement.
     pub fees_accrued: WorkshopFeeAccount,
     pub opening_outstanding: HashMap<AgentId, WorkshopFeeAccount>,
@@ -43,6 +44,7 @@ impl DailyGuildHistory {
             closing_coins: coins,
             payments_received: 0,
             expenses_paid: 0,
+            construction: Default::default(),
             fees_accrued: WorkshopFeeAccount::default(),
             opening_outstanding: outstanding.clone(),
             closing_outstanding: outstanding,
@@ -207,12 +209,19 @@ impl Universe {
                         day.payments_received,
                         day.expenses_paid,
                         day.fees_accrued.unpaid,
+                        day.construction.escrow_deposited,
+                        day.construction.escrow_refunded,
+                        day.construction.payments_received,
+                        day.construction.payments_paid,
                     ]
                     .iter()
                     .any(|coins| *coins < 0)
                     || day.fees_accrued.remainder >= FEE_HOUR_MS
                     || i128::from(day.opening_coins) + i128::from(day.payments_received)
                         - i128::from(day.expenses_paid)
+                        - i128::from(day.construction.escrow_deposited)
+                        + i128::from(day.construction.escrow_refunded)
+                        + i128::from(day.construction.payments_received)
                         != i128::from(day.closing_coins)
                     || total(&day.opening_outstanding) + amount(&day.fees_accrued)
                         - i128::from(day.payments_received) * i128::from(FEE_HOUR_MS)

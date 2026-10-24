@@ -188,14 +188,20 @@ impl Universe {
         if self.construction.contracts.values().any(|contract| {
             let project = &self.construction.projects[&contract.project];
             (contract.status.open()
-                && (members.contains(&project.client)
+                && (project
+                    .client
+                    .account()
+                    .is_some_and(|id| members.contains(&id))
                     || contract
                         .quotes
                         .iter()
                         .any(|quote| members.contains(&quote.carpenter))))
                 || (!project.completed
                     && (project.completed_base_ms > 0 || project.installed_wood > 0)
-                    && members.contains(&project.client))
+                    && project
+                        .client
+                        .account()
+                        .is_some_and(|id| members.contains(&id)))
         }) {
             return Err(SimulationError::CitizenBusy);
         }

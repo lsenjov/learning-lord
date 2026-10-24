@@ -16,6 +16,25 @@ pub const BIDDING_MS: u64 = DAY_MS;
 pub const DEADLINE_MS: u64 = 30 * DAY_MS;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ConstructionClient {
+    Account(AgentId),
+    Town,
+}
+impl ConstructionClient {
+    pub fn account(self) -> Option<AgentId> {
+        match self {
+            Self::Account(id) => Some(id),
+            Self::Town => None,
+        }
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RepairTarget {
+    Room(RoomId),
+    Object(ObjectId),
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProjectId(pub Uuid);
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContractId(pub Uuid);
@@ -86,6 +105,11 @@ impl ConstructionItem {
             _ => self.object_kind().unwrap().footprint_m2(),
         }
     }
+    pub fn from_object_kind(kind: ObjectKind) -> Option<Self> {
+        Self::OBJECTS
+            .into_iter()
+            .find(|item| kind.same_capability(item.object_kind().unwrap()))
+    }
     pub fn object_kind(self) -> Option<ObjectKind> {
         Some(match self {
             Self::Room(_) => return None,
@@ -116,6 +140,7 @@ pub enum ConstructionOutput {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ConstructionStage {
     pub next_contract: ContractId,
+    pub wood: Quantity,
     pub base_ms: u64,
     pub completed_base_ms: u64,
     pub installed_wood: Quantity,
@@ -125,16 +150,16 @@ impl ConstructionStage {
         self.base_ms - self.completed_base_ms
     }
     pub fn missing_wood(&self) -> Quantity {
-        wood_through(self.base_ms).saturating_sub(self.installed_wood)
+        self.wood.saturating_sub(self.installed_wood)
     }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ConstructionProject {
     pub id: ProjectId,
-    pub client: AgentId,
+    pub client: ConstructionClient,
     pub place: PlaceId,
-    pub building: BuildingId,
+    pub building: Option<BuildingId>,
     pub room: Option<RoomId>,
     pub item: ConstructionItem,
     pub completed_base_ms: u64,
@@ -142,6 +167,10 @@ pub struct ConstructionProject {
     pub completed: bool,
     pub output: ConstructionOutput,
     pub stages: Vec<ConstructionStage>,
+    pub total_base_ms: u64,
+    pub total_wood: Quantity,
+    pub repair: Option<RepairTarget>,
+    pub repair_damage_units: u128,
     pub escrow: Coins,
     pub funding_base_ms: u64,
     pub funding_offer: Coins,
@@ -151,10 +180,13 @@ pub struct ConstructionProject {
 }
 impl ConstructionProject {
     pub fn remaining_base_ms(&self) -> u64 {
-        self.item.base_hours() * HOUR_MS - self.completed_base_ms
+        self.total_base_ms - self.completed_base_ms
     }
     pub fn missing_wood(&self) -> Quantity {
-        self.item.wood() - self.installed_wood
+        self.total_wood - self.installed_wood
+    }
+    pub fn repair_credit_through(&self, base_ms: u64) -> u128 {
+        self.repair_damage_units * u128::from(base_ms) / u128::from(self.total_base_ms)
     }
 }
 
@@ -217,7 +249,7 @@ pub struct ConstructionCash {
 pub struct ConstructionPayment {
     pub contract: ContractId,
     pub time_ms: u64,
-    pub client: AgentId,
+    pub client: ConstructionClient,
     pub carpenter: AgentId,
     pub amount: Coins,
 }
@@ -226,7 +258,7 @@ pub struct Construction {
     pub projects: HashMap<ProjectId, ConstructionProject>,
     pub contracts: HashMap<ContractId, ConstructionContract>,
     pub payments: Vec<ConstructionPayment>,
-    rng: Xoshiro256PlusPlus,
+    pub(crate) rng: Xoshiro256PlusPlus,
 }
 impl Default for Construction {
     fn default() -> Self {
@@ -254,6 +286,40 @@ impl Universe {
         &self.construction
     }
 
+    pub(crate) fn construction_client_coins(
+        &self,
+        client: ConstructionClient,
+    ) -> Result<Coins, SimulationError> {
+        match client {
+            ConstructionClient::Account(id) => self.account_coins(id),
+            ConstructionClient::Town => Ok(self.town_treasury),
+        }
+    }
+    pub(crate) fn set_construction_client_coins(
+        &mut self,
+        client: ConstructionClient,
+        coins: Coins,
+    ) -> Result<(), SimulationError> {
+        match client {
+            ConstructionClient::Account(id) => self.set_account_coins(id, coins),
+            ConstructionClient::Town => {
+                self.town_treasury = coins;
+                Ok(())
+            }
+        }
+    }
+    pub(crate) fn construction_client_budget(
+        &self,
+        client: ConstructionClient,
+    ) -> Result<Coins, SimulationError> {
+        match client {
+            ConstructionClient::Account(id) if !self.guilds.contains_key(&id) => {
+                Ok(self.construction_budget(id)?.maximum_offer)
+            }
+            _ => self.construction_client_coins(client),
+        }
+    }
+
     pub fn construction_budget(
         &self,
         client: AgentId,
@@ -264,10 +330,15 @@ impl Universe {
 
     fn construction_cash(
         &mut self,
-        account: AgentId,
+        client: ConstructionClient,
         change: ConstructionCash,
     ) -> Result<(), SimulationError> {
-        let cash = if let Some(history) = self.household_histories.get_mut(&account) {
+        let Some(account) = client.account() else {
+            return Ok(());
+        };
+        let cash = if let Some(history) = self.guild_histories.get_mut(&account) {
+            &mut history.current.construction
+        } else if let Some(history) = self.household_histories.get_mut(&account) {
             &mut history.current.construction
         } else {
             &mut self
@@ -289,6 +360,7 @@ impl Universe {
             .values()
             .filter(|project| {
                 !project.completed
+                    && project.repair.is_none()
                     && project.place == place
                     && project.room == room
                     && self.construction.contracts.values().any(|contract| {
@@ -369,11 +441,16 @@ impl Universe {
         let account = self.economic_id(client)?;
         if let Some(project) = self.construction.projects.values().find(|project| {
             !project.completed
+                && project.repair.is_none()
                 && project.completed_base_ms == 0
                 && project.installed_wood == 0
-                && self.economic_id(project.client).ok() == Some(account)
+                && project
+                    .client
+                    .account()
+                    .and_then(|id| self.economic_id(id).ok())
+                    == Some(account)
                 && project.place == place
-                && project.building == building
+                && project.building == Some(building)
                 && project.room == room
                 && project.item == item
                 && !self
@@ -392,17 +469,25 @@ impl Universe {
             id,
             ConstructionProject {
                 id,
-                client,
+                client: ConstructionClient::Account(client),
                 place,
-                building,
+                building: Some(building),
                 room,
                 item,
                 completed_base_ms: 0,
                 installed_wood: 0,
                 completed: false,
+                total_base_ms: item.base_hours() * HOUR_MS,
+                total_wood: item.wood(),
+                repair: None,
+                repair_damage_units: 0,
                 stages: (0..(item.base_hours() * HOUR_MS).div_ceil(MILESTONE_BASE_MS))
                     .map(|index| ConstructionStage {
                         next_contract: ContractId(Uuid::new_v4()),
+                        wood: wood_through(
+                            (item.base_hours() * HOUR_MS - index * MILESTONE_BASE_MS)
+                                .min(MILESTONE_BASE_MS),
+                        ),
                         base_ms: (item.base_hours() * HOUR_MS - index * MILESTONE_BASE_MS)
                             .min(MILESTONE_BASE_MS),
                         completed_base_ms: 0,
@@ -436,10 +521,17 @@ impl Universe {
             .projects
             .get(&project)
             .ok_or(SimulationError::MissingProperty)?;
-        if self.economic_id(client)? != self.economic_id(site.client)? {
+        if self.economic_id(client)?
+            != self.economic_id(
+                site.client
+                    .account()
+                    .ok_or(SimulationError::PrivateProperty)?,
+            )?
+        {
             return Err(SimulationError::PrivateProperty);
         }
         if site.completed
+            || site.repair.is_some()
             || self
                 .construction
                 .contracts
@@ -457,7 +549,7 @@ impl Universe {
         available.validate_construction_destination(
             client,
             site.place,
-            site.building,
+            site.building.ok_or(SimulationError::MissingProperty)?,
             site.room,
             site.item,
         )?;
@@ -487,16 +579,22 @@ impl Universe {
         Ok((world, contract))
     }
 
-    fn post_construction(
+    pub(crate) fn post_construction(
         &mut self,
         project: ProjectId,
         maximum_offer: Coins,
     ) -> Result<ContractId, SimulationError> {
-        let client = self.economic_id(self.construction.projects[&project].client)?;
-        if maximum_offer <= 0 || maximum_offer > self.construction_budget(client)?.maximum_offer {
+        let client = match self.construction.projects[&project].client {
+            ConstructionClient::Account(id) => ConstructionClient::Account(self.economic_id(id)?),
+            ConstructionClient::Town => ConstructionClient::Town,
+        };
+        if maximum_offer <= 0 || maximum_offer > self.construction_client_budget(client)? {
             return Err(SimulationError::InvalidQuantity);
         }
-        self.set_account_coins(client, self.account_coins(client)? - maximum_offer)?;
+        self.set_construction_client_coins(
+            client,
+            self.construction_client_coins(client)? - maximum_offer,
+        )?;
         self.construction_cash(
             client,
             ConstructionCash {
@@ -518,7 +616,9 @@ impl Universe {
                 .contracts
                 .contains_key(&stage.next_contract)
             {
-                stage.next_contract = ContractId(Uuid::new_v4());
+                stage.next_contract = ContractId(
+                    uuid::Builder::from_random_bytes(self.construction.rng.random()).into_uuid(),
+                );
             }
         }
         let stage = site
@@ -620,7 +720,9 @@ impl Universe {
             .contracts
             .get(&id)
             .ok_or(SimulationError::MissingProperty)?;
-        if self.construction.projects[&contract.project].client != self.economic_id(client)? {
+        if self.construction.projects[&contract.project].client
+            != ConstructionClient::Account(self.economic_id(client)?)
+        {
             return Err(SimulationError::PrivateProperty);
         }
         if contract.status != ContractStatus::Bidding {
@@ -924,22 +1026,29 @@ impl Universe {
         };
         valid.retain(|quote| quote.price == lowest);
         let winner = valid.swap_remove(self.construction.rng.random_range(0..valid.len()));
-        let mut commitments = self.other_construction_commitments(client, id)?;
-        if self.economic_id(winner.carpenter)? == client {
+        let mut commitments = match client.account() {
+            Some(account) => self.other_construction_commitments(account, id)?,
+            None => 0,
+        };
+        if Some(self.economic_id(winner.carpenter)?) == client.account() {
             add_coins(&mut commitments, winner.financing)?;
         }
-        let budget = self.household_budget(client, commitments)?;
-        if i128::from(budget.cash) + i128::from(snapshot.maximum_offer - winner.price)
-            < i128::from(budget.essential_reserve)
-                + i128::from(budget.liabilities)
-                + i128::from(budget.commitments)
-        {
-            return self.close_construction(id, ContractStatus::Cancelled);
+        if client.account().is_some_and(|account| {
+            self.agents.contains_key(&account) || self.households.contains_key(&account)
+        }) {
+            let budget = self.household_budget(client.account().unwrap(), commitments)?;
+            if i128::from(budget.cash) + i128::from(snapshot.maximum_offer - winner.price)
+                < i128::from(budget.essential_reserve)
+                    + i128::from(budget.liabilities)
+                    + i128::from(budget.commitments)
+            {
+                return self.close_construction(id, ContractStatus::Cancelled);
+            }
         }
         let refund = snapshot.escrow - winner.price;
-        self.set_account_coins(
+        self.set_construction_client_coins(
             client,
-            self.account_coins(client)?
+            self.construction_client_coins(client)?
                 .checked_add(refund)
                 .ok_or(SimulationError::WealthOverflow)?,
         )?;
@@ -971,7 +1080,7 @@ impl Universe {
         Ok(())
     }
 
-    fn close_construction(
+    pub(crate) fn close_construction(
         &mut self,
         id: ContractId,
         status: ContractStatus,
@@ -986,9 +1095,9 @@ impl Universe {
             .unwrap();
         project.escrow = 0;
         project.scheduling = false;
-        self.set_account_coins(
+        self.set_construction_client_coins(
             client,
-            self.account_coins(client)?
+            self.construction_client_coins(client)?
                 .checked_add(unallocated)
                 .ok_or(SimulationError::WealthOverflow)?,
         )?;
@@ -999,9 +1108,9 @@ impl Universe {
                 ..Default::default()
             },
         )?;
-        self.set_account_coins(
+        self.set_construction_client_coins(
             client,
-            self.account_coins(client)?
+            self.construction_client_coins(client)?
                 .checked_add(snapshot.escrow)
                 .ok_or(SimulationError::WealthOverflow)?,
         )?;
@@ -1088,7 +1197,10 @@ impl Universe {
                 .construction
                 .contracts
                 .values()
-                .filter(|contract| self.construction.projects[&contract.project].client == account)
+                .filter(|contract| {
+                    self.construction.projects[&contract.project].client
+                        == ConstructionClient::Account(account)
+                })
                 .try_fold(0i64, |sum, contract| {
                     sum.checked_add(contract.escrow)
                         .ok_or(SimulationError::WealthOverflow)
@@ -1097,7 +1209,7 @@ impl Universe {
                 .construction
                 .projects
                 .values()
-                .filter(|project| project.client == account)
+                .filter(|project| project.client == ConstructionClient::Account(account))
                 .try_fold(escrow, |sum, project| {
                     sum.checked_add(project.escrow)
                         .ok_or(SimulationError::WealthOverflow)
@@ -1220,7 +1332,7 @@ impl Universe {
                 },
             )?;
             self.construction_cash(
-                account,
+                ConstructionClient::Account(account),
                 ConstructionCash {
                     payments_received: payment,
                     ..Default::default()
@@ -1255,7 +1367,9 @@ impl Universe {
 
     fn finish_construction(&mut self, project: ProjectId) -> Result<(), SimulationError> {
         let site = &self.construction.projects[&project];
-        self.map.install_construction(site)?;
+        if site.repair.is_none() {
+            self.map.install_construction(site)?;
+        }
         self.construction
             .projects
             .get_mut(&project)
@@ -1499,6 +1613,7 @@ impl Universe {
         let mut outputs = HashSet::new();
         let mut sequences = HashSet::new();
         let mut stage_ids = HashSet::new();
+        let mut repair_targets = HashSet::new();
         let existing_outputs: HashSet<_> = self
             .map
             .places()
@@ -1514,19 +1629,22 @@ impl Universe {
             .collect();
 
         for (id, project) in &self.construction.projects {
-            let total = project.item.base_hours() * HOUR_MS;
+            let total = project.total_base_ms;
             let output = match project.output {
                 ConstructionOutput::Room(id) => id.0,
                 ConstructionOutput::Object(id) => id.0,
             };
-            if !project.completed && existing_outputs.contains(&output) {
+            if project.repair.is_none() && !project.completed && existing_outputs.contains(&output)
+            {
                 return Err(invalid());
             }
             if *id != project.id
-                || self.economic_id(project.client).is_err()
+                || project
+                    .client
+                    .account()
+                    .is_some_and(|id| self.economic_id(id).is_err())
                 || project.completed_base_ms > total
-                || project.installed_wood > project.item.wood()
-                || project.installed_wood < wood_through(project.completed_base_ms)
+                || project.installed_wood > project.total_wood
                 || project.completed != (project.completed_base_ms == total)
                 || !self
                     .construction
@@ -1545,8 +1663,8 @@ impl Universe {
                     stage.base_ms == 0
                         || stage.base_ms > MILESTONE_BASE_MS
                         || stage.completed_base_ms > stage.base_ms
-                        || stage.installed_wood > wood_through(stage.base_ms)
-                        || stage.installed_wood < wood_through(stage.completed_base_ms)
+                        || stage.installed_wood > stage.wood
+                        || (stage.completed_base_ms > 0 && stage.installed_wood != stage.wood)
                 })
                 || project
                     .stages
@@ -1584,7 +1702,19 @@ impl Universe {
             {
                 return Err(invalid());
             }
+            let mut stage_start = 0;
+            let through = |base| {
+                (u128::from(project.total_wood) * u128::from(base)).div_ceil(u128::from(total))
+                    as u64
+            };
             for (index, stage) in project.stages.iter().enumerate() {
+                let end = stage_start + stage.base_ms;
+                if stage.base_ms != (total - stage_start).min(MILESTONE_BASE_MS)
+                    || stage.wood != through(end) - through(stage_start)
+                {
+                    return Err(invalid());
+                }
+                stage_start = end;
                 if self
                     .construction
                     .contracts
@@ -1596,20 +1726,42 @@ impl Universe {
                     return Err(invalid());
                 }
             }
+            if let Some(target) = project.repair {
+                if !project.completed && !repair_targets.insert((project.place, target)) {
+                    return Err(invalid());
+                }
+                self.validate_repair_project(project)
+                    .map_err(|_| invalid())?;
+                continue;
+            }
+            if project.total_base_ms != project.item.base_hours() * HOUR_MS
+                || project.total_wood != project.item.wood()
+                || project.repair_damage_units != 0
+            {
+                return Err(invalid());
+            }
             let place = self.map.place(project.place).map_err(|_| invalid())?;
             let building = place
                 .buildings
                 .iter()
-                .find(|building| building.id == project.building)
+                .find(|building| Some(building.id) == project.building)
                 .ok_or_else(invalid)?;
-            if self.economic_id(building.owner).ok() != self.economic_id(project.client).ok() {
+            if self.economic_id(building.owner).ok()
+                != project
+                    .client
+                    .account()
+                    .and_then(|id| self.economic_id(id).ok())
+            {
                 return Err(invalid());
             }
             match (&project.output, project.item) {
                 (ConstructionOutput::Room(output), ConstructionItem::Room(size)) => {
                     if project.room.is_some()
                         || place.owner.and_then(|owner| self.economic_id(owner).ok())
-                            != self.economic_id(project.client).ok()
+                            != project
+                                .client
+                                .account()
+                                .and_then(|id| self.economic_id(id).ok())
                         || !outputs.insert(output.0)
                     {
                         return Err(invalid());
@@ -1670,7 +1822,11 @@ impl Universe {
                     .is_some_and(|end| end < contract.paid_base_ms || end > stage.completed_base_ms)
                 || (contract.status.open() && !open_stages.insert((project.id, contract.stage)))
                 || (contract.status.open()
-                    && self.economic_id(project.client).ok() != Some(project.client))
+                    && project
+                        .client
+                        .account()
+                        .and_then(|id| self.economic_id(id).ok())
+                        != project.client.account())
             {
                 return Err(invalid());
             }
@@ -1762,8 +1918,7 @@ impl Universe {
                     || quote.financing < 0
                     || quote.procurement_cash < 0
                     || quote.procurement_cash > quote.financing
-                    || quote.shared_wood.saturating_add(quote.carried_wood)
-                        > wood_through(stage.base_ms - contract.start_base_ms)
+                    || quote.shared_wood.saturating_add(quote.carried_wood) > stage.wood
                 {
                     return Err(invalid());
                 }
@@ -1906,7 +2061,7 @@ impl Universe {
                                 .saturating_add(elapsed)
                                 .min(crate::production::MAX_SKILL_PRACTICE_MS),
                         )
-                    || stage.installed_wood < wood_through(milestone_end)
+                    || stage.installed_wood < stage.wood
                 {
                     return Err(invalid());
                 }
@@ -1979,7 +2134,7 @@ mod tests {
             fixture(ConstructionItem::Room(RoomSize::Small), 2_400);
         let project = &world.construction.projects[&world.construction.contracts[&first].project];
         let place = project.place;
-        let building = project.building;
+        let building = project.building.unwrap();
         let (world, second) = world
             .request_construction(
                 client,
@@ -2113,7 +2268,14 @@ mod tests {
         let site = &world.construction.projects[&project];
         assert!(
             world
-                .request_construction(client, site.place, site.building, site.room, site.item, 1)
+                .request_construction(
+                    client,
+                    site.place,
+                    site.building.unwrap(),
+                    site.room,
+                    site.item,
+                    1
+                )
                 .is_err()
         );
     }
@@ -2236,8 +2398,47 @@ mod tests {
         assert!(world.construction.contracts[&id].paid > 0);
         let saved = world.to_save_string().unwrap();
         world = Universe::from_save_str(&saved).unwrap();
+        let policy = crate::marketplace::CaravanPolicy {
+            import_tariff_basis_points: 0,
+            ..world.caravan_policy()
+        };
+        world = world.with_caravan_policy(policy).unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
+        let home = citizen.home;
+        world = world
+            .with_stored_good(
+                home,
+                crate::storage::GoodsOwner::Agent(worker),
+                Good::BreadRoll,
+                1_000_000,
+            )
+            .unwrap()
+            .with_stored_good(
+                home,
+                crate::storage::GoodsOwner::Agent(worker),
+                Good::Water,
+                1_000_000,
+            )
+            .unwrap();
         let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&worker).unwrap().kind;
-        citizen.set_inventory_units(Good::Wood, 3_600);
+        citizen.garment_condition = Some(1.0);
+        citizen.set_inventory_units(Good::Wood, 100_000);
+        world.refresh_market();
+        // Maintenance accumulated during the month of scarce supply also needs finishing.
+        let limit = world.current_time_ms + 90 * DAY_MS;
+        while world.carpenter_committed_base_ms(worker) > CAPACITY_BASE_MS - MILESTONE_BASE_MS
+            && world.current_time_ms < limit
+        {
+            let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
+            let step = citizen
+                .active_action()
+                .map_or(HOUR_MS, |active| active.remaining_ms().min(HOUR_MS))
+                .max(1);
+            world = world.advance(step).unwrap();
+        }
+        assert!(world.carpenter_committed_base_ms(worker) <= CAPACITY_BASE_MS - MILESTONE_BASE_MS);
+        let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&worker).unwrap().kind;
+        citizen.set_inventory_units(Good::Wood, 100_000);
         world.refresh_market();
         let (world, next) = world
             .continue_construction(client, project, 100_000)
@@ -2287,7 +2488,7 @@ mod tests {
             .request_construction(
                 client,
                 site.place,
-                site.building,
+                site.building.unwrap(),
                 site.room,
                 ConstructionItem::WoodRack,
                 100_000,

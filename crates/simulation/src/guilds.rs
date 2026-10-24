@@ -837,10 +837,10 @@ mod tests {
     fn guild_history_records_weekly_property_expense_on_closing_day() {
         use crate::taxation::{TaxKind, TaxPayer, TaxScope};
         let (mut world, _, _, _, guild) = workshop(10);
-        world.guilds.get_mut(&guild).unwrap().coins = 10;
+        world.guilds.get_mut(&guild).unwrap().coins = 10_000;
         world
             .guild_histories
-            .insert(guild, crate::guild_history::GuildHistory::new(0, 10));
+            .insert(guild, crate::guild_history::GuildHistory::new(0, 10_000));
         let (world, _) = world
             .with_scoped_tax_rule(
                 TaxScope::LocationType(Location::Weavery),
@@ -863,7 +863,22 @@ mod tests {
         assert_eq!(paid, 2);
         assert_eq!(history.completed.back().unwrap().expenses_paid, 2);
         assert_eq!(history.current.expenses_paid, 0);
-        assert_eq!(history.current.closing_coins, 8);
+        let payer = crate::construction::ConstructionClient::Account(guild);
+        let escrow = world
+            .construction
+            .projects
+            .values()
+            .filter(|project| project.client == payer)
+            .map(|project| project.escrow)
+            .sum::<Coins>()
+            + world
+                .construction
+                .contracts
+                .values()
+                .filter(|contract| world.construction.projects[&contract.project].client == payer)
+                .map(|contract| contract.escrow)
+                .sum::<Coins>();
+        assert_eq!(history.current.closing_coins + escrow, 10_000 - 2);
         assert_eq!(
             Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
             world

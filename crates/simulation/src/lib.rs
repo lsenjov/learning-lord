@@ -4,7 +4,9 @@ use rand::{RngExt, rngs::Xoshiro256PlusPlus};
 use std::fmt;
 use uuid::Uuid;
 
+mod building_maintenance;
 pub mod calendar;
+pub mod condition;
 pub mod construction;
 pub mod construction_finance;
 pub mod storage;
@@ -2560,6 +2562,7 @@ impl Universe {
             }
         }
         universe.process_construction()?;
+        universe.commission_repairs()?;
         while universe.current_time_ms < end {
             if should_cancel() {
                 return Ok(None);
@@ -2595,12 +2598,17 @@ impl Universe {
                 .min(until_week)
                 .min(boundary)
                 .min(planning_boundary)
-                .min(universe.construction_boundary().unwrap_or(u64::MAX));
+                .min(universe.construction_boundary().unwrap_or(u64::MAX))
+                .min(universe.maintenance_boundary());
             let finishing_time = universe.current_time_ms + step;
             let trades_before = universe.market.trades().len();
             let taxes_before = universe.taxation.history.len();
             let histories_before = universe.citizen_histories.clone();
             let agents_before = universe.agents.clone();
+            let (room_credits, object_credits) = universe.construction_repair_credits(step);
+            universe
+                .map
+                .advance_conditions(step, &room_credits, &object_credits);
             for id in &ids {
                 let agent_trades_before = universe.market.trades().len();
                 let agent = universe.agents.get_mut(id).unwrap();
@@ -2878,6 +2886,7 @@ impl Universe {
                     .close_day(finishing_time, citizen);
             }
             universe.process_construction()?;
+            universe.commission_repairs()?;
             let histories_before = universe.citizen_histories.clone();
             if step == until_update {
                 universe.refresh_market();

@@ -482,11 +482,12 @@ fn room_readout(room: &Room) -> String {
         .flat_map(|object| &object.workers)
         .collect();
     format!(
-        "{} | Area {}/{} m2 | Workers {}",
+        "{} | Area {}/{} m2 | Workers {} | Condition {:.1}%",
         room.name,
         room.used_area_m2(),
         room.size.area_m2(),
-        workers.len()
+        workers.len(),
+        room.condition.fraction() * 100.0
     )
 }
 
@@ -610,7 +611,31 @@ fn render_object(
     place: &Place,
     object: &Object,
 ) {
-    let (fragments, tooltip) = object_row(universe, place, object);
+    let (mut fragments, mut tooltip) = object_row(universe, place, object);
+    if object.degrades_in(place.kind) {
+        fragments.push(crate::navigation::Fragment::text(format!(
+            " | Condition {:.1}%",
+            object.condition.fraction() * 100.0
+        )));
+        let multiplier = place
+            .object_room(object.id)
+            .and_then(|id| {
+                place
+                    .buildings
+                    .iter()
+                    .flat_map(|building| &building.rooms)
+                    .find(|room| room.id == id)
+            })
+            .map_or(1.0, |room| 1.0 + 4.0 * (1.0 - room.condition.fraction()));
+        if !tooltip.is_empty() {
+            tooltip.push('\n');
+        }
+        tooltip.push_str(&format!(
+            "Condition {:.3}% | Wear {:.2}x",
+            object.condition.fraction() * 100.0,
+            multiplier
+        ));
+    }
     parent
         .spawn((
             Node {
@@ -696,7 +721,7 @@ fn render_hierarchy(
                     content,
                     universe,
                     place.id,
-                    building.id,
+                    Some(building.id),
                     None,
                     construction,
                 );
@@ -711,7 +736,15 @@ fn render_hierarchy(
                     .with_children(|rooms| {
                         for room in &building.rooms {
                             row(rooms, |header| {
-                                header.spawn(text(room_readout(room), 14.0, MUTED));
+                                header.spawn((
+                                    text(room_readout(room), 14.0, MUTED),
+                                    Interaction::None,
+                                    crate::tooltip::Tooltip(format!(
+                                        "Condition {:.3}% | Object wear {:.2}x",
+                                        room.condition.fraction() * 100.0,
+                                        1.0 + 4.0 * (1.0 - room.condition.fraction())
+                                    )),
+                                ));
                                 crate::construction::render_choices(
                                     header,
                                     universe,
@@ -733,7 +766,7 @@ fn render_hierarchy(
                                 rooms,
                                 universe,
                                 place.id,
-                                building.id,
+                                Some(building.id),
                                 Some(room.id),
                                 construction,
                             );
@@ -754,6 +787,14 @@ fn render_hierarchy(
                     });
             }
             if !place.outdoor_objects.is_empty() {
+                crate::construction::render_projects(
+                    content,
+                    universe,
+                    place.id,
+                    None,
+                    None,
+                    construction,
+                );
                 content.spawn(text("Outdoors", 14.0, MUTED));
                 content
                     .spawn(Node {
@@ -2533,7 +2574,10 @@ mod tests {
         let map = world.map();
         let place = map.place(site).unwrap();
         let room = &place.buildings[0].rooms[0];
-        assert_eq!(room_readout(room), "Workroom | Area 14/24 m2 | Workers 1");
+        assert_eq!(
+            room_readout(room),
+            "Workroom | Area 14/24 m2 | Workers 1 | Condition 100.0%"
+        );
         let vessel = room
             .objects
             .iter()
@@ -2569,7 +2613,7 @@ mod tests {
         assert!(tooltip.starts_with("Ready: "));
         assert_eq!(
             room_readout(&place.buildings[0].rooms[0]),
-            "Workroom | Area 14/24 m2 | Workers 0"
+            "Workroom | Area 14/24 m2 | Workers 0 | Condition 100.0%"
         );
     }
 
@@ -2631,7 +2675,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label == "Bedroom | Area 3/6 m2 | Workers 0")
+                .any(|label| label == "Bedroom | Area 3/6 m2 | Workers 0 | Condition 100.0%")
         );
         assert!(labels.iter().any(|label| label == "Bed | Resident: "));
         assert!(labels.iter().any(|label| label == "Berry bushes"));

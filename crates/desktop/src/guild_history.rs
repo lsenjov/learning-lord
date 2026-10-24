@@ -117,6 +117,9 @@ pub(crate) fn render(
             day.closing_coins
         ),
     );
+    if let Some(cashflow) = crate::construction::cashflow(day.construction) {
+        label(parent, cashflow);
+    }
     for (caption, debts) in [
         ("OPENING OUTSTANDING FEES", &day.opening_outstanding),
         (

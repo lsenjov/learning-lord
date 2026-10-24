@@ -3,7 +3,8 @@ use bevy::prelude::*;
 use learning_lord_simulation::{
     AgentId, Universe,
     construction::{
-        ConstructionItem, ConstructionProject, ContractId, ContractStatus, HOUR_MS, ProjectId,
+        ConstructionClient, ConstructionItem, ConstructionProject, ContractId, ContractStatus,
+        HOUR_MS, ProjectId,
     },
     locations::{Building, BuildingId, Place, PlaceId, RoomId, RoomSize},
 };
@@ -74,6 +75,19 @@ fn budget(
         .map_err(|error| error.to_string())
 }
 
+fn client_budget_tip(universe: &Universe, client: ConstructionClient) -> String {
+    match client {
+        ConstructionClient::Town => format!("Town treasury: {} coins", universe.town_treasury()),
+        ConstructionClient::Account(owner) => {
+            if let Some(guild) = universe.guilds().get(&owner) {
+                format!("Guild cash: {} coins", guild.coins)
+            } else {
+                budget_tip(universe, owner)
+            }
+        }
+    }
+}
+
 fn budget_tip(universe: &Universe, owner: AgentId) -> String {
     match budget(universe, owner) {
         Ok(budget) => format!(
@@ -112,10 +126,11 @@ fn unavailable(
         Err(error) => return Some(error.to_string()),
     };
     if universe.construction().projects.values().any(|project| {
-        !project.completed
-            && project.client == budget.account
+        project.repair.is_none()
+            && !project.completed
+            && project.client == ConstructionClient::Account(budget.account)
             && project.place == destination.place
-            && project.building == destination.building
+            && project.building == Some(destination.building)
             && project.room == destination.room
             && project.item == item
             && latest_contract(universe, project)
@@ -258,11 +273,17 @@ fn latest_contract<'a>(
 }
 
 fn continuation_reason(universe: &Universe, project: &ConstructionProject) -> Option<String> {
-    if let Err(error) = universe.validate_construction_continuation(project.client, project.id) {
+    if project.repair.is_some() {
+        return Some("Repair tenders are posted automatically".into());
+    }
+    let Some(client) = project.client.account() else {
+        return Some("Town-funded repairs are automatic".into());
+    };
+    if let Err(error) = universe.validate_construction_continuation(client, project.id) {
         return Some(error.to_string());
     }
     let available = match universe.construction_tender_offer(
-        project.client,
+        client,
         project.place,
         project.remaining_base_ms(),
         project.missing_wood(),
@@ -304,23 +325,68 @@ fn project_status(universe: &Universe, project: &ConstructionProject) -> String 
         .filter(|contract| contract.status == ContractStatus::Bidding)
         .map(|contract| contract.quotes.len())
         .sum();
+    let working = if project.repair.is_some() {
+        "repairing"
+    } else {
+        "building"
+    };
     match (active, bidding) {
         (0, 0) => match latest_contract(universe, project).map(|contract| contract.status) {
             Some(ContractStatus::NoBids) => "No bids".into(),
             Some(ContractStatus::Cancelled) => "Cancelled".into(),
             _ => "Unfinished".into(),
         },
-        (_, 0) => format!("{active} building"),
+        (_, 0) => format!("{active} {working}"),
         (0, _) => format!("{bidding} bidding | {bids} bids"),
-        _ => format!("{active} building | {bidding} bidding | {bids} bids"),
+        _ => format!("{active} {working} | {bidding} bidding | {bids} bids"),
     }
+}
+
+fn project_label(universe: &Universe, project: &ConstructionProject) -> String {
+    use learning_lord_simulation::construction::RepairTarget;
+    let Some(target) = project.repair else {
+        return project.item.name().into();
+    };
+    let map = universe.map();
+    let Ok(place) = map.place(project.place) else {
+        return format!("Repair {}", project.item.name());
+    };
+    let target = match target {
+        RepairTarget::Room(id) => place
+            .buildings
+            .iter()
+            .flat_map(|building| &building.rooms)
+            .find(|room| room.id == id)
+            .map(|room| room.name.clone()),
+        RepairTarget::Object(id) => place.object(id).map(|object| {
+            let same: Vec<_> = place
+                .objects()
+                .filter(|other| {
+                    std::mem::discriminant(&other.kind) == std::mem::discriminant(&object.kind)
+                })
+                .collect();
+            if same.len() > 1 {
+                format!(
+                    "{} {}",
+                    object.kind.name(),
+                    same.iter().position(|other| other.id == id).unwrap() + 1
+                )
+            } else {
+                object.kind.name().into()
+            }
+        }),
+    };
+    format!(
+        "Repair {}",
+        target.unwrap_or_else(|| project.item.name().into())
+    )
 }
 
 pub(crate) fn render_projects(
     parent: &mut ChildSpawnerCommands,
     universe: &Universe,
     place: PlaceId,
-    building: BuildingId,
+    building: Option<BuildingId>,
     room: Option<RoomId>,
     state: &State,
 ) {
@@ -349,20 +415,28 @@ pub(crate) fn render_projects(
         let mut tooltip = format!(
             "Progress: {:.1}/{} base labour hours\nInstalled wood: {}/{} g\nMissing wood: {} g\n{}",
             project.completed_base_ms as f64 / HOUR_MS as f64,
-            project.item.base_hours(),
+            project.total_base_ms as f64 / HOUR_MS as f64,
             project.installed_wood,
-            project.item.wood(),
+            project.total_wood,
             project.missing_wood(),
-            budget_tip(universe, project.client)
+            client_budget_tip(universe, project.client)
         );
         tooltip.push_str(&format!(
             "\nUnallocated project escrow: {} coins",
             project.escrow
         ));
+        if project.repair.is_some() {
+            tooltip.push_str(&format!(
+                "\nRepair scope: {:.3}% of original condition",
+                project.repair_damage_units as f64
+                    / learning_lord_simulation::condition::MAX_CONDITION_UNITS as f64
+                    * 100.0
+            ));
+        }
         for contract in open_contracts
             .iter()
             .copied()
-            .chain(contract.filter(|_| open_contracts.is_empty()).into_iter())
+            .chain(contract.filter(|_| open_contracts.is_empty()))
         {
             tooltip.push_str(&format!("\nPortion {}", contract.stage + 1));
             tooltip.push_str(&format!(
@@ -413,18 +487,18 @@ pub(crate) fn render_projects(
                 crate::tooltip::Tooltip(tooltip.clone()),
             ))
             .with_children(|row| {
-                let percent = project.completed_base_ms.saturating_mul(100)
-                    / (project.item.base_hours() * HOUR_MS);
+                let percent = project.completed_base_ms.saturating_mul(100) / project.total_base_ms;
                 row.spawn(text(
-                    format!("{} | {status} | {percent}%", project.item.name()),
+                    format!(
+                        "{} | {status} | {percent}%",
+                        project_label(universe, project)
+                    ),
                     13.0,
                     MUTED,
                 ));
-                for contract in open_contracts
-                    .iter()
-                    .copied()
-                    .filter(|contract| contract.status == ContractStatus::Bidding)
-                {
+                for contract in open_contracts.iter().copied().filter(|contract| {
+                    project.repair.is_none() && contract.status == ContractStatus::Bidding
+                }) {
                     button(
                         row,
                         format!("Cancel portion {}", contract.stage + 1),
@@ -437,7 +511,7 @@ pub(crate) fn render_projects(
                         false,
                     );
                 }
-                if open_contracts.is_empty() {
+                if open_contracts.is_empty() && project.repair.is_none() {
                     button(
                         row,
                         "Continue",
@@ -538,16 +612,19 @@ pub(crate) fn handle(
                     state.error = Some(reason);
                     continue;
                 }
+                let Some(client) = project.client.account() else {
+                    continue;
+                };
                 let maximum_offer = universe
                     .construction_tender_offer(
-                        project.client,
+                        client,
                         project.place,
                         project.remaining_base_ms(),
                         project.missing_wood(),
                     )
                     .unwrap();
                 crate::simulation::Mutation::ContinueConstruction {
-                    client: project.client,
+                    client,
                     project: project_id,
                     maximum_offer,
                 }
@@ -562,8 +639,14 @@ pub(crate) fn handle(
                 let Some(project) = universe.construction().projects.get(&contract.project) else {
                     continue;
                 };
+                let Some(client) = project.client.account() else {
+                    continue;
+                };
+                if project.repair.is_some() {
+                    continue;
+                }
                 crate::simulation::Mutation::CancelConstruction {
-                    client: project.client,
+                    client,
                     contract: contract_id,
                 }
             }

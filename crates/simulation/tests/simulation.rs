@@ -273,10 +273,10 @@ fn nonfinite_hunger_results_are_rejected_without_changing_the_source() {
             .unwrap();
         let snapshot = universe.clone();
 
-        assert_eq!(
+        assert!(matches!(
             universe.advance(elapsed_ms),
-            Err(SimulationError::HungerOverflow)
-        );
+            Err(SimulationError::HungerOverflow | SimulationError::WellbeingOverflow)
+        ));
         assert_eq!(universe, snapshot);
     }
 }

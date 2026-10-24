@@ -8,6 +8,34 @@ use learning_lord_simulation::{
     taxation::{TaxAmount, TaxKind, TaxRate},
 };
 
+fn construction_escrow(
+    world: &Universe,
+    payer: learning_lord_simulation::construction::ConstructionClient,
+) -> i64 {
+    world
+        .construction()
+        .projects
+        .values()
+        .filter(|project| project.client == payer)
+        .map(|project| project.escrow)
+        .sum::<i64>()
+        + world
+            .construction()
+            .contracts
+            .values()
+            .filter(|contract| world.construction().projects[&contract.project].client == payer)
+            .map(|contract| contract.escrow)
+            .sum::<i64>()
+}
+
+fn town_cash_and_escrow(world: &Universe) -> i64 {
+    world.town_treasury()
+        + construction_escrow(
+            world,
+            learning_lord_simulation::construction::ConstructionClient::Town,
+        )
+}
+
 fn citizen(world: &Universe, id: AgentId) -> &Citizen {
     let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
     citizen
@@ -213,7 +241,7 @@ fn weekly_flat_fees_start_sunday_four_and_multiweek_steps_assess_every_boundary(
     let first = world.advance(FIRST_WEEKLY_SETTLEMENT_MS - 1).unwrap();
     assert_eq!(first.town_treasury(), 0);
     let next = first.advance(1 + 2 * WEEK_MS).unwrap();
-    assert_eq!(next.town_treasury(), 21);
+    assert_eq!(town_cash_and_escrow(&next), 21);
     assert_eq!(citizen(&next, id).coins(), 79);
     assert_eq!(next.tax_arrears(rule, id), 0);
     assert_eq!(
@@ -256,9 +284,23 @@ fn assets_tax_goods_owners_at_current_prices_and_exclude_town_carried_and_buildi
         .unwrap();
     let world = world.with_prices(Prices::default().with_price(Good::FlaxBlock, 4.0).unwrap());
     let next = world.advance(FIRST_WEEKLY_SETTLEMENT_MS).unwrap();
-    assert_eq!(next.town_treasury(), 4);
-    assert_eq!(citizen(&next, payer).coins(), 996);
-    assert_eq!(citizen(&next, owner).coins(), 100);
+    assert_eq!(town_cash_and_escrow(&next), 4);
+    assert_eq!(
+        citizen(&next, payer).coins()
+            + construction_escrow(
+                &next,
+                learning_lord_simulation::construction::ConstructionClient::Account(payer)
+            ),
+        996
+    );
+    assert_eq!(
+        citizen(&next, owner).coins()
+            + construction_escrow(
+                &next,
+                learning_lord_simulation::construction::ConstructionClient::Account(owner)
+            ),
+        100
+    );
     assert_eq!(next.tax_arrears(rule, payer), 0);
     assert_eq!(next.storage(), world.storage());
 }
@@ -419,7 +461,7 @@ fn rule_edits_and_removal_preserve_arrears_and_retired_debts_retry_weekly() {
         .advance(FIRST_WEEKLY_SETTLEMENT_MS + WEEK_MS - funded.current_time_ms())
         .unwrap();
     assert_eq!(paid.tax_arrears(rule, seller), 0);
-    assert_eq!(paid.town_treasury(), 20);
+    assert_eq!(town_cash_and_escrow(&paid), 20);
     assert_eq!(citizen(&paid, seller).coins(), revenue - 20);
     assert!(!paid.tax_rules()[&rule].active);
     assert_eq!(world.tax_arrears(rule, seller), 20);
@@ -638,13 +680,19 @@ fn cancellation_after_collection_and_treasury_overflow_roll_back_all_tax_state()
             },
         )
         .unwrap();
+    let (world, also_rich) = world
+        .with_citizen(
+            "Also rich",
+            Citizen::new(0.0).unwrap().with_coins(i64::MAX).unwrap(),
+        )
+        .unwrap();
     let (world, _) = world
         .with_tax_rule(
             place,
             "Overflow",
             TaxKind::FlatFee {
-                payer: learning_lord_simulation::taxation::TaxPayer::Agent(id),
-                coins: 1,
+                payer: learning_lord_simulation::taxation::TaxPayer::Agent(also_rich),
+                coins: i64::MAX,
             },
         )
         .unwrap();
@@ -747,7 +795,7 @@ fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
     let world = world.advance(FIRST_WEEKLY_SETTLEMENT_MS).unwrap();
     assert_eq!(world.tax_arrears(rule, ada), 20);
     assert_eq!(world.tax_arrears(rule, ben), 50);
-    assert_eq!(world.town_treasury(), 110);
+    assert_eq!(town_cash_and_escrow(&world), 110);
     let receipts: Vec<_> = world
         .tax_history()
         .iter()

@@ -122,6 +122,7 @@ pub struct Building {
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Room {
+    pub condition: crate::condition::Condition,
     pub id: RoomId,
     pub name: String,
     pub size: RoomSize,
@@ -129,6 +130,7 @@ pub struct Room {
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Object {
+    pub condition: crate::condition::Condition,
     pub id: ObjectId,
     pub kind: ObjectKind,
     pub workers: Vec<AgentId>,
@@ -302,8 +304,13 @@ impl Room {
     }
 }
 impl Object {
+    pub fn degrades_in(&self, place: Location) -> bool {
+        !matches!(place, Location::Forest | Location::River)
+            && crate::construction::ConstructionItem::from_object_kind(self.kind).is_some()
+    }
     pub fn new(kind: ObjectKind) -> Self {
         Self {
+            condition: Default::default(),
             id: ObjectId(Uuid::new_v4()),
             kind,
             workers: Vec::new(),
@@ -449,6 +456,7 @@ impl Building {
         };
         let storage = ObjectKind::storage_kit(kind);
         let mut rooms = vec![Room {
+            condition: Default::default(),
             id: RoomId(Uuid::new_v4()),
             name: "Storeroom".into(),
             size: RoomSize::fitting(storage.iter().map(|kind| kind.footprint_m2()).sum())
@@ -459,6 +467,7 @@ impl Building {
             rooms.insert(
                 0,
                 Room {
+                    condition: Default::default(),
                     id: RoomId(Uuid::new_v4()),
                     name: if kind == Location::Home {
                         "Bedroom"
@@ -584,6 +593,72 @@ impl Map {
     }
     pub fn place(&self, id: PlaceId) -> Result<&Place, SimulationError> {
         self.places.get(&id).ok_or(SimulationError::PlaceNotFound)
+    }
+    pub fn repair_target_condition(
+        &self,
+        place: PlaceId,
+        target: crate::construction::RepairTarget,
+    ) -> Result<crate::condition::Condition, SimulationError> {
+        let place = self.place(place)?;
+        match target {
+            crate::construction::RepairTarget::Room(id) => place
+                .buildings
+                .iter()
+                .flat_map(|building| &building.rooms)
+                .find(|room| room.id == id)
+                .map(|room| room.condition),
+            crate::construction::RepairTarget::Object(id) => {
+                place.object(id).map(|object| object.condition)
+            }
+        }
+        .ok_or(SimulationError::MissingProperty)
+    }
+
+    pub(crate) fn advance_conditions(
+        &mut self,
+        elapsed_ms: u64,
+        room_credits: &[(RoomId, u128)],
+        object_credits: &[(ObjectId, u128)],
+    ) {
+        use crate::condition::{MAX_CONDITION_UNITS, base_wear, room_object_wear};
+        fn aggregate<K: std::hash::Hash + Eq + Copy>(
+            credits: &[(K, u128)],
+        ) -> std::collections::HashMap<K, u128> {
+            let mut totals = std::collections::HashMap::<K, u128>::new();
+            for (id, units) in credits {
+                let total = totals.entry(*id).or_default();
+                *total = total.saturating_add(*units).min(MAX_CONDITION_UNITS);
+            }
+            totals
+        }
+        let rooms = aggregate(room_credits);
+        let objects = aggregate(object_credits);
+        let natural = base_wear(elapsed_ms);
+        for (_, place) in self.places.iter_mut() {
+            for room in place
+                .buildings
+                .iter_mut()
+                .flat_map(|building| &mut building.rooms)
+            {
+                let credit = rooms.get(&room.id).copied().unwrap_or(0);
+                let object_wear = room_object_wear(room.condition, elapsed_ms, credit);
+                room.condition.advance(natural, credit);
+                for object in &mut room.objects {
+                    if object.degrades_in(place.kind) {
+                        object
+                            .condition
+                            .advance(object_wear, objects.get(&object.id).copied().unwrap_or(0));
+                    }
+                }
+            }
+            for object in &mut place.outdoor_objects {
+                if object.degrades_in(place.kind) {
+                    object
+                        .condition
+                        .advance(natural, objects.get(&object.id).copied().unwrap_or(0));
+                }
+            }
+        }
     }
     pub fn public_place(&self, kind: Location) -> PlaceId {
         self.places
@@ -717,7 +792,8 @@ impl Map {
                     return Err(SaveError::InvalidState("invalid building"));
                 }
                 for room in &building.rooms {
-                    if !identities.insert(room.id.0)
+                    if !room.condition.valid()
+                        || !identities.insert(room.id.0)
                         || room.id.0.get_version_num() != 4
                         || room.used_area_m2() > room.size.area_m2()
                         || room.objects.iter().any(|object| {
@@ -730,7 +806,8 @@ impl Map {
                 }
             }
             for object in place.objects() {
-                if !identities.insert(object.id.0)
+                if !object.condition.valid()
+                    || !identities.insert(object.id.0)
                     || object.id.0.get_version_num() != 4
                     || (!object.kind.unlimited_workers() && object.workers.len() > 1)
                     || (object.kind.is_storage() && !object.workers.is_empty())
@@ -876,6 +953,7 @@ impl Map {
             .expect("accessible home building exists")
             .rooms
             .push(Room {
+                condition: Default::default(),
                 id: RoomId(Uuid::new_v4()),
                 name: "Bedroom".into(),
                 size: RoomSize::Small,
@@ -941,10 +1019,11 @@ impl Map {
         let building = site
             .buildings
             .iter_mut()
-            .find(|building| building.id == project.building)
+            .find(|building| Some(building.id) == project.building)
             .ok_or(SimulationError::MissingProperty)?;
         match project.item {
             crate::construction::ConstructionItem::Room(size) => building.rooms.push(Room {
+                condition: Default::default(),
                 id: match project.output {
                     crate::construction::ConstructionOutput::Room(id) => id,
                     _ => return Err(SimulationError::MissingProperty),
@@ -960,6 +1039,7 @@ impl Map {
                 .ok_or(SimulationError::MissingProperty)?
                 .objects
                 .push(Object {
+                    condition: Default::default(),
                     id: match project.output {
                         crate::construction::ConstructionOutput::Object(id) => id,
                         _ => return Err(SimulationError::MissingProperty),
@@ -975,6 +1055,88 @@ impl Map {
 #[cfg(test)]
 mod space_tests {
     use super::*;
+
+    #[test]
+    fn condition_wears_constructed_objects_and_preserves_exempt_resources() {
+        use crate::condition::{CONDITION_LIFETIME_MS, MAX_CONDITION_UNITS};
+        let owner = AgentId(Uuid::new_v4());
+        let (mut map, home) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(owner), "Home")
+            .unwrap();
+        let before = map.clone();
+        map.advance_conditions(CONDITION_LIFETIME_MS / 10, &[], &[]);
+        let room = &map.place(home).unwrap().buildings[0].rooms[0];
+        assert_eq!(
+            room.condition.condition_units(),
+            MAX_CONDITION_UNITS * 9 / 10
+        );
+        assert_eq!(
+            room.objects[0].condition.condition_units(),
+            MAX_CONDITION_UNITS * 88 / 100
+        );
+        for location in [Location::Forest, Location::River] {
+            let site = map.public_place(location);
+            assert_eq!(map.place(site).unwrap(), before.place(site).unwrap());
+        }
+        for location in [Location::Market, Location::Warehouse] {
+            let site = map.public_place(location);
+            for object in map.place(site).unwrap().objects() {
+                if object.degrades_in(location) {
+                    assert_eq!(
+                        object.condition.condition_units(),
+                        MAX_CONDITION_UNITS * 9 / 10
+                    );
+                }
+            }
+        }
+        let mut split = before;
+        split.advance_conditions(CONDITION_LIFETIME_MS / 20, &[], &[]);
+        split.advance_conditions(CONDITION_LIFETIME_MS / 20, &[], &[]);
+        assert_eq!(map, split);
+    }
+
+    #[test]
+    fn room_repair_credits_combine_before_object_wear_and_do_not_depend_on_order() {
+        use crate::condition::{CONDITION_LIFETIME_MS, Condition, MAX_CONDITION_UNITS};
+        let owner = AgentId(Uuid::new_v4());
+        let (mut map, home) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(owner), "Home")
+            .unwrap();
+        let room = &mut map.places_mut().get_mut(&home).unwrap().buildings[0].rooms[0];
+        room.condition = Condition::from_units(MAX_CONDITION_UNITS / 2).unwrap();
+        let id = room.id;
+        let mut reverse = map.clone();
+        let first = (id, MAX_CONDITION_UNITS / 10);
+        let second = (id, MAX_CONDITION_UNITS * 4 / 10);
+        map.advance_conditions(CONDITION_LIFETIME_MS / 10, &[first, second], &[]);
+        reverse.advance_conditions(CONDITION_LIFETIME_MS / 10, &[second, first], &[]);
+        assert_eq!(map, reverse);
+        let room = &map.place(home).unwrap().buildings[0].rooms[0];
+        assert_eq!(
+            room.condition.condition_units(),
+            MAX_CONDITION_UNITS * 9 / 10
+        );
+        assert_eq!(
+            room.objects[0].condition.condition_units(),
+            MAX_CONDITION_UNITS * 78 / 100
+        );
+        map.validate_save().unwrap();
+    }
+
+    #[test]
+    fn saved_condition_outside_its_bounds_is_rejected() {
+        let owner = AgentId(Uuid::new_v4());
+        let (mut map, home) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(owner), "Home")
+            .unwrap();
+        let invalid = ron::from_str(&format!(
+            "(remaining_units:{})",
+            crate::condition::MAX_CONDITION_UNITS + 1
+        ))
+        .unwrap();
+        map.places_mut().get_mut(&home).unwrap().buildings[0].rooms[0].condition = invalid;
+        assert!(map.validate_save().is_err());
+    }
 
     #[test]
     fn initial_rooms_use_smallest_fitting_preset() {

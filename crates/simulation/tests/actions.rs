@@ -304,10 +304,11 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
                     .with_citizen("Ada", citizen)
                     .unwrap();
             let snapshot = universe.clone();
-            assert_eq!(
+            // An intervening maintenance boundary can expose wellbeing overflow first.
+            assert!(matches!(
                 universe.advance(120 * MINUTE_MS),
-                Err(SimulationError::HungerOverflow)
-            );
+                Err(SimulationError::HungerOverflow | SimulationError::WellbeingOverflow)
+            ));
             assert_eq!(universe, snapshot);
         }
     }

@@ -171,7 +171,44 @@ fn each_universe_has_a_distinct_map_and_citizens_start_at_home() {
         let AgentKind::Citizen(citizen) = &inhabited.agents()[&id].kind;
         assert_eq!(citizen.position(), map.position(citizen.home()));
         assert_eq!(citizen.map(), map);
-        assert_eq!(inhabited.advance(123).unwrap().map(), map);
+        let advanced = inhabited.advance(123).unwrap();
+        let advanced_map = advanced.map();
+        assert_eq!(advanced_map.places().len(), map.places().len());
+        for (id, place) in map.places() {
+            let after = advanced_map.place(*id).unwrap();
+            assert_eq!(
+                (after.kind, after.position, after.owner),
+                (place.kind, place.position, place.owner)
+            );
+            assert_eq!(
+                after
+                    .buildings
+                    .iter()
+                    .map(|building| building.id)
+                    .collect::<Vec<_>>(),
+                place
+                    .buildings
+                    .iter()
+                    .map(|building| building.id)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                after
+                    .buildings
+                    .iter()
+                    .flat_map(|building| building.rooms.iter().map(|room| room.id))
+                    .collect::<Vec<_>>(),
+                place
+                    .buildings
+                    .iter()
+                    .flat_map(|building| building.rooms.iter().map(|room| room.id))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                after.objects().map(|object| object.id).collect::<Vec<_>>(),
+                place.objects().map(|object| object.id).collect::<Vec<_>>()
+            );
+        }
     }
 }
 
