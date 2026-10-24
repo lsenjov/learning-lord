@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 12;
+pub const SAVE_VERSION: u32 = 13;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -145,6 +145,7 @@ impl Universe {
         self.validate_guild_histories()?;
         self.validate_work_reservations()?;
         self.validate_production_trials()?;
+        self.validate_construction()?;
         if self.town_treasury < 0 {
             return Err(SaveError::InvalidState("negative town treasury"));
         }

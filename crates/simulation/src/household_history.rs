@@ -47,6 +47,7 @@ pub struct DailyHouseholdHistory {
     pub purchases: Coins,
     pub taxes_paid: Coins,
     pub workshop_fees_paid: Coins,
+    pub construction: crate::construction::ConstructionCash,
     pub produced: [Quantity; Good::COUNT],
     pub bought: [Quantity; Good::COUNT],
     pub sold: [Quantity; Good::COUNT],
@@ -66,6 +67,7 @@ impl DailyHouseholdHistory {
             purchases: 0,
             taxes_paid: 0,
             workshop_fees_paid: 0,
+            construction: Default::default(),
             produced: [0; Good::COUNT],
             bought: [0; Good::COUNT],
             sold: [0; Good::COUNT],
@@ -326,6 +328,10 @@ impl Universe {
                         day.purchases,
                         day.taxes_paid,
                         day.workshop_fees_paid,
+                        day.construction.escrow_deposited,
+                        day.construction.escrow_refunded,
+                        day.construction.payments_received,
+                        day.construction.payments_paid,
                     ]
                     .iter()
                     .any(|coins| *coins < 0)
@@ -333,6 +339,9 @@ impl Universe {
                         - i128::from(day.purchases)
                         - i128::from(day.taxes_paid)
                         - i128::from(day.workshop_fees_paid)
+                        - i128::from(day.construction.escrow_deposited)
+                        + i128::from(day.construction.escrow_refunded)
+                        + i128::from(day.construction.payments_received)
                         != i128::from(day.closing_coins)
                 {
                     return Err(invalid());

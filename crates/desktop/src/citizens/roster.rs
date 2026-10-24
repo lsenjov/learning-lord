@@ -121,6 +121,7 @@ pub(super) fn activity(action: Option<CitizenAction>) -> &'static str {
             | Harvest { .. }
             | Clear { .. },
         ) => "Producing",
+        Some(Construct { .. }) => "Constructing",
         Some(Travel(_)) => "Travelling",
         Some(BuyFood(_) | Buy(_) | BuyAt { .. } | ListExcess | List(..) | ListAt { .. }) => {
             "Trading"

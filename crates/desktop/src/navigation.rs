@@ -275,6 +275,7 @@ pub(crate) fn action(
 ) -> Vec<Fragment> {
     use learning_lord_simulation::CitizenAction as A;
     match action {
+        A::Construct { place: id, .. } => vec![Fragment::text("Construct at "), place(citizen, id)],
         A::BuyFood(good) => vec![Fragment::text("Buy "), Fragment::good(good)],
         A::List(good, units) | A::Withdraw(good, units) => vec![
             Fragment::text(format!(

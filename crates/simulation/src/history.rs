@@ -34,6 +34,7 @@ pub struct DailyCitizenHistory {
     pub coins_earned: Coins,
     pub coins_spent: Coins,
     pub workshop_fees_paid: Coins,
+    pub construction: crate::construction::ConstructionCash,
     pub worst_hunger: f64,
     pub worst_thirst: f64,
     pub worst_tiredness: f64,
@@ -57,6 +58,7 @@ impl DailyCitizenHistory {
             coins_earned: 0,
             coins_spent: 0,
             workshop_fees_paid: 0,
+            construction: Default::default(),
             worst_hunger: citizen.hunger(),
             worst_thirst: citizen.thirst(),
             worst_tiredness: citizen.tiredness(),
@@ -111,7 +113,15 @@ impl CitizenHistory {
             ]
             .into_iter()
             .try_fold(0_u64, u64::checked_add);
-            if day.end_ms < day.start_ms
+            if [
+                day.construction.escrow_deposited,
+                day.construction.escrow_refunded,
+                day.construction.payments_received,
+                day.construction.payments_paid,
+            ]
+            .into_iter()
+            .any(|cash| cash < 0)
+                || day.end_ms < day.start_ms
                 || day.end_ms > now
                 || day.elapsed_ms != day.end_ms - day.start_ms
                 || day.elapsed_ms > crate::marketplace::DAY_MS
@@ -200,7 +210,8 @@ impl CitizenHistory {
                 | CitizenAction::Tend { .. }
                 | CitizenAction::Harvest { .. }
                 | CitizenAction::Clear { .. }
-                | CitizenAction::CollectBeer { .. },
+                | CitizenAction::CollectBeer { .. }
+                | CitizenAction::Construct { .. },
             ) => &mut self.current.activity.production_ms,
             Some(CitizenAction::Travel(_)) => &mut self.current.activity.travel_ms,
             Some(CitizenAction::Sleep) => &mut self.current.activity.sleep_ms,

@@ -87,7 +87,8 @@ impl CitizenAction {
             | Self::Tend { .. }
             | Self::Harvest { .. }
             | Self::Clear { .. }
-            | Self::CollectBeer { .. } => &[Production],
+            | Self::CollectBeer { .. }
+            | Self::Construct { .. } => &[Production],
             Self::Travel(_)
             | Self::ListExcess
             | Self::List(..)
@@ -2106,7 +2107,7 @@ fn production_at_site(
     })
 }
 
-pub(super) fn need_eligible(citizen: &Citizen, goal: Effect) -> bool {
+pub(crate) fn need_eligible(citizen: &Citizen, goal: Effect) -> bool {
     match goal {
         Effect::ReduceHunger => citizen.hunger() > 0.0,
         Effect::ReduceThirst => citizen.thirst() > 0.0,

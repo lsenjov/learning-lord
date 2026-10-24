@@ -929,6 +929,49 @@ impl Map {
     }
 }
 
+impl Map {
+    pub(crate) fn install_construction(
+        &mut self,
+        project: &crate::construction::ConstructionProject,
+    ) -> Result<(), SimulationError> {
+        let site = self
+            .places
+            .get_mut(&project.place)
+            .ok_or(SimulationError::PlaceNotFound)?;
+        let building = site
+            .buildings
+            .iter_mut()
+            .find(|building| building.id == project.building)
+            .ok_or(SimulationError::MissingProperty)?;
+        match project.item {
+            crate::construction::ConstructionItem::Room(size) => building.rooms.push(Room {
+                id: match project.output {
+                    crate::construction::ConstructionOutput::Room(id) => id,
+                    _ => return Err(SimulationError::MissingProperty),
+                },
+                name: project.item.name().into(),
+                size,
+                objects: Vec::new(),
+            }),
+            _ => building
+                .rooms
+                .iter_mut()
+                .find(|room| Some(room.id) == project.room)
+                .ok_or(SimulationError::MissingProperty)?
+                .objects
+                .push(Object {
+                    id: match project.output {
+                        crate::construction::ConstructionOutput::Object(id) => id,
+                        _ => return Err(SimulationError::MissingProperty),
+                    },
+                    kind: project.item.object_kind().unwrap(),
+                    workers: Vec::new(),
+                }),
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod space_tests {
     use super::*;

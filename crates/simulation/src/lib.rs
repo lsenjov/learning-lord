@@ -5,6 +5,7 @@ use std::fmt;
 use uuid::Uuid;
 
 pub mod calendar;
+pub mod construction;
 pub mod construction_finance;
 pub mod storage;
 pub mod taxation;
@@ -185,6 +186,13 @@ pub enum CitizenAction {
         place: PlaceId,
         list: marketplace::ShoppingList,
     },
+    Construct {
+        contract: construction::ContractId,
+        place: PlaceId,
+        base_ms: u64,
+        duration_ms: u64,
+        practice_ms: u64,
+    },
     Travel(PlaceId),
 }
 
@@ -198,6 +206,7 @@ impl CitizenAction {
 
     pub fn required_place(self, citizen: &Citizen) -> Option<PlaceId> {
         match self {
+            Self::Construct { place, .. } => Some(place),
             Self::CollectBeer { brewery, .. } => Some(brewery),
             Self::Sleep | Self::Eat | Self::Drink => Some(citizen.home),
             Self::Plant { field, .. }
@@ -303,6 +312,7 @@ pub enum StartingRole {
     Tailor,
     Fisher,
     Brewer,
+    Carpenter,
 }
 
 impl StartingRole {
@@ -316,6 +326,7 @@ impl StartingRole {
             Self::Tailor => "Tailor",
             Self::Fisher => "Fisher",
             Self::Brewer => "Brewer",
+            Self::Carpenter => "Carpenter",
         }
     }
 }
@@ -356,6 +367,10 @@ pub struct Citizen {
     work_period: u64,
     work_ms: u64,
     coins: Coins,
+    construction_escrow: Coins,
+    construction_protected: Coins,
+    construction_access: Option<PlaceId>,
+    construction_wood_reserve: Quantity,
     forage_rng: Xoshiro256PlusPlus,
     prices: Prices,
     market: Market,
@@ -424,6 +439,10 @@ impl Citizen {
             work_period: 0,
             work_ms: 0,
             coins: 0,
+            construction_escrow: 0,
+            construction_protected: 0,
+            construction_access: None,
+            construction_wood_reserve: 0,
             forage_rng: rand::make_rng(),
             prices: Prices::default(),
             market: Market::default(),
@@ -591,6 +610,7 @@ impl Citizen {
             StartingRole::Tailor => production::Skill::Tailoring,
             StartingRole::Fisher => production::Skill::Fishing,
             StartingRole::Brewer => production::Skill::Brewing,
+            StartingRole::Carpenter => production::Skill::Carpentry,
         };
         citizen.skills[skill as usize] = Some(0);
         citizen
@@ -739,7 +759,8 @@ impl Citizen {
     }
 
     pub(crate) fn economic_wealth(&self) -> Result<f64, SimulationError> {
-        let mut wealth = self.coins as f64 - self.workshop_fee_liability()
+        let mut wealth = self.coins as f64 + self.construction_escrow as f64
+            - self.workshop_fee_liability()
             + self.prices.value(Good::FlaxGarment, 1).unwrap_or(0.0)
                 * self.garment_condition.unwrap_or(0.0);
         for good in Good::ALL {
@@ -808,7 +829,10 @@ impl Citizen {
 
     fn accessible_place(&self, id: PlaceId) -> Result<&locations::Place, SimulationError> {
         let place = self.map.place(id)?;
-        if place.kind == Location::Home && !self.may_use_place(place) {
+        if place.kind == Location::Home
+            && !self.may_use_place(place)
+            && self.construction_access != Some(id)
+        {
             return Err(SimulationError::PrivateProperty);
         }
         Ok(place)
@@ -817,6 +841,24 @@ impl Citizen {
     pub fn action_duration_ms(&self, action: CitizenAction) -> Result<u64, SimulationError> {
         self.action_objects(action)?;
         Ok(match action {
+            CitizenAction::Construct {
+                place,
+                base_ms,
+                duration_ms,
+                ..
+            } => {
+                if self.construction_access != Some(place)
+                    || base_ms == 0
+                    || duration_ms == 0
+                    || duration_ms > construction::HOUR_MS
+                    || self
+                        .skill_practice_ms(production::Skill::Carpentry)
+                        .is_none()
+                {
+                    return Err(SimulationError::MissingProperty);
+                }
+                duration_ms
+            }
             CitizenAction::Travel(destination) => (self
                 .position
                 .distance(self.accessible_place(destination)?.position)
@@ -1175,6 +1217,8 @@ impl Citizen {
 
     pub fn reserved_goods(&self) -> Result<marketplace::ShoppingList, SimulationError> {
         let mut reserve = self.production_ingredient_reserve()?;
+        reserve[Good::Wood as usize] =
+            reserve[Good::Wood as usize].max(self.construction_wood_reserve);
         reserve[Good::FlaxGarment as usize] = reserve[Good::FlaxGarment as usize]
             .checked_add(self.spare_clothing_target())
             .ok_or(SimulationError::InventoryOverflow)?;
@@ -1648,11 +1692,15 @@ impl Citizen {
                     recipe.skill()
                 }
                 CitizenAction::CollectBeer { .. } => Some(production::Skill::Brewing),
+                CitizenAction::Construct { .. } => Some(production::Skill::Carpentry),
                 action if action.crop_plot().is_some() => Some(production::Skill::Farming),
                 _ => None,
             };
             if active.action.production_recipe().is_some()
-                || matches!(active.action, CitizenAction::CollectBeer { .. })
+                || matches!(
+                    active.action,
+                    CitizenAction::CollectBeer { .. } | CitizenAction::Construct { .. }
+                )
                 || active.action.crop_plot().is_some()
                 || matches!(active.action, CitizenAction::Travel(_))
                     && citizen
@@ -1947,7 +1995,21 @@ impl Citizen {
             self.market_party(),
             place,
             (good, units),
-            (self.coins.min(budget), ceiling),
+            (
+                self.coins
+                    .saturating_sub(
+                        if good.nutrition_per_unit().is_some()
+                            || matches!(good, Good::Water | Good::Beer | Good::FlaxGarment)
+                        {
+                            0
+                        } else {
+                            self.construction_protected
+                        },
+                    )
+                    .max(0)
+                    .min(budget),
+                ceiling,
+            ),
             self.market_time_ms
                 .checked_add(elapsed_ms)
                 .ok_or(SimulationError::TimeOverflow)?,
@@ -2034,6 +2096,7 @@ pub struct Universe {
     workshop_fees: HashMap<(AgentId, AgentId), guilds::WorkshopFeeAccount>,
     town_treasury: Coins,
     taxation: taxation::Taxation,
+    construction: construction::Construction,
 }
 
 impl Default for Universe {
@@ -2052,6 +2115,7 @@ impl Default for Universe {
             workshop_fees: HashMap::new(),
             town_treasury: 0,
             taxation: taxation::Taxation::default(),
+            construction: construction::Construction::default(),
         }
     }
 }
@@ -2495,6 +2559,7 @@ impl Universe {
                 runtime.planning_event(citizen, universe.current_time_ms)?;
             }
         }
+        universe.process_construction()?;
         while universe.current_time_ms < end {
             if should_cancel() {
                 return Ok(None);
@@ -2529,7 +2594,8 @@ impl Universe {
                 .min(until_update)
                 .min(until_week)
                 .min(boundary)
-                .min(planning_boundary);
+                .min(planning_boundary)
+                .min(universe.construction_boundary().unwrap_or(u64::MAX));
             let finishing_time = universe.current_time_ms + step;
             let trades_before = universe.market.trades().len();
             let taxes_before = universe.taxation.history.len();
@@ -2655,6 +2721,9 @@ impl Universe {
                         step.min(active.remaining_ms()),
                         produced,
                     )?;
+                }
+                if let Some(active) = action_before.active_action() {
+                    universe.advance_construction_work(*id, active, step, finishing_time)?;
                 }
                 let before = &action_before;
                 if let Some(active) = before
@@ -2808,6 +2877,7 @@ impl Universe {
                     .unwrap()
                     .close_day(finishing_time, citizen);
             }
+            universe.process_construction()?;
             let histories_before = universe.citizen_histories.clone();
             if step == until_update {
                 universe.refresh_market();
@@ -2892,6 +2962,13 @@ impl Universe {
                 if let Some(goal) = completed_maintenance {
                     universe.finish_maintenance(id, goal, finishing_time, true)?;
                     universe.refresh_market();
+                }
+                if universe.start_construction_action(id)? {
+                    if let Some(runtime) = runtime.as_deref_mut() {
+                        runtime.cancel(id);
+                    }
+                    universe.refresh_market();
+                    continue;
                 }
                 let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
                 citizen.market = universe.market.clone();
@@ -3160,11 +3237,30 @@ impl Universe {
             .map_or_else(marketplace::ShoppingList::default, |decision| {
                 decision.blocked_requests
             });
+        let construction_wood = self
+            .construction
+            .contracts
+            .values()
+            .find(|contract| {
+                contract.status == construction::ContractStatus::Active
+                    && contract.carpenter == Some(id)
+            })
+            .map_or(0, |contract| {
+                let project = &self.construction.projects[&contract.project];
+                project
+                    .missing_wood()
+                    .saturating_sub(citizen.available_units(Good::Wood))
+            });
         let request = marketplace::ShoppingList::new(Good::ALL.into_iter().map(|good| {
             (
                 good,
                 request
                     .units(good)
+                    .max(if good == Good::Wood {
+                        construction_wood
+                    } else {
+                        0
+                    })
                     .max(shortages.units(good))
                     .max(blocked.units(good)),
             )
@@ -3207,6 +3303,9 @@ impl Universe {
         id: AgentId,
         action: CitizenAction,
     ) -> Result<Self, SimulationError> {
+        if matches!(action, CitizenAction::Construct { .. }) {
+            return Err(SimulationError::MissingProperty);
+        }
         let agent = self.agents.get(&id).ok_or(SimulationError::AgentNotFound)?;
         let updated = agent.start_action(action)?;
         let mut universe = self.clone();

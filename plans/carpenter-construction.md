@@ -1,10 +1,10 @@
 # Carpenter construction
 
-Status: step 1 implemented; verification and independent review recorded below. Step 2 implemented and independently reviewed. Steps 3–4 have not started; contract payment/progress policy is under discussion.
+Status: step 1 implemented; verification and independent review recorded below. Step 2 implemented and independently reviewed. Step 3 is implemented with the agreed milestone payments and persistent unfinished construction; final verification is recorded below. Step 4 has not started.
 
 ## Scope
 
-Add carpenter-built rooms and installed objects, commissioned manually from Locations through household-funded market requests. Carpenters procure materials and perform persistent work. Autonomous commissioning, repair/deterioration, new standalone buildings, land purchases, storage quantity limits, employee/bulk contracts, and partial payments are deferred.
+Add carpenter-built rooms and installed objects, commissioned manually from Locations through household-funded market requests. Carpenters procure materials and perform persistent work. Autonomous commissioning, repair/deterioration, new standalone buildings, land purchases, storage quantity limits, and employee/bulk contracts are deferred. Payments are released at 12-base-labour-hour milestones.
 
 Use the existing building/room/object hierarchy, shared economic accounts, goods market, travel, and needs systems. Keep UI controls compact; explanations belong in tooltips or inspection details.
 
@@ -16,7 +16,7 @@ Use the existing building/room/object hierarchy, shared economic accounts, goods
 - A plot has 120 m² of total room area shared by all buildings. Completed rooms and pending room requests count. Outdoor resources/crop plots do not.
 - Building owners commission installed objects and repairs; room expansion requires ownership of both building and plot. Resolve ownership through household membership where applicable. Residents do not independently gain alteration rights.
 - Completed improvements belong to the building owner. Ordinary facility access remains unchanged.
-- Reserve room area for requested objects and plot allowance for requested rooms when posting; release reservations on cancellation/failure.
+- Reserve room area for requested objects and plot allowance for requested rooms when posting; release reservations on cancellation/failure only when no work/materials have been installed. Unfinished construction retains its space until completed; demolition is outside this feature.
 - Preserve rooms and their other contents when residents move. Constructed beds may be unassigned; resident assignment is separate.
 
 ## Construction requirements
@@ -55,7 +55,7 @@ All materials are wood initially, including placeholders for equipment that woul
 - Use seven-day history where applicable to estimate current lifestyle consumption and earning time. Separate recurring household costs from materials and capital purchases. Include clothing replacement and account for taxes/fees without double counting.
 - Carpenter hourly earnings target covers household essentials, current discretionary consumption, and a reserve-replenishment allowance, divided by realistic combined household earning hours. It does not fund an aspirational lifestyle.
 - Quote materials at current market values, including owned materials, and add expected procurement/construction time at the earnings target. No separate profit-margin setting initially.
-- A carpenter bids only when the job fits the maximum offer, can be completed by the deadline, and can be financed. Financing includes procurement and household living costs until expected payment, accounting for other commitments and shared funds.
+- A carpenter bids only when the job fits the maximum offer, can be completed by the deadline, and can be financed. Financing includes the materials and household living costs needed to reach the next milestone payment, accounting for other commitments and shared funds. Availability of the full material requirement is not a bidding prerequisite; carpenters can procure over time and record unmet demand for caravans.
 - Recheck the client's protected reserve at award. Cancel if the winning payment would compromise it.
 
 ## Market contract lifecycle
@@ -65,11 +65,12 @@ All materials are wood initially, including placeholders for equipment that woul
 3. Award to the lowest valid quote; randomly break equal-price ties. Revalidate affordability and commitments at award. Release the difference between maximum budget and winning quote.
 4. No valid quotes closes the request and releases cash/area. Reposting an unsuccessful request requires an increased available budget; do not add autonomous reposting in this version.
 5. Winner sources materials through existing economic actions and travels to the job site. Grant contract-specific work access, not general access to the client's stock.
-6. Consume required materials when construction starts. Store progress on the contract and perform work in one-hour actions (or a shorter final action). Meals, sleep, and replanning preserve progress. Awarded work remains a work commitment.
-7. Completion creates the usable room/object, converts the area reservation to occupied area, and pays the carpenter from reserved funds.
-8. The deadline is 30 simulation days after award. Failure releases the client's cash and area. Unused materials remain the carpenter's; consumed materials and incomplete work are lost.
+6. Procure and consume materials for each milestone when work on that milestone starts. Work proceeds in one-hour actions (or a shorter final action), with persistent base-work progress. Meals, sleep, and replanning preserve progress. Awarded work remains a work commitment.
+7. Release proportional payment after each 12 base labour hours, with a shorter final milestone when needed. Skills reduce actual time, not material quantities or payment proportions. Use cumulative integer settlement so the final total exactly matches the quote. On completion, create the usable room/object and convert the space reservation to occupied area.
+8. The deadline is 30 simulation days after award. Failure releases unpaid client escrow. All completed work and installed materials, including partial progress within an unpaid milestone, remain as household-owned unfinished construction occupying its space. Paid milestones are not refunded; the departing carpenter receives no payment for an incomplete milestone. Unused, uninstalled materials remain the carpenter's.
+9. A manual continuation request seeks quotes only for remaining work and missing materials. Preserve project identity, progress, installed materials and space across contracts; prevent concurrent contracts on the same project. Completed work is not usable until the full room/object is finished.
 
-Owner cancellation is allowed during bidding. Post-award discretionary cancellation is not part of the initial lifecycle. Payment is entirely on completion; no deposits or partial payments. Escrow remains owned wealth but cannot fund ordinary purchases or another commitment.
+Owner cancellation is allowed during bidding. Post-award discretionary cancellation is not part of the initial lifecycle. There are no advance deposits; milestone payments come from the client's full upfront escrow. Escrow remains owned wealth but cannot fund ordinary purchases or another commitment.
 
 ## Implementation steps
 
@@ -93,14 +94,15 @@ Each implementation step requires appropriate behavioural checks, an independent
 
 - Add carpenter skill/starting role and initial-world provisioning; settle initial carpenter count and skill before wiring generation.
 - Implement distinct construction contract records within the market feature, escrow, bidding, deterministic simulation event boundaries, area reservations, settlement, and persistence.
-- Integrate procurement, contract-specific access, persistent progress, short work actions, needs breaks, and skill practice.
+- Integrate procurement over time, contract-specific access, persistent project progress, short work actions, milestone payments, needs breaks, and skill practice.
+- Preserve unfinished projects across failure, including work/materials within unpaid milestones; manually re-tender only their remaining requirements. Financing forecasts the next payment rather than the entire project.
 - Reuse existing goods shopping and unlimited carrying; do not add a hauling-capacity subsystem.
 - Verify auction timing, random tie handling, competing commitments within one household, no-bid closure, cancellation, award revalidation, exact-once settlement, failure cleanup, and save/load during work.
 - Verify identical outcomes for equivalent split/large time advances, including completion/deadline ordering.
 
 ### 4. Locations controls and end-to-end evaluation
 
-- Add an Add room control on building rows and an Add object control on room rows. Disable unavailable choices with tooltip reasons.
+- Add an Add room control on building rows and an Add object control on room rows. Disable unavailable choices with tooltip reasons. Add a compact continuation control for unfinished projects without an active request/contract.
 - Submit requests through the existing simulation mutation channel; validate again in simulation state.
 - Expose concise request/bid/work status and inspection details for budget, quotes, progress, blockers, and deadline.
 - Exercise low-budget/no-bid requests and successful object/room construction through the full workflow. Inspect compact layouts and run relevant workspace checks.
@@ -112,7 +114,7 @@ Each implementation step requires appropriate behavioural checks, an independent
 - Expected earning hours and reserve-replenishment horizon, including new households.
 - How much discretionary consumption history to preserve versus minimum essential requirements.
 - Procurement/deadline forecasting under limited current supply; expected future supply is not a guaranteed purchase.
-- Treatment of taxes on contract payments and their financial-history attribution.
+- Contract payments are untaxed initially (agreed); record them separately from ordinary goods trades and capital/lifestyle consumption.
 - Initial carpenter population/skills and handling of privately owned versus guild-owned building controls.
 - Unassigned-bed assignment behaviour and visibility; no new rental system is implied.
 
@@ -141,3 +143,13 @@ These are outstanding details, not authorization to broaden the feature. The app
 - Added seven finance behavior tests covering shared accounts, missing/complete history, deprivation/self-provisioning, production and capital exclusion, standalone tax/fee history, earning time, liabilities, owned-material valuation and delayed financing. Extreme-balance tests preserve one-coin commitments and exact fractional liability rounding.
 - Independent review found loss of cash precision above 2^53. Protected cash/commitments/reserve now use integer arithmetic; debt components and fractional workshop fees aggregate exactly before rounding. README save-version documentation was corrected. Fresh review found no remaining high/medium issues.
 - Verification: full simulation library passed (402 passed, six ignored), including all seven finance tests and existing history, guild fee and persistence checks. Formatting passes.
+
+## Step 3 implementation evidence
+
+- Added a construction catalogue, persistent projects and sealed market contracts, full client escrow, hourly bid opportunities over a 24-hour auction, random equal-price selection, award revalidation and a 30-day deadline. Carpenter qualification and practice use the existing skill model. Three new unpractised carpenters bring the initial population to 33 and site count to 59.
+- Work advances in actions of at most one actual hour. Each contract pays cumulative rounded price fractions at 12 base-hour milestones and its shorter final milestone. Skill changes actual time only. Milestone materials are installed before work; completed and partial work and installed materials survive failure. Manually commissioned continuation prices only remaining work and missing materials.
+- Carpenters collect owned supplies and buy available partial fills through ordinary goods actions, retaining unmet demand for later supply. Quoted and active material requirements protect supplies from ordinary excess listing. Needs and reserve tasks use existing planner eligibility; ordinary planning resumes when work ends.
+- Escrow is removed from spendable cash and remains owned wealth. Dedicated citizen/household history fields record deposits, refunds and payments. New commitments account for shared household financing; essential goods may use living cash, other workers' outstanding procurement capital is protected, and shared owned wood is allocated once across quotes. Contract payments are untaxed; goods trades retain existing taxes.
+- Added strict save format 13 with validation of project/output identity, retained area, contract chronology, escrow/payment totals, continuation progress ranges, skill-adjusted actions, material coverage and derived access/finance context. Public mutation rejects forged construction actions, and committed ordinary plans cannot contain them. Household formation rejects outstanding construction commitments and retained unfinished client work.
+- Fourteen behavior tests cover escrow/refunds, auction/no-bid/retry behavior, random ties, area reuse, award reserves and sealed prices, short-action save/load and corruption, persistent partial milestones, a real deadline and continuation through completion, partial purchases from three suppliers over time, two active household carpenters completing separately financed jobs, shared wood allocation and ordinary essential spending.
+- Independent review identified and resolved ownership/area revalidation, immutable sealed pricing, shared materials/capital accounting, losing-bidder availability and strict action/save validation issues. Final verification passed 416 simulation library tests (six ignored) and 188 integration tests. Workspace check passes; Clippy reports only the three existing production/planning warnings. Formatting and diff checks pass. The final failure-travel cleanup rerun also passed.

@@ -26,10 +26,11 @@ pub enum Skill {
     Tailoring,
     Fishing,
     Brewing,
+    Carpentry,
 }
 
 impl Skill {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Farming,
         Self::Milling,
@@ -39,6 +40,7 @@ impl Skill {
         Self::Tailoring,
         Self::Fishing,
         Self::Brewing,
+        Self::Carpentry,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -50,6 +52,7 @@ impl Skill {
             Self::Tailoring => "Tailoring",
             Self::Fishing => "Fishing",
             Self::Brewing => "Brewing",
+            Self::Carpentry => "Carpentry",
         }
     }
 }
