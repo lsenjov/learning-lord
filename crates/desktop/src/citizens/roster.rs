@@ -823,7 +823,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(ids.len(), 30, "{grouping:?}");
+            assert_eq!(ids.len(), expected.len(), "{grouping:?}");
             assert_eq!(
                 ids.into_iter().collect::<BTreeSet<_>>(),
                 expected,
@@ -832,7 +832,7 @@ mod tests {
         }
         let view = View::default();
         let collapsed = rows(&world, &view);
-        assert_eq!(collapsed.len(), 8);
+        assert_eq!(collapsed.len(), 9);
         assert!(
             collapsed
                 .iter()

@@ -2,6 +2,7 @@ mod caravan_controls;
 mod citizen_history;
 mod citizens;
 mod collectives;
+mod construction;
 mod floating_ui;
 mod guild_history;
 mod household_history;
@@ -142,6 +143,7 @@ fn main() -> Result<(), String> {
     .init_resource::<citizen_history::Selection>()
     .init_resource::<market::Selection>()
     .init_resource::<locations::State>()
+    .init_resource::<construction::State>()
     .init_resource::<caravan_controls::State>()
     .init_resource::<market::OrderDisplay>()
     .init_resource::<market_history::ChartDisplay>()
@@ -154,7 +156,7 @@ fn main() -> Result<(), String> {
             (
                 poll_worker,
                 floating_ui::interact,
-                locations::handle,
+                (locations::handle, construction::handle).chain(),
                 caravan_controls::handle,
                 handle_controls,
                 citizens::handle_selection,
@@ -1436,6 +1438,7 @@ mod tests {
             .init_resource::<citizen_history::Selection>()
             .init_resource::<market::Selection>()
             .init_resource::<locations::State>()
+            .init_resource::<construction::State>()
             .init_resource::<caravan_controls::State>()
             .init_resource::<market::OrderDisplay>()
             .init_resource::<market_history::ChartDisplay>()
@@ -1449,7 +1452,7 @@ mod tests {
                 Update,
                 (
                     poll_worker,
-                    locations::handle,
+                    (locations::handle, construction::handle).chain(),
                     caravan_controls::handle,
                     handle_controls,
                     citizens::handle_selection,
@@ -1633,7 +1636,7 @@ mod tests {
                 .with_price(Good::Berries, 65.0)
                 .unwrap()
         );
-        assert_eq!(snapshot.universe.agents().len(), 30);
+        assert_eq!(snapshot.universe.agents().len(), 33);
         let controls = app.world().resource::<Controls>();
         assert_eq!(controls.speed, 1);
         assert!(!controls.running);

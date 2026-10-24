@@ -152,7 +152,10 @@ pub fn handle(
     mut state: ResMut<State>,
     (snapshot, worker): (Res<DisplaySnapshot>, Res<SimulationWorker>),
     selection: Res<market::Selection>,
-    locations: Option<Res<crate::locations::State>>,
+    (locations, construction): (
+        Option<Res<crate::locations::State>>,
+        Option<Res<crate::construction::State>>,
+    ),
     controls: Option<Res<crate::Controls>>,
     buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
     mut keys: MessageReader<KeyboardInput>,
@@ -254,6 +257,7 @@ pub fn handle(
             if locations
                 .as_ref()
                 .is_some_and(|locations| locations.pending())
+                || construction.as_ref().is_some_and(|editor| editor.pending())
             {
                 state.error = Some("Another change is saving. Try again when it finishes.".into());
                 continue;

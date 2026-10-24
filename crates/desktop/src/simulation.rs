@@ -40,6 +40,23 @@ pub enum Command {
 
 #[derive(Clone)]
 pub enum Mutation {
+    RequestConstruction {
+        client: learning_lord_simulation::AgentId,
+        place: learning_lord_simulation::locations::PlaceId,
+        building: learning_lord_simulation::locations::BuildingId,
+        room: Option<learning_lord_simulation::locations::RoomId>,
+        item: learning_lord_simulation::construction::ConstructionItem,
+        maximum_offer: learning_lord_simulation::Coins,
+    },
+    ContinueConstruction {
+        client: learning_lord_simulation::AgentId,
+        project: learning_lord_simulation::construction::ProjectId,
+        maximum_offer: learning_lord_simulation::Coins,
+    },
+    CancelConstruction {
+        client: learning_lord_simulation::AgentId,
+        contract: learning_lord_simulation::construction::ContractId,
+    },
     SaveExportPolicy {
         good: learning_lord_simulation::marketplace::Good,
         policy: learning_lord_simulation::marketplace::ExportPolicy,
@@ -67,6 +84,26 @@ pub enum Mutation {
 impl Mutation {
     fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
         match self {
+            Self::RequestConstruction {
+                client,
+                place,
+                building,
+                room,
+                item,
+                maximum_offer,
+            } => universe
+                .request_construction(client, place, building, room, item, maximum_offer)
+                .map(|(world, _)| world),
+            Self::ContinueConstruction {
+                client,
+                project,
+                maximum_offer,
+            } => universe
+                .continue_construction(client, project, maximum_offer)
+                .map(|(world, _)| world),
+            Self::CancelConstruction { client, contract } => {
+                universe.cancel_construction(client, contract)
+            }
             Self::SaveExportPolicy { good, policy } => {
                 let mut next = universe.caravan_policy();
                 next.exports[good as usize] = policy;

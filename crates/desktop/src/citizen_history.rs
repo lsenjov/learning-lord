@@ -239,7 +239,7 @@ fn day_label_with_goods(
 ) -> String {
     let a = day.activity;
     format!(
-        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals {}\n\n{}COINS\nEarned {}  |  Spent {}  |  Net {:+}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
+        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals {}\n\n{}COINS\nEarned {}  |  Spent {}  |  Net {:+}{}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
         crate::format_clock(day.start_ms),
         crate::format_clock(day.end_ms),
         if partial {
@@ -260,6 +260,8 @@ fn day_label_with_goods(
         day.coins_earned,
         day.coins_spent,
         day.coins_earned - day.coins_spent,
+        crate::construction::cashflow(day.construction)
+            .map_or_else(String::new, |line| format!("\n{line}")),
         day.average_wellbeing().map_or_else(
             || "No elapsed time yet".into(),
             |value| format!("{value:.1}")

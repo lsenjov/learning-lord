@@ -148,6 +148,10 @@ impl State {
         }
     }
 
+    pub(crate) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn pending(&self) -> bool {
         self.awaiting_mutation.is_some()
     }
@@ -478,7 +482,7 @@ fn room_readout(room: &Room) -> String {
         .flat_map(|object| &object.workers)
         .collect();
     format!(
-        "{} | Area {}/{} m² | Workers {}",
+        "{} | Area {}/{} m2 | Workers {}",
         room.name,
         room.used_area_m2(),
         room.size.area_m2(),
@@ -641,7 +645,12 @@ fn render_object(
         });
 }
 
-fn render_hierarchy(parent: &mut ChildSpawnerCommands, universe: &Universe, place: &Place) {
+fn render_hierarchy(
+    parent: &mut ChildSpawnerCommands,
+    universe: &Universe,
+    place: &Place,
+    construction: &crate::construction::State,
+) {
     use crate::navigation::Fragment as F;
     if place.buildings.is_empty() && place.outdoor_objects.is_empty() {
         return;
@@ -656,14 +665,40 @@ fn render_hierarchy(parent: &mut ChildSpawnerCommands, universe: &Universe, plac
         .with_children(|content| {
             content.spawn(text("BUILDINGS & OBJECTS", 15.0, MUTED));
             for building in &place.buildings {
-                crate::navigation::render(
+                row(content, |header| {
+                    crate::navigation::render(
+                        header,
+                        &[
+                            F::text(format!("{} | Owner: ", building.name)),
+                            crate::navigation::account(universe, building.owner),
+                        ],
+                        15.0,
+                        TEXT,
+                    );
+                    crate::construction::render_choices(
+                        header,
+                        universe,
+                        place,
+                        building,
+                        None,
+                        construction,
+                    );
+                });
+                crate::construction::render_menu(
                     content,
-                    &[
-                        F::text(format!("{} | Owner: ", building.name)),
-                        crate::navigation::account(universe, building.owner),
-                    ],
-                    15.0,
-                    TEXT,
+                    universe,
+                    place,
+                    building,
+                    None,
+                    construction,
+                );
+                crate::construction::render_projects(
+                    content,
+                    universe,
+                    place.id,
+                    building.id,
+                    None,
+                    construction,
                 );
                 content
                     .spawn(Node {
@@ -675,7 +710,33 @@ fn render_hierarchy(parent: &mut ChildSpawnerCommands, universe: &Universe, plac
                     })
                     .with_children(|rooms| {
                         for room in &building.rooms {
-                            rooms.spawn(text(room_readout(room), 14.0, MUTED));
+                            row(rooms, |header| {
+                                header.spawn(text(room_readout(room), 14.0, MUTED));
+                                crate::construction::render_choices(
+                                    header,
+                                    universe,
+                                    place,
+                                    building,
+                                    Some(room.id),
+                                    construction,
+                                );
+                            });
+                            crate::construction::render_menu(
+                                rooms,
+                                universe,
+                                place,
+                                building,
+                                Some(room.id),
+                                construction,
+                            );
+                            crate::construction::render_projects(
+                                rooms,
+                                universe,
+                                place.id,
+                                building.id,
+                                Some(room.id),
+                                construction,
+                            );
                             rooms
                                 .spawn(Node {
                                     flex_direction: FlexDirection::Column,
@@ -717,6 +778,7 @@ pub fn refresh(
     mut state: ResMut<State>,
     roots: Query<Entity, With<Content>>,
     panels: Query<(&ScrollPanel, &ScrollPosition)>,
+    construction: Option<Res<crate::construction::State>>,
 ) {
     if state.generation != snapshot.0.generation {
         *state = State {
@@ -795,7 +857,10 @@ pub fn refresh(
                 details.spawn(text(&place.name, 23.0, TEXT));
                 let owner = if place.kind.is_town_owned() { crate::navigation::Fragment::text("Town") } else { place.owner.map_or_else(|| crate::navigation::Fragment::text("Public"), |id| crate::navigation::account(universe, id)) };
                 crate::navigation::render(details, &[crate::navigation::Fragment::text("Owner: "), owner], 15.0, MUTED);
-                render_hierarchy(details, universe, place);
+                let default_construction = crate::construction::State::default();
+                let construction = construction.as_deref().unwrap_or(&default_construction);
+                render_hierarchy(details, universe, place, construction);
+                crate::construction::render_error(details, construction);
                 details.spawn(text("LOCAL TRANSFERS", 15.0, MUTED));
                 details.spawn(text("Citizen must be at this location and stationary. Working ingredients remain reserved.", 13.0, MUTED));
                 row(details, |row| {
@@ -1034,7 +1099,10 @@ pub fn handle(
     (snapshot, worker): (Res<DisplaySnapshot>, Res<SimulationWorker>),
     buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
     mut keys: MessageReader<KeyboardInput>,
-    caravan: Option<Res<crate::caravan_controls::State>>,
+    (caravan, construction): (
+        Option<Res<crate::caravan_controls::State>>,
+        Option<Res<crate::construction::State>>,
+    ),
     controls: Option<Res<crate::Controls>>,
     mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
@@ -1250,7 +1318,9 @@ pub fn handle(
             },
         };
         if let Some(mutation) = mutation {
-            if caravan.as_ref().is_some_and(|editor| editor.pending()) {
+            if caravan.as_ref().is_some_and(|editor| editor.pending())
+                || construction.as_ref().is_some_and(|editor| editor.pending())
+            {
                 state.error = Some("Another change is saving. Try again when it finishes.".into());
                 continue;
             }
@@ -2463,7 +2533,7 @@ mod tests {
         let map = world.map();
         let place = map.place(site).unwrap();
         let room = &place.buildings[0].rooms[0];
-        assert_eq!(room_readout(room), "Workroom | Area 14/24 m² | Workers 1");
+        assert_eq!(room_readout(room), "Workroom | Area 14/24 m2 | Workers 1");
         let vessel = room
             .objects
             .iter()
@@ -2499,7 +2569,7 @@ mod tests {
         assert!(tooltip.starts_with("Ready: "));
         assert_eq!(
             room_readout(&place.buildings[0].rooms[0]),
-            "Workroom | Area 14/24 m² | Workers 0"
+            "Workroom | Area 14/24 m2 | Workers 0"
         );
     }
 
@@ -2542,7 +2612,12 @@ mod tests {
         app.add_systems(Startup, move |mut commands: Commands| {
             commands.spawn(Node::default()).with_children(|parent| {
                 for place in &places {
-                    render_hierarchy(parent, &world, place);
+                    render_hierarchy(
+                        parent,
+                        &world,
+                        place,
+                        &crate::construction::State::default(),
+                    );
                 }
             });
         });
@@ -2556,7 +2631,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label == "Bedroom | Area 3/6 m² | Workers 0")
+                .any(|label| label == "Bedroom | Area 3/6 m2 | Workers 0")
         );
         assert!(labels.iter().any(|label| label == "Bed | Resident: "));
         assert!(labels.iter().any(|label| label == "Berry bushes"));

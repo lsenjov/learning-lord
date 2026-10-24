@@ -1567,7 +1567,16 @@ mod tests {
             .query_filtered::<&Text, With<Summary>>()
             .iter(app.world())
             .collect::<Vec<_>>();
-        assert_eq!(cells.len(), 150);
+        assert_eq!(
+            cells.len(),
+            app.world()
+                .resource::<DisplaySnapshot>()
+                .0
+                .universe
+                .agents()
+                .len()
+                * 5
+        );
         assert!(cells.iter().all(|text| !text.0.is_empty()));
         assert!(
             !app.world_mut()
@@ -1777,7 +1786,7 @@ mod tests {
     fn every_citizen_is_reachable_and_restart_resets_selection() {
         let universe = simulation::new_universe().unwrap();
         let ids: Vec<_> = sorted_agents(&universe).iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids.len(), 30);
+        assert_eq!(ids.len(), universe.agents().len());
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,

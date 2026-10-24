@@ -228,6 +228,9 @@ pub(crate) fn render(
             day.closing_coins
         ),
     );
+    if let Some(cashflow) = crate::construction::cashflow(day.construction) {
+        label(parent, cashflow);
+    }
     parent.spawn(text("GOODS", 14.0, MUTED));
     goods(
         parent,
