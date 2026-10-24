@@ -652,7 +652,7 @@ mod tests {
         for shared in [false, true] {
             let (mut world, first, second, place, guild) = workshop(10);
             let room = &mut world.map.places_mut().get_mut(&place).unwrap().buildings[0].rooms[0];
-            room.object_capacity += 1;
+            room.size = crate::locations::RoomSize::Large;
             room.objects.push(crate::locations::Object::new(
                 crate::locations::ObjectKind::Loom,
             ));

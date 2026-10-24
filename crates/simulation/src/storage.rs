@@ -1270,7 +1270,7 @@ mod physical_tests {
             .unwrap()
             .id;
         let room = &mut map.places_mut().get_mut(&place).unwrap().buildings[0].rooms[1];
-        room.object_capacity += 1;
+        room.size = crate::locations::RoomSize::Large;
         room.objects
             .push(crate::locations::Object::new(ObjectKind::PantryShelving));
         let mut storage = Storage::default();

@@ -302,8 +302,8 @@ mod tests {
             ));
         }
         let mut malformed = world.clone();
-        malformed.map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0].object_capacity =
-            0;
+        malformed.map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0].size =
+            crate::locations::RoomSize::Small;
         assert!(matches!(
             Universe::from_save_str(&malformed.to_save_string().unwrap()),
             Err(SaveError::InvalidState(_))

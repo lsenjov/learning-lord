@@ -98,7 +98,9 @@ impl Citizen {
             }
             Some(ObjectKind::for_recipe(recipe))
         } else if action == CitizenAction::Sleep {
-            Some(ObjectKind::Bed { resident: self.id })
+            Some(ObjectKind::Bed {
+                resident: Some(self.id),
+            })
         } else {
             None
         };
@@ -138,7 +140,7 @@ impl Citizen {
             let kind = capability.unwrap();
             let eligible = || {
                 site.objects().filter(|object| object.kind.same_capability(kind))
-                .filter(|object| !matches!(object.kind, ObjectKind::Bed { resident } if resident != self.id))
+                .filter(|object| !matches!(object.kind, ObjectKind::Bed { resident } if resident != Some(self.id)))
                 .filter(|object| self.may_use_object(site, object))
             };
             if eligible().next().is_none() {
@@ -191,7 +193,9 @@ impl crate::Universe {
                 return Err(invalid());
             }
             for object in place.objects() {
-                if let ObjectKind::Bed { resident } = object.kind
+                if let ObjectKind::Bed {
+                    resident: Some(resident),
+                } = object.kind
                     && !self.agents.contains_key(&resident)
                 {
                     return Err(invalid());
@@ -242,7 +246,7 @@ impl crate::Universe {
                 .filter(|object| {
                     object.kind
                         == ObjectKind::Bed {
-                            resident: worker.id(),
+                            resident: Some(worker.id()),
                         }
                 })
                 .count()
@@ -298,7 +302,7 @@ impl crate::Universe {
                 } else if action == CitizenAction::Sleep {
                     object.kind
                         == ObjectKind::Bed {
-                            resident: worker.id(),
+                            resident: Some(worker.id()),
                         }
                 } else if let Some((_, plot)) = action.crop_plot() {
                     let crop = match object.kind {
@@ -550,7 +554,7 @@ mod tests {
     fn brewing_workers_finish_their_own_vessels_and_fermentation_keeps_no_worker() {
         let (mut world, first, second, site) = household(StartingRole::Brewer, Location::Brewery);
         let room = &mut world.map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0];
-        room.object_capacity += 1;
+        room.size = crate::locations::RoomSize::Large;
         room.objects.push(Object::new(ObjectKind::BrewingEquipment));
         world.refresh_market();
         world = stocked(world, first, site, &[Recipe::BrewBeer]);

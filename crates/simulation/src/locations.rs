@@ -5,6 +5,28 @@ use uuid::Uuid;
 
 pub const MAP_HALF_SIZE_METRES: f64 = 1000.0;
 pub const WALK_MS_PER_METRE: f64 = 600.0;
+pub const PLOT_AREA_LIMIT_M2: u32 = 120;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoomSize {
+    Small,
+    Medium,
+    Large,
+}
+impl RoomSize {
+    pub fn area_m2(self) -> u32 {
+        match self {
+            Self::Small => 6,
+            Self::Medium => 12,
+            Self::Large => 24,
+        }
+    }
+    pub fn fitting(area_m2: u32) -> Option<Self> {
+        [Self::Small, Self::Medium, Self::Large]
+            .into_iter()
+            .find(|size| size.area_m2() >= area_m2)
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Position {
@@ -102,7 +124,7 @@ pub struct Building {
 pub struct Room {
     pub id: RoomId,
     pub name: String,
-    pub object_capacity: usize,
+    pub size: RoomSize,
     pub objects: Vec<Object>,
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -114,7 +136,7 @@ pub struct Object {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectKind {
     Bed {
-        resident: AgentId,
+        resident: Option<AgentId>,
     },
     PantryShelving,
     DryGoodsBin,
@@ -140,6 +162,23 @@ pub enum ObjectKind {
     },
 }
 impl ObjectKind {
+    pub fn footprint_m2(self) -> u32 {
+        match self {
+            Self::Bed { .. } | Self::WoodRack | Self::SewingTable => 3,
+            Self::PantryShelving
+            | Self::DryGoodsBin
+            | Self::SpinningWheel
+            | Self::FermentationVessel { .. } => 2,
+            Self::FishCrate | Self::TextileChest | Self::LiquidBarrel => 1,
+            Self::Millstone | Self::Loom | Self::BrewingEquipment => 6,
+            Self::Oven => 4,
+            Self::BerryBushes
+            | Self::Trees
+            | Self::FishingSpot
+            | Self::WaterSource
+            | Self::CropPlot { .. } => 0,
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             Self::Bed { .. } => "Bed",
@@ -251,6 +290,17 @@ impl ObjectKind {
         std::mem::discriminant(&self) == std::mem::discriminant(&other)
     }
 }
+impl Room {
+    pub fn used_area_m2(&self) -> u32 {
+        self.objects
+            .iter()
+            .map(|object| object.kind.footprint_m2())
+            .sum()
+    }
+    pub fn available_area_m2(&self) -> u32 {
+        self.size.area_m2().saturating_sub(self.used_area_m2())
+    }
+}
 impl Object {
     pub fn new(kind: ObjectKind) -> Self {
         Self {
@@ -308,6 +358,16 @@ slots!(
     crate::brewing::Batch
 );
 impl Place {
+    pub fn used_area_m2(&self) -> u32 {
+        self.buildings
+            .iter()
+            .flat_map(|building| &building.rooms)
+            .map(|room| room.size.area_m2())
+            .sum()
+    }
+    pub fn available_area_m2(&self) -> u32 {
+        PLOT_AREA_LIMIT_M2.saturating_sub(self.used_area_m2())
+    }
     pub fn objects(&self) -> impl Iterator<Item = &Object> {
         self.outdoor_objects.iter().chain(
             self.buildings
@@ -373,7 +433,9 @@ impl Building {
     fn initial(kind: Location, owner: AgentId) -> Self {
         use ObjectKind::*;
         let kinds = match kind {
-            Location::Home => vec![Bed { resident: owner }],
+            Location::Home => vec![Bed {
+                resident: Some(owner),
+            }],
             Location::Mill => vec![Millstone],
             Location::Bakery => vec![Oven],
             Location::Weavery => vec![SpinningWheel, Loom],
@@ -389,7 +451,8 @@ impl Building {
         let mut rooms = vec![Room {
             id: RoomId(Uuid::new_v4()),
             name: "Storeroom".into(),
-            object_capacity: storage.len(),
+            size: RoomSize::fitting(storage.iter().map(|kind| kind.footprint_m2()).sum())
+                .expect("initial storage fits"),
             objects: storage.into_iter().map(Object::new).collect(),
         }];
         if !kinds.is_empty() {
@@ -403,7 +466,8 @@ impl Building {
                         "Workroom"
                     }
                     .into(),
-                    object_capacity: kinds.len(),
+                    size: RoomSize::fitting(kinds.iter().map(|kind| kind.footprint_m2()).sum())
+                        .expect("initial equipment fits"),
                     objects: kinds.into_iter().map(Object::new).collect(),
                 },
             );
@@ -637,6 +701,7 @@ impl Map {
         for (id, place) in &self.places {
             if *id != place.id
                 || !place.position.valid()
+                || place.used_area_m2() > PLOT_AREA_LIMIT_M2
                 || !identities.insert(id.0)
                 || (place.kind.is_public() || place.kind.is_town_owned()) != place.owner.is_none()
                 || (place.kind == Location::Field
@@ -654,7 +719,7 @@ impl Map {
                 for room in &building.rooms {
                     if !identities.insert(room.id.0)
                         || room.id.0.get_version_num() != 4
-                        || room.objects.len() > room.object_capacity
+                        || room.used_area_m2() > room.size.area_m2()
                         || room.objects.iter().any(|object| {
                             object.kind.unlimited_workers()
                                 || matches!(object.kind, ObjectKind::CropPlot { .. })
@@ -732,6 +797,10 @@ impl Map {
         let mut building = Building::initial(kind, owner);
         building.name = name.into();
         let id = building.id;
+        let area: u32 = building.rooms.iter().map(|room| room.size.area_m2()).sum();
+        if area > site.available_area_m2() {
+            return Err(SimulationError::MissingProperty);
+        }
         site.buildings.push(building);
         Ok((map, id))
     }
@@ -739,41 +808,81 @@ impl Map {
         &mut self,
         home: PlaceId,
         resident: AgentId,
+        allowed_owners: &[AgentId],
     ) -> Result<(), SimulationError> {
         if self
             .place(home)?
-            .objects()
-            .any(|object| object.kind == ObjectKind::Bed { resident })
+            .buildings
+            .iter()
+            .filter(|building| allowed_owners.contains(&building.owner))
+            .flat_map(|building| &building.rooms)
+            .flat_map(|room| &room.objects)
+            .any(|object| {
+                object.kind
+                    == ObjectKind::Bed {
+                        resident: Some(resident),
+                    }
+            })
         {
             return Ok(());
         }
-        for (_, place) in self.places.iter_mut() {
-            for building in &mut place.buildings {
-                building.rooms.retain(|room| {
-                    !room
-                        .objects
-                        .iter()
-                        .any(|object| object.kind == ObjectKind::Bed { resident })
-                });
-            }
-            place
-                .buildings
-                .retain(|building| !building.rooms.is_empty());
-        }
-        let place = self
-            .places
-            .get_mut(&home)
-            .ok_or(SimulationError::PlaceNotFound)?;
-        let building = place
+        let place = self.place(home)?;
+        if !place
             .buildings
-            .first_mut()
-            .ok_or(SimulationError::MissingProperty)?;
-        building.rooms.push(Room {
-            id: RoomId(Uuid::new_v4()),
-            name: "Bedroom".into(),
-            object_capacity: 1,
-            objects: vec![Object::new(ObjectKind::Bed { resident })],
-        });
+            .iter()
+            .any(|building| allowed_owners.contains(&building.owner))
+        {
+            return Err(SimulationError::MissingProperty);
+        }
+        let vacant_bed = place
+            .buildings
+            .iter()
+            .filter(|building| allowed_owners.contains(&building.owner))
+            .flat_map(|building| &building.rooms)
+            .flat_map(|room| &room.objects)
+            .any(|object| object.kind == ObjectKind::Bed { resident: None });
+        if !vacant_bed && place.available_area_m2() < RoomSize::Small.area_m2() {
+            return Err(SimulationError::MissingProperty);
+        }
+        for (_, place) in self.places.iter_mut() {
+            for object in place.objects_mut() {
+                if object.kind
+                    == (ObjectKind::Bed {
+                        resident: Some(resident),
+                    })
+                {
+                    object.kind = ObjectKind::Bed { resident: None };
+                }
+            }
+        }
+        let place = self.places.get_mut(&home).expect("home exists");
+        if let Some(bed) = place
+            .buildings
+            .iter_mut()
+            .filter(|building| allowed_owners.contains(&building.owner))
+            .flat_map(|building| &mut building.rooms)
+            .flat_map(|room| &mut room.objects)
+            .find(|object| object.kind == ObjectKind::Bed { resident: None })
+        {
+            bed.kind = ObjectKind::Bed {
+                resident: Some(resident),
+            };
+            return Ok(());
+        }
+        place
+            .buildings
+            .iter_mut()
+            .find(|building| allowed_owners.contains(&building.owner))
+            .expect("accessible home building exists")
+            .rooms
+            .push(Room {
+                id: RoomId(Uuid::new_v4()),
+                name: "Bedroom".into(),
+                size: RoomSize::Small,
+                objects: vec![Object::new(ObjectKind::Bed {
+                    resident: Some(resident),
+                })],
+            });
         Ok(())
     }
     pub(crate) fn release_objects(
@@ -817,5 +926,138 @@ impl Map {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+
+    #[test]
+    fn initial_rooms_use_smallest_fitting_preset() {
+        let owner = AgentId(Uuid::new_v4());
+        let mut map = Map::default();
+        for kind in [
+            Location::Home,
+            Location::Field,
+            Location::Mill,
+            Location::Bakery,
+            Location::Weavery,
+            Location::Tailory,
+            Location::Brewery,
+        ] {
+            let (next, site) = map
+                .with_place(kind, Position::default(), Some(owner), "Test")
+                .unwrap();
+            map = next;
+            for room in &map.place(site).unwrap().buildings[0].rooms {
+                assert_eq!(Some(room.size), RoomSize::fitting(room.used_area_m2()));
+            }
+        }
+        map.validate_save().unwrap();
+    }
+
+    #[test]
+    fn mixed_contents_fit_by_area_and_oversized_contents_fail() {
+        let owner = AgentId(Uuid::new_v4());
+        let (mut map, site) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(owner), "Home")
+            .unwrap();
+        let room = &mut map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0];
+        room.objects.push(Object::new(ObjectKind::PantryShelving));
+        room.objects.push(Object::new(ObjectKind::TextileChest));
+        assert_eq!(room.available_area_m2(), 0);
+        map.validate_save().unwrap();
+        map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0]
+            .objects
+            .push(Object::new(ObjectKind::FishCrate));
+        assert!(map.validate_save().is_err());
+    }
+
+    #[test]
+    fn relocation_preserves_shared_room_and_reuses_unassigned_bed() {
+        let resident = AgentId(Uuid::new_v4());
+        let other = AgentId(Uuid::new_v4());
+        let (map, old) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(resident), "Old")
+            .unwrap();
+        let (mut map, new) = map
+            .with_place(Location::Home, Position::default(), Some(other), "New")
+            .unwrap();
+        let old_room = &mut map.places_mut().get_mut(&old).unwrap().buildings[0].rooms[0];
+        let room_id = old_room.id;
+        old_room.objects.push(Object::new(ObjectKind::TextileChest));
+        let new_room = &mut map.places_mut().get_mut(&new).unwrap().buildings[0].rooms[0];
+        new_room
+            .objects
+            .push(Object::new(ObjectKind::Bed { resident: None }));
+        map.assign_bedroom(new, resident, &[resident, other])
+            .unwrap();
+        let old_room = &map.place(old).unwrap().buildings[0].rooms[0];
+        assert_eq!(old_room.id, room_id);
+        assert_eq!(old_room.objects.len(), 2);
+        assert_eq!(old_room.objects[0].kind, ObjectKind::Bed { resident: None });
+        assert_eq!(map.place(new).unwrap().buildings[0].rooms.len(), 2);
+        assert!(map.place(new).unwrap().objects().any(|object| object.kind
+            == ObjectKind::Bed {
+                resident: Some(resident)
+            }));
+        map.validate_save().unwrap();
+    }
+
+    #[test]
+    fn relocation_uses_only_household_owned_buildings() {
+        let resident = AgentId(Uuid::new_v4());
+        let foreign = AgentId(Uuid::new_v4());
+        let (map, home) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(resident), "Home")
+            .unwrap();
+        let (mut map, _) = map
+            .with_building(home, Location::Home, foreign, "Foreign")
+            .unwrap();
+        let place = map.places_mut().get_mut(&home).unwrap();
+        place.buildings[0].rooms[0].objects[0].kind = ObjectKind::Bed { resident: None };
+        place.buildings[1].rooms[0].objects[0].kind = ObjectKind::Bed { resident: None };
+        place.buildings.swap(0, 1);
+        let foreign_rooms = place.buildings[0].rooms.clone();
+        map.assign_bedroom(home, resident, &[resident]).unwrap();
+        let place = map.place(home).unwrap();
+        assert_eq!(place.buildings[0].rooms, foreign_rooms);
+        assert_eq!(
+            place.buildings[1].rooms[0].objects[0].kind,
+            ObjectKind::Bed {
+                resident: Some(resident)
+            }
+        );
+        let newcomer = AgentId(Uuid::new_v4());
+        map.assign_bedroom(home, newcomer, &[resident, newcomer])
+            .unwrap();
+        let place = map.place(home).unwrap();
+        assert_eq!(place.buildings[0].rooms, foreign_rooms);
+        assert_eq!(place.buildings[1].rooms.len(), 3);
+        map.validate_save().unwrap();
+    }
+
+    #[test]
+    fn plot_limit_rejects_additional_building_without_changing_map() {
+        let owner = AgentId(Uuid::new_v4());
+        let (mut map, site) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(owner), "Home")
+            .unwrap();
+        for _ in 0..9 {
+            map = map
+                .with_building(site, Location::Home, owner, "Home")
+                .unwrap()
+                .0;
+        }
+        assert_eq!(map.place(site).unwrap().available_area_m2(), 0);
+        assert!(
+            map.with_building(site, Location::Home, owner, "Extra")
+                .is_err()
+        );
+        map.validate_save().unwrap();
+        let place = map.places_mut().get_mut(&site).unwrap();
+        place.buildings[0].rooms[0].size = RoomSize::Medium;
+        assert!(map.validate_save().is_err());
     }
 }

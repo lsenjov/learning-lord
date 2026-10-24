@@ -351,7 +351,7 @@ mod tests {
             .unwrap();
         let mut citizen = citizen.with_map(map).unwrap();
         let room = &mut citizen.map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0];
-        room.object_capacity += 1;
+        room.size = crate::locations::RoomSize::Large;
         room.objects.push(crate::locations::Object::new(
             crate::locations::ObjectKind::for_recipe(Recipe::MillFlour),
         ));

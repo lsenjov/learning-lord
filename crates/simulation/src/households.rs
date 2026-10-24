@@ -247,7 +247,7 @@ impl Universe {
             },
         );
         for member in members {
-            universe.map.assign_bedroom(home, *member)?;
+            universe.map.assign_bedroom(home, *member, members)?;
             let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(member).unwrap().kind;
             citizen.home = home;
             citizen.position = universe.map.position(home);
@@ -713,7 +713,7 @@ mod tests {
             .with_household("Brewers", citizen.home(), &[first, second])
             .unwrap();
         let room = &mut world.map.places_mut().get_mut(&brewery).unwrap().buildings[0].rooms[0];
-        room.object_capacity += 1;
+        room.size = crate::locations::RoomSize::Large;
         room.objects.push(crate::locations::Object::new(
             crate::locations::ObjectKind::BrewingEquipment,
         ));

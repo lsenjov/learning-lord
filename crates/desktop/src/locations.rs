@@ -478,10 +478,10 @@ fn room_readout(room: &Room) -> String {
         .flat_map(|object| &object.workers)
         .collect();
     format!(
-        "{} | Objects {}/{} | Workers {}",
+        "{} | Area {}/{} m² | Workers {}",
         room.name,
-        room.objects.len(),
-        room.object_capacity,
+        room.used_area_m2(),
+        room.size.area_m2(),
         workers.len()
     )
 }
@@ -541,7 +541,10 @@ fn object_row(
     let now = universe.current_time_ms();
     let mut tooltip = String::new();
     let mut fragments = match object.kind {
-        ObjectKind::Bed { resident } => vec![
+        ObjectKind::Bed { resident: None } => vec![F::text("Bed | Unassigned")],
+        ObjectKind::Bed {
+            resident: Some(resident),
+        } => vec![
             F::text("Bed | Resident: "),
             F::entity(name(universe, resident), Target::Citizen(resident)),
         ],
@@ -2460,7 +2463,7 @@ mod tests {
         let map = world.map();
         let place = map.place(site).unwrap();
         let room = &place.buildings[0].rooms[0];
-        assert_eq!(room_readout(room), "Workroom | Objects 5/5 | Workers 1");
+        assert_eq!(room_readout(room), "Workroom | Area 14/24 m² | Workers 1");
         let vessel = room
             .objects
             .iter()
@@ -2496,7 +2499,7 @@ mod tests {
         assert!(tooltip.starts_with("Ready: "));
         assert_eq!(
             room_readout(&place.buildings[0].rooms[0]),
-            "Workroom | Objects 5/5 | Workers 0"
+            "Workroom | Area 14/24 m² | Workers 0"
         );
     }
 
@@ -2553,7 +2556,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label == "Bedroom | Objects 1/1 | Workers 0")
+                .any(|label| label == "Bedroom | Area 3/6 m² | Workers 0")
         );
         assert!(labels.iter().any(|label| label == "Bed | Resident: "));
         assert!(labels.iter().any(|label| label == "Berry bushes"));

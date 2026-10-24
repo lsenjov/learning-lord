@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 10;
+pub const SAVE_VERSION: u32 = 11;
 
 #[derive(Debug)]
 pub enum SaveError {
