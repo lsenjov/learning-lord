@@ -29,8 +29,11 @@ pub struct DailyCitizenHistory {
     pub bought: [Quantity; Good::COUNT],
     pub sold: [Quantity; Good::COUNT],
     pub consumed: [Quantity; Good::COUNT],
+    /// Goods used personally, excluding recipe inputs and capital spending.
+    pub personal_consumed: [Quantity; Good::COUNT],
     pub coins_earned: Coins,
     pub coins_spent: Coins,
+    pub workshop_fees_paid: Coins,
     pub worst_hunger: f64,
     pub worst_thirst: f64,
     pub worst_tiredness: f64,
@@ -50,8 +53,10 @@ impl DailyCitizenHistory {
             bought: [0; Good::COUNT],
             sold: [0; Good::COUNT],
             consumed: [0; Good::COUNT],
+            personal_consumed: [0; Good::COUNT],
             coins_earned: 0,
             coins_spent: 0,
+            workshop_fees_paid: 0,
             worst_hunger: citizen.hunger(),
             worst_thirst: citizen.thirst(),
             worst_tiredness: citizen.tiredness(),
@@ -82,6 +87,18 @@ impl CitizenHistory {
     pub(crate) fn validate_save(&self, now: u64) -> Result<(), crate::persistence::SaveError> {
         use crate::persistence::SaveError;
         for day in std::iter::once(&self.current).chain(self.completed.iter()) {
+            if day.workshop_fees_paid < 0
+                || Good::ALL.into_iter().any(|good| {
+                    day.personal_consumed[good as usize] > day.consumed[good as usize]
+                        || (day.personal_consumed[good as usize] != 0
+                            && !Good::FOOD.contains(&good)
+                            && !matches!(good, Good::Water | Good::Beer | Good::FlaxGarment))
+                })
+            {
+                return Err(SaveError::InvalidState(
+                    "invalid personal consumption history",
+                ));
+            }
             let activity = day.activity;
             let total = [
                 activity.production_ms,
@@ -143,6 +160,20 @@ impl CitizenHistory {
             for good in Good::FOOD {
                 self.current.consumed[good as usize] = self.current.consumed[good as usize]
                     .checked_add(active.meal_units[good as usize])
+                    .ok_or(SimulationError::InventoryOverflow)?;
+            }
+        }
+        if let Some(active) = citizen.active_action()
+            && matches!(active.action(), CitizenAction::Eat | CitizenAction::Drink)
+        {
+            let i = active.drink_good as usize;
+            self.current.personal_consumed[i] = self.current.personal_consumed[i]
+                .checked_add(active.drink_units)
+                .ok_or(SimulationError::InventoryOverflow)?;
+            for good in Good::FOOD {
+                let i = good as usize;
+                self.current.personal_consumed[i] = self.current.personal_consumed[i]
+                    .checked_add(active.meal_units[i])
                     .ok_or(SimulationError::InventoryOverflow)?;
             }
         }
@@ -272,6 +303,10 @@ impl CitizenHistory {
                         .ok_or(SimulationError::InventoryOverflow)?;
                 }
                 Some(CitizenAction::EquipClothing) => {
+                    self.current.personal_consumed[Good::FlaxGarment as usize] =
+                        self.current.personal_consumed[Good::FlaxGarment as usize]
+                            .checked_add(1)
+                            .ok_or(SimulationError::InventoryOverflow)?;
                     self.current.consumed[Good::FlaxGarment as usize] = self.current.consumed
                         [Good::FlaxGarment as usize]
                         .checked_add(
@@ -517,6 +552,10 @@ mod tests {
             let started = world.start_action(id, CitizenAction::Eat).unwrap();
             let history = started.citizen_history(id).unwrap();
             assert_eq!(history.current.consumed[Good::Beer as usize], beer.min(200));
+            assert_eq!(
+                history.current.personal_consumed[Good::Beer as usize],
+                beer.min(200)
+            );
             assert_eq!(history.current.consumed[Good::Water as usize], 0);
             let duration = if beer == 100 { 100_000 } else { 80_000 };
             let whole = started.advance(duration).unwrap();
@@ -598,6 +637,8 @@ mod tests {
             .average_wellbeing()
             .unwrap();
         assert!((actual - split).abs() < 1e-9, "{actual} != {split}");
+        let day = &whole.citizen_history(id).unwrap().current;
+        assert_eq!(day.personal_consumed, day.consumed);
     }
 
     #[test]

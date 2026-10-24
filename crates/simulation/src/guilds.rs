@@ -238,6 +238,12 @@ impl Universe {
                     .workshop_fees_paid
                     .checked_add(paid)
                     .ok_or(SimulationError::WealthOverflow)?;
+            } else if let Some(history) = self.citizen_histories.get_mut(&payer) {
+                history.current.workshop_fees_paid = history
+                    .current
+                    .workshop_fees_paid
+                    .checked_add(paid)
+                    .ok_or(SimulationError::WealthOverflow)?;
             }
         }
         self.refresh_market();

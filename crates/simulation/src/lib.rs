@@ -5,6 +5,7 @@ use std::fmt;
 use uuid::Uuid;
 
 pub mod calendar;
+pub mod construction_finance;
 pub mod storage;
 pub mod taxation;
 use storage::{GoodsOwner, StockKey, Storage};

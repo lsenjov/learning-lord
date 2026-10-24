@@ -1,6 +1,6 @@
 # Carpenter construction
 
-Status: step 1 implemented; verification and independent review recorded below. Steps 2–4 have not started.
+Status: step 1 implemented; verification and independent review recorded below. Step 2 implemented and independently reviewed. Steps 3–4 have not started; contract payment/progress policy is under discussion.
 
 ## Scope
 
@@ -126,5 +126,18 @@ These are outstanding details, not authorization to broaden the feature. The app
 - Locations displays used/total room area and unassigned beds. Save format is version 11, with no migration.
 - Behaviour checks cover initial preset sizing, mixed contents, overcrowding, plot limits, room preservation, vacant beds, and mixed building ownership.
 - Independent review identified an ownership issue in vacant-bed reuse; it was fixed and a fresh review found no high or medium issues.
-- Verification: simulation library suite passed (394 passed, six ignored) before the final ownership regression; all five final space tests passed. Formatting passes. Workspace Clippy passes with three existing warnings in unchanged production/planning code; strict warnings-as-errors fails those warnings.
-- Workspace desktop tests need a larger test stack (`RUST_MIN_STACK=16777216`); the default-stack market-test overflow also reproduces at HEAD. Two unrelated desktop assertions reproduce at HEAD: `details_distinguish_current_goal_from_forecast` expects “Forecast after replanning”, and `decision_panel_shows_reachable_hunger_and_uses_saved_prices` expects “Replenish reserves”. Final full-suite results pending the long-running initial-town test.
+- Verification: final simulation package suite passed (395 library tests and 188 integration tests, six ignored); all five final space tests passed. Formatting passes. Workspace Clippy passes with three existing warnings in unchanged production/planning code; strict warnings-as-errors fails those warnings.
+- Workspace desktop tests need a larger test stack (`RUST_MIN_STACK=16777216`); the default-stack market-test overflow also reproduces at HEAD. Two unrelated desktop assertions reproduce at HEAD: `details_distinguish_current_goal_from_forecast` expects “Forecast after replanning”, and `decision_panel_shows_reachable_hunger_and_uses_saved_prices` expects “Replenish reserves”. Final desktop suite: 155 passed, two baseline assertion failures described above, one ignored; the long-running initial-town test passed.
+
+## Step 2 implementation evidence
+
+- Added inspectable household/singleton budgets, hourly carpenter earnings, quotes and delayed-payment financing; ordinary goods pricing is unchanged.
+- Reserve protects seven days of hunger-rate-specific nutrition and 400 g water per member per day. Food uses the cheapest obtainable offer per nutrition; when no edible offers exist, world reference prices provide the fallback. Estimates do not guarantee future supply volume.
+- Lifestyle uses up to seven complete days of actual personal consumption at current prices, with food/water essentials as a lower bound. Equipped garments add replacement amortization over their existing ten-day lifetime. Material/capital purchases and production inputs do not enter lifestyle.
+- Existing consumed history mixes production inputs with personal consumption. Added separate citizen personal-consumption attribution and standalone workshop-fee payments; strict save version is now 12, without migration.
+- Earning time initially assumes eight hours per member per day. Complete history uses production/travel/trade hours, conservatively subtracts food-goal time, and clamps to one–24 hours per member. Existing food-goal history includes meals, so subtraction can underestimate earning time; the lower bound prevents zero denominators.
+- Earnings include observed cash taxes/workshop fees once, plus reserve deficit replenishment over seven days. Budget deducts actual tax arrears, workshop liabilities and caller-supplied new commitments exactly once. Contract payments remain untaxed initially; ordinary goods taxes remain intact.
+- Quotes value owned and missing materials equally, adding expected procurement and skill-adjusted construction hours. Financing charges procurement only for missing materials and recurring living costs over forecast calendar time until the next payment, without assuming future receipts.
+- Added seven finance behavior tests covering shared accounts, missing/complete history, deprivation/self-provisioning, production and capital exclusion, standalone tax/fee history, earning time, liabilities, owned-material valuation and delayed financing. Extreme-balance tests preserve one-coin commitments and exact fractional liability rounding.
+- Independent review found loss of cash precision above 2^53. Protected cash/commitments/reserve now use integer arithmetic; debt components and fractional workshop fees aggregate exactly before rounding. README save-version documentation was corrected. Fresh review found no remaining high/medium issues.
+- Verification: full simulation library passed (402 passed, six ignored), including all seven finance tests and existing history, guild fee and persistence checks. Formatting passes.
