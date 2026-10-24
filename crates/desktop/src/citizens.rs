@@ -436,7 +436,84 @@ pub(crate) fn goal_label(goal: Effect) -> &'static str {
     }
 }
 
-fn plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
+fn plan_rows(universe: &Universe, id: AgentId, citizen: &Citizen) -> Vec<PlanRow> {
+    use learning_lord_simulation::construction::ContractStatus;
+    let project = universe
+        .construction()
+        .contracts
+        .values()
+        .find(|contract| {
+            contract.status == ContractStatus::Active && contract.carpenter == Some(id)
+        })
+        .and_then(|contract| universe.construction().projects.get(&contract.project));
+    let Some(project) = project else {
+        return ordinary_plan_rows(citizen);
+    };
+    construction_plan_rows(project, citizen)
+}
+
+fn construction_plan_rows(
+    project: &learning_lord_simulation::construction::ConstructionProject,
+    citizen: &Citizen,
+) -> Vec<PlanRow> {
+    let mut fragments = vec![crate::navigation::Fragment::text(format!(
+        "Construction: {} at ",
+        project.item.name()
+    ))];
+    fragments.push(crate::navigation::place(citizen, project.place));
+    fragments.push(crate::navigation::Fragment::text(format!(
+        "  |  Work {}/{}",
+        duration(project.completed_base_ms),
+        duration(project.item.base_hours() * learning_lord_simulation::construction::HOUR_MS)
+    )));
+    let mut rows = vec![PlanRow {
+        label: crate::navigation::plain(&fragments),
+        fragments,
+        state: RowState::Heading,
+    }];
+    if citizen.active_plan().is_some() {
+        rows.extend(ordinary_plan_rows(citizen));
+    } else if let Some(active) = citizen.active_action() {
+        rows.push(construction_action_row(
+            citizen,
+            active.action(),
+            active.remaining_ms(),
+        ));
+    } else {
+        rows.push(PlanRow {
+            label: "Awaiting next construction action".into(),
+            fragments: vec![crate::navigation::Fragment::text(
+                "Awaiting next construction action",
+            )],
+            state: RowState::Upcoming,
+        });
+    }
+    rows
+}
+
+fn construction_action_row(
+    citizen: &Citizen,
+    action: learning_lord_simulation::CitizenAction,
+    remaining_ms: u64,
+) -> PlanRow {
+    let mut fragments = vec![crate::navigation::Fragment::text("    NOW   ")];
+    if action == learning_lord_simulation::CitizenAction::Wait {
+        fragments.push(crate::navigation::Fragment::text("Waiting for wood"));
+    } else {
+        fragments.extend(crate::navigation::action(action, citizen));
+    }
+    fragments.push(crate::navigation::Fragment::text(format!(
+        "  |  {} left",
+        duration(remaining_ms)
+    )));
+    PlanRow {
+        label: crate::navigation::plain(&fragments),
+        fragments,
+        state: RowState::Current,
+    }
+}
+
+fn ordinary_plan_rows(citizen: &Citizen) -> Vec<PlanRow> {
     let Some(active) = citizen.active_plan() else {
         return vec![PlanRow {
             fragments: vec![crate::navigation::Fragment::text("No active plan")],
@@ -676,7 +753,7 @@ pub fn refresh_plan(
     }
     let rows = selected_agent(&snapshot.0.universe, selection.0).map_or_else(Vec::new, |agent| {
         let AgentKind::Citizen(citizen) = &agent.kind;
-        plan_rows(citizen)
+        plan_rows(&snapshot.0.universe, selection.0.unwrap(), citizen)
     });
     if cached.selected != selection.0 {
         for mut position in &mut scroll {
@@ -1326,6 +1403,140 @@ mod tests {
     use crate::simulation::{self, Snapshot};
     use learning_lord_simulation::{CitizenAction, locations::Map};
 
+    fn construction_fixture() -> (
+        Universe,
+        AgentId,
+        learning_lord_simulation::construction::ConstructionProject,
+    ) {
+        use learning_lord_simulation::construction::ConstructionItem;
+        let (world, id) = Universe::default()
+            .with_citizen(
+                "Builder",
+                Citizen::new(0.0).unwrap().with_coins(100_000).unwrap(),
+            )
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
+        let map = world.map();
+        let place = map.place(citizen.home()).unwrap();
+        let building = &place.buildings[0];
+        let (world, contract) = world
+            .request_construction(
+                id,
+                place.id,
+                building.id,
+                Some(building.rooms[0].id),
+                ConstructionItem::Bed,
+                1,
+            )
+            .unwrap();
+        let project = world.construction().projects
+            [&world.construction().contracts[&contract].project]
+            .clone();
+        (world, id, project)
+    }
+
+    #[test]
+    fn construction_plan_shows_commitment_and_wait_for_wood() {
+        let (world, id, mut project) = construction_fixture();
+        let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
+        let citizen = citizen.start_action(CitizenAction::Wait).unwrap();
+        project.completed_base_ms = 3_600_000;
+        let rows = construction_plan_rows(&project, &citizen);
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0]
+                .label
+                .contains("Construction: Bed at Builder's home")
+        );
+        assert!(rows[0].label.contains("Work 01:00:00/20:00:00"));
+        assert!(
+            rows[0]
+                .fragments
+                .iter()
+                .any(|f| f.target == Some(crate::navigation::Target::Location(project.place)))
+        );
+        assert!(rows[1].label.contains("Waiting for wood"));
+        assert!(rows[1].label.contains("left"));
+        assert_eq!(rows[1].state, RowState::Current);
+    }
+
+    #[test]
+    fn construction_actions_show_building_procurement_and_travel() {
+        use learning_lord_simulation::marketplace::{Good, ShoppingList};
+        let (world, id, project) = construction_fixture();
+        let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
+        let contract = *world.construction().contracts.keys().next().unwrap();
+        for (action, expected) in [
+            (
+                CitizenAction::Construct {
+                    contract,
+                    place: project.place,
+                    base_ms: 3_600_000,
+                    duration_ms: 3_600_000,
+                    practice_ms: 0,
+                },
+                "Construct at",
+            ),
+            (
+                CitizenAction::BuyAt {
+                    place: project.place,
+                    list: ShoppingList::single(Good::Wood, 200),
+                },
+                "Buy",
+            ),
+            (CitizenAction::Travel(project.place), "Travel"),
+            (
+                CitizenAction::CollectStored {
+                    place: project.place,
+                    list: ShoppingList::single(Good::Wood, 200),
+                },
+                "Collect",
+            ),
+        ] {
+            let row = construction_action_row(citizen, action, 45 * 60_000);
+            assert!(row.label.contains(expected), "{}", row.label);
+            assert!(row.label.contains("00:45:00 left"));
+            assert!(
+                row.fragments
+                    .iter()
+                    .any(|f| f.target == Some(crate::navigation::Target::Location(project.place)))
+            );
+        }
+    }
+
+    #[test]
+    fn construction_commitment_keeps_ordinary_needs_plan_visible() {
+        let (world, id, project) = construction_fixture();
+        let (needs_world, eater) = Universe::default()
+            .with_citizen(
+                "Eater",
+                Citizen::with_needs(60.0, 100.0)
+                    .unwrap()
+                    .with_berries(310)
+                    .unwrap(),
+            )
+            .unwrap();
+        let AgentKind::Citizen(eater_citizen) = &needs_world.agents()[&eater].kind;
+        let needs_world = needs_world
+            .deposit_goods(
+                eater,
+                eater_citizen.home(),
+                learning_lord_simulation::marketplace::Good::Berries,
+                310,
+            )
+            .unwrap()
+            .start_planning(eater)
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &needs_world.agents()[&eater].kind;
+        assert!(citizen.active_plan().is_some());
+        let ordinary = ordinary_plan_rows(citizen);
+        let rows = construction_plan_rows(&project, citizen);
+        assert_eq!(&rows[1..], ordinary.as_slice());
+        assert!(rows.iter().any(|row| row.label.contains("Reduce Hunger")));
+        let AgentKind::Citizen(idle) = &world.agents()[&id].kind;
+        assert_eq!(plan_rows(&world, id, idle), ordinary_plan_rows(idle));
+    }
+
     #[test]
     fn overview_uses_shared_accounts_and_needs_wellbeing_without_wealth() {
         let universe = simulation::new_universe().unwrap();
@@ -1925,7 +2136,7 @@ mod tests {
             citizen.active_action().unwrap().action(),
             CitizenAction::Eat
         );
-        let rows = plan_rows(citizen);
+        let rows = plan_rows(&progressed, ada, citizen);
         assert_eq!(
             rows.iter()
                 .filter(|row| row.state != RowState::Heading)
