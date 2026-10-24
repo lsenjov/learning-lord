@@ -102,15 +102,25 @@ fn unavailable(
             "No cash available above commitments and the seven-day essential reserve".into(),
         );
     }
-    if universe.construction().contracts.values().any(|contract| {
-        let project = &universe.construction().projects[&contract.project];
-        contract.status == ContractStatus::NoBids
+    let offer = match universe.construction_tender_offer(
+        destination.owner,
+        destination.place,
+        item.base_hours() * HOUR_MS,
+        item.wood(),
+    ) {
+        Ok(offer) => offer,
+        Err(error) => return Some(error.to_string()),
+    };
+    if universe.construction().projects.values().any(|project| {
+        !project.completed
             && project.client == budget.account
             && project.place == destination.place
             && project.building == destination.building
             && project.room == destination.room
             && project.item == item
-            && budget.maximum_offer <= contract.maximum_offer
+            && latest_contract(universe, project)
+                .is_some_and(|contract| contract.status == ContractStatus::NoBids)
+            && offer <= project.funding_offer
     }) {
         return Some("Reposting after no bids requires a higher available budget".into());
     }
@@ -206,10 +216,18 @@ pub(crate) fn render_menu(
             };
             for item in items {
                 let tooltip = format!(
-                    "{} m2 | {} base labour hours | {} g wood\n{}",
+                    "{} m2 | {} base labour hours | {} g wood\nTender offer: {} coins\n{}",
                     item.area_m2(),
                     item.base_hours(),
                     item.wood(),
+                    universe
+                        .construction_tender_offer(
+                            destination.owner,
+                            destination.place,
+                            item.base_hours() * HOUR_MS,
+                            item.wood()
+                        )
+                        .unwrap_or(0),
                     budget_tip(universe, destination.owner)
                 );
                 button(
@@ -243,27 +261,59 @@ fn continuation_reason(universe: &Universe, project: &ConstructionProject) -> Op
     if let Err(error) = universe.validate_construction_continuation(project.client, project.id) {
         return Some(error.to_string());
     }
-    let available = match budget(universe, project.client) {
-        Ok(budget) => budget.maximum_offer,
-        Err(error) => return Some(error),
+    let available = match universe.construction_tender_offer(
+        project.client,
+        project.place,
+        project.remaining_base_ms(),
+        project.missing_wood(),
+    ) {
+        Ok(offer) => offer,
+        Err(error) => return Some(error.to_string()),
     };
     if available <= 0 {
         return Some(
             "No cash available above commitments and the seven-day essential reserve".into(),
         );
     }
-    if universe
-        .construction()
-        .contracts
-        .values()
-        .filter(|contract| {
-            contract.project == project.id && contract.status == ContractStatus::NoBids
-        })
-        .any(|contract| available <= contract.maximum_offer)
+    if latest_contract(universe, project)
+        .is_some_and(|contract| contract.status == ContractStatus::NoBids)
+        && available <= project.funding_offer
     {
         return Some("Reposting after no bids requires a higher available budget".into());
     }
     None
+}
+
+fn project_status(universe: &Universe, project: &ConstructionProject) -> String {
+    let contracts: Vec<_> = universe
+        .construction()
+        .contracts
+        .values()
+        .filter(|contract| contract.project == project.id)
+        .collect();
+    let active = contracts
+        .iter()
+        .filter(|contract| contract.status == ContractStatus::Active)
+        .count();
+    let bidding = contracts
+        .iter()
+        .filter(|contract| contract.status == ContractStatus::Bidding)
+        .count();
+    let bids: usize = contracts
+        .iter()
+        .filter(|contract| contract.status == ContractStatus::Bidding)
+        .map(|contract| contract.quotes.len())
+        .sum();
+    match (active, bidding) {
+        (0, 0) => match latest_contract(universe, project).map(|contract| contract.status) {
+            Some(ContractStatus::NoBids) => "No bids".into(),
+            Some(ContractStatus::Cancelled) => "Cancelled".into(),
+            _ => "Unfinished".into(),
+        },
+        (_, 0) => format!("{active} building"),
+        (0, _) => format!("{bidding} bidding | {bids} bids"),
+        _ => format!("{active} building | {bidding} bidding | {bids} bids"),
+    }
 }
 
 pub(crate) fn render_projects(
@@ -288,15 +338,14 @@ pub(crate) fn render_projects(
     projects.sort_by_key(|project| project.id.0);
     for project in projects {
         let contract = latest_contract(universe, project);
-        let status = match contract.map(|contract| contract.status) {
-            Some(ContractStatus::Bidding) => {
-                format!("Bidding | {} bids", contract.unwrap().quotes.len())
-            }
-            Some(ContractStatus::Active) => "Building".into(),
-            Some(ContractStatus::NoBids) => "No bids".into(),
-            Some(ContractStatus::Cancelled) => "Cancelled".into(),
-            _ => "Unfinished".into(),
-        };
+        let mut open_contracts: Vec<_> = universe
+            .construction()
+            .contracts
+            .values()
+            .filter(|contract| contract.project == project.id && contract.status.open())
+            .collect();
+        open_contracts.sort_by_key(|contract| (contract.stage, contract.sequence));
+        let status = project_status(universe, project);
         let mut tooltip = format!(
             "Progress: {:.1}/{} base labour hours\nInstalled wood: {}/{} g\nMissing wood: {} g\n{}",
             project.completed_base_ms as f64 / HOUR_MS as f64,
@@ -306,7 +355,16 @@ pub(crate) fn render_projects(
             project.missing_wood(),
             budget_tip(universe, project.client)
         );
-        if let Some(contract) = contract {
+        tooltip.push_str(&format!(
+            "\nUnallocated project escrow: {} coins",
+            project.escrow
+        ));
+        for contract in open_contracts
+            .iter()
+            .copied()
+            .chain(contract.filter(|_| open_contracts.is_empty()).into_iter())
+        {
+            tooltip.push_str(&format!("\nPortion {}", contract.stage + 1));
             tooltip.push_str(&format!(
                 "\nOffer: {} | Price: {} | Paid: {} | Escrow: {} coins",
                 contract.maximum_offer, contract.price, contract.paid, contract.escrow
@@ -362,20 +420,24 @@ pub(crate) fn render_projects(
                     13.0,
                     MUTED,
                 ));
-                if let Some(contract) =
-                    contract.filter(|contract| contract.status == ContractStatus::Bidding)
+                for contract in open_contracts
+                    .iter()
+                    .copied()
+                    .filter(|contract| contract.status == ContractStatus::Bidding)
                 {
                     button(
                         row,
-                        "Cancel",
+                        format!("Cancel portion {}", contract.stage + 1),
                         Choice::Cancel(contract.id),
                         state
                             .pending
                             .map(|_| "Waiting for construction request".into()),
-                        "Cancel bidding and release reserved cash and unused space".into(),
+                        "Stop future portions and cancel this auction; awarded work continues"
+                            .into(),
                         false,
                     );
-                } else if !contract.is_some_and(|contract| contract.status.open()) {
+                }
+                if open_contracts.is_empty() {
                     button(
                         row,
                         "Continue",
@@ -451,7 +513,14 @@ pub(crate) fn handle(
                     state.error = Some(reason);
                     continue;
                 }
-                let maximum_offer = budget(universe, destination.owner).unwrap().maximum_offer;
+                let maximum_offer = universe
+                    .construction_tender_offer(
+                        destination.owner,
+                        destination.place,
+                        item.base_hours() * HOUR_MS,
+                        item.wood(),
+                    )
+                    .unwrap();
                 crate::simulation::Mutation::RequestConstruction {
                     client: destination.owner,
                     place: destination.place,
@@ -469,7 +538,14 @@ pub(crate) fn handle(
                     state.error = Some(reason);
                     continue;
                 }
-                let maximum_offer = budget(universe, project.client).unwrap().maximum_offer;
+                let maximum_offer = universe
+                    .construction_tender_offer(
+                        project.client,
+                        project.place,
+                        project.remaining_base_ms(),
+                        project.missing_wood(),
+                    )
+                    .unwrap();
                 crate::simulation::Mutation::ContinueConstruction {
                     client: project.client,
                     project: project_id,
@@ -480,6 +556,9 @@ pub(crate) fn handle(
                 let Some(contract) = universe.construction().contracts.get(&contract_id) else {
                     continue;
                 };
+                if contract.status != ContractStatus::Bidding {
+                    continue;
+                }
                 let Some(project) = universe.construction().projects.get(&contract.project) else {
                     continue;
                 };
@@ -581,12 +660,66 @@ mod tests {
     }
 
     #[test]
+    fn project_status_includes_active_and_bidding_portions() {
+        use learning_lord_simulation::{StartingRole, marketplace::Good};
+        let (world, destination) = fixture(1_000_000);
+        let worker = Citizen::with_needs(-100.0, -100.0)
+            .unwrap()
+            .with_thirst(-100.0)
+            .unwrap()
+            .with_coins(100_000)
+            .unwrap()
+            .with_starting_role(StartingRole::Carpenter)
+            .with_garment_condition(Some(1.0))
+            .unwrap()
+            .with_good(Good::BreadRoll, 10_000)
+            .unwrap()
+            .with_good(Good::Wood, 6_000)
+            .unwrap()
+            .with_good(Good::Water, 10_000)
+            .unwrap();
+        let (world, worker_id) = world.with_citizen("Carpenter", worker).unwrap();
+        let (world, contract) = world
+            .request_construction(
+                destination.owner,
+                destination.place,
+                destination.building,
+                None,
+                ConstructionItem::Room(RoomSize::Small),
+                100_000,
+            )
+            .unwrap();
+        let project_id = world.construction().contracts[&contract].project;
+        let mut world = world
+            .advance(learning_lord_simulation::construction::BIDDING_MS)
+            .unwrap();
+        for _ in 0..24 {
+            let project = &world.construction().projects[&project_id];
+            if project_status(&world, project).starts_with("1 building | 1 bidding |") {
+                return;
+            }
+            world = world.advance(HOUR_MS).unwrap();
+        }
+        let project = &world.construction().projects[&project_id];
+        let AgentKind::Citizen(worker) = &world.agents()[&worker_id].kind;
+        panic!(
+            "{}; worker action: {:?}",
+            project_status(&world, project),
+            worker.active_action()
+        );
+    }
+
+    #[test]
     fn request_and_cancel_use_the_snapshot_mutation_channel() {
         let (world, destination) = fixture(1_000_000);
         let maximum = world
-            .construction_budget(destination.owner)
-            .unwrap()
-            .maximum_offer;
+            .construction_tender_offer(
+                destination.owner,
+                destination.place,
+                ConstructionItem::FishCrate.base_hours() * HOUR_MS,
+                ConstructionItem::FishCrate.wood(),
+            )
+            .unwrap();
         let mut app = app(world);
         press(
             &mut app,

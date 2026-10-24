@@ -437,14 +437,8 @@ pub(crate) fn goal_label(goal: Effect) -> &'static str {
 }
 
 fn plan_rows(universe: &Universe, id: AgentId, citizen: &Citizen) -> Vec<PlanRow> {
-    use learning_lord_simulation::construction::ContractStatus;
     let project = universe
-        .construction()
-        .contracts
-        .values()
-        .find(|contract| {
-            contract.status == ContractStatus::Active && contract.carpenter == Some(id)
-        })
+        .carpenter_contract(id)
         .and_then(|contract| universe.construction().projects.get(&contract.project));
     let Some(project) = project else {
         return ordinary_plan_rows(citizen);

@@ -57,6 +57,94 @@ fn ceil_coins(value: f64) -> Result<Coins, SimulationError> {
 }
 
 impl Universe {
+    /// Whole-project market estimate, including procurement for every work portion.
+    pub fn construction_estimate(
+        &self,
+        client: AgentId,
+        place: crate::locations::PlaceId,
+        base_ms: u64,
+        wood: Quantity,
+    ) -> Result<Coins, SimulationError> {
+        use crate::production::{Skill, skill_duration_reduction};
+        if base_ms == 0 {
+            return if wood == 0 {
+                Ok(0)
+            } else {
+                Err(SimulationError::InvalidQuantity)
+            };
+        }
+        let mut workers = Vec::new();
+        for agent in self.agents.values() {
+            let AgentKind::Citizen(worker) = &agent.kind;
+            if let Some(practice) = worker.skill_practice_ms(Skill::Carpentry) {
+                let budget = self.household_budget(worker.economic_id(), 0)?;
+                let travel = worker.position().distance(self.map.position(place))
+                    * crate::locations::WALK_MS_PER_METRE
+                    / HOUR_MS;
+                workers.push((
+                    budget.account,
+                    budget.hourly_earnings_target,
+                    1.0 - skill_duration_reduction(practice),
+                    travel,
+                ));
+            }
+        }
+        if workers.is_empty() {
+            // A missing profession must not make labour appear free to clients.
+            let food = Good::FOOD
+                .into_iter()
+                .map(|good| {
+                    self.construction_estimated_unit_price(client, good)
+                        / good.nutrition_per_unit().unwrap()
+                })
+                .min_by(f64::total_cmp)
+                .unwrap();
+            let daily = crate::HUNGER_PER_HOUR * 24.0 * food
+                + 400.0 * self.construction_estimated_unit_price(client, Good::Water);
+            workers.push((client, daily / FALLBACK_EARNING_HOURS, 1.0, 0.0));
+        }
+        let portion_ms = crate::construction::MILESTONE_BASE_MS;
+        let mut elapsed = 0;
+        let mut estimate = 0.0;
+        while elapsed < base_ms {
+            let end = elapsed.saturating_add(portion_ms).min(base_ms);
+            let units_through =
+                |ms| (u128::from(wood) * u128::from(ms)).div_ceil(u128::from(base_ms)) as Quantity;
+            let portion_wood = units_through(end) - units_through(elapsed);
+            let hours = (end - elapsed) as f64 / HOUR_MS;
+            let mut quotes: Vec<_> = workers
+                .iter()
+                .map(|(account, hourly, factor, travel)| {
+                    portion_wood as f64
+                        * self.construction_estimated_unit_price(*account, Good::Wood)
+                        + (hours * factor + travel + if portion_wood > 0 { 2.0 } else { 0.0 })
+                            * hourly
+                })
+                .collect();
+            quotes.sort_by(f64::total_cmp);
+            let middle = quotes.len() / 2;
+            estimate += if quotes.len() % 2 == 0 {
+                (quotes[middle - 1] + quotes[middle]) / 2.0
+            } else {
+                quotes[middle]
+            };
+            elapsed = end;
+        }
+        ceil_coins(estimate * 1.2)
+    }
+
+    pub fn construction_tender_offer(
+        &self,
+        client: AgentId,
+        place: crate::locations::PlaceId,
+        base_ms: u64,
+        wood: Quantity,
+    ) -> Result<Coins, SimulationError> {
+        Ok(self
+            .construction_estimate(client, place, base_ms, wood)?
+            .min(self.construction_budget(client)?.maximum_offer))
+    }
+
     /// Lowest obtainable offer, otherwise the world's current reference price.
     pub fn construction_estimated_unit_price(&self, account: AgentId, good: Good) -> f64 {
         let account = self.economic_id(account).unwrap_or(account);
@@ -336,6 +424,128 @@ impl HouseholdBudget {
 mod tests {
     use super::*;
     use crate::{Citizen, locations::Map};
+
+    #[test]
+    fn project_estimate_prices_each_portion_and_adds_twenty_percent() {
+        let (world, worker) = Universe::with_map(Map::default())
+            .with_citizen(
+                "Carpenter",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_coins(100_000)
+                    .unwrap()
+                    .with_skill_practice_ms(crate::production::Skill::Carpentry, Some(0))
+                    .unwrap(),
+            )
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
+        let place = citizen.home();
+        let target = world
+            .household_budget(worker, 0)
+            .unwrap()
+            .hourly_earnings_target;
+        let material = 4_800.0 * world.construction_estimated_unit_price(worker, Good::Wood);
+        assert_eq!(
+            world
+                .construction_estimate(worker, place, 24 * 3_600_000, 4_800)
+                .unwrap(),
+            ((material + 28.0 * target) * 1.2).ceil() as Coins
+        );
+        let busy = world
+            .start_action(worker, crate::CitizenAction::Sleep)
+            .unwrap();
+        assert_eq!(
+            busy.construction_estimate(worker, place, 24 * 3_600_000, 4_800)
+                .unwrap(),
+            world
+                .construction_estimate(worker, place, 24 * 3_600_000, 4_800)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn estimates_use_median_skill_and_cap_offers_at_available_cash() {
+        let (mut world, client, _, _) = family(100_000);
+        let AgentKind::Citizen(client_citizen) = &world.agents[&client].kind;
+        let place = client_citizen.home();
+        for practice in [0, crate::production::MAX_SKILL_PRACTICE_MS] {
+            (world, _) = world
+                .with_citizen(
+                    "Carpenter",
+                    Citizen::new(0.0)
+                        .unwrap()
+                        .with_coins(100_000)
+                        .unwrap()
+                        .with_skill_practice_ms(crate::production::Skill::Carpentry, Some(practice))
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        let workers: Vec<_> = world
+            .agents
+            .iter()
+            .filter_map(|(id, agent)| {
+                let AgentKind::Citizen(worker) = &agent.kind;
+                worker
+                    .skill_practice_ms(crate::production::Skill::Carpentry)
+                    .map(|_| *id)
+            })
+            .collect();
+        let hourly = world
+            .household_budget(workers[0], 0)
+            .unwrap()
+            .hourly_earnings_target;
+        let material = 200.0 * world.construction_estimated_unit_price(client, Good::Wood);
+        let travel = workers
+            .iter()
+            .map(|id| {
+                let AgentKind::Citizen(worker) = &world.agents[id].kind;
+                worker.position().distance(world.map.position(place))
+                    * crate::locations::WALK_MS_PER_METRE
+                    / HOUR_MS
+            })
+            .sum::<f64>()
+            / workers.len() as f64;
+        let estimate = world
+            .construction_estimate(client, place, 3_600_000, 200)
+            .unwrap();
+        assert_eq!(
+            estimate,
+            ((material + (2.75 + travel) * hourly) * 1.2).ceil() as Coins
+        );
+        assert_eq!(
+            world
+                .construction_tender_offer(client, place, 3_600_000, 200)
+                .unwrap(),
+            estimate
+        );
+        let account = world.economic_id(client).unwrap();
+        let reserve = world.household_budget(client, 0).unwrap().essential_reserve;
+        world.set_account_coins(account, reserve + 1).unwrap();
+        assert_eq!(
+            world
+                .construction_tender_offer(client, place, 3_600_000, 200)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn no_carpenter_estimate_keeps_unskilled_labour_and_remaining_material_cost() {
+        let (world, client, _, _) = family(100_000);
+        let AgentKind::Citizen(client_citizen) = &world.agents[&client].kind;
+        let place = client_citizen.home();
+        let materials = 200.0 * world.construction_estimated_unit_price(client, Good::Wood);
+        let full = world
+            .construction_estimate(client, place, 3_600_000, 200)
+            .unwrap();
+        let installed = world
+            .construction_estimate(client, place, 3_600_000, 0)
+            .unwrap();
+        assert!(full > (materials * 1.2).ceil() as Coins);
+        assert!(installed > 0 && installed < full);
+        assert_eq!(world.construction_estimate(client, place, 0, 0).unwrap(), 0);
+    }
 
     fn family(coins: Coins) -> (Universe, AgentId, AgentId, AgentId) {
         let (world, first) = Universe::with_map(Map::default())
