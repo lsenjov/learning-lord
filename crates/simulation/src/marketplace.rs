@@ -615,6 +615,45 @@ impl Market {
         })
     }
 
+    pub(crate) fn production_snapshot(
+        &self,
+        buyer: MarketParty,
+        map: &crate::locations::Map,
+    ) -> (
+        [Quantity; Good::COUNT],
+        [Option<f64>; Good::COUNT],
+        [Option<f64>; Good::COUNT],
+    ) {
+        let mut owned = [0; Good::COUNT];
+        let mut purchases: [Option<f64>; Good::COUNT] = [None; Good::COUNT];
+        let mut listings: [Option<f64>; Good::COUNT] = [None; Good::COUNT];
+        for order in self.orders() {
+            let index = order.good as usize;
+            if order.seller == buyer {
+                owned[index] += order.units;
+            }
+            if order.units == 0
+                || !self.purchasable(order)
+                || !map
+                    .places()
+                    .get(&order.place)
+                    .is_some_and(|place| place.kind != crate::locations::Location::Home)
+            {
+                continue;
+            }
+            let price = order.quoted_price;
+            if listings[index].is_none_or(|current| price.total_cmp(&current).is_lt()) {
+                listings[index] = Some(price);
+            }
+            if order.seller != buyer
+                && purchases[index].is_none_or(|current| price.total_cmp(&current).is_lt())
+            {
+                purchases[index] = Some(price);
+            }
+        }
+        (owned, purchases, listings)
+    }
+
     pub(crate) fn lowest_purchase_quote(
         &self,
         buyer: MarketParty,
@@ -636,6 +675,7 @@ impl Market {
             .min_by(f64::total_cmp)
     }
 
+    #[cfg(test)]
     pub(crate) fn lowest_listed_quote(
         &self,
         good: Good,

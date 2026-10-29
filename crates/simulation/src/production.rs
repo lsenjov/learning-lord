@@ -449,9 +449,30 @@ fn planned_crop_stock(
     crop.planned_yield(citizen.current_time_ms(), tending_finish) as f64
 }
 
+#[cfg(test)]
 fn production_stocks(citizen: &Citizen) -> [f64; Good::COUNT] {
-    let mut stock =
-        std::array::from_fn(|index| citizen.economic_owned_units(Good::ALL[index]) as f64);
+    let (listed, _, _) = citizen
+        .market()
+        .production_snapshot(citizen.market_party(), &citizen.map());
+    production_stocks_with_listed(citizen, &listed)
+}
+
+fn production_stocks_with_listed(
+    citizen: &Citizen,
+    listed: &[Quantity; Good::COUNT],
+) -> [f64; Good::COUNT] {
+    let mut stock = std::array::from_fn(|index| {
+        citizen
+            .resource_units(Good::ALL[index])
+            .unwrap_or(Quantity::MAX)
+            .saturating_add(listed[index])
+            .saturating_add(
+                citizen
+                    .household
+                    .as_ref()
+                    .map_or(0, |household| household.other_carried[index]),
+            ) as f64
+    });
     if let Some(active) = citizen.active_action()
         && let Some(recipe) = active.action().production_recipe()
         && recipe != Recipe::BrewBeer
@@ -491,7 +512,13 @@ fn production_stocks(citizen: &Citizen) -> [f64; Good::COUNT] {
 #[cfg(test)]
 pub(crate) fn assert_production_stocks_match(citizen: &Citizen) {
     let stock = production_stocks(citizen);
+    let prices = ProductionPrices::snapshot(citizen);
     for good in Good::ALL {
+        assert_eq!(
+            prices.owned[good as usize],
+            citizen.usable_owned_units(good),
+            "{good:?}"
+        );
         assert_eq!(
             stock[good as usize].to_bits(),
             production_stock(good, citizen).to_bits(),
@@ -524,29 +551,40 @@ pub(crate) struct ProductionPrices {
 
 impl ProductionPrices {
     pub(crate) fn snapshot(citizen: &Citizen) -> Self {
+        let (listed, purchases, listings) = citizen
+            .market()
+            .production_snapshot(citizen.market_party(), &citizen.map());
+        Self::from_market_snapshot(citizen, &listed, &purchases, &listings)
+    }
+
+    fn from_market_snapshot(
+        citizen: &Citizen,
+        listed: &[Quantity; Good::COUNT],
+        purchases: &[Option<f64>; Good::COUNT],
+        listings: &[Option<f64>; Good::COUNT],
+    ) -> Self {
         let reference = |good| citizen.prices().price(good).unwrap_or(f64::NAN);
         Self {
             stock: None,
-            owned: std::array::from_fn(|index| citizen.usable_owned_units(Good::ALL[index])),
-            purchasable: std::array::from_fn(|index| {
-                citizen
-                    .market()
-                    .lowest_purchase_quote(citizen.market_party(), Good::ALL[index], &citizen.map())
-                    .is_some()
-            }),
-            inputs: std::array::from_fn(|index| {
+            owned: std::array::from_fn(|index| {
                 let good = Good::ALL[index];
                 citizen
-                    .market()
-                    .lowest_purchase_quote(citizen.market_party(), good, &citizen.map())
-                    .unwrap_or_else(|| reference(good))
+                    .carried_available_units(good)
+                    .saturating_add(listed[index])
+                    .saturating_add(
+                        citizen
+                            .stored_sources(good)
+                            .iter()
+                            .map(|(_, units)| *units)
+                            .fold(0_u64, u64::saturating_add),
+                    )
+            }),
+            purchasable: purchases.map(|quote| quote.is_some()),
+            inputs: std::array::from_fn(|index| {
+                purchases[index].unwrap_or_else(|| reference(Good::ALL[index]))
             }),
             outputs: std::array::from_fn(|index| {
-                let good = Good::ALL[index];
-                citizen
-                    .market()
-                    .lowest_listed_quote(good, &citizen.map())
-                    .unwrap_or_else(|| reference(good))
+                listings[index].unwrap_or_else(|| reference(Good::ALL[index]))
             }),
             minimum_margin: f64::from(
                 citizen
@@ -810,13 +848,58 @@ pub(crate) fn projected_recipes_at(
         .collect())
 }
 
+pub(crate) struct ProjectionSnapshot {
+    prices: ProductionPrices,
+    stock: [f64; Good::COUNT],
+}
+
+impl ProjectionSnapshot {
+    pub(crate) fn new(citizen: &Citizen) -> Self {
+        let (listed, purchases, listings) = citizen
+            .market()
+            .production_snapshot(citizen.market_party(), &citizen.map());
+        Self {
+            prices: ProductionPrices::from_market_snapshot(citizen, &listed, &purchases, &listings),
+            stock: production_stocks_with_listed(citizen, &listed),
+        }
+    }
+
+    pub(crate) fn recipes_at(
+        &self,
+        citizen: &Citizen,
+        site: Option<PlaceId>,
+        horizon_ms: u64,
+    ) -> Result<Vec<Recipe>, SimulationError> {
+        Ok(
+            projected_route_blocks_from_snapshot(citizen, site, horizon_ms, self)?
+                .into_iter()
+                .flatten()
+                .collect(),
+        )
+    }
+}
+
 pub(crate) fn projected_route_blocks_at(
     citizen: &Citizen,
     site: Option<PlaceId>,
     horizon_ms: u64,
 ) -> Result<Vec<Vec<Recipe>>, SimulationError> {
+    projected_route_blocks_from_snapshot(
+        citizen,
+        site,
+        horizon_ms,
+        &ProjectionSnapshot::new(citizen),
+    )
+}
+
+fn projected_route_blocks_from_snapshot(
+    citizen: &Citizen,
+    site: Option<PlaceId>,
+    horizon_ms: u64,
+    snapshot: &ProjectionSnapshot,
+) -> Result<Vec<Vec<Recipe>>, SimulationError> {
     let candidates = projection_candidates(citizen, site);
-    let mut prices = ProductionPrices::snapshot(citizen);
+    let mut prices = snapshot.prices.clone();
     let eligible: [bool; Recipe::COUNT] = std::array::from_fn(|index| {
         candidates.contains(&Recipe::ALL[index])
             && citizen.eligible_sale_replenishment_with_cost(
@@ -826,7 +909,7 @@ pub(crate) fn projected_route_blocks_at(
             )
     });
     let mut owned = prices.owned;
-    let mut stock = production_stocks(citizen);
+    let mut stock = snapshot.stock;
     if let Some(active) = citizen.active_action()
         && let Some(recipe) = active.action().production_recipe()
         && recipe != Recipe::BrewBeer
@@ -1041,6 +1124,103 @@ pub(crate) fn period_start(period: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_projection_snapshot_matches_independent_horizons() {
+        for citizen in [
+            quoted_weaver(0),
+            quoted_weaver(10000),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_starting_role(StartingRole::Farmer),
+        ] {
+            let snapshot = ProjectionSnapshot::new(&citizen);
+            for site in [None, Some(citizen.selling_place())] {
+                for horizon in [PRODUCTION_BLOCK_MS, DAILY_CAPACITY_MS, PRODUCTION_BLOCK_MS] {
+                    assert_eq!(
+                        snapshot.recipes_at(&citizen, site, horizon).unwrap(),
+                        projected_recipes_at(&citizen, site, horizon).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn market_snapshot_matches_scalar_prices_and_ownership() {
+        let mut citizen = quoted_weaver(10000);
+        citizen.household = Some(crate::households::HouseholdContext {
+            id: crate::AgentId(uuid::Uuid::new_v4()),
+            members: vec![citizen.id()],
+            allegiance: 1.0,
+            other_carried: [7; Good::COUNT],
+            other_consumption_value: 0.0,
+            other_clothing_replacements: 0,
+        });
+        citizen.tax_reserved.insert(Good::Flax, 500);
+        let mut market = citizen.market().clone();
+        let other = crate::AgentId(uuid::Uuid::new_v4());
+        let (map, home) = citizen
+            .map()
+            .with_place(
+                Location::Home,
+                citizen.position(),
+                Some(citizen.id()),
+                "Home",
+            )
+            .unwrap();
+        let citizen = citizen.with_map(map).unwrap();
+        for (seller, place, good, price) in [
+            (
+                citizen.market_party(),
+                citizen.selling_place(),
+                Good::Flax,
+                1.0,
+            ),
+            (other.into(), citizen.selling_place(), Good::Flax, 17.0),
+            (other.into(), home, Good::Thread, 0.5),
+            (citizen.market_party(), home, Good::Flour, 2.0),
+        ] {
+            market
+                .list_at_quote(seller, place, good, 50, price)
+                .unwrap();
+        }
+        let citizen = citizen.with_market(market);
+        let prices = ProductionPrices::snapshot(&citizen);
+        let (listed, purchases, listings) = citizen
+            .market()
+            .production_snapshot(citizen.market_party(), &citizen.map());
+        for good in Good::ALL {
+            let index = good as usize;
+            assert_eq!(
+                listed[index],
+                citizen.market().listed_units(citizen.market_party(), good)
+            );
+            assert_eq!(
+                purchases[index],
+                citizen.market().lowest_purchase_quote(
+                    citizen.market_party(),
+                    good,
+                    &citizen.map()
+                )
+            );
+            assert_eq!(
+                listings[index],
+                citizen.market().lowest_listed_quote(good, &citizen.map())
+            );
+            assert_eq!(prices.owned[index], citizen.usable_owned_units(good));
+            let reference = citizen.prices().price(good).unwrap_or(f64::NAN);
+            assert_eq!(
+                prices.inputs[index].to_bits(),
+                purchases[index].unwrap_or(reference).to_bits()
+            );
+            assert_eq!(
+                prices.outputs[index].to_bits(),
+                listings[index].unwrap_or(reference).to_bits()
+            );
+        }
+        assert_production_stocks_match(&citizen);
+    }
 
     #[test]
     fn production_snapshot_values_owned_inputs_at_competitive_prices_and_stays_fixed() {
@@ -1618,6 +1798,7 @@ mod tests {
             .with_good(Good::Water, 10000)
             .unwrap();
         citizen.tax_reserved.insert(Good::Berries, 5520);
+        assert_production_stocks_match(&citizen);
         citizen
             .market
             .list_at_quote(

@@ -422,6 +422,7 @@ impl Universe {
                 .entry((citizen.economic_id(), place))
                 .or_insert(([0; Good::COUNT], [0; Good::COUNT]));
             let mut own = [crate::marketplace::ShoppingList::default(); 2];
+            let snapshot = crate::production::ProjectionSnapshot::new(citizen);
             for (index, horizon) in [
                 crate::production::PRODUCTION_BLOCK_MS,
                 crate::production::DAILY_CAPACITY_MS,
@@ -429,8 +430,7 @@ impl Universe {
             .into_iter()
             .enumerate()
             {
-                let recipes =
-                    crate::production::projected_recipes_at(citizen, Some(place), horizon)?;
+                let recipes = snapshot.recipes_at(citizen, Some(place), horizon)?;
                 let stock =
                     crate::production::recipe_requirements_at(citizen, Some(place), &recipes)?;
                 own[index] = stock;
