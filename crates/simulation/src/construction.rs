@@ -140,6 +140,8 @@ pub enum ConstructionOutput {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ConstructionStage {
     pub next_contract: ContractId,
+    #[serde(default)]
+    pub settled_base_ms: u64,
     pub wood: Quantity,
     pub base_ms: u64,
     pub completed_base_ms: u64,
@@ -177,6 +179,10 @@ pub struct ConstructionProject {
     pub allocated_base_ms: u64,
     pub allocated_offer: Coins,
     pub scheduling: bool,
+    #[serde(default)]
+    pub latest_outcome: Option<(u64, ContractStatus)>,
+    #[serde(default)]
+    pub awarded: bool,
 }
 impl ConstructionProject {
     pub fn remaining_base_ms(&self) -> u64 {
@@ -213,6 +219,8 @@ pub struct ConstructionQuote {
     pub procurement_cash: Coins,
     pub shared_wood: Quantity,
     pub carried_wood: Quantity,
+    #[serde(default)]
+    pub material_value: Option<f64>,
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ConstructionContract {
@@ -236,6 +244,41 @@ pub struct ConstructionContract {
     pub start_base_ms: u64,
     pub paid_base_ms: u64,
     pub ended_base_ms: Option<u64>,
+    #[serde(default)]
+    pub work_days: Vec<ContractWorkDay>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct ContractWorkDay {
+    pub start_ms: u64,
+    pub actual_ms: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct CarpenterDay {
+    pub start_ms: u64,
+    pub actual_ms: u64,
+    pub labour_coins: f64,
+    pub pending: u64,
+    pub unknown: bool,
+}
+impl CarpenterDay {
+    pub fn hours(&self) -> f64 {
+        self.actual_ms as f64 / HOUR_MS as f64
+    }
+    pub fn price(&self) -> Option<f64> {
+        (self.actual_ms > 0 && self.pending == 0 && !self.unknown)
+            .then(|| self.labour_coins / self.hours())
+    }
+}
+
+fn labour_day(time: u64) -> u64 {
+    let offset = crate::marketplace::UPDATE_TIME_MS;
+    if time < offset {
+        0
+    } else {
+        (time - offset) / DAY_MS * DAY_MS + offset
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -258,6 +301,14 @@ pub struct Construction {
     pub projects: HashMap<ProjectId, ConstructionProject>,
     pub contracts: HashMap<ContractId, ConstructionContract>,
     pub payments: Vec<ConstructionPayment>,
+    #[serde(default)]
+    pub next_sequence: Option<u64>,
+    #[serde(default)]
+    pub labour_days: Vec<CarpenterDay>,
+    #[serde(default)]
+    pub labour_started_ms: Option<u64>,
+    #[serde(default)]
+    pub released_carpenters: std::collections::HashSet<AgentId>,
     pub(crate) rng: Xoshiro256PlusPlus,
 }
 impl Default for Construction {
@@ -266,7 +317,24 @@ impl Default for Construction {
             projects: HashMap::new(),
             contracts: HashMap::new(),
             payments: Vec::new(),
+            next_sequence: Some(0),
+            labour_days: vec![CarpenterDay::default()],
+            labour_started_ms: Some(0),
+            released_carpenters: Default::default(),
             rng: rand::make_rng(),
+        }
+    }
+}
+
+impl Construction {
+    pub(crate) fn starting_at(time_ms: u64) -> Self {
+        Self {
+            labour_started_ms: Some(time_ms),
+            labour_days: vec![CarpenterDay {
+                start_ms: labour_day(time_ms),
+                ..Default::default()
+            }],
+            ..Self::default()
         }
     }
 }
@@ -282,6 +350,176 @@ fn add_coins(to: &mut Coins, amount: Coins) -> Result<(), SimulationError> {
 }
 
 impl Universe {
+    pub(crate) fn migrate_construction(&mut self) {
+        if self.construction.next_sequence.is_some() {
+            return;
+        }
+        self.construction.next_sequence = Some(
+            self.construction
+                .contracts
+                .values()
+                .map(|c| c.sequence + 1)
+                .max()
+                .unwrap_or(0),
+        );
+        self.construction.labour_started_ms = Some(self.current_time_ms);
+        for contract in self.construction.contracts.values() {
+            if contract.awarded_ms.is_some() {
+                self.construction
+                    .projects
+                    .get_mut(&contract.project)
+                    .unwrap()
+                    .awarded = true;
+            }
+        }
+        self.compact_construction();
+    }
+
+    fn record_construction_work(&mut self, id: ContractId, mut time: u64, mut elapsed: u64) {
+        while elapsed > 0 {
+            let start = labour_day(time);
+            let end = if start == 0 {
+                crate::marketplace::UPDATE_TIME_MS
+            } else {
+                start + DAY_MS
+            };
+            let actual_ms = elapsed.min(end - time);
+            let contract = self.construction.contracts.get_mut(&id).unwrap();
+            let first = !contract.work_days.iter().any(|day| day.start_ms == start);
+            if first {
+                contract.work_days.push(ContractWorkDay {
+                    start_ms: start,
+                    actual_ms: 0,
+                });
+            }
+            contract
+                .work_days
+                .iter_mut()
+                .find(|day| day.start_ms == start)
+                .unwrap()
+                .actual_ms += actual_ms;
+            if !self
+                .construction
+                .labour_days
+                .iter()
+                .any(|day| day.start_ms == start)
+            {
+                self.construction.labour_days.push(CarpenterDay {
+                    start_ms: start,
+                    ..Default::default()
+                });
+            }
+            let day = self
+                .construction
+                .labour_days
+                .iter_mut()
+                .find(|day| day.start_ms == start)
+                .unwrap();
+            day.actual_ms += actual_ms;
+            if first {
+                day.pending += 1;
+            }
+            time += actual_ms;
+            elapsed -= actual_ms;
+        }
+    }
+
+    fn compact_construction(&mut self) {
+        let mut closed: Vec<_> = self
+            .construction
+            .contracts
+            .values()
+            .filter(|c| !c.status.open())
+            .cloned()
+            .collect();
+        closed.sort_by_key(|contract| contract.sequence);
+        for contract in closed {
+            if let Some(worker) = contract.carpenter {
+                self.construction.released_carpenters.insert(worker);
+            }
+            let project = self
+                .construction
+                .projects
+                .get_mut(&contract.project)
+                .unwrap();
+            project.stages[contract.stage].settled_base_ms = contract.ended_base_ms.unwrap();
+            if project
+                .latest_outcome
+                .is_none_or(|(sequence, _)| sequence < contract.sequence)
+            {
+                project.latest_outcome = Some((contract.sequence, contract.status));
+            }
+            let material = contract
+                .quotes
+                .iter()
+                .find(|q| Some(q.carpenter) == contract.carpenter)
+                .and_then(|q| q.material_value);
+            let labour = material.map(|wood| (contract.paid as f64 - wood).max(0.0));
+            let total: u64 = contract.work_days.iter().map(|day| day.actual_ms).sum();
+            for work in &contract.work_days {
+                if let Some(day) = self
+                    .construction
+                    .labour_days
+                    .iter_mut()
+                    .find(|day| day.start_ms == work.start_ms)
+                {
+                    day.pending -= 1;
+                    if contract.status == ContractStatus::Completed {
+                        if let Some(labour) = labour {
+                            day.labour_coins += labour * work.actual_ms as f64 / total as f64;
+                        } else {
+                            day.unknown = true;
+                        }
+                    }
+                }
+            }
+            self.construction.contracts.remove(&contract.id);
+        }
+        self.construction
+            .payments
+            .retain(|payment| self.construction.contracts.contains_key(&payment.contract));
+        self.construction
+            .projects
+            .retain(|_, project| !project.completed);
+        let today = labour_day(self.current_time_ms);
+        let cutoff = today.saturating_sub(365 * DAY_MS);
+        self.construction
+            .labour_days
+            .retain(|day| day.start_ms >= cutoff);
+        let mut day = self.construction.labour_days.last().map_or_else(
+            || {
+                labour_day(
+                    self.construction
+                        .labour_started_ms
+                        .unwrap_or(self.current_time_ms),
+                )
+                .max(cutoff)
+            },
+            |day| day.start_ms,
+        );
+        while day <= today {
+            if !self
+                .construction
+                .labour_days
+                .iter()
+                .any(|entry| entry.start_ms == day)
+            {
+                self.construction.labour_days.push(CarpenterDay {
+                    start_ms: day,
+                    ..Default::default()
+                });
+            }
+            day = if day == 0 {
+                crate::marketplace::UPDATE_TIME_MS
+            } else {
+                day + DAY_MS
+            };
+        }
+        self.construction
+            .labour_days
+            .sort_by_key(|day| day.start_ms);
+    }
+
     pub fn construction(&self) -> &Construction {
         &self.construction
     }
@@ -363,12 +601,11 @@ impl Universe {
                     && project.repair.is_none()
                     && project.place == place
                     && project.room == room
-                    && self.construction.contracts.values().any(|contract| {
-                        contract.project == project.id
-                            && (contract.status.open()
-                                || project.completed_base_ms > 0
-                                || project.installed_wood > 0)
-                    })
+                    && (project.completed_base_ms > 0
+                        || project.installed_wood > 0
+                        || self.construction.contracts.values().any(|contract| {
+                            contract.project == project.id && contract.status.open()
+                        }))
             })
             .map(|project| project.item.area_m2())
             .sum()
@@ -484,6 +721,7 @@ impl Universe {
                 stages: (0..(item.base_hours() * HOUR_MS).div_ceil(MILESTONE_BASE_MS))
                     .map(|index| ConstructionStage {
                         next_contract: ContractId(Uuid::new_v4()),
+                        settled_base_ms: 0,
                         wood: wood_through(
                             (item.base_hours() * HOUR_MS - index * MILESTONE_BASE_MS)
                                 .min(MILESTONE_BASE_MS),
@@ -500,6 +738,8 @@ impl Universe {
                 allocated_base_ms: 0,
                 allocated_offer: 0,
                 scheduling: false,
+                latest_outcome: None,
+                awarded: false,
                 output: if matches!(item, ConstructionItem::Room(_)) {
                     ConstructionOutput::Room(RoomId(Uuid::new_v4()))
                 } else {
@@ -563,13 +803,9 @@ impl Universe {
         maximum_offer: Coins,
     ) -> Result<(Self, ContractId), SimulationError> {
         self.validate_construction_continuation(client, project)?;
-        let previous = self
-            .construction
-            .contracts
-            .values()
-            .filter(|contract| contract.project == project)
-            .max_by_key(|contract| contract.sequence);
-        if previous.is_some_and(|contract| contract.status == ContractStatus::NoBids)
+        if self.construction.projects[&project]
+            .latest_outcome
+            .is_some_and(|(_, status)| status == ContractStatus::NoBids)
             && maximum_offer <= self.construction.projects[&project].funding_offer
         {
             return Err(SimulationError::InvalidQuantity);
@@ -611,10 +847,11 @@ impl Universe {
         site.allocated_offer = 0;
         site.scheduling = true;
         for stage in &mut site.stages {
-            if self
-                .construction
-                .contracts
-                .contains_key(&stage.next_contract)
+            if site.latest_outcome.is_some()
+                || self
+                    .construction
+                    .contracts
+                    .contains_key(&stage.next_contract)
             {
                 stage.next_contract = ContractId(
                     uuid::Builder::from_random_bytes(self.construction.rng.random()).into_uuid(),
@@ -662,7 +899,7 @@ impl Universe {
                 stage,
                 started: false,
                 posted_ms: self.current_time_ms,
-                sequence: self.construction.contracts.len() as u64,
+                sequence: self.construction.next_sequence.unwrap(),
                 bidding_ends_ms,
                 next_quote_ms: self.current_time_ms,
                 maximum_offer,
@@ -677,8 +914,10 @@ impl Universe {
                 start_base_ms,
                 paid_base_ms: start_base_ms,
                 ended_base_ms: None,
+                work_days: Vec::new(),
             },
         );
+        self.construction.next_sequence = Some(self.construction.next_sequence.unwrap() + 1);
         Ok(id)
     }
 
@@ -730,6 +969,7 @@ impl Universe {
         }
         let mut world = self.clone();
         world.close_construction(id, ContractStatus::Cancelled)?;
+        world.compact_construction();
         world.refresh_construction_context()?;
         world.refresh_market();
         world.refresh_household_history(world.current_time_ms, false)?;
@@ -931,6 +1171,18 @@ impl Universe {
             procurement_cash: finance.procurement_cash,
             shared_wood,
             carried_wood,
+            material_value: if sealed_price.is_some() {
+                contract
+                    .quotes
+                    .iter()
+                    .find(|quote| quote.carpenter == id)
+                    .and_then(|quote| quote.material_value)
+            } else {
+                Some(
+                    stage.missing_wood() as f64
+                        * self.construction_estimated_unit_price(account, Good::Wood),
+                )
+            },
         }))
     }
 
@@ -951,6 +1203,7 @@ impl Universe {
     }
 
     pub(crate) fn process_construction(&mut self) -> Result<(), SimulationError> {
+        self.compact_construction();
         let mut contracts: Vec<_> = self.construction.contracts.keys().copied().collect();
         contracts.sort_by_key(|id| (self.construction.contracts[id].posted_ms, id.0));
         let mut workers: Vec<_> = self.agents.keys().copied().collect();
@@ -1007,6 +1260,7 @@ impl Universe {
                 }
             }
         }
+        self.compact_construction();
         self.refresh_construction_context()
     }
 
@@ -1076,6 +1330,11 @@ impl Universe {
                 .ok_or(SimulationError::TimeOverflow)?,
         );
         contract.price = winner.price;
+        self.construction
+            .projects
+            .get_mut(&snapshot.project)
+            .unwrap()
+            .awarded = true;
         contract.escrow = winner.price;
         Ok(())
     }
@@ -1302,6 +1561,7 @@ impl Universe {
         let new_elapsed = (old_elapsed + elapsed).min(duration_ms);
         let before = u128::from(base_ms) * u128::from(old_elapsed) / u128::from(duration_ms);
         let after = u128::from(base_ms) * u128::from(new_elapsed) / u128::from(duration_ms);
+        self.record_construction_work(id, time - elapsed, new_elapsed - old_elapsed);
         let site = self
             .construction
             .projects
@@ -1386,11 +1646,7 @@ impl Universe {
             let AgentKind::Citizen(citizen) = &self.agents[&worker].kind;
             if citizen.active_action.is_none()
                 && citizen.active_plan.is_none()
-                && self
-                    .construction
-                    .contracts
-                    .values()
-                    .any(|contract| contract.carpenter == Some(worker) && !contract.status.open())
+                && self.construction.released_carpenters.contains(&worker)
             {
                 let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&worker).unwrap().kind;
                 *citizen = citizen.start_planning()?;
@@ -1628,6 +1884,63 @@ impl Universe {
             })
             .collect();
 
+        if self
+            .construction
+            .labour_started_ms
+            .is_some_and(|start| start > now)
+            || self.construction.labour_days.len() > 366
+        {
+            return Err(invalid());
+        }
+        let mut day_starts = HashSet::new();
+        for day in &self.construction.labour_days {
+            let pending = self
+                .construction
+                .contracts
+                .values()
+                .filter(|contract| {
+                    contract.status.open()
+                        && contract
+                            .work_days
+                            .iter()
+                            .any(|work| work.start_ms == day.start_ms)
+                })
+                .count() as u64;
+            let pending_ms: u128 = self
+                .construction
+                .contracts
+                .values()
+                .flat_map(|contract| &contract.work_days)
+                .filter(|work| work.start_ms == day.start_ms)
+                .map(|work| u128::from(work.actual_ms))
+                .sum();
+            if pending_ms > u128::from(day.actual_ms)
+                || !day_starts.insert(day.start_ms)
+                || labour_day(day.start_ms) != day.start_ms
+                || day.start_ms > now
+                || !day.labour_coins.is_finite()
+                || day.labour_coins < 0.0
+                || day.pending != pending
+                || (day.actual_ms == 0 && day.labour_coins != 0.0)
+            {
+                return Err(invalid());
+            }
+        }
+        for contract in self.construction.contracts.values() {
+            let mut starts = HashSet::new();
+            for day in &contract.work_days {
+                if (day.start_ms >= labour_day(now).saturating_sub(365 * DAY_MS)
+                    && !day_starts.contains(&day.start_ms))
+                    || !starts.insert(day.start_ms)
+                    || day.actual_ms == 0
+                    || day.start_ms > now
+                    || labour_day(day.start_ms) != day.start_ms
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+
         for (id, project) in &self.construction.projects {
             let total = project.total_base_ms;
             let output = match project.output {
@@ -1643,14 +1956,23 @@ impl Universe {
                     .client
                     .account()
                     .is_some_and(|id| self.economic_id(id).is_err())
+                || project.latest_outcome.is_some_and(|(sequence, status)| {
+                    status.open()
+                        || self
+                            .construction
+                            .next_sequence
+                            .is_some_and(|next| sequence >= next)
+                })
+                || (self.construction.next_sequence.is_some() && project.completed)
                 || project.completed_base_ms > total
                 || project.installed_wood > project.total_wood
                 || project.completed != (project.completed_base_ms == total)
-                || !self
-                    .construction
-                    .contracts
-                    .values()
-                    .any(|contract| contract.project == *id)
+                || (self.construction.next_sequence.is_none()
+                    && !self
+                        .construction
+                        .contracts
+                        .values()
+                        .any(|contract| contract.project == *id))
             {
                 return Err(invalid());
             }
@@ -1662,6 +1984,7 @@ impl Universe {
                 || project.stages.iter().any(|stage| {
                     stage.base_ms == 0
                         || stage.base_ms > MILESTONE_BASE_MS
+                        || stage.settled_base_ms > stage.completed_base_ms
                         || stage.completed_base_ms > stage.base_ms
                         || stage.installed_wood > stage.wood
                         || (stage.completed_base_ms > 0 && stage.installed_wood != stage.wood)
@@ -1803,8 +2126,13 @@ impl Universe {
                 .get(&contract.project)
                 .ok_or_else(invalid)?;
             let stage = project.stages.get(contract.stage).ok_or_else(invalid)?;
-            if !sequences.insert(contract.sequence)
-                || contract.sequence >= self.construction.contracts.len() as u64
+            if (self.construction.next_sequence.is_some() && !contract.status.open())
+                || !sequences.insert(contract.sequence)
+                || contract.sequence
+                    >= self
+                        .construction
+                        .next_sequence
+                        .unwrap_or(self.construction.contracts.len() as u64)
                 || *id != contract.id
                 || contract.maximum_offer < 0
                 || contract.escrow < 0
@@ -1913,6 +2241,9 @@ impl Universe {
                 let AgentKind::Citizen(worker) = &worker.kind;
                 if !quoted.insert(quote.carpenter)
                     || worker.skill_practice_ms(Skill::Carpentry).is_none()
+                    || quote.material_value.is_some_and(|value| {
+                        !value.is_finite() || value < 0.0 || value > quote.price as f64
+                    })
                     || quote.price <= 0
                     || quote.price > contract.maximum_offer
                     || quote.financing < 0
@@ -1943,7 +2274,7 @@ impl Universe {
                     .filter(|contract| contract.project == project.id && contract.stage == index)
                     .collect();
                 contracts.sort_by_key(|contract| contract.sequence);
-                let mut previous_end = 0;
+                let mut previous_end = stage.settled_base_ms;
                 for contract in contracts {
                     if contract.start_base_ms != previous_end {
                         return Err(invalid());
@@ -2129,6 +2460,199 @@ mod tests {
     }
 
     #[test]
+    fn later_starting_universe_has_no_fabricated_prior_labour_days() {
+        let start = 500 * DAY_MS + 8 * HOUR_MS;
+        let mut world = Universe::starting_at(start);
+        world.compact_construction();
+        assert_eq!(world.construction.labour_started_ms, Some(start));
+        assert_eq!(world.construction.labour_days.len(), 1);
+        assert_eq!(
+            world.construction.labour_days[0].start_ms,
+            labour_day(start)
+        );
+    }
+
+    #[test]
+    fn compact_saves_reject_missing_work_summaries_and_measurement_start() {
+        let (world, _, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        let world = award(world, worker).advance(HOUR_MS).unwrap();
+        assert!(!world.construction.contracts[&id].work_days.is_empty());
+        let mut missing_day = world.clone();
+        missing_day.construction.labour_days.clear();
+        assert!(Universe::from_save_str(&missing_day.to_save_string().unwrap()).is_err());
+        let mut missing_start = world;
+        missing_start.construction.labour_started_ms = None;
+        assert!(Universe::from_save_str(&missing_start.to_save_string().unwrap()).is_err());
+    }
+
+    #[test]
+    fn labour_hours_measure_skill_adjusted_elapsed_time_rather_than_base_progress() {
+        let (mut world, _, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&worker).unwrap().kind;
+        *citizen = citizen
+            .clone()
+            .with_skill_practice_ms(
+                Skill::Carpentry,
+                Some(crate::production::MAX_SKILL_PRACTICE_MS),
+            )
+            .unwrap();
+        let mut world = award(world, worker).advance(HOUR_MS).unwrap();
+        let project = world.construction.contracts[&id].project;
+        let old_actual: u64 = world
+            .construction
+            .labour_days
+            .iter()
+            .map(|day| day.actual_ms)
+            .sum();
+        let old_progress = world.construction.projects[&project].completed_base_ms;
+        let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
+        let active = citizen.active_action().unwrap();
+        assert!(matches!(active.action(), CitizenAction::Construct { .. }));
+        let elapsed = active.remaining_ms().min(HOUR_MS / 2);
+        world
+            .advance_construction_work(worker, active, elapsed, world.current_time_ms + elapsed)
+            .unwrap();
+        assert_eq!(
+            world
+                .construction
+                .labour_days
+                .iter()
+                .map(|day| day.actual_ms)
+                .sum::<u64>(),
+            old_actual + elapsed
+        );
+        assert!(world.construction.projects[&project].completed_base_ms - old_progress > elapsed);
+    }
+
+    #[test]
+    fn daily_labour_allocates_settlement_to_actual_work_days_without_wood() {
+        let (mut world, _, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        let material = world.construction.contracts[&id].quotes[0]
+            .material_value
+            .unwrap();
+        let boundary = crate::marketplace::UPDATE_TIME_MS + DAY_MS;
+        world.record_construction_work(id, boundary - HOUR_MS / 2, 2 * HOUR_MS);
+        let worked: Vec<_> = world
+            .construction
+            .labour_days
+            .iter()
+            .filter(|day| day.actual_ms > 0)
+            .collect();
+        assert_eq!(worked.len(), 2);
+        assert_eq!(worked[0].actual_ms, HOUR_MS / 2);
+        assert_eq!(worked[1].actual_ms, HOUR_MS + HOUR_MS / 2);
+        assert!(worked.iter().all(|day| day.price().is_none()));
+        let project = world.construction.contracts[&id].project;
+        let contract = world.construction.contracts.get_mut(&id).unwrap();
+        contract.carpenter = Some(worker);
+        contract.status = ContractStatus::Completed;
+        contract.paid = material.ceil() as Coins + 100;
+        contract.ended_base_ms = Some(5 * HOUR_MS);
+        world.current_time_ms = boundary + 2 * HOUR_MS;
+        let expected = contract.paid as f64 - material;
+        world.compact_construction();
+        assert!(!world.construction.contracts.contains_key(&id));
+        assert_eq!(
+            world.construction.projects[&project].stages[0].settled_base_ms,
+            5 * HOUR_MS
+        );
+        let worked: Vec<_> = world
+            .construction
+            .labour_days
+            .iter()
+            .filter(|day| day.actual_ms > 0)
+            .collect();
+        assert!((worked[0].labour_coins - expected / 4.0).abs() < 1e-9);
+        assert!((worked[1].labour_coins - expected * 3.0 / 4.0).abs() < 1e-9);
+        assert!((worked[0].price().unwrap() - expected / 2.0).abs() < 1e-9);
+        assert!((worked[1].price().unwrap() - expected / 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn failed_work_has_zero_revenue_and_unknown_completed_work_has_no_price() {
+        for status in [ContractStatus::Failed, ContractStatus::Completed] {
+            let (mut world, _, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
+            world.record_construction_work(id, 0, HOUR_MS);
+            let contract = world.construction.contracts.get_mut(&id).unwrap();
+            contract.carpenter = Some(worker);
+            contract.quotes[0].material_value = None;
+            contract.status = status;
+            contract.ended_base_ms = Some(HOUR_MS);
+            world.compact_construction();
+            let day = &world.construction.labour_days[0];
+            assert_eq!(day.pending, 0);
+            assert_eq!(day.labour_coins, 0.0);
+            assert_eq!(
+                day.price(),
+                if status == ContractStatus::Failed {
+                    Some(0.0)
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn labour_history_retains_365_completed_market_days_and_empty_current_day() {
+        let mut world = Universe::with_map(Map::default());
+        world.current_time_ms = crate::marketplace::UPDATE_TIME_MS + 500 * DAY_MS;
+        world.compact_construction();
+        assert_eq!(world.construction.labour_days.len(), 366);
+        assert_eq!(
+            world.construction.labour_days[0].start_ms,
+            crate::marketplace::UPDATE_TIME_MS + 135 * DAY_MS
+        );
+        assert!(
+            world
+                .construction
+                .labour_days
+                .iter()
+                .all(|day| day.hours() == 0.0 && day.price().is_none())
+        );
+        let unchanged = world.construction.clone();
+        world.compact_construction();
+        assert_eq!(world.construction, unchanged);
+    }
+
+    #[test]
+    fn version_15_migration_starts_measurements_without_inventing_history() {
+        let (mut world, _, _, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        world.construction.next_sequence = None;
+        world.construction.labour_started_ms = None;
+        world.construction.labour_days.clear();
+        for quote in &mut world.construction.contracts.get_mut(&id).unwrap().quotes {
+            quote.material_value = None;
+        }
+        let save = world
+            .to_save_string()
+            .unwrap()
+            .replacen("version: 16", "version: 15", 1);
+        let loaded = Universe::from_save_str(&save).unwrap();
+        assert_eq!(
+            loaded.construction.labour_started_ms,
+            Some(world.current_time_ms)
+        );
+        assert_eq!(loaded.construction.next_sequence, Some(1));
+        assert!(
+            loaded
+                .construction
+                .labour_days
+                .iter()
+                .all(|day| day.actual_ms == 0 && day.labour_coins == 0.0)
+        );
+        assert!(
+            loaded.construction.contracts[&id].quotes[0]
+                .material_value
+                .is_none()
+        );
+        assert_eq!(
+            loaded,
+            Universe::from_save_str(&loaded.to_save_string().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
     fn capacity_counts_multiple_bids_and_allocates_carried_wood_once() {
         let (world, client, worker, first) =
             fixture(ConstructionItem::Room(RoomSize::Small), 2_400);
@@ -2239,7 +2763,7 @@ mod tests {
         assert_eq!(world.construction.contracts[&id].quotes.len(), 1);
         let world = world.cancel_construction(client, id).unwrap();
         assert_eq!(world.account_coins(client).unwrap(), 1_000_000);
-        assert_eq!(world.construction.contracts[&id].escrow, 0);
+        assert!(!world.construction.contracts.contains_key(&id));
         assert_eq!(
             world.construction_reserved_area(
                 citizen.home,
@@ -2254,13 +2778,17 @@ mod tests {
     #[test]
     fn no_bids_refunds_and_retry_requires_larger_offer() {
         let (world, client, _, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        let cancelled = world.construction.contracts[&id].clone();
         let world = world.cancel_construction(client, id).unwrap();
-        let project = world.construction.contracts[&id].project;
+        let project = cancelled.project;
         let (world, low) = world.continue_construction(client, project, 1).unwrap();
         assert!(world.construction.contracts[&low].quotes.is_empty());
         let world = world.advance(BIDDING_MS).unwrap();
         assert_eq!(
-            world.construction.contracts[&low].status,
+            world.construction.projects[&project]
+                .latest_outcome
+                .unwrap()
+                .1,
             ContractStatus::NoBids
         );
         assert_eq!(world.account_coins(client).unwrap(), 1_000_000);
@@ -2304,11 +2832,18 @@ mod tests {
         assert_eq!(a.active_action(), b.active_action());
         assert_eq!(a.skills, b.skills);
         assert_eq!(a.inventory, b.inventory);
-        let contract = &large.construction.contracts[&id];
-        assert_eq!(contract.status, ContractStatus::Completed);
-        assert_eq!(contract.paid, contract.price);
-        assert_eq!(contract.escrow, 0);
-        assert_eq!(large.construction.payments.len(), 1);
+        assert!(!large.construction.contracts.contains_key(&id));
+        assert!(large.construction.projects.is_empty());
+        assert!(large.construction.payments.is_empty());
+        assert!(
+            large
+                .construction
+                .labour_days
+                .iter()
+                .map(|day| day.labour_coins)
+                .sum::<f64>()
+                > 0.0
+        );
         let saved = large.to_save_string().unwrap();
         assert_eq!(large, Universe::from_save_str(&saved).unwrap());
     }
@@ -2324,6 +2859,7 @@ mod tests {
         assert_eq!(world.construction.contracts[&id].paid, 0);
         let client_before = world.account_coins(client).unwrap();
         let escrow = world.construction.contracts[&id].escrow;
+        let original_price = world.construction.contracts[&id].price;
         world
             .construction
             .contracts
@@ -2332,7 +2868,10 @@ mod tests {
             .deadline_ms = Some(world.current_time_ms + 1);
         world = world.advance(1).unwrap();
         assert_eq!(
-            world.construction.contracts[&id].status,
+            world.construction.projects[&project]
+                .latest_outcome
+                .unwrap()
+                .1,
             ContractStatus::Failed
         );
         assert_eq!(world.account_coins(client).unwrap(), client_before + escrow);
@@ -2345,10 +2884,7 @@ mod tests {
             retained
         );
         assert_eq!(world.construction.projects[&project].missing_wood(), 0);
-        assert!(
-            world.construction.contracts[&continuation].quotes[0].price
-                < world.construction.contracts[&id].price
-        );
+        assert!(world.construction.contracts[&continuation].quotes[0].price < original_price);
     }
 
     #[test]
@@ -2380,22 +2916,31 @@ mod tests {
             ..world.caravan_policy()
         };
         let world = world.with_caravan_policy(policy).unwrap();
+        let project = world.construction.contracts[&id].project;
         let world = award(world, worker);
         let mut world = world.advance(DEADLINE_MS + BIDDING_MS + HOUR_MS).unwrap();
-        let project = world.construction.contracts[&id].project;
+        assert!(!world.construction.contracts.contains_key(&id));
         assert_eq!(
-            world.construction.contracts[&id].status,
-            ContractStatus::Completed
+            world.construction.projects[&project]
+                .latest_outcome
+                .unwrap()
+                .1,
+            ContractStatus::Failed
         );
-        assert!(world.construction.contracts.values().any(
-            |contract| contract.project == project && contract.status == ContractStatus::Failed
-        ));
         assert_eq!(
             world.construction.projects[&project].completed_base_ms,
             MILESTONE_BASE_MS
         );
         assert_eq!(world.construction.projects[&project].installed_wood, 2_400);
-        assert!(world.construction.contracts[&id].paid > 0);
+        assert!(
+            world
+                .construction
+                .labour_days
+                .iter()
+                .map(|day| day.labour_coins)
+                .sum::<f64>()
+                > 0.0
+        );
         let saved = world.to_save_string().unwrap();
         world = Universe::from_save_str(&saved).unwrap();
         let policy = crate::marketplace::CaravanPolicy {
@@ -2444,25 +2989,8 @@ mod tests {
             .continue_construction(client, project, 100_000)
             .unwrap();
         let world = award(world, worker).advance(DEADLINE_MS).unwrap();
-        let AgentKind::Citizen(worker_state) = &world.agents[&worker].kind;
-        assert_eq!(
-            world.construction.contracts[&next].status,
-            ContractStatus::Completed,
-            "progress={}, wood={}, action={:?}, goal={:?}, needs={:?}",
-            world.construction.projects[&project].completed_base_ms,
-            world.construction.projects[&project].installed_wood,
-            worker_state.active_action(),
-            worker_state
-                .active_plan
-                .as_ref()
-                .map(|plan| plan.plan().goals()),
-            (
-                worker_state.hunger(),
-                worker_state.thirst(),
-                worker_state.tiredness()
-            )
-        );
-        assert_eq!(world.construction.projects[&project].installed_wood, 6_000);
+        assert!(!world.construction.contracts.contains_key(&next));
+        assert!(!world.construction.projects.contains_key(&project));
         let saved = world.to_save_string().unwrap();
         assert_eq!(
             world.construction,
@@ -2544,10 +3072,12 @@ mod tests {
         world.construction.contracts.get_mut(&id).unwrap().escrow = price;
         world.set_account_coins(client, 0).unwrap();
         let world = world.advance(BIDDING_MS).unwrap();
-        assert_eq!(
-            world.construction.contracts[&id].status,
-            ContractStatus::Cancelled
-        );
+        assert!(!world.construction.contracts.contains_key(&id));
+        assert!(world.construction.projects.values().any(|project| {
+            project
+                .latest_outcome
+                .is_some_and(|(_, status)| status == ContractStatus::Cancelled)
+        }));
         assert_eq!(world.account_coins(client).unwrap(), price);
     }
 
@@ -2561,11 +3091,12 @@ mod tests {
                 .with_household("Family", home, &[client, worker])
                 .is_err()
         );
+        let cancelled = world.construction.contracts[&id].clone();
         let world = world.cancel_construction(client, id).unwrap();
         let (world, family) = world
             .with_household("Family", home, &[client, worker])
             .unwrap();
-        let project = world.construction.contracts[&id].project;
+        let project = cancelled.project;
         assert!(
             world
                 .continue_construction(family, project, 100_000)
@@ -2630,10 +3161,7 @@ mod tests {
             .unwrap()
             .advance(2 * DAY_MS)
             .unwrap();
-        assert_eq!(
-            world.construction.contracts[&id].status,
-            ContractStatus::Completed
-        );
+        assert!(!world.construction.contracts.contains_key(&id));
         let trades: Vec<_> = world
             .market
             .trades()
@@ -2686,6 +3214,7 @@ mod tests {
     #[test]
     fn shared_financing_limits_new_quotes_and_capital_spending_but_allows_meals() {
         let (world, client, first, old) = fixture(ConstructionItem::FishCrate, 0);
+        let cancelled = world.construction.contracts[&old].clone();
         let world = world.cancel_construction(client, old).unwrap();
         let second = Citizen::with_needs(-100.0, -100.0)
             .unwrap()
@@ -2698,13 +3227,13 @@ mod tests {
             .with_household("Carpenters", worker.home, &[first, second])
             .unwrap();
         let financing = world
-            .construction_quote(first, &world.construction.contracts[&old], None)
+            .construction_quote(first, &cancelled, None)
             .unwrap()
             .unwrap()
             .financing;
         world.set_account_coins(family, financing).unwrap();
         world.refresh_market();
-        let project = world.construction.contracts[&old].project;
+        let project = cancelled.project;
         let (mut world, id) = world
             .continue_construction(client, project, 100_000)
             .unwrap();
@@ -2753,6 +3282,7 @@ mod tests {
     #[test]
     fn two_active_household_carpenters_spend_each_procurement_allocation_and_finish() {
         let (world, client, first, old) = fixture(ConstructionItem::Room(RoomSize::Small), 0);
+        let cancelled = world.construction.contracts[&old].clone();
         let world = world.cancel_construction(client, old).unwrap();
         let policy = crate::marketplace::CaravanPolicy {
             import_tariff_basis_points: 10_000,
@@ -2777,7 +3307,7 @@ mod tests {
         let (world, family) = world
             .with_household("Carpenters", worker.home, &[first, second])
             .unwrap();
-        let project = world.construction.contracts[&old].project;
+        let project = cancelled.project;
         let (world, room_job) = world
             .continue_construction(client, project, 100_000)
             .unwrap();
@@ -2861,14 +3391,8 @@ mod tests {
             1_000
         );
         let world = world.advance(5 * DAY_MS).unwrap();
-        assert_eq!(
-            world.construction.contracts[&room_job].status,
-            ContractStatus::Completed
-        );
-        assert_eq!(
-            world.construction.contracts[&object_job].status,
-            ContractStatus::Completed
-        );
+        assert!(!world.construction.contracts.contains_key(&room_job));
+        assert!(!world.construction.contracts.contains_key(&object_job));
     }
 
     #[test]
@@ -2990,6 +3514,7 @@ mod tests {
     #[test]
     fn sibling_carpenters_each_keep_their_own_carried_material_allocation() {
         let (world, client, first, old) = fixture(ConstructionItem::FishCrate, 1_000);
+        let cancelled = world.construction.contracts[&old].clone();
         let world = world.cancel_construction(client, old).unwrap();
         let (world, second) = world
             .with_citizen(
@@ -3007,7 +3532,7 @@ mod tests {
         let (world, _) = world
             .with_household("Carpenters", worker.home, &[first, second])
             .unwrap();
-        let project = world.construction.contracts[&old].project;
+        let project = cancelled.project;
         let (world, id) = world
             .continue_construction(client, project, 100_000)
             .unwrap();
@@ -3021,6 +3546,7 @@ mod tests {
     #[test]
     fn shared_owned_wood_is_allocated_once_across_quotes() {
         let (world, client, first, old) = fixture(ConstructionItem::FishCrate, 0);
+        let cancelled = world.construction.contracts[&old].clone();
         let world = world.cancel_construction(client, old).unwrap();
         let (world, store) = world
             .with_property(first, crate::locations::Location::Bakery)
@@ -3044,7 +3570,7 @@ mod tests {
                 1_000,
             )
             .unwrap();
-        let project = world.construction.contracts[&old].project;
+        let project = cancelled.project;
         let (world, id) = world
             .continue_construction(client, project, 100_000)
             .unwrap();

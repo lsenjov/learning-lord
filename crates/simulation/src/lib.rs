@@ -2128,6 +2128,7 @@ impl Universe {
         Self {
             current_time_ms,
             market: Market::starting_at(current_time_ms),
+            construction: construction::Construction::starting_at(current_time_ms),
             ..Self::default()
         }
     }

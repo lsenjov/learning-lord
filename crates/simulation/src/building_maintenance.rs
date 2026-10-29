@@ -166,6 +166,7 @@ impl Universe {
         while elapsed < total_base_ms {
             let end = (elapsed + MILESTONE_BASE_MS).min(total_base_ms);
             stages.push(ConstructionStage {
+                settled_base_ms: 0,
                 next_contract: ContractId(
                     uuid::Builder::from_random_bytes(self.construction.rng.random()).into_uuid(),
                 ),
@@ -274,15 +275,13 @@ impl Universe {
                         allocated_base_ms: 0,
                         allocated_offer: 0,
                         scheduling: false,
+                        latest_outcome: None,
+                        awarded: false,
                     },
                 );
                 id
             };
-            let awarded = self
-                .construction
-                .contracts
-                .values()
-                .any(|contract| contract.project == id && contract.awarded_ms.is_some());
+            let awarded = self.construction.projects[&id].awarded;
             if !awarded {
                 self.construction.projects.get_mut(&id).unwrap().client = client;
                 self.reset_repair_scope(id, damage);
@@ -514,7 +513,7 @@ mod tests {
             .deadline_ms = Some(world.current_time_ms + 1);
         world = world.advance(1).unwrap();
         assert_eq!(
-            world.construction.contracts[&contract].status,
+            world.construction.projects[&id].latest_outcome.unwrap().1,
             ContractStatus::Failed
         );
         assert!(
@@ -652,7 +651,10 @@ mod tests {
                 .count(),
             1
         );
-        assert!(large.construction.contracts.values().any(|contract| contract.project == id && contract.status == ContractStatus::NoBids));
+        assert_eq!(
+            large.construction.projects[&id].latest_outcome.unwrap().1,
+            ContractStatus::NoBids
+        );
         assert_eq!(
             large,
             Universe::from_save_str(&large.to_save_string().unwrap()).unwrap()
@@ -685,9 +687,7 @@ mod tests {
         let id = world.repair_project(place, target).unwrap().id;
         let snapshot = world.construction.projects[&id].repair_damage_units;
         let world = world.advance(3 * BIDDING_MS).unwrap();
-        let project = &world.construction.projects[&id];
-        assert!(project.completed);
-        assert_eq!(project.repair_damage_units, snapshot);
+        assert!(!world.construction.projects.contains_key(&id));
         assert!(
             world
                 .map
@@ -788,25 +788,11 @@ mod tests {
         let guild_id = guild_project.id;
         let town_id = town_project.id;
         let world = world.advance(3 * BIDDING_MS).unwrap();
-        assert!(world.construction.projects[&guild_id].completed);
-        assert!(world.construction.projects[&town_id].completed);
-        let town_paid: i64 = world
-            .construction
-            .payments
-            .iter()
-            .filter(|payment| payment.client == ConstructionClient::Town)
-            .map(|payment| payment.amount)
-            .sum();
-        let guild_paid: i64 = world
-            .construction
-            .payments
-            .iter()
-            .filter(|payment| payment.client == ConstructionClient::Account(guild))
-            .map(|payment| payment.amount)
-            .sum();
-        assert!(town_paid > 0 && guild_paid > 0);
-        assert_eq!(world.town_treasury + town_paid, 100);
-        assert_eq!(world.account_coins(guild).unwrap() + guild_paid, 100);
+        assert!(!world.construction.projects.contains_key(&guild_id));
+        assert!(!world.construction.projects.contains_key(&town_id));
+        assert!(world.town_treasury < 100);
+        assert!(world.account_coins(guild).unwrap() < 100);
+        assert!(world.construction.payments.is_empty());
         assert_eq!(
             world,
             Universe::from_save_str(&world.to_save_string().unwrap()).unwrap()

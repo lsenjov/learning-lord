@@ -108,7 +108,7 @@ pub(crate) fn handle(
                     || collectives.selected_guild() != Some(id)
             }
             Target::Location(id) => locations.selected_place() != Some(id),
-            Target::Good(good) => market.good != Some(good),
+            Target::Good(good) => market.carpentry || market.good != Some(good),
         };
         let kind = match *target {
             Target::Citizen(id) if universe.agents().contains_key(&id) => {
@@ -132,6 +132,7 @@ pub(crate) fn handle(
             }
             Target::Good(good) => {
                 market.good = Some(good);
+                market.carpentry = false;
                 market.tab = market::Tab::Overview;
                 WindowKind::Market
             }
@@ -578,6 +579,20 @@ mod tests {
         assert!(targets.contains(&Target::Good(Good::Wheat)));
         assert!(targets.contains(&Target::Good(Good::Water)));
         assert!(targets.contains(&Target::Location(site)));
+    }
+
+    #[test]
+    fn good_link_leaves_carpentry_even_for_the_previously_selected_good() {
+        let mut app = app();
+        click(&mut app, Target::Good(Good::Wheat));
+        app.world_mut()
+            .resource_mut::<market::Selection>()
+            .carpentry = true;
+        click(&mut app, Target::Good(Good::Wheat));
+        let selection = app.world().resource::<market::Selection>();
+        assert!(!selection.carpentry);
+        assert_eq!(selection.good(), Good::Wheat);
+        assert_eq!(selection.tab, market::Tab::Overview);
     }
 
     #[test]

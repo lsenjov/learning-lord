@@ -133,8 +133,7 @@ fn unavailable(
             && project.building == Some(destination.building)
             && project.room == destination.room
             && project.item == item
-            && latest_contract(universe, project)
-                .is_some_and(|contract| contract.status == ContractStatus::NoBids)
+            && latest_status(universe, project) == Some(ContractStatus::NoBids)
             && offer <= project.funding_offer
     }) {
         return Some("Reposting after no bids requires a higher available budget".into());
@@ -272,6 +271,15 @@ fn latest_contract<'a>(
         .max_by_key(|contract| contract.sequence)
 }
 
+fn latest_status(universe: &Universe, project: &ConstructionProject) -> Option<ContractStatus> {
+    latest_contract(universe, project)
+        .map(|contract| (contract.sequence, contract.status))
+        .into_iter()
+        .chain(project.latest_outcome)
+        .max_by_key(|(sequence, _)| *sequence)
+        .map(|(_, status)| status)
+}
+
 fn continuation_reason(universe: &Universe, project: &ConstructionProject) -> Option<String> {
     if project.repair.is_some() {
         return Some("Repair tenders are posted automatically".into());
@@ -296,8 +304,7 @@ fn continuation_reason(universe: &Universe, project: &ConstructionProject) -> Op
             "No cash available above commitments and the seven-day essential reserve".into(),
         );
     }
-    if latest_contract(universe, project)
-        .is_some_and(|contract| contract.status == ContractStatus::NoBids)
+    if latest_status(universe, project) == Some(ContractStatus::NoBids)
         && available <= project.funding_offer
     {
         return Some("Reposting after no bids requires a higher available budget".into());
@@ -331,7 +338,7 @@ fn project_status(universe: &Universe, project: &ConstructionProject) -> String 
         "building"
     };
     match (active, bidding) {
-        (0, 0) => match latest_contract(universe, project).map(|contract| contract.status) {
+        (0, 0) => match latest_status(universe, project) {
             Some(ContractStatus::NoBids) => "No bids".into(),
             Some(ContractStatus::Cancelled) => "Cancelled".into(),
             _ => "Unfinished".into(),
@@ -403,7 +410,6 @@ pub(crate) fn render_projects(
         .collect();
     projects.sort_by_key(|project| project.id.0);
     for project in projects {
-        let contract = latest_contract(universe, project);
         let mut open_contracts: Vec<_> = universe
             .construction()
             .contracts
@@ -433,11 +439,7 @@ pub(crate) fn render_projects(
                     * 100.0
             ));
         }
-        for contract in open_contracts
-            .iter()
-            .copied()
-            .chain(contract.filter(|_| open_contracts.is_empty()))
-        {
+        for contract in open_contracts.iter().copied() {
             tooltip.push_str(&format!("\nPortion {}", contract.stage + 1));
             tooltip.push_str(&format!(
                 "\nOffer: {} | Price: {} | Paid: {} | Escrow: {} coins",
@@ -821,17 +823,21 @@ mod tests {
             .unwrap();
         assert_eq!(contract.maximum_offer, maximum);
         let id = contract.id;
+        let project = contract.project;
         press(&mut app, Choice::Cancel(id));
         await_request(&mut app);
+        let construction = app
+            .world()
+            .resource::<DisplaySnapshot>()
+            .0
+            .universe
+            .construction();
+        assert!(!construction.contracts.contains_key(&id));
         assert_eq!(
-            app.world()
-                .resource::<DisplaySnapshot>()
-                .0
-                .universe
-                .construction()
-                .contracts[&id]
-                .status,
-            ContractStatus::Cancelled
+            construction.projects[&project]
+                .latest_outcome
+                .map(|(_, status)| status),
+            Some(ContractStatus::Cancelled)
         );
     }
 
@@ -848,10 +854,10 @@ mod tests {
                 1,
             )
             .unwrap();
+        let project = world.construction().contracts[&original].project;
         let world = world
             .advance(learning_lord_simulation::construction::BIDDING_MS)
             .unwrap();
-        let project = world.construction().contracts[&original].project;
         let mut app = app(world);
         press(&mut app, Choice::Continue(project));
         await_request(&mut app);
@@ -865,6 +871,8 @@ mod tests {
         .unwrap();
         assert_eq!(contract.status, ContractStatus::Bidding);
         let latest = contract.id;
+        let sequence = contract.sequence;
+        let posted_ms = contract.posted_ms;
         press(&mut app, Choice::Cancel(latest));
         await_request(&mut app);
         press(&mut app, Choice::Continue(project));
@@ -876,11 +884,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(contract.status, ContractStatus::Bidding);
-        assert!(contract.sequence > snapshot.universe.construction().contracts[&latest].sequence);
-        assert_eq!(
-            contract.posted_ms,
-            snapshot.universe.construction().contracts[&latest].posted_ms
-        );
+        assert!(contract.sequence > sequence);
+        assert_eq!(contract.posted_ms, posted_ms);
     }
 
     #[test]
@@ -1017,12 +1022,16 @@ mod tests {
                 offer,
             )
             .unwrap();
+        let project_id = world.construction().contracts[&contract_id].project;
         let world = world
             .advance(learning_lord_simulation::construction::BIDDING_MS)
             .unwrap();
-        let contract = &world.construction().contracts[&contract_id];
-        assert_eq!(contract.status, ContractStatus::NoBids);
-        let project = &world.construction().projects[&contract.project];
+        assert!(!world.construction().contracts.contains_key(&contract_id));
+        let project = &world.construction().projects[&project_id];
+        assert_eq!(
+            project.latest_outcome.map(|(_, status)| status),
+            Some(ContractStatus::NoBids)
+        );
         assert_eq!(
             continuation_reason(&world, project).as_deref(),
             Some("Reposting after no bids requires a higher available budget")

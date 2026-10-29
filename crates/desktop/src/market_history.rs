@@ -114,6 +114,142 @@ fn days(universe: &Universe, good: Good) -> Vec<Day> {
     result
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LabourDay {
+    hours: f64,
+    price: Option<f64>,
+    pending: u64,
+    unknown: bool,
+}
+
+fn labour_days(
+    entries: &[learning_lord_simulation::construction::CarpenterDay],
+    days: &[Day],
+) -> Vec<LabourDay> {
+    days.iter()
+        .map(|day| {
+            let start = if day.start < UPDATE_TIME_MS {
+                0
+            } else {
+                (day.start - UPDATE_TIME_MS) / DAY_MS * DAY_MS + UPDATE_TIME_MS
+            };
+            let entry = entries.iter().find(|entry| entry.start_ms == start);
+            entry.map_or(
+                LabourDay {
+                    hours: 0.0,
+                    price: None,
+                    pending: 0,
+                    unknown: false,
+                },
+                |entry| LabourDay {
+                    hours: entry.hours(),
+                    price: entry.price(),
+                    pending: entry.pending,
+                    unknown: entry.unknown,
+                },
+            )
+        })
+        .collect()
+}
+
+fn labour_label(day: &Day, labour: &LabourDay) -> String {
+    let price = labour.price.map_or_else(
+        || "—".into(),
+        |price| format!("{price:.3} coins/actual hour"),
+    );
+    let reason = if labour.unknown {
+        " | earnings unknown"
+    } else if labour.pending > 0 {
+        " | settlement pending"
+    } else {
+        ""
+    };
+    format!(
+        "{} to {} | {}\nActual work: {:.3} hours | Labour earnings: {}{}",
+        format_clock(day.start),
+        format_clock(day.end),
+        if day.partial { "PARTIAL" } else { "CLOSED" },
+        labour.hours,
+        price,
+        reason
+    )
+}
+
+fn draw_labour_chart(
+    commands: &mut Commands,
+    days: &[Day],
+    values: &[LabourDay],
+    axes: &[Entity],
+    plots: &[Entity],
+) {
+    let hours_max = values.iter().map(|day| day.hours).fold(1.0, f64::max);
+    let price_max = values
+        .iter()
+        .filter_map(|day| day.price)
+        .fold(1.0, f64::max);
+    for entity in axes {
+        commands
+            .entity(*entity)
+            .despawn_children()
+            .with_children(|axis| {
+                label(axis, "coins/hour".into(), 0.0, 5.0, PRICE);
+                for fraction in [0.0, 0.5, 1.0] {
+                    label(
+                        axis,
+                        format!("{:.3}", fraction * price_max),
+                        0.0,
+                        173.0 - fraction as f32 * 140.0,
+                        PRICE,
+                    );
+                }
+                label(axis, format!("{hours_max:.1} hours"), 0.0, 218.0, BODY);
+                rect(axis, 78.0, 195.0, 3.0, 70.0, BODY);
+            });
+    }
+    for entity in plots {
+        commands
+            .entity(*entity)
+            .despawn_children()
+            .with_children(|plot| {
+                if values.is_empty() {
+                    label(plot, "No carpenter history yet".into(), 2.0, 120.0, MUTED);
+                    return;
+                }
+                let slot = 100.0 / values.len() as f32;
+                for y in [40.0, 110.0, 180.0] {
+                    rect(plot, 0.0, y, 100.0, 1.0, Color::srgb(0.16, 0.20, 0.23));
+                }
+                for (index, day) in values.iter().enumerate() {
+                    let left = index as f32 * slot;
+                    let height = (day.hours / hours_max) as f32 * 70.0;
+                    body_mark(plot, left + slot / 2.0, 265.0 - height, slot, height, BODY);
+                    if let Some(price) = day.price {
+                        rect(
+                            plot,
+                            left,
+                            180.0 - (price / price_max) as f32 * 140.0,
+                            slot,
+                            2.0,
+                            PRICE,
+                        );
+                    }
+                    if days[index].partial {
+                        rect(plot, left, 0.0, slot, 2.0, PRICE);
+                    }
+                    if index == 0 || index + 1 == values.len() || index % 5 == 0 {
+                        label(
+                            plot,
+                            format!("D{}", days[index].start / DAY_MS),
+                            left,
+                            267.0,
+                            MUTED,
+                        );
+                    }
+                }
+            });
+    }
+}
+
 fn price_before_window(
     first_start: u64,
     retained_price: Option<f64>,
@@ -209,6 +345,7 @@ impl Scale {
 #[derive(Resource, Default)]
 pub struct ChartDisplay {
     days: Vec<Day>,
+    labour: Option<Vec<LabourDay>>,
     good: Option<Good>,
     pinned: Option<u64>,
     generation: u64,
@@ -217,6 +354,8 @@ pub struct ChartDisplay {
 pub(super) struct Plot;
 #[derive(Component)]
 pub(super) struct Axis;
+#[derive(Component)]
+pub(super) struct GoodsDescription;
 #[derive(Component)]
 pub(super) struct Legend;
 #[derive(Component)]
@@ -230,7 +369,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
         14.0,
         MUTED,
     ));
-    parent.spawn(text("Blue: accepted local quote VWAP (dashed: carried; grey: initial reference) | Grey line: reference estimate\nGreen below wick: exports | Red above wick: import deliveries\nBody: red caravan purchases / grey local trades / green exports\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED));
+    parent.spawn((text("Blue: accepted local quote VWAP (dashed: carried; grey: initial reference) | Grey line: reference estimate\nGreen below wick: exports | Red above wick: import deliveries\nBody: red caravan purchases / grey local trades / green exports\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED), Node::default(), GoodsDescription));
     let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
@@ -356,6 +495,10 @@ fn label(parent: &mut ChildSpawnerCommands, value: String, x: f32, y: f32, color
     ));
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bevy injects each system parameter independently"
+)]
 pub fn refresh(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
@@ -364,6 +507,7 @@ pub fn refresh(
     plots: Query<(Entity, Ref<Plot>)>,
     axes: Query<Entity, With<Axis>>,
     mut legends: Query<&mut Text, With<Legend>>,
+    mut descriptions: Query<&mut Node, With<GoodsDescription>>,
 ) {
     let added = plots.iter().any(|(_, plot)| plot.is_added());
     if plots.is_empty() || (!snapshot.is_changed() && !selection.is_changed() && !added) {
@@ -373,15 +517,31 @@ pub fn refresh(
         cached.generation = snapshot.0.generation;
         cached.pinned = None;
     }
+    for mut description in &mut descriptions {
+        description.display = if selection.carpentry {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
     let good = selection.good();
-    let values = days(&snapshot.0.universe, good);
+    let mut values = days(&snapshot.0.universe, good);
+    let labour = selection.carpentry.then(|| {
+        let started = snapshot.0.universe.construction().labour_started_ms;
+        values.retain(|day| started.is_some_and(|start| day.end > start || day.start >= start));
+        if let (Some(day), Some(start)) = (values.first_mut(), started) {
+            day.start = day.start.max(start);
+        }
+        labour_days(&snapshot.0.universe.construction().labour_days, &values)
+    });
     if cached
         .pinned
         .is_some_and(|start| !values.iter().any(|day| day.start == start))
     {
         cached.pinned = None;
     }
-    let same_geometry = cached.good == Some(good)
+    let same_geometry = cached.labour == labour
+        && cached.good == Some(good)
         && cached.days.len() == values.len()
         && cached.days.iter().zip(&values).all(|(old, new)| {
             old.start == new.start
@@ -401,19 +561,34 @@ pub fn refresh(
     }
     let scale = Scale::new(&values);
     for mut legend in &mut legends {
-        legend.0 = format!(
-            "Quantity size key at left: {}  |  one linear scale across these days",
-            chart_quantity_label(good, scale.quantity_max)
+        legend.0 = if labour.is_some() {
+            String::new()
+        } else {
+            format!(
+                "Quantity size key at left: {}  |  one linear scale across these days",
+                chart_quantity_label(good, scale.quantity_max)
+            )
+        };
+    }
+    if let Some(labour) = &labour {
+        draw_labour_chart(
+            &mut commands,
+            &values,
+            labour,
+            &axes.iter().collect::<Vec<_>>(),
+            &plots.iter().map(|(entity, _)| entity).collect::<Vec<_>>(),
+        );
+    } else {
+        draw_chart(
+            &mut commands,
+            good,
+            &values,
+            &axes.iter().collect::<Vec<_>>(),
+            &plots.iter().map(|(entity, _)| entity).collect::<Vec<_>>(),
         );
     }
-    draw_chart(
-        &mut commands,
-        good,
-        &values,
-        &axes.iter().collect::<Vec<_>>(),
-        &plots.iter().map(|(entity, _)| entity).collect::<Vec<_>>(),
-    );
     cached.days = values;
+    cached.labour = labour;
     cached.good = Some(good);
 }
 
@@ -612,7 +787,13 @@ pub fn hover(
         })
         .or_else(|| cached.days.len().checked_sub(1));
     let value = selected.map_or_else(
-        || "No market history yet".into(),
+        || {
+            if cached.labour.is_some() {
+                "No carpenter history yet".into()
+            } else {
+                "No market history yet".into()
+            }
+        },
         |index| {
             let day = &cached.days[index];
             let status = if hovered.is_some() {
@@ -622,10 +803,16 @@ pub fn hover(
             } else {
                 "CURRENT"
             };
-            format!("{status} | {}", hover_label(selection.good(), day))
+            let label = if let Some(labour) = &cached.labour {
+                labour_label(day, &labour[index])
+            } else {
+                hover_label(selection.good(), day)
+            };
+            format!("{status} | {label}")
         },
     );
     let rows = selected
+        .filter(|_| cached.labour.is_none())
         .map(|index| day_table(selection.good(), cached.days[index].activity))
         .unwrap_or_default();
     for (entity, mut table) in &mut tables {
@@ -1283,11 +1470,11 @@ mod tests {
     fn displayed_table(app: &mut App) -> Vec<String> {
         let children = app
             .world_mut()
-            .query_filtered::<&Children, With<DayTable>>()
+            .query_filtered::<Option<&Children>, With<DayTable>>()
             .single(app.world())
             .unwrap()
-            .iter()
-            .collect::<Vec<_>>();
+            .map(|children| children.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
         children
             .into_iter()
             .map(|entity| app.world().get::<Text>(entity).unwrap().0.clone())
@@ -1460,6 +1647,101 @@ mod tests {
         assert_eq!(chart_quantity_label(Good::BerryPie, 3.0), "3 pies");
         assert_eq!(chart_quantity_label(Good::FlaxBlock, 1.0), "1 block");
         assert_eq!(chart_quantity_label(Good::FlaxGarment, 2.0), "2 garments");
+    }
+
+    #[test]
+    fn carpentry_uses_existing_day_selection_and_clears_goods_table() {
+        let mut app = selection_app();
+        let button = app
+            .world_mut()
+            .spawn((market::Choice::Carpentry, Interaction::Pressed))
+            .id();
+        app.update();
+        app.world_mut().despawn(button);
+        assert!(app.world().resource::<market::Selection>().carpentry);
+        assert!(app.world().resource::<ChartDisplay>().labour.is_some());
+        assert!(displayed_table(&mut app).is_empty());
+        assert!(detail(&mut app).contains("Actual work: 0.000 hours | Labour earnings: —"));
+        pointer(&mut app, Some(Vec2::new(-0.49, 0.0)), true);
+        pointer(&mut app, None, false);
+        assert!(detail(&mut app).starts_with("PINNED"));
+        let button = app
+            .world_mut()
+            .spawn((market::Choice::Good(Good::BreadRoll), Interaction::Pressed))
+            .id();
+        app.update();
+        app.world_mut().despawn(button);
+        assert!(!app.world().resource::<market::Selection>().carpentry);
+        assert!(app.world().resource::<ChartDisplay>().labour.is_none());
+        assert!(!displayed_table(&mut app).is_empty());
+    }
+
+    #[test]
+    fn carpenter_daily_projection_keeps_work_days_and_missing_prices() {
+        use learning_lord_simulation::construction::CarpenterDay;
+        let values = days(
+            &Universe::default()
+                .advance(UPDATE_TIME_MS + 3 * DAY_MS)
+                .unwrap(),
+            Good::Berries,
+        );
+        let entries = [
+            CarpenterDay {
+                start_ms: 0,
+                actual_ms: 3_600_000,
+                labour_coins: 4.0,
+                ..default()
+            },
+            CarpenterDay {
+                start_ms: UPDATE_TIME_MS,
+                actual_ms: 7_200_000,
+                labour_coins: 8.0,
+                pending: 1,
+                ..default()
+            },
+            CarpenterDay {
+                start_ms: UPDATE_TIME_MS + DAY_MS,
+                actual_ms: 3_600_000,
+                unknown: true,
+                ..default()
+            },
+        ];
+        let projected = labour_days(&entries, &values);
+        assert_eq!(projected[0].hours, 1.0);
+        assert_eq!(projected[0].price, Some(4.0));
+        assert_eq!(projected[1].hours, 2.0);
+        assert_eq!(projected[1].price, None);
+        assert_eq!(projected[2].price, None);
+        assert!(projected[2].unknown);
+        assert_eq!(projected[3].hours, 0.0);
+        assert_eq!(projected[3].price, None);
+    }
+
+    #[test]
+    fn carpenter_readout_distinguishes_settled_pending_and_unknown() {
+        let day = days(&Universe::default(), Good::Berries).remove(0);
+        let settled = LabourDay {
+            hours: 2.0,
+            price: Some(3.5),
+            pending: 0,
+            unknown: false,
+        };
+        assert!(
+            labour_label(&day, &settled)
+                .contains("2.000 hours | Labour earnings: 3.500 coins/actual hour")
+        );
+        let pending = LabourDay {
+            price: None,
+            pending: 1,
+            ..settled.clone()
+        };
+        assert!(labour_label(&day, &pending).contains("Labour earnings: — | settlement pending"));
+        let unknown = LabourDay {
+            price: None,
+            unknown: true,
+            ..settled
+        };
+        assert!(labour_label(&day, &unknown).contains("Labour earnings: — | earnings unknown"));
     }
 
     #[test]

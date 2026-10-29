@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 15;
+pub const SAVE_VERSION: u32 = 16;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -42,21 +42,24 @@ struct SaveLoader<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for SaveLoader<'_> {
-    type Value = Universe;
+    type Value = (u32, Universe);
 
-    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Universe, D::Error> {
+    fn deserialize<D: de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_struct("Save", &["version", "universe"], self)
     }
 }
 
 impl<'de> Visitor<'de> for SaveLoader<'_> {
-    type Value = Universe;
+    type Value = (u32, Universe);
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a saved universe with version and universe fields")
     }
 
-    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Universe, M::Error> {
+    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
         #[derive(Deserialize)]
         #[serde(field_identifier, rename_all = "lowercase")]
         enum Field {
@@ -73,7 +76,7 @@ impl<'de> Visitor<'de> for SaveLoader<'_> {
                         return Err(de::Error::duplicate_field("version"));
                     }
                     let value = map.next_value::<u32>()?;
-                    if value != SAVE_VERSION {
+                    if value != SAVE_VERSION && value != 15 {
                         *self.unsupported_version = Some(value);
                         return Err(de::Error::custom("unsupported save version"));
                     }
@@ -87,8 +90,10 @@ impl<'de> Visitor<'de> for SaveLoader<'_> {
                 }
             }
         }
-        version.ok_or_else(|| de::Error::missing_field("version"))?;
-        universe.ok_or_else(|| de::Error::missing_field("universe"))
+        Ok((
+            version.ok_or_else(|| de::Error::missing_field("version"))?,
+            universe.ok_or_else(|| de::Error::missing_field("universe"))?,
+        ))
     }
 }
 
@@ -108,7 +113,7 @@ impl Universe {
         let mut unsupported_version = None;
         let mut deserializer = ron::Deserializer::from_str(input)
             .map_err(|error| SaveError::Format(error.to_string()))?;
-        let mut universe = SaveLoader {
+        let (version, mut universe) = SaveLoader {
             unsupported_version: &mut unsupported_version,
         }
         .deserialize(&mut deserializer)
@@ -119,7 +124,19 @@ impl Universe {
         deserializer
             .end()
             .map_err(|error| SaveError::Format(deserializer.span_error(error).to_string()))?;
+        if version == SAVE_VERSION
+            && (universe.construction.next_sequence.is_none()
+                || universe.construction.labour_started_ms.is_none())
+        {
+            return Err(SaveError::InvalidState(
+                "missing compact construction accounting",
+            ));
+        }
         universe.validate_save()?;
+        if universe.construction.next_sequence.is_none() {
+            universe.migrate_construction();
+            universe.validate_save()?;
+        }
         if universe.agents.values().any(|agent| {
             let AgentKind::Citizen(citizen) = &agent.kind;
             citizen
@@ -1194,7 +1211,7 @@ mod tests {
 
     #[test]
     fn rejects_other_versions_before_decoding_the_universe() {
-        for version in [0, SAVE_VERSION - 1, SAVE_VERSION + 1, u32::MAX] {
+        for version in [0, 14, SAVE_VERSION + 1, u32::MAX] {
             let input = format!("(version: {version}, universe: invalid old schema)");
             assert!(matches!(
                 Universe::from_save_str(&input),

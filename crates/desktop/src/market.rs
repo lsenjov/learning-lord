@@ -36,6 +36,7 @@ pub struct Selection {
     pub(super) view: View,
     pub(super) good: Option<Good>,
     pub(super) tab: Tab,
+    pub(super) carpentry: bool,
 }
 
 impl Selection {
@@ -52,6 +53,7 @@ pub enum Choice {
     View(View),
     Good(Good),
     Tab(Tab),
+    Carpentry,
 }
 
 #[derive(Component)]
@@ -151,6 +153,10 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                         button.spawn((text("", 13.0, MUTED), Readout::Price(good)));
                     });
                 }
+                list.spawn((Button, Choice::Carpentry, BackgroundColor(PANEL),
+                    crate::tooltip::Tooltip("Daily actual carpenter working hours and labour earnings per actual hour. Labour excludes materials and is attributed to the work day after settlement; pending or unknown earnings have no price.".into()),
+                    Node { width: percent(100), padding: UiRect::all(px(12)), border_radius: BorderRadius::all(px(8)), ..default() }))
+                    .with_children(|button| { button.spawn(text("Carpentry", 16.0, TEXT)); });
             });
             row.spawn((
                 Node {
@@ -281,8 +287,16 @@ pub fn handle_selection(
                 }
                 Choice::Tab(tab) => {
                     selection.tab = tab;
+                    if tab != Tab::Overview {
+                        selection.carpentry = false;
+                    }
+                }
+                Choice::Carpentry => {
+                    selection.carpentry = true;
+                    selection.tab = Tab::Overview;
                 }
                 Choice::Good(good) => {
+                    selection.carpentry = false;
                     if let Some(windows) = windows.as_mut() {
                         windows.open(crate::floating_ui::WindowKind::Market);
                     }
@@ -324,6 +338,7 @@ pub fn handle_selection(
         };
         if next != selection.good() {
             selection.good = Some(next);
+            selection.carpentry = false;
             if let Some(windows) = windows.as_mut() {
                 windows.open(crate::floating_ui::WindowKind::Market);
             }
@@ -537,7 +552,8 @@ pub fn refresh_choices(
     for (choice, interaction, mut color) in &mut buttons {
         let selected = match *choice {
             Choice::View(view) => selection.view == view,
-            Choice::Good(good) => selection.good() == good,
+            Choice::Good(good) => !selection.carpentry && selection.good() == good,
+            Choice::Carpentry => selection.carpentry,
             Choice::Tab(tab) => selection.tab == tab,
         };
         let value = if *interaction == Interaction::Pressed {
@@ -554,6 +570,7 @@ pub fn refresh_choices(
 }
 
 type MarketRows = (
+    bool,
     Good,
     Vec<(learning_lord_simulation::AgentId, String, u64, u64)>,
     String,
@@ -610,8 +627,20 @@ pub fn refresh(
                     format!("{price}\n{margins}")
                 }
             }
-            Readout::Title => selection.good().name().into(),
-            Readout::PriceNow => price_details(universe, selection.good()),
+            Readout::Title => {
+                if selection.carpentry {
+                    "Carpentry".into()
+                } else {
+                    selection.good().name().into()
+                }
+            }
+            Readout::PriceNow => {
+                if selection.carpentry {
+                    String::new()
+                } else {
+                    price_details(universe, selection.good())
+                }
+            }
             Readout::Unfulfilled => format!(
                 "Affordable unfulfilled demand: {}",
                 crate::quantity_label(
@@ -641,7 +670,12 @@ pub fn refresh(
             })
         })
         .collect();
-    let row_key = (good, buyer_key, material_margins(universe, good, true));
+    let row_key = (
+        selection.carpentry,
+        good,
+        buyer_key,
+        material_margins(universe, good, true),
+    );
     if row_cache.as_ref() != Some(&row_key) || added {
         for entity in &buyers {
             commands
@@ -695,6 +729,9 @@ pub fn refresh(
                 .entity(entity)
                 .despawn_children()
                 .with_children(|content| {
+                    if selection.carpentry {
+                        return;
+                    }
                     content.spawn(text(material_margins(universe, good, true), 14.0, MUTED));
                     for recipe in Recipe::ALL
                         .into_iter()
