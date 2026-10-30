@@ -511,6 +511,32 @@ struct ListingBatch {
     local_sales_by_price: Vec<(f64, Quantity)>,
 }
 
+// Derived state must not affect market equality or save files.
+#[derive(Clone, Debug, Default)]
+struct AffordabilityCache(Option<AffordabilityInputs>, #[cfg(test)] usize);
+
+impl PartialEq for AffordabilityCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AffordabilityInputs {
+    orders: HashMap<OrderId, SellOrder>,
+    prices: Prices,
+    caravan_purchasable: bool,
+    accounts: HashMap<AgentId, AffordableAccount>,
+}
+
+#[derive(Clone, Debug)]
+struct AffordableAccount {
+    buyer: MarketParty,
+    budget: Coins,
+    request: ShoppingList,
+    affordable: ShoppingList,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Market {
     containers: HashMap<OrderId, crate::locations::ObjectId>,
@@ -532,6 +558,8 @@ pub struct Market {
     next_order_id: u64,
     requests: HashMap<AgentId, ShoppingList>,
     affordable_requests: HashMap<AgentId, ShoppingList>,
+    #[serde(skip)]
+    affordability_cache: AffordabilityCache,
     history: Vector<DailyMarketActivity>,
     period_start_ms: u64,
     first_period_start_ms: u64,
@@ -994,48 +1022,100 @@ impl Market {
                     .map(|id| (id, coins))
             })
             .collect();
+        let caravan_purchasable = self.policy.import_tariff_basis_points < 10_000;
+        let previous = self.affordability_cache.0.as_ref().filter(|cached| {
+            cached.orders.ptr_eq(&self.orders)
+                && cached.prices == self.prices
+                && cached.caravan_purchasable == caravan_purchasable
+        });
+        let mut accounts = HashMap::new();
+        #[cfg(test)]
+        let mut calculations = 0;
         for &(buyer, budget) in budgets {
             let buyer = buyer.into();
             let Some(account) = buyer.account() else {
                 continue;
             };
-            let mut funds = budget.max(0);
-            let mut items = Vec::new();
-            for (good, requested) in self.requested(account).items() {
-                if let Ok(fill) = self.fill_plan(buyer, None, good, requested, Some(funds)) {
-                    funds -= fill.coins;
-                    let unavailable = requested.saturating_sub(self.available_units(buyer, good));
-                    let mut low = 0;
-                    let mut high = unavailable;
-                    while low < high {
-                        let middle = low + (high - low).div_ceil(2);
-                        if self
-                            .prices
-                            .value(good, middle)
-                            .and_then(|value| charge(value).ok())
-                            .is_some_and(|cost| cost <= funds)
-                        {
-                            low = middle;
-                        } else {
-                            high = middle - 1;
-                        }
-                    }
-                    if low > 0 {
-                        funds -= charge(self.prices.value(good, low).unwrap()).unwrap();
-                    }
-                    let units = fill.units + low;
-                    if units > 0 {
-                        items.push((good, units));
-                    }
-                }
+            let request = self.requested(account);
+            if request.items().next().is_none() {
+                continue;
             }
-            if let Ok(list) = ShoppingList::new(items)
-                && list.items().next().is_some()
-            {
+            let list = previous
+                .and_then(|cached| cached.accounts.get(&account))
+                .filter(|cached| {
+                    cached.buyer == buyer && cached.budget == budget && cached.request == request
+                })
+                .map(|cached| cached.affordable)
+                .unwrap_or_else(|| {
+                    #[cfg(test)]
+                    {
+                        calculations += 1;
+                    }
+                    self.calculate_affordable_request(buyer, budget, request)
+                });
+            if list.items().next().is_some() {
                 affordable.insert(account, list);
             }
+            accounts.insert(
+                account,
+                AffordableAccount {
+                    buyer,
+                    budget,
+                    request,
+                    affordable: list,
+                },
+            );
         }
         self.affordable_requests = affordable;
+        #[cfg(test)]
+        {
+            self.affordability_cache.1 += calculations;
+        }
+        self.affordability_cache.0 = Some(AffordabilityInputs {
+            orders: self.orders.clone(),
+            prices: self.prices,
+            caravan_purchasable,
+            accounts,
+        });
+    }
+
+    fn calculate_affordable_request(
+        &self,
+        buyer: MarketParty,
+        budget: Coins,
+        request: ShoppingList,
+    ) -> ShoppingList {
+        let mut funds = budget.max(0);
+        let mut items = Vec::new();
+        for (good, requested) in request.items() {
+            if let Ok(fill) = self.fill_plan(buyer, None, good, requested, Some(funds)) {
+                funds -= fill.coins;
+                let unavailable = requested.saturating_sub(self.available_units(buyer, good));
+                let mut low = 0;
+                let mut high = unavailable;
+                while low < high {
+                    let middle = low + (high - low).div_ceil(2);
+                    if self
+                        .prices
+                        .value(good, middle)
+                        .and_then(|value| charge(value).ok())
+                        .is_some_and(|cost| cost <= funds)
+                    {
+                        low = middle;
+                    } else {
+                        high = middle - 1;
+                    }
+                }
+                if low > 0 {
+                    funds -= charge(self.prices.value(good, low).unwrap()).unwrap();
+                }
+                let units = fill.units + low;
+                if units > 0 {
+                    items.push((good, units));
+                }
+            }
+        }
+        ShoppingList::new(items).unwrap_or_default()
     }
 
     pub fn orders(&self) -> impl Iterator<Item = &SellOrder> {
@@ -2149,6 +2229,123 @@ mod tests {
     }
 
     const PLACE: PlaceId = PlaceId(uuid::Uuid::nil());
+
+    #[test]
+    fn affordability_reuses_unchanged_accounts_and_recalculates_changed_inputs() {
+        let first = AgentId(uuid::Uuid::new_v4());
+        let second = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        for buyer in [first, second] {
+            market
+                .set_request(buyer, ShoppingList::single(Good::Flour, 1000))
+                .unwrap();
+        }
+        market.refresh_affordability(&[(first, 10), (second, 20)]);
+        assert_eq!(market.affordability_cache.1, 2);
+        let expected = market.affordable_requests.clone();
+        market.affordable_requests.clear();
+        market.refresh_affordability(&[(first, 10), (second, 20)]);
+        assert_eq!(market.affordability_cache.1, 2);
+        assert_eq!(market.affordable_requests, expected);
+
+        market
+            .set_request(first, ShoppingList::single(Good::Water, 500))
+            .unwrap();
+        market.refresh_affordability(&[(first, 10), (second, 20)]);
+        assert_eq!(market.affordability_cache.1, 3);
+        assert_eq!(market.affordable_request(first).units(Good::Flour), 0);
+        market.refresh_affordability(&[(first, 0), (second, 20)]);
+        assert_eq!(market.affordability_cache.1, 4);
+        assert_eq!(market.affordable_request(first), ShoppingList::default());
+        market.refresh_affordability(&[(second, 20)]);
+        assert_eq!(market.affordability_cache.1, 4);
+        assert!(!market.demand_budgets.contains_key(&first));
+        assert!(
+            !market
+                .affordability_cache
+                .0
+                .as_ref()
+                .unwrap()
+                .accounts
+                .contains_key(&first)
+        );
+        market.refresh_affordability(&[(first, 10), (second, 20)]);
+        assert_eq!(market.affordability_cache.1, 5);
+        market.set_request(first, ShoppingList::default()).unwrap();
+        market.refresh_affordability(&[(first, 10), (second, 20)]);
+        assert_eq!(market.affordability_cache.1, 5);
+        assert_eq!(market.affordable_request(first), ShoppingList::default());
+        market.refresh_affordability(&[(MarketParty::Household(second), 20)]);
+        assert_eq!(market.affordability_cache.1, 6);
+    }
+
+    #[test]
+    fn affordability_invalidates_for_every_shared_market_input() {
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market
+            .set_request(buyer, ShoppingList::single(Good::Flour, 1000))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 2)]);
+        let check = |market: &mut Market| {
+            let calculations = market.affordability_cache.1;
+            let mut uncached = market.clone();
+            uncached.affordability_cache = AffordabilityCache::default();
+            uncached.refresh_affordability(&[(buyer, 2)]);
+            market.refresh_affordability(&[(buyer, 2)]);
+            assert_eq!(market.affordability_cache.1, calculations + 1);
+            assert_eq!(market.affordable_requests, uncached.affordable_requests);
+            assert_eq!(market.demand_budgets, uncached.demand_budgets);
+        };
+        let order = market
+            .list_at_quote(MarketParty::Caravan, PLACE, Good::Flour, 500, 1.0)
+            .unwrap();
+        check(&mut market);
+        market.orders.get_mut(&order).unwrap().units = 100;
+        check(&mut market);
+        market.orders.get_mut(&order).unwrap().quoted_price = 100.0;
+        check(&mut market);
+        market.policy.import_tariff_basis_points = 10_000;
+        check(&mut market);
+        market.policy.import_tariff_basis_points = 0;
+        check(&mut market);
+        market.prices = market.prices.with_price(Good::Flour, 100.0).unwrap();
+        check(&mut market);
+        market.orders.remove(&order);
+        check(&mut market);
+    }
+
+    #[test]
+    fn affordability_cache_is_safe_across_clones_and_save_roundtrips() {
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market
+            .set_request(buyer, ShoppingList::single(Good::Flour, 1000))
+            .unwrap();
+        market.refresh_affordability(&[(buyer, 2)]);
+        let saved = ron::to_string(&market).unwrap();
+        let mut restored: Market = ron::from_str(&saved).unwrap();
+        assert_eq!(restored, market);
+        assert!(restored.affordability_cache.0.is_none());
+        restored.refresh_affordability(&[(buyer, 2)]);
+        assert_eq!(restored, market);
+        assert_eq!(restored.affordability_cache.1, 1);
+        assert_eq!(ron::to_string(&restored).unwrap(), saved);
+        let mut speculative = market.clone();
+        speculative.refresh_affordability(&[(buyer, 2)]);
+        assert_eq!(speculative.affordability_cache.1, 1);
+        speculative.prices = speculative.prices.with_price(Good::Flour, 100.0).unwrap();
+        speculative.refresh_affordability(&[(buyer, 2)]);
+        assert_eq!(speculative.affordability_cache.1, 2);
+        speculative
+            .list_at_quote(MarketParty::Caravan, PLACE, Good::Flour, 100, 1.0)
+            .unwrap();
+        speculative.refresh_affordability(&[(buyer, 2)]);
+        assert_eq!(speculative.affordability_cache.1, 3);
+        market.refresh_affordability(&[(buyer, 2)]);
+        assert_eq!(market.affordability_cache.1, 1);
+        assert_eq!(ron::to_string(&market).unwrap(), saved);
+    }
 
     #[test]
     fn save_validation_rejects_missing_or_orphan_containers_and_empty_escrow() {
