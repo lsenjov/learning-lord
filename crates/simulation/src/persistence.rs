@@ -132,7 +132,24 @@ impl Universe {
                 "missing compact construction accounting",
             ));
         }
-        universe.validate_save()?;
+        universe.validate_save_sources()?;
+        // Rebuilding context synchronizes balances; keep saved snapshots for validation.
+        let balances: Vec<_> = universe
+            .agents
+            .iter()
+            .map(|(id, agent)| {
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                (*id, citizen.coins)
+            })
+            .collect();
+        universe
+            .refresh_construction_context()
+            .map_err(|_| SaveError::InvalidState("cannot rebuild construction context"))?;
+        for (id, coins) in balances {
+            let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
+            citizen.coins = coins;
+        }
+        universe.validate_save_context()?;
         if universe.construction.next_sequence.is_none() {
             universe.migrate_construction();
             universe.validate_save()?;
@@ -151,6 +168,11 @@ impl Universe {
     }
 
     fn validate_save(&self) -> Result<(), SaveError> {
+        self.validate_save_sources()?;
+        self.validate_save_context()
+    }
+
+    fn validate_save_sources(&self) -> Result<(), SaveError> {
         self.map.validate_save()?;
         self.validate_objects()?;
         self.market.validate_save()?;
@@ -158,11 +180,24 @@ impl Universe {
         self.storage.validate_objects(&self.map, &self.market)?;
         self.validate_households()?;
         self.validate_guilds()?;
+        self.validate_construction()?;
+        Ok(())
+    }
+
+    fn validate_save_context(&self) -> Result<(), SaveError> {
+        for agent in self.agents.values() {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            if citizen
+                .designated_workplace
+                .is_some_and(|place| citizen.accessible_place(place).is_err())
+            {
+                return Err(SaveError::InvalidState("inaccessible designated workplace"));
+            }
+        }
         self.validate_household_histories()?;
         self.validate_guild_histories()?;
         self.validate_work_reservations()?;
         self.validate_production_trials()?;
-        self.validate_construction()?;
         if self.town_treasury < 0 {
             return Err(SaveError::InvalidState("negative town treasury"));
         }
@@ -270,12 +305,6 @@ impl Universe {
                 }
             } else {
                 self.validate_maintenance(*id, &citizen.maintenance)?;
-            }
-            if citizen
-                .designated_workplace
-                .is_some_and(|place| citizen.accessible_place(place).is_err())
-            {
-                return Err(SaveError::InvalidState("inaccessible designated workplace"));
             }
         }
         for (key, _) in self.storage.stock() {
@@ -809,7 +838,7 @@ mod tests {
     #[test]
     fn rejects_inconsistent_households_work_reservations_and_maintenance() {
         let (world, first, _, household, mill) = household_world();
-        for case in 0..6 {
+        for case in 0..7 {
             let mut invalid = world.clone();
             match case {
                 0 => invalid
@@ -851,7 +880,7 @@ mod tests {
                         .unwrap();
                     invalid.storage.reserve_work(key, 1).unwrap();
                 }
-                _ => {
+                5 => {
                     invalid
                         .households
                         .get_mut(&household)
@@ -860,6 +889,11 @@ mod tests {
                         .listing
                         .claimant = Some(first);
                     invalid.refresh_market();
+                }
+                _ => {
+                    let AgentKind::Citizen(citizen) =
+                        &mut invalid.agents.get_mut(&first).unwrap().kind;
+                    citizen.coins += 1;
                 }
             }
             assert!(

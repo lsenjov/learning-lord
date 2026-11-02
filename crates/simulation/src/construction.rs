@@ -1493,6 +1493,13 @@ impl Universe {
                 add_coins(escrow.entry(account).or_default(), project.escrow)?;
             }
         }
+        // Procurement must use the rebuilt access of every worker, including on load.
+        for (id, agent) in self.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.construction_access = current.get(id).map(|id| {
+                self.construction.projects[&self.construction.contracts[id].project].place
+            });
+        }
         let mut prices = HashMap::new();
         let mut available = HashMap::new();
         let mut ids: Vec<_> = self.agents.keys().copied().collect();
@@ -1545,8 +1552,6 @@ impl Universe {
             citizen.construction_access = access;
             citizen.construction_wood_reserve = reserve.get(&account).copied().unwrap_or_default();
             citizen.coins = coins;
-            // Access can change usable storage for later household members in this refresh.
-            available.remove(&id);
         }
         Ok(())
     }
@@ -1604,6 +1609,22 @@ impl Universe {
 
     #[cfg(test)]
     fn scalar_refresh_construction_context(&mut self) -> Result<(), SimulationError> {
+        let access: Vec<_> = self
+            .agents
+            .keys()
+            .map(|id| {
+                (
+                    *id,
+                    self.carpenter_contract(*id)
+                        .map(|contract| self.construction.projects[&contract.project].place),
+                )
+            })
+            .collect();
+        for (id, access) in access {
+            let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&id).unwrap().kind;
+            citizen.construction_access = access;
+        }
+
         let mut ids: Vec<_> = self.agents.keys().copied().collect();
         ids.sort_by_key(|id| id.0);
         for id in ids {
@@ -2477,20 +2498,8 @@ impl Universe {
                 }
             }
         }
-        let mut refreshed = self.clone();
-        refreshed
-            .refresh_construction_context()
-            .map_err(|_| invalid())?;
-        for (id, agent) in &self.agents {
+        for agent in self.agents.values() {
             let AgentKind::Citizen(worker) = &agent.kind;
-            let AgentKind::Citizen(expected) = &refreshed.agents[id].kind;
-            if worker.construction_access != expected.construction_access
-                || worker.construction_escrow != expected.construction_escrow
-                || worker.construction_protected != expected.construction_protected
-                || worker.construction_wood_reserve != expected.construction_wood_reserve
-            {
-                return Err(invalid());
-            }
             if worker.active_plan.as_ref().is_some_and(|plan| {
                 plan.plan()
                     .actions()
@@ -2696,7 +2705,17 @@ mod tests {
                         .collect();
                     world.construction.contracts.insert(contract.id, contract);
                 }
-                assert_refresh_matches_scalar(world);
+                assert_refresh_matches_scalar(world.clone());
+                world.refresh_construction_context().unwrap();
+                let once = world.clone();
+                world.refresh_construction_context().unwrap();
+                assert_eq!(once, world);
+                for (_, agent) in world.agents.iter_mut() {
+                    let AgentKind::Citizen(citizen) = &mut agent.kind;
+                    citizen.construction_access = None;
+                }
+                world.refresh_construction_context().unwrap();
+                assert_eq!(once, world);
             }
         }
     }
@@ -3159,6 +3178,83 @@ mod tests {
         );
         assert_eq!(world.construction.projects[&project].missing_wood(), 0);
         assert!(world.construction.contracts[&continuation].quotes[0].price < original_price);
+    }
+
+    #[test]
+    fn load_rebuilds_construction_context_and_ignores_legacy_cache_fields() {
+        let (world, _, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        let mut world = award(world, worker).advance(HOUR_MS / 3).unwrap();
+        world.refresh_construction_context().unwrap();
+        let save = world.to_save_string().unwrap();
+        for field in [
+            "construction_escrow:",
+            "construction_protected:",
+            "construction_access:",
+            "construction_wood_reserve:",
+        ] {
+            assert!(!save.contains(field));
+        }
+        let legacy = save.replace(
+            " coins:",
+            " construction_escrow: -999, construction_protected: -999, construction_access: None, construction_wood_reserve: 18446744073709551615, coins:",
+        );
+        assert_eq!(world, Universe::from_save_str(&legacy).unwrap());
+        assert_eq!(world, Universe::from_save_str(&save).unwrap());
+        let mut invalid = world.clone();
+        invalid.construction.contracts.get_mut(&id).unwrap().escrow += 1;
+        assert!(Universe::from_save_str(&invalid.to_save_string().unwrap()).is_err());
+        let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&worker).unwrap().kind;
+        citizen.construction_access = None;
+        citizen.construction_protected = i64::MAX;
+        citizen.construction_wood_reserve = u64::MAX;
+        citizen.construction_escrow = i64::MAX;
+        let loaded = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+        let mut refreshed = loaded.clone();
+        refreshed.refresh_construction_context().unwrap();
+        assert_eq!(loaded, refreshed);
+    }
+
+    #[test]
+    fn load_rejects_unbound_overflowing_wood_orders_before_rebuilding_context() {
+        let (mut world, _, worker, _) = fixture(ConstructionItem::FishCrate, 0);
+        let market = world.map.public_place(crate::locations::Location::Market);
+        for _ in 0..2 {
+            world
+                .market
+                .list(worker, market, Good::Wood, 123_456)
+                .unwrap();
+        }
+        for (_, agent) in world.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.market = world.market.clone();
+        }
+        let save = world
+            .to_save_string()
+            .unwrap()
+            .replace("units: 123456", "units: 18446744073709551615");
+        assert!(matches!(
+            Universe::from_save_str(&save),
+            Err(crate::persistence::SaveError::InvalidState(
+                "market container binding mismatch"
+            )),
+        ));
+    }
+
+    #[test]
+    fn explicit_action_boundary_refreshes_context_after_stock_changes() {
+        let (mut world, _, worker, _) = fixture(ConstructionItem::FishCrate, 1_000);
+        world.refresh_construction_context().unwrap();
+        let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&worker).unwrap().kind;
+        citizen.inventory.remove(&Good::Wood);
+        let mut expected = world.clone();
+        expected.refresh_construction_context().unwrap();
+        let AgentKind::Citizen(stale) = &world.agents[&worker].kind;
+        let AgentKind::Citizen(fresh) = &expected.agents[&worker].kind;
+        assert!(fresh.construction_protected > stale.construction_protected);
+        assert_eq!(
+            world.start_action(worker, CitizenAction::Wait).unwrap(),
+            expected.start_action(worker, CitizenAction::Wait).unwrap(),
+        );
     }
 
     #[test]

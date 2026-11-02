@@ -369,9 +369,13 @@ pub struct Citizen {
     work_period: u64,
     work_ms: u64,
     coins: Coins,
+    #[serde(skip)]
     construction_escrow: Coins,
+    #[serde(skip)]
     construction_protected: Coins,
+    #[serde(skip)]
     construction_access: Option<PlaceId>,
+    #[serde(skip)]
     construction_wood_reserve: Quantity,
     forage_rng: Xoshiro256PlusPlus,
     prices: Prices,
@@ -2555,6 +2559,7 @@ impl Universe {
         if elapsed_ms == 0
             && let Some(runtime) = runtime.as_deref_mut()
         {
+            universe.refresh_construction_context()?;
             let mut ids: Vec<_> = universe.agents.keys().copied().collect();
             ids.sort_by_key(|id| id.0);
             for id in ids {
@@ -2611,6 +2616,13 @@ impl Universe {
                 .map
                 .advance_conditions(step, &room_credits, &object_credits);
             for id in &ids {
+                let AgentKind::Citizen(citizen) = &universe.agents[id].kind;
+                if citizen
+                    .active_action()
+                    .is_some_and(|action| action.remaining_ms() <= step)
+                {
+                    universe.refresh_construction_context()?;
+                }
                 let agent_trades_before = universe.market.trades().len();
                 let agent = universe.agents.get_mut(id).unwrap();
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
@@ -2956,9 +2968,14 @@ impl Universe {
                 citizen.active_action.is_none()
             });
             if needs_stock_refresh || step == until_update {
+                universe.refresh_construction_context()?;
                 universe.refresh_workplace_supplies()?;
             }
             for id in ids {
+                let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
+                if citizen.active_action.is_none() {
+                    universe.refresh_construction_context()?;
+                }
                 let completed_maintenance = {
                     let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
                     citizen
@@ -3030,6 +3047,7 @@ impl Universe {
                 universe.refresh_market();
             }
             universe.refresh_market();
+            universe.refresh_construction_context()?;
             if let Some(runtime) = runtime.as_deref_mut() {
                 let mut ids: Vec<_> = universe.agents.keys().copied().collect();
                 ids.sort_by_key(|id| id.0);
@@ -3316,9 +3334,13 @@ impl Universe {
         if matches!(action, CitizenAction::Construct { .. }) {
             return Err(SimulationError::MissingProperty);
         }
-        let agent = self.agents.get(&id).ok_or(SimulationError::AgentNotFound)?;
-        let updated = agent.start_action(action)?;
         let mut universe = self.clone();
+        universe.refresh_construction_context()?;
+        let agent = universe
+            .agents
+            .get(&id)
+            .ok_or(SimulationError::AgentNotFound)?;
+        let updated = agent.start_action(action)?;
         let histories_before = universe.citizen_histories.clone();
         let AgentKind::Citizen(citizen) = &updated.kind;
         universe
@@ -3338,6 +3360,7 @@ impl Universe {
 
     pub fn start_planning(&self, id: AgentId) -> Result<Self, SimulationError> {
         let mut prepared = self.clone();
+        prepared.refresh_construction_context()?;
         prepared.refresh_workplace_supplies()?;
         let mut agent = prepared
             .agents
