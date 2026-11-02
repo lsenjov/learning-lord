@@ -1397,7 +1397,162 @@ impl Universe {
         Ok(())
     }
 
-    fn outstanding_construction_procurement(
+    pub(crate) fn refresh_construction_context(&mut self) -> Result<(), SimulationError> {
+        use std::collections::{HashMap, HashSet};
+
+        let accounts: HashSet<_> = self
+            .agents
+            .keys()
+            .map(|id| self.economic_id(*id))
+            .collect::<Result<_, _>>()?;
+        let mut escrow = HashMap::<AgentId, Coins>::new();
+        let mut quotes = HashMap::<AgentId, Vec<(ContractId, ConstructionQuote)>>::new();
+        let mut shared = HashMap::<AgentId, u128>::new();
+        let mut shared_by_contract = HashMap::<(AgentId, ContractId), u128>::new();
+        let mut carried = HashMap::<AgentId, u128>::new();
+        let mut carried_by_contract = HashMap::<(AgentId, ContractId), u128>::new();
+        let mut reserve = HashMap::<AgentId, Quantity>::new();
+        let mut current = HashMap::<AgentId, ContractId>::new();
+        for contract in self.construction.contracts.values() {
+            let project = &self.construction.projects[&contract.project];
+            if let Some(account) = project
+                .client
+                .account()
+                .filter(|account| accounts.contains(account))
+            {
+                add_coins(escrow.entry(account).or_default(), contract.escrow)?;
+            }
+            if !contract.status.open() {
+                continue;
+            }
+            let mut accounts = HashSet::new();
+            for quote in contract.quotes.iter().filter(|quote| {
+                contract.status == ContractStatus::Bidding
+                    || contract.carpenter == Some(quote.carpenter)
+            }) {
+                let account = self.economic_id(quote.carpenter)?;
+                quotes
+                    .entry(account)
+                    .or_default()
+                    .push((contract.id, quote.clone()));
+                // Keep the unsaturated sum so excluding a whole contract also works after overflow.
+                *shared.entry(account).or_default() += u128::from(quote.shared_wood);
+                *shared_by_contract
+                    .entry((account, contract.id))
+                    .or_default() += u128::from(quote.shared_wood);
+                *carried.entry(quote.carpenter).or_default() += u128::from(quote.carried_wood);
+                *carried_by_contract
+                    .entry((quote.carpenter, contract.id))
+                    .or_default() += u128::from(quote.carried_wood);
+                if contract.status == ContractStatus::Bidding {
+                    accounts.insert(account);
+                }
+            }
+            if contract.status == ContractStatus::Active {
+                if let Some(worker) = contract.carpenter {
+                    accounts.insert(self.economic_id(worker)?);
+                    let AgentKind::Citizen(citizen) = &self.agents[&worker].kind;
+                    let active = citizen
+                        .active_action()
+                        .and_then(|action| match action.action() {
+                            CitizenAction::Construct { contract, .. } => Some(contract),
+                            _ => None,
+                        });
+                    let key = |id: ContractId| {
+                        let candidate = &self.construction.contracts[&id];
+                        let stage =
+                            &self.construction.projects[&candidate.project].stages[candidate.stage];
+                        (
+                            Some(id) != active,
+                            stage.missing_wood() > citizen.carried_available_units(Good::Wood),
+                            candidate.awarded_ms,
+                            candidate.sequence,
+                        )
+                    };
+                    if current
+                        .get(&worker)
+                        .is_none_or(|previous| key(contract.id) < key(*previous))
+                    {
+                        current.insert(worker, contract.id);
+                    }
+                }
+            }
+            for account in accounts {
+                let total = reserve.entry(account).or_default();
+                *total = total
+                    .checked_add(project.stages[contract.stage].missing_wood())
+                    .ok_or(SimulationError::InventoryOverflow)?;
+            }
+        }
+        for project in self.construction.projects.values() {
+            if let Some(account) = project
+                .client
+                .account()
+                .filter(|account| accounts.contains(account))
+            {
+                add_coins(escrow.entry(account).or_default(), project.escrow)?;
+            }
+        }
+        let mut prices = HashMap::new();
+        let mut available = HashMap::new();
+        let mut ids: Vec<_> = self.agents.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        for id in ids {
+            let account = self.economic_id(id)?;
+            let current_contract = current.get(&id).copied();
+            let mut protected = 0i64;
+            for (contract_id, quote) in quotes.get(&account).into_iter().flatten() {
+                if Some(*contract_id) == current_contract {
+                    continue;
+                }
+                let (usable, held) = *available.entry(quote.carpenter).or_insert_with(|| {
+                    let AgentKind::Citizen(worker) = &self.agents[&quote.carpenter].kind;
+                    let mut worker = worker.clone();
+                    worker.storage = self.storage.clone();
+                    worker.market = self.market.clone();
+                    (
+                        worker.usable_owned_units(Good::Wood),
+                        worker.carried_available_units(Good::Wood),
+                    )
+                });
+                let other_shared = (shared[&account] - shared_by_contract[&(account, *contract_id)])
+                    .min(u128::from(u64::MAX)) as u64;
+                let other_carried = (carried[&quote.carpenter]
+                    - carried_by_contract[&(quote.carpenter, *contract_id)])
+                    .min(u128::from(u64::MAX)) as u64;
+                let owned = usable
+                    .saturating_sub(held)
+                    .saturating_sub(other_shared)
+                    .saturating_add(held.saturating_sub(other_carried));
+                let contract = &self.construction.contracts[contract_id];
+                let required = self.construction.projects[&contract.project].stages[contract.stage]
+                    .missing_wood();
+                let price = *prices
+                    .entry(account)
+                    .or_insert_with(|| self.construction_estimated_unit_price(account, Good::Wood));
+                add_coins(
+                    &mut protected,
+                    (required.saturating_sub(owned) as f64 * price).ceil() as Coins,
+                )?;
+            }
+            let access = current_contract.map(|id| {
+                self.construction.projects[&self.construction.contracts[&id].project].place
+            });
+            let coins = self.account_coins(account)?;
+            let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&id).unwrap().kind;
+            citizen.construction_escrow = escrow.get(&account).copied().unwrap_or_default();
+            citizen.construction_protected = protected;
+            citizen.construction_access = access;
+            citizen.construction_wood_reserve = reserve.get(&account).copied().unwrap_or_default();
+            citizen.coins = coins;
+            // Access can change usable storage for later household members in this refresh.
+            available.remove(&id);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn scalar_outstanding_construction_procurement(
         &self,
         contract: &ConstructionContract,
         quote: &ConstructionQuote,
@@ -1447,7 +1602,8 @@ impl Universe {
         .ceil() as Coins)
     }
 
-    pub(crate) fn refresh_construction_context(&mut self) -> Result<(), SimulationError> {
+    #[cfg(test)]
+    fn scalar_refresh_construction_context(&mut self) -> Result<(), SimulationError> {
         let mut ids: Vec<_> = self.agents.keys().copied().collect();
         ids.sort_by_key(|id| id.0);
         for id in ids {
@@ -1490,7 +1646,7 @@ impl Universe {
                     {
                         add_coins(
                             &mut protected,
-                            self.outstanding_construction_procurement(contract, quote)?,
+                            self.scalar_outstanding_construction_procurement(contract, quote)?,
                         )?;
                     }
                 }
@@ -2457,6 +2613,124 @@ mod tests {
         world.start_construction_action(worker).unwrap();
         world.refresh_market();
         world
+    }
+
+    fn assert_refresh_matches_scalar(mut world: Universe) {
+        let mut scalar = world.clone();
+        let result = world.refresh_construction_context();
+        let expected = scalar.scalar_refresh_construction_context();
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"));
+        if result.is_ok() {
+            for (id, agent) in &world.agents {
+                let AgentKind::Citizen(actual) = &agent.kind;
+                let AgentKind::Citizen(expected) = &scalar.agents[id].kind;
+                assert_eq!(actual.construction_escrow, expected.construction_escrow);
+                assert_eq!(
+                    actual.construction_protected,
+                    expected.construction_protected
+                );
+                assert_eq!(actual.construction_access, expected.construction_access);
+                assert_eq!(
+                    actual.construction_wood_reserve,
+                    expected.construction_wood_reserve
+                );
+                assert_eq!(actual.coins, expected.coins);
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_summary_matches_scalar_for_household_quotes_and_saturated_commitments() {
+        let (world, client, first, old) = fixture(ConstructionItem::FishCrate, 1_000);
+        let template = world.construction.contracts[&old].clone();
+        let world = world.cancel_construction(client, old).unwrap();
+        let (world, second) = world
+            .with_citizen("Partner", Citizen::new(-100.0).unwrap())
+            .unwrap();
+        let AgentKind::Citizen(worker) = &world.agents[&first].kind;
+        let (world, family) = world
+            .with_household("Carpenters", worker.home, &[first, second])
+            .unwrap();
+        let site = world.construction.projects[&template.project].place;
+        let mut world = world;
+        world.map.places_mut().get_mut(&site).unwrap().buildings[0].rooms[0]
+            .objects
+            .push(crate::locations::Object::new(ObjectKind::WoodRack));
+        for (_, agent) in world.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.map = world.map.clone();
+        }
+        let world = world
+            .with_stored_good(
+                site,
+                crate::storage::GoodsOwner::Household(family),
+                Good::Wood,
+                5_000,
+            )
+            .unwrap();
+        for amount in [0, 500, u64::MAX] {
+            for active in [false, true] {
+                let mut world = world.clone();
+                for index in 0..3 {
+                    let mut contract = template.clone();
+                    contract.id = ContractId(Uuid::new_v4());
+                    contract.sequence = index;
+                    contract.status = if active && index < 2 {
+                        ContractStatus::Active
+                    } else {
+                        ContractStatus::Bidding
+                    };
+                    contract.carpenter = (contract.status == ContractStatus::Active)
+                        .then_some(if index == 0 { first } else { second });
+                    contract.quotes = [first, second]
+                        .into_iter()
+                        .map(|carpenter| ConstructionQuote {
+                            carpenter,
+                            price: 100,
+                            financing: 0,
+                            procurement_cash: 0,
+                            shared_wood: amount,
+                            carried_wood: amount,
+                            material_value: None,
+                        })
+                        .collect();
+                    world.construction.contracts.insert(contract.id, contract);
+                }
+                assert_refresh_matches_scalar(world);
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_summary_matches_scalar_for_escrow_and_reserve_overflow() {
+        let (mut world, _, _, id) = fixture(ConstructionItem::FishCrate, 0);
+        let mut extra = world.construction.contracts[&id].clone();
+        extra.id = ContractId(Uuid::new_v4());
+        extra.escrow = i64::MAX;
+        world.construction.contracts.insert(extra.id, extra);
+        assert_refresh_matches_scalar(world.clone());
+        let mut unused_account = world.clone();
+        let project = unused_account.construction.contracts[&id].project;
+        unused_account
+            .construction
+            .projects
+            .get_mut(&project)
+            .unwrap()
+            .client = ConstructionClient::Account(AgentId(Uuid::new_v4()));
+        assert_refresh_matches_scalar(unused_account);
+
+        for (_, contract) in world.construction.contracts.iter_mut() {
+            contract.escrow = 0;
+        }
+        let project = world.construction.contracts[&id].project;
+        world
+            .construction
+            .projects
+            .get_mut(&project)
+            .unwrap()
+            .stages[0]
+            .wood = u64::MAX;
+        assert_refresh_matches_scalar(world);
     }
 
     #[test]
