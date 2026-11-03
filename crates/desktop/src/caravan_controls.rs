@@ -70,6 +70,7 @@ pub struct State {
     import: String,
     export: String,
     field: Option<Field>,
+    replace_on_input: bool,
     pending: Option<(u64, Saved)>,
     generation: u64,
     error: Option<String>,
@@ -314,13 +315,17 @@ pub fn handle(
                 None
             }
             Choice::Field(kind) => {
-                state.field = Some(match kind {
+                let field = match kind {
                     FieldKind::GoodImport => Field::GoodImport(good),
                     FieldKind::GoodExport => Field::GoodExport(good),
                     FieldKind::Reserve => Field::Reserve(good),
                     FieldKind::Import => Field::Import,
                     FieldKind::Export => Field::Export,
-                });
+                };
+                if state.field != Some(field) {
+                    state.replace_on_input = true;
+                    state.field = Some(field);
+                }
                 None
             }
             Choice::Reset => {
@@ -405,7 +410,12 @@ pub fn handle(
         match &key.logical_key {
             Key::Escape | Key::Enter | Key::Tab => state.field = None,
             Key::Backspace => {
-                state.value_mut(field).pop();
+                if state.replace_on_input {
+                    state.value_mut(field).clear();
+                    state.replace_on_input = false;
+                } else {
+                    state.value_mut(field).pop();
+                }
             }
             Key::Character(value)
                 if value.chars().all(|c| {
@@ -413,9 +423,15 @@ pub fn handle(
                         || (!matches!(field, Field::Reserve(_)) && matches!(c, '.' | '-'))
                 }) =>
             {
+                let replace = state.replace_on_input;
                 let target = state.value_mut(field);
-                if target.len() + value.len() <= 30 {
+                if !value.is_empty() && (if replace { 0 } else { target.len() }) + value.len() <= 30
+                {
+                    if replace {
+                        target.clear();
+                    }
                     target.push_str(value);
+                    state.replace_on_input = false;
                 }
             }
             _ => {}
@@ -568,6 +584,121 @@ mod tests {
             std::thread::yield_now();
         }
     }
+    fn type_key(app: &mut App, logical_key: Key) {
+        app.world_mut()
+            .resource_mut::<Messages<KeyboardInput>>()
+            .write(KeyboardInput {
+                key_code: KeyCode::KeyH,
+                logical_key,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+        app.update();
+    }
+
+    fn type_text(app: &mut App, value: &str) {
+        type_key(app, Key::Character(value.into()));
+    }
+
+    #[test]
+    fn numeric_fields_replace_on_first_input_only() {
+        let mut app = app();
+        for (kind, field, original) in [
+            (FieldKind::Import, Field::Import, "0.00"),
+            (FieldKind::Export, Field::Export, "20.00"),
+            (
+                FieldKind::GoodImport,
+                Field::GoodImport(Good::Flour),
+                "20.00",
+            ),
+            (
+                FieldKind::GoodExport,
+                Field::GoodExport(Good::Flour),
+                "0.00",
+            ),
+            (FieldKind::Reserve, Field::Reserve(Good::Flour), "100"),
+        ] {
+            *app.world_mut().resource_mut::<State>().value_mut(field) = original.into();
+            press(&mut app, Choice::Field(kind));
+            assert_eq!(
+                app.world_mut().resource_mut::<State>().value_mut(field),
+                original
+            );
+            type_key(&mut app, Key::Tab);
+            assert_eq!(
+                app.world_mut().resource_mut::<State>().value_mut(field),
+                original
+            );
+            press(&mut app, Choice::Field(kind));
+            type_text(&mut app, "x");
+            type_text(&mut app, "");
+            assert_eq!(
+                app.world_mut().resource_mut::<State>().value_mut(field),
+                original
+            );
+            type_text(&mut app, "2");
+            press(&mut app, Choice::Field(kind));
+            type_text(&mut app, "0");
+            assert_eq!(
+                app.world_mut().resource_mut::<State>().value_mut(field),
+                "20"
+            );
+            type_key(&mut app, Key::Backspace);
+            assert_eq!(
+                app.world_mut().resource_mut::<State>().value_mut(field),
+                "2"
+            );
+            type_key(&mut app, Key::Enter);
+            press(&mut app, Choice::Field(kind));
+            type_key(&mut app, Key::Backspace);
+            assert_eq!(app.world_mut().resource_mut::<State>().value_mut(field), "");
+            type_text(&mut app, "20");
+            type_key(&mut app, Key::Backspace);
+            assert_eq!(
+                app.world_mut().resource_mut::<State>().value_mut(field),
+                "2"
+            );
+            type_key(&mut app, Key::Escape);
+        }
+        press(&mut app, Choice::Field(FieldKind::Import));
+        type_text(&mut app, "-");
+        type_text(&mut app, "2");
+        type_text(&mut app, ".");
+        type_text(&mut app, "5");
+        assert_eq!(app.world().resource::<State>().import, "-2.5");
+        press(&mut app, Choice::Field(FieldKind::Reserve));
+        type_text(&mut app, "-");
+        type_text(&mut app, ".");
+        type_text(&mut app, "7");
+        assert_eq!(
+            app.world().resource::<State>().drafts[Good::Flour as usize].reserve,
+            "7"
+        );
+        press(&mut app, Choice::Field(FieldKind::Import));
+        type_text(&mut app, "20");
+        press(&mut app, Choice::SaveTariffs);
+        await_save(&mut app);
+        assert_eq!(
+            app.world()
+                .resource::<DisplaySnapshot>()
+                .0
+                .universe
+                .caravan_policy()
+                .import_tariff_basis_points,
+            2000
+        );
+        press(&mut app, Choice::Field(FieldKind::Import));
+        type_text(&mut app, "4");
+        assert_eq!(app.world().resource::<State>().import, "4");
+        press(&mut app, Choice::Reset);
+        assert_eq!(app.world().resource::<State>().import, "20.00");
+        press(&mut app, Choice::Field(FieldKind::Import));
+        type_text(&mut app, "3");
+        assert_eq!(app.world().resource::<State>().import, "3");
+    }
+
     #[test]
     fn signed_percentages_accept_offsets_above_one_hundred() {
         for (input, expected) in [("-25", -2500), ("125.01", 12501), ("-0.01", -1), ("0", 0)] {

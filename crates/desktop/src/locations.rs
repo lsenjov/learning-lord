@@ -113,6 +113,7 @@ pub struct State {
     drafts: Vec<(TaxScope, Draft)>,
     pending_scope: Option<TaxScope>,
     field: Option<Field>,
+    replace_on_input: bool,
     citizen: Option<AgentId>,
     good: Option<Good>,
     quantity: String,
@@ -1239,7 +1240,10 @@ pub fn handle(
                 None
             }
             Choice::Field(field) => {
-                state.field = Some(field);
+                if state.field != Some(field) {
+                    state.replace_on_input = field != Field::Name;
+                    state.field = Some(field);
+                }
                 None
             }
             Choice::Good(good) => {
@@ -1404,13 +1408,21 @@ pub fn handle(
                 }
             }
             Key::Backspace => {
+                let replace = state.replace_on_input;
                 if let Some(value) = state.value_mut(field) {
-                    value.pop();
+                    if replace {
+                        value.clear();
+                    } else {
+                        value.pop();
+                    }
+                    state.replace_on_input = false;
                 }
             }
             Key::Character(value) => {
+                let replace = state.replace_on_input;
                 if let Some(target) = state.value_mut(field)
-                    && target.len() < 100
+                    && (replace || target.len() < 100)
+                    && !value.is_empty()
                     && (field == Field::Name
                         || value.chars().all(|character| {
                             character.is_ascii_digit()
@@ -1418,7 +1430,11 @@ pub fn handle(
                                     && character == '.')
                         }))
                 {
+                    if replace {
+                        target.clear();
+                    }
                     target.push_str(value);
+                    state.replace_on_input = false;
                 }
             }
             _ => {}
@@ -2113,6 +2129,152 @@ mod tests {
             0
         );
         assert!(app.world().resource::<State>().draft.is_some());
+    }
+
+    fn type_key(app: &mut App, logical_key: Key) {
+        app.world_mut()
+            .resource_mut::<Messages<KeyboardInput>>()
+            .write(KeyboardInput {
+                key_code: KeyCode::KeyH,
+                logical_key,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+        app.update();
+    }
+
+    fn type_text(app: &mut App, value: &str) {
+        type_key(app, Key::Character(value.into()));
+    }
+
+    #[test]
+    fn numeric_fields_replace_on_first_input_only() {
+        let worker = SimulationWorker::spawn(Universe::default(), 60.try_into().unwrap());
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(worker.snapshot()))
+            .insert_resource(worker)
+            .insert_resource(State {
+                draft: Some(Draft {
+                    coins: "100".into(),
+                    all_rate: "0.00".into(),
+                    rates: vec![(Good::Wheat, "20.00".into())],
+                    ..default()
+                }),
+                quantity: "100".into(),
+                ..default()
+            })
+            .add_message::<KeyboardInput>()
+            .add_systems(Update, handle);
+        for (field, original) in [
+            (Field::Coins, "100"),
+            (Field::Quantity, "100"),
+            (Field::AllRate, "0.00"),
+            (Field::Rate(Good::Wheat), "20.00"),
+        ] {
+            press_numeric_field(&mut app, field);
+            type_key(&mut app, Key::Tab);
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<State>()
+                    .value_mut(field)
+                    .unwrap(),
+                original
+            );
+            press_numeric_field(&mut app, field);
+            type_text(&mut app, "x");
+            type_text(&mut app, "-");
+            type_text(&mut app, "");
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<State>()
+                    .value_mut(field)
+                    .unwrap(),
+                original
+            );
+            type_text(&mut app, "2");
+            press_numeric_field(&mut app, field);
+            type_text(&mut app, "0");
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<State>()
+                    .value_mut(field)
+                    .unwrap(),
+                "20"
+            );
+            type_key(&mut app, Key::Backspace);
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<State>()
+                    .value_mut(field)
+                    .unwrap(),
+                "2"
+            );
+            type_key(&mut app, Key::Enter);
+            press_numeric_field(&mut app, field);
+            type_key(&mut app, Key::Backspace);
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<State>()
+                    .value_mut(field)
+                    .unwrap(),
+                ""
+            );
+            type_text(&mut app, "20");
+            type_key(&mut app, Key::Backspace);
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<State>()
+                    .value_mut(field)
+                    .unwrap(),
+                "2"
+            );
+            type_key(&mut app, Key::Escape);
+        }
+        press_numeric_field(&mut app, Field::AllRate);
+        type_text(&mut app, ".");
+        type_text(&mut app, "5");
+        assert_eq!(
+            app.world()
+                .resource::<State>()
+                .draft
+                .as_ref()
+                .unwrap()
+                .all_rate,
+            ".5"
+        );
+        press_numeric_field(&mut app, Field::Quantity);
+        type_text(&mut app, ".");
+        type_text(&mut app, "7");
+        assert_eq!(app.world().resource::<State>().quantity, "7");
+        press_numeric_field(&mut app, Field::AllRate);
+        type_text(&mut app, "3");
+        assert_eq!(
+            app.world()
+                .resource::<State>()
+                .draft
+                .as_ref()
+                .unwrap()
+                .all_rate,
+            "3"
+        );
+        press_numeric_field(&mut app, Field::Name);
+        type_text(&mut app, "Tax");
+        type_text(&mut app, " name");
+        assert_eq!(
+            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            "Tax name"
+        );
+    }
+
+    fn press_numeric_field(app: &mut App, field: Field) {
+        let entity = app
+            .world_mut()
+            .spawn((Choice::Field(field), Interaction::Pressed))
+            .id();
+        app.update();
+        app.world_mut().despawn(entity);
     }
 
     #[test]
