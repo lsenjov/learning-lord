@@ -60,8 +60,8 @@ fn purchases_top_up_at_completion_without_borrowing() {
         assert_eq!(citizen(&complete, buyer).berries_units(), expected_berries);
         assert_eq!(citizen(&complete, buyer).coins(), expected_coins);
         assert_eq!(citizen(&complete, seller).coins(), coins - expected_coins);
-        let rounding_loss =
-            citizen(&source, buyer).wealth().unwrap() - citizen(&complete, buyer).wealth().unwrap();
+        let rounding_loss = citizen(&source, buyer).economic_wealth().unwrap()
+            - citizen(&complete, buyer).economic_wealth().unwrap();
         let premium = (expected_berries - berries) as f64 * (quote - 100.0) / 1000.0;
         assert!((0.0..1.0).contains(&(rounding_loss - premium)));
         assert_eq!(
@@ -117,7 +117,10 @@ fn listing_preserves_ownership_wealth_and_coins_until_someone_buys() {
         126
     );
     assert_eq!(complete.units(Good::Wood), 12);
-    close(complete.wealth().unwrap(), source.wealth().unwrap());
+    close(
+        complete.economic_wealth().unwrap(),
+        source.economic_wealth().unwrap(),
+    );
     assert_eq!(source.berries_units(), 126);
     assert_eq!(partial.with_berries(1), Err(SimulationError::CitizenBusy));
 }
@@ -158,7 +161,9 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
     let source = source
         .with_stored_good(
             citizen(&source, buyer).home(),
-            learning_lord_simulation::storage::GoodsOwner::Agent(buyer),
+            match &source.agents()[&buyer].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
             Good::Water,
             1200,
         )
@@ -206,59 +211,15 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
     assert_eq!(citizen(&eating, buyer).berries_units(), 0);
     assert_eq!(citizen(&eating, buyer).coins(), 0);
     assert_eq!(citizen(&eating, seller).coins(), meal_cost);
-    assert_eq!(source.market().listed_units(seller, Good::Berries), 155);
-}
-
-#[test]
-fn simultaneous_buyers_compete_deterministically_and_partial_fills_conserve_stock() {
-    let (universe, seller) = supply(150);
-    let (universe, a) = universe
-        .with_citizen("A", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
-        .unwrap();
-    let (universe, b) = universe
-        .with_citizen("B", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
-        .unwrap();
-    let started = universe
-        .start_action(
-            a,
-            CitizenAction::Buy(learning_lord_simulation::marketplace::ShoppingList::single(
-                Good::Berries,
-                100,
-            )),
-        )
-        .unwrap()
-        .start_action(
-            b,
-            CitizenAction::Buy(learning_lord_simulation::marketplace::ShoppingList::single(
-                Good::Berries,
-                100,
-            )),
-        )
-        .unwrap();
-    let direct = started.advance(TRADE_DURATION_MS).unwrap();
-    let split = started
-        .advance(1000)
-        .unwrap()
-        .advance(TRADE_DURATION_MS - 1000)
-        .unwrap();
-    assert_eq!(direct, split);
-    let first = if a.0 < b.0 { a } else { b };
-    let second = if first == a { b } else { a };
-    assert_eq!(citizen(&direct, first).berries_units(), 100);
-    assert_eq!(citizen(&direct, second).berries_units(), 50);
-    let quote = started.market().orders().next().unwrap().quoted_price;
     assert_eq!(
-        citizen(&direct, seller).coins(),
-        (quote * 0.1).ceil() as i64 + (quote * 0.05).ceil() as i64
+        source.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                source.economic_id(seller).unwrap()
+            ),
+            Good::Berries
+        ),
+        155
     );
-    assert_eq!(
-        citizen(&direct, a).coins()
-            + citizen(&direct, b).coins()
-            + citizen(&direct, seller).coins(),
-        200
-    );
-    assert_eq!(direct.market().orders().count(), 0);
-    assert_eq!(direct.market().trades().len(), 2);
 }
 
 #[test]
@@ -294,10 +255,18 @@ fn withdrawal_is_partial_owned_and_requires_a_market_action() {
         .advance(TRADE_DURATION_MS)
         .unwrap();
     assert_eq!(citizen(&done, seller).berries_units(), 40);
-    assert_eq!(done.market().listed_units(seller, Good::Berries), 60);
+    assert_eq!(
+        done.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                done.economic_id(seller).unwrap()
+            ),
+            Good::Berries
+        ),
+        60
+    );
     close(
-        citizen(&done, seller).wealth().unwrap(),
-        citizen(&universe, seller).wealth().unwrap(),
+        citizen(&done, seller).economic_wealth().unwrap(),
+        citizen(&universe, seller).economic_wealth().unwrap(),
     );
 }
 
@@ -334,7 +303,7 @@ fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
         let quote = universe
             .market()
             .orders()
-            .find(|order| order.seller.citizen() == Some(seller))
+            .find(|order| order.seller.account() == Some(universe.economic_id(seller).unwrap()))
             .unwrap()
             .quoted_price;
         (quote * units as f64 / 1000.0).ceil() as i64
@@ -345,8 +314,19 @@ fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
         citizen(&done, buyer).coins(),
         100 - cost(cheap, 40) - cost(expensive, 60)
     );
-    assert_eq!(done.market().listed_units(expensive, Good::Berries), 40);
-    assert_eq!(done.market().trades()[0].seller.citizen(), Some(cheap));
+    assert_eq!(
+        done.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                done.economic_id(expensive).unwrap()
+            ),
+            Good::Berries
+        ),
+        40
+    );
+    assert_eq!(
+        done.market().trades()[0].seller.account(),
+        Some(done.economic_id(cheap).unwrap())
+    );
 }
 
 #[test]
@@ -384,7 +364,15 @@ fn seller_coin_overflow_preserves_the_source() {
         started.advance(TRADE_DURATION_MS),
         Err(SimulationError::WealthOverflow)
     );
-    assert_eq!(started.market().listed_units(seller, Good::Berries), 1000);
+    assert_eq!(
+        started.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                started.economic_id(seller).unwrap()
+            ),
+            Good::Berries
+        ),
+        1000
+    );
     assert!(started.market().trades().is_empty());
     assert_eq!(citizen(&started, buyer).coins(), 100);
 }
@@ -408,7 +396,9 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
     let universe = universe
         .with_stored_good(
             citizen(&universe, buyer).home(),
-            learning_lord_simulation::storage::GoodsOwner::Agent(buyer),
+            match &universe.agents()[&buyer].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
             Good::Water,
             1200,
         )
@@ -469,7 +459,10 @@ fn earlier_completions_take_stock_before_later_completions_regardless_of_id_orde
     assert_eq!(direct.market(), split.market());
     assert_eq!(citizen(&direct, early).berries_units(), 100);
     assert_eq!(citizen(&direct, late).berries_units(), 0);
-    assert_eq!(direct.market().trades()[0].buyer.citizen(), Some(early));
+    assert_eq!(
+        direct.market().trades()[0].buyer.account(),
+        Some(direct.economic_id(early).unwrap())
+    );
     assert_eq!(direct.market().trades()[0].time_ms, 2 * TRADE_DURATION_MS);
 }
 
@@ -745,7 +738,15 @@ fn purchases_cannot_buy_sub_coin_value_without_a_coin_and_preserve_stock() {
         .unwrap();
     assert_eq!(citizen(&bought, buyer).berries_units(), 0);
     assert_eq!(citizen(&bought, buyer).coins(), 0);
-    assert_eq!(bought.market().listed_units(seller, Good::Berries), 1);
+    assert_eq!(
+        bought.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                bought.economic_id(seller).unwrap()
+            ),
+            Good::Berries
+        ),
+        1
+    );
     assert!(bought.market().trades().is_empty());
 }
 

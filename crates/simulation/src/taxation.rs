@@ -953,12 +953,18 @@ mod tests {
             .with_citizen("Ada", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
             .unwrap();
         let (world, second) = world
-            .with_citizen("Ben", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .with_household_member(
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
+                "Ben",
+                Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
+            )
             .unwrap();
-        let AgentKind::Citizen(worker) = &world.agents[&first].kind;
-        let (world, household) = world
-            .with_household("Family", worker.home(), &[first, second])
-            .unwrap();
+        let household = match &world.agents()[&first].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         let (world, place) = world.with_property(first, Location::Bakery).unwrap();
         (world, first, second, household, place)
     }
@@ -1200,7 +1206,7 @@ mod tests {
             .unwrap();
         world
             .tax_production_from_stock(
-                id,
+                world.economic_id(id).unwrap(),
                 place,
                 good,
                 units,
@@ -1237,9 +1243,13 @@ mod tests {
         assert_eq!(worker.available_units(Good::Cloth), 25);
         assert_eq!(worker.tax_reserved_units(Good::Cloth), 0);
         assert_eq!(
-            moved
-                .storage
-                .reserved_units(place, GoodsOwner::Agent(id), Good::Cloth),
+            moved.storage.reserved_units(
+                place,
+                match &moved.agents()[&id].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Cloth
+            ),
             25
         );
         let done = moved
@@ -1248,8 +1258,13 @@ mod tests {
         let AgentKind::Citizen(worker) = &done.agents[&id].kind;
         assert_eq!(worker.units(Good::Cloth), 0);
         assert_eq!(
-            done.storage
-                .units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+            done.storage.units(
+                place,
+                match &done.agents()[&id].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::FlaxBlock
+            ),
             1
         );
 
@@ -1266,8 +1281,13 @@ mod tests {
         let AgentKind::Citizen(worker) = &done.agents[&id].kind;
         assert_eq!(worker.garment_condition(), Some(1.0));
         assert_eq!(
-            done.storage
-                .reserved_units(place, GoodsOwner::Agent(id), Good::FlaxGarment),
+            done.storage.reserved_units(
+                place,
+                match &done.agents()[&id].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::FlaxGarment
+            ),
             1
         );
     }
@@ -1277,14 +1297,14 @@ mod tests {
         let (world, id, _) = reserved_worker(Good::BreadRoll, 10);
         let AgentKind::Citizen(worker) = &world.agents[&id].kind;
         let home = worker.home;
-        let wealth = worker.wealth().unwrap();
+        let wealth = worker.economic_wealth().unwrap();
         assert_eq!(worker.food_reserve_wellbeing(), 0.0);
         let world = world.deposit_goods(id, home, Good::BreadRoll, 10).unwrap();
         let AgentKind::Citizen(worker) = &world.agents[&id].kind;
         assert_eq!(worker.home_units(Good::BreadRoll), 10);
         assert_eq!(worker.stored_available_units(home, Good::BreadRoll), 5);
         assert_eq!(worker.food_reserve_wellbeing(), 5.0);
-        assert_eq!(worker.wealth().unwrap(), wealth);
+        assert_eq!(worker.economic_wealth().unwrap(), wealth);
         let busy = world.start_action(id, crate::CitizenAction::Eat).unwrap();
         let AgentKind::Citizen(worker) = &busy.agents[&id].kind;
         assert_eq!(worker.home_units(Good::BreadRoll), 5);
@@ -1296,7 +1316,7 @@ mod tests {
         );
         assert_eq!(worker.stored_available_units(home, Good::BreadRoll), 0);
         assert_eq!(worker.food_reserve_wellbeing(), 5.0);
-        assert_eq!(worker.wealth().unwrap(), wealth);
+        assert_eq!(worker.economic_wealth().unwrap(), wealth);
         let done = busy
             .advance(worker.active_action().unwrap().remaining_ms())
             .unwrap();
@@ -1304,7 +1324,7 @@ mod tests {
         assert_eq!(worker.home_units(Good::BreadRoll), 5);
         assert_eq!(worker.food_reserve_wellbeing(), 0.0);
         assert_eq!(
-            worker.wealth().unwrap(),
+            worker.economic_wealth().unwrap(),
             wealth - worker.prices.value(Good::BreadRoll, 5).unwrap()
         );
     }
@@ -1324,7 +1344,7 @@ mod tests {
         let mut world = world;
         world
             .tax_production_from_stock(
-                second,
+                world.economic_id(second).unwrap(),
                 origin,
                 Good::FlaxGarment,
                 2,
@@ -1367,13 +1387,23 @@ mod tests {
             Err(SimulationError::InventoryOverflow)
         );
         assert_eq!(
-            full.storage
-                .reserved_units(destination, GoodsOwner::Agent(first), Good::FlaxGarment),
+            full.storage.reserved_units(
+                destination,
+                match &full.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::FlaxGarment
+            ),
             1
         );
         assert_eq!(
-            full.storage
-                .units(destination, GoodsOwner::Agent(first), Good::FlaxGarment),
+            full.storage.units(
+                destination,
+                match &full.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::FlaxGarment
+            ),
             2
         );
     }

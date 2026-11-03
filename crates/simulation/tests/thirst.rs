@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::{
     AgentKind, Citizen, CitizenAction, THIRST_PER_HOUR, Universe, marketplace::Good,
 };
@@ -82,14 +79,18 @@ fn meal_and_water_finish_their_components_in_parallel_and_history_is_chunk_indep
         let world = world
             .with_stored_good(
                 home,
-                learning_lord_simulation::storage::GoodsOwner::Agent(id),
+                match &world.agents()[&id].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
                 Good::Berries,
                 berries,
             )
             .unwrap()
             .with_stored_good(
                 home,
-                learning_lord_simulation::storage::GoodsOwner::Agent(id),
+                match &world.agents()[&id].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
                 Good::Water,
                 200,
             )

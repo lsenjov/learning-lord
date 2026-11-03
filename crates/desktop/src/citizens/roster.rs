@@ -375,7 +375,7 @@ pub(super) fn rows(universe: &Universe, view: &View) -> Vec<Row> {
     });
     let mut rows = vec![];
     for mut group in groups {
-        if view.grouping == Grouping::Household && group.members[0].household.is_none() {
+        if view.grouping == Grouping::Household && group.members.len() == 1 {
             rows.push(member_row(&group.members[0], false));
             continue;
         }
@@ -714,8 +714,10 @@ mod tests {
                     .with_starting_role(StartingRole::Farmer),
             )
             .unwrap();
-        let (world, b) = world
-            .with_citizen(
+        let AgentKind::Citizen(first) = &world.agents()[&a].kind;
+        let (world, _b) = world
+            .with_household_member(
+                first.household_id().unwrap(),
                 "Bram",
                 Citizen::new(30.0)
                     .unwrap()
@@ -736,26 +738,24 @@ mod tests {
                     .with_starting_role(StartingRole::Farmer),
             )
             .unwrap();
-        let AgentKind::Citizen(a_citizen) = &world.agents()[&a].kind;
         world
-            .with_household("Ada and Bram", a_citizen.home(), &[a, b])
-            .unwrap()
-            .0
     }
 
     #[test]
     fn household_shares_preserve_personal_assets_and_town_totals() {
         let world = household_world();
         let members = members(&world);
-        let household = world.households().values().next().unwrap();
-        let shared = world.household_wealth(household.id).unwrap();
+        let shared = world
+            .households()
+            .keys()
+            .map(|id| world.household_wealth(*id).unwrap())
+            .sum::<f64>();
         for member in &members {
             let AgentKind::Citizen(citizen) = &world.agents()[&member.id].kind;
-            let expected = if member.household.is_some() {
-                shared / 2.0 + citizen.wealth().unwrap()
-            } else {
-                citizen.wealth().unwrap()
-            };
+            let household = &world.households()[&member.household.unwrap()];
+            let expected = world.household_wealth(household.id).unwrap()
+                / household.members.len() as f64
+                + citizen.wealth().unwrap();
             assert_eq!(member.wealth.as_ref().unwrap(), &expected);
         }
         assert_eq!(
@@ -1231,7 +1231,9 @@ mod tests {
         let next = world
             .with_stored_good(
                 citizen.home(),
-                learning_lord_simulation::storage::GoodsOwner::Agent(other),
+                match &world.agents()[&other].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
                 Good::Berries,
                 1_000_000,
             )

@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::marketplace::{Good, ShoppingList};
 use learning_lord_simulation::planning::{goals::Effect, plan};
 use learning_lord_simulation::{AgentKind, Citizen, CitizenAction, TRADE_DURATION_MS, Universe};
@@ -29,7 +26,7 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
         close(citizen.food_reserve_wellbeing(), bonus);
         close(
             citizen.personal_wellbeing().unwrap(),
-            citizen.wealth().unwrap() * 0.1 + bonus - 20.0,
+            citizen.economic_wealth().unwrap() * 0.1 + bonus - 20.0,
         );
     }
     let mixed = Citizen::new(0.0)
@@ -61,7 +58,10 @@ fn listing_excludes_food_from_bonus_and_excess_preserves_the_cap() {
         .unwrap();
     close(listed.available_food_nutrition(), 300.0);
     close(listed.food_reserve_wellbeing(), 14.0);
-    close(listed.wealth().unwrap(), citizen.wealth().unwrap());
+    close(
+        listed.economic_wealth().unwrap(),
+        citizen.economic_wealth().unwrap(),
+    );
     let all_listed = citizen
         .start_action(CitizenAction::List(Good::BreadRoll, 40))
         .unwrap()
@@ -153,7 +153,9 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
     let universe = universe
         .with_stored_good(
             home,
-            learning_lord_simulation::storage::GoodsOwner::Agent(buyer),
+            match &universe.agents()[&buyer].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
             Good::Water,
             1200,
         )
@@ -192,11 +194,19 @@ fn replenishment_above_meal_stock_chooses_an_actual_purchase_and_reports_it_duri
     let target = 50.0 + units as f64 * Good::BreadRoll.nutrition_per_unit().unwrap();
     assert_eq!(target, 300.0);
     assert_eq!(universe, snapshot);
-    assert_eq!(universe.market().requested(buyer), ShoppingList::default());
+    assert_eq!(
+        universe
+            .market()
+            .requested(universe.economic_id(buyer).unwrap()),
+        ShoppingList::default()
+    );
 
     let travelling = universe.start_planning(buyer).unwrap();
     close(
-        travelling.market().requested(buyer).units(Good::BreadRoll) as f64,
+        travelling
+            .market()
+            .requested(travelling.economic_id(buyer).unwrap())
+            .units(Good::BreadRoll) as f64,
         units as f64,
     );
     let AgentKind::Citizen(citizen) = &travelling.agents()[&buyer].kind;
@@ -208,14 +218,20 @@ fn replenishment_above_meal_stock_chooses_an_actual_purchase_and_reports_it_duri
         .advance(citizen.active_action().unwrap().remaining_ms())
         .unwrap();
     close(
-        arrived.market().requested(buyer).units(Good::BreadRoll) as f64,
+        arrived
+            .market()
+            .requested(arrived.economic_id(buyer).unwrap())
+            .units(Good::BreadRoll) as f64,
         units as f64,
     );
     let bought = arrived
         .advance(TRADE_DURATION_MS * baskets.len() as u64)
         .unwrap();
     close(
-        bought.market().requested(buyer).units(Good::BreadRoll) as f64,
+        bought
+            .market()
+            .requested(bought.economic_id(buyer).unwrap())
+            .units(Good::BreadRoll) as f64,
         0.0,
     );
     let AgentKind::Citizen(citizen) = &bought.agents()[&buyer].kind;
@@ -269,7 +285,12 @@ fn foraging_does_not_publish_a_food_reserve_wishlist() {
             CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
         )
         .unwrap();
-    assert_eq!(universe.market().requested(worker), ShoppingList::default());
+    assert_eq!(
+        universe
+            .market()
+            .requested(universe.economic_id(worker).unwrap()),
+        ShoppingList::default()
+    );
 }
 
 #[test]
@@ -345,12 +366,7 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
         .unwrap()
         .deposit_goods(buyer, home, Good::Water, 400)
         .unwrap()
-        .with_stored_good(
-            home,
-            learning_lord_simulation::storage::GoodsOwner::Agent(buyer),
-            Good::Water,
-            1200,
-        )
+        .with_stored_good(home, citizen.goods_owner(), Good::Water, 1200)
         .unwrap();
     let before = world.clone();
     let AgentKind::Citizen(citizen) = &world.agents()[&buyer].kind;
@@ -375,11 +391,17 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     assert!(basket.units(Good::Fish) > 0 || basket.units(Good::Cabbage) > 0);
     let blocked = selected.decision().unwrap().blocked_requests;
     assert_eq!(world, before);
-    assert_eq!(world.market().requested(buyer), ShoppingList::default());
+    assert_eq!(
+        world.market().requested(world.economic_id(buyer).unwrap()),
+        ShoppingList::default()
+    );
     let travelling = world.start_planning(buyer).unwrap();
     for good in Good::FOOD {
         assert_eq!(
-            travelling.market().requested(buyer).units(good),
+            travelling
+                .market()
+                .requested(travelling.economic_id(buyer).unwrap())
+                .units(good),
             basket.units(good).max(blocked.units(good)),
             "{good:?}: basket {basket:?}; blocked {:?}",
             selected.decision().unwrap().blocked_requests
@@ -391,7 +413,10 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
         .unwrap();
     for good in Good::FOOD {
         assert_eq!(
-            arrived.market().requested(buyer).units(good),
+            arrived
+                .market()
+                .requested(arrived.economic_id(buyer).unwrap())
+                .units(good),
             basket.units(good).max(blocked.units(good))
         );
     }
@@ -402,7 +427,10 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
     }
     for good in Good::FOOD {
         assert_eq!(
-            bought.market().requested(buyer).units(good),
+            bought
+                .market()
+                .requested(bought.economic_id(buyer).unwrap())
+                .units(good),
             blocked.units(good)
         );
     }

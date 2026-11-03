@@ -172,11 +172,8 @@ impl crate::Universe {
     pub(crate) fn validate_objects(&self) -> Result<(), crate::persistence::SaveError> {
         use crate::{AgentKind, persistence::SaveError};
         let invalid = || SaveError::InvalidState("object ownership or action claim mismatch");
-        let valid_owner = |owner| {
-            self.agents.contains_key(&owner)
-                || self.guilds.contains_key(&owner)
-                || self.households.contains_key(&owner)
-        };
+        let valid_owner =
+            |owner| self.guilds.contains_key(&owner) || self.households.contains_key(&owner);
         for agent in self.agents.values() {
             let AgentKind::Citizen(worker) = &agent.kind;
             if worker.map != self.map {
@@ -368,15 +365,16 @@ mod tests {
             .with_citizen("First", Citizen::new(0.0).unwrap().with_starting_role(role))
             .unwrap();
         let (world, second) = world
-            .with_citizen(
+            .with_household_member(
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
                 "Second",
                 Citizen::new(0.0).unwrap().with_starting_role(role),
             )
             .unwrap();
-        let AgentKind::Citizen(worker) = &world.agents[&first].kind;
-        let (world, _) = world
-            .with_household("Family", worker.home(), &[first, second])
-            .unwrap();
+        let AgentKind::Citizen(_worker) = &world.agents[&first].kind;
+
         let (world, site) = world.with_property(first, kind).unwrap();
         (world, first, second, site)
     }
@@ -646,12 +644,22 @@ mod tests {
         let site = worker(&world, first).home();
         world.map = world
             .map
-            .with_building(site, Location::Mill, first, "Mill")
+            .with_building(
+                site,
+                Location::Mill,
+                world.economic_id(first).unwrap(),
+                "Mill",
+            )
             .unwrap()
             .0;
         world.map = world
             .map
-            .with_building(site, Location::Bakery, second, "Bakery")
+            .with_building(
+                site,
+                Location::Bakery,
+                world.economic_id(second).unwrap(),
+                "Bakery",
+            )
             .unwrap()
             .0;
         world.refresh_market();
@@ -685,7 +693,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(world.map.place(site).unwrap().owner, Some(first));
+        assert_eq!(
+            world.map.place(site).unwrap().owner,
+            Some(world.economic_id(first).unwrap())
+        );
         round_trip(&world);
     }
     #[test]
@@ -824,10 +835,16 @@ mod tests {
                     .with_starting_role(StartingRole::Brewer),
             )
             .unwrap();
-        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = outsider;
+        let owner = world.economic_id(outsider).unwrap();
+        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = owner;
         world.map = world
             .map
-            .with_building(site, Location::Brewery, first, "Family brewery")
+            .with_building(
+                site,
+                Location::Brewery,
+                world.economic_id(first).unwrap(),
+                "Family brewery",
+            )
             .unwrap()
             .0;
         for slot in [0, 4, 5] {
@@ -892,10 +909,16 @@ mod tests {
                     .with_starting_role(StartingRole::Brewer),
             )
             .unwrap();
-        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = outsider;
+        let owner = world.economic_id(outsider).unwrap();
+        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = owner;
         world.map = world
             .map
-            .with_building(site, Location::Brewery, first, "Family brewery")
+            .with_building(
+                site,
+                Location::Brewery,
+                world.economic_id(first).unwrap(),
+                "Family brewery",
+            )
             .unwrap()
             .0;
         world.refresh_market();

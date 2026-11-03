@@ -327,7 +327,7 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
         .filter(|place| {
             place.kind != Location::Home
                 && place.owner.is_some_and(|owner| {
-                    household.members.contains(&owner)
+                    owner == household.id
                         || universe.guilds().get(&owner).is_some_and(|guild| {
                             guild.workshops.contains(&place.id)
                                 && guild
@@ -689,16 +689,14 @@ pub(crate) fn refresh(
                     .map()
                     .places()
                     .values()
-                    .filter(
-                        |place| place.owner.is_some_and(|owner| h.members.contains(&owner)
-                            || universe.guilds().get(&owner).is_some_and(|guild| guild
-                                .workshops
-                                .contains(&place.id)
-                                && guild
-                                    .members
-                                    .iter()
-                                    .any(|member| h.members.contains(member))))
-                    )
+                    .filter(|place| place.owner.is_some_and(|owner| owner == h.id
+                        || universe.guilds().get(&owner).is_some_and(|guild| guild
+                            .workshops
+                            .contains(&place.id)
+                            && guild
+                                .members
+                                .iter()
+                                .any(|member| h.members.contains(member)))))
                     .map(|place| (place.id, &place.name, place.owner, place.kind))
                     .collect::<Vec<_>>(),
                 h.maintenance,
@@ -1038,7 +1036,9 @@ mod tests {
         let id = *snapshot
             .universe
             .households()
-            .keys()
+            .iter()
+            .filter(|(_, household)| household.members.len() == 2)
+            .map(|(id, _)| id)
             .min_by_key(|id| id.0)
             .unwrap();
         let mut state = State::default();
@@ -1059,7 +1059,8 @@ mod tests {
             .join("\n");
         for expected in [
             "CURRENT DAY · partial totals",
-            "Opening 6000",
+            "Opening 3000",
+            "New member funds: 3000 coins",
             "Sales receipts 0",
             "Taxes paid 0",
             "CURRENT SUPPLIES",
@@ -1148,11 +1149,11 @@ mod tests {
         for expected in [
             "Ada",
             "Iris",
-            "Ada's home",
+            "Ada and Iris's home",
             "Shared coins: 6000",
             "Bread rolls",
             stock_label.as_str(),
-            "Ada's field",
+            "Ada and Iris's field",
             "Owner:",
             "MAINTENANCE",
             "Committed worker:",

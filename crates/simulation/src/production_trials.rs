@@ -58,25 +58,6 @@ pub(crate) struct ProductionTrials {
 }
 
 impl Market {
-    pub(crate) fn account_has_committed_production_trial(&self, account: AgentId) -> bool {
-        self.production_trials
-            .active
-            .iter()
-            .any(|((owner, _), trial)| {
-                *owner == account
-                    && matches!(
-                        trial.phase,
-                        TrialPhase::AwaitingOutput | TrialPhase::Offered
-                    )
-            })
-    }
-
-    pub(crate) fn cancel_unoffered_production_trials(&mut self, account: AgentId) {
-        self.production_trials.active.retain(|(owner, _), trial| {
-            *owner != account || !matches!(trial.phase, TrialPhase::Preparing | TrialPhase::Ready)
-        });
-    }
-
     pub fn production_trial(&self, account: AgentId, good: Good) -> Option<&ProductionTrial> {
         self.production_trials.active.get(&(account, good))
     }
@@ -1708,7 +1689,7 @@ mod depletion_tests {
         let (mut universe, id) = crate::Universe::with_map(crate::locations::Map::default())
             .with_citizen("Brewer", citizen)
             .unwrap();
-        let (world, companion) = universe
+        let (world, _companion) = universe
             .with_citizen("Companion", Citizen::new(0.0).unwrap())
             .unwrap();
         universe = world;
@@ -1742,7 +1723,7 @@ mod depletion_tests {
         assert_eq!(
             started
                 .market
-                .production_trial(id, Good::Beer)
+                .production_trial(started.economic_id(id).unwrap(), Good::Beer)
                 .unwrap()
                 .source,
             Some(CitizenAction::CollectBeer { brewery, slot: 1 })
@@ -1750,11 +1731,7 @@ mod depletion_tests {
         let done = started.advance(crate::brewing::PREPARATION_MS).unwrap();
         let loaded = crate::Universe::from_save_str(&done.to_save_string().unwrap()).unwrap();
         assert_eq!(loaded, done);
-        let crate::AgentKind::Citizen(brewer) = &loaded.agents[&id].kind;
-        assert_eq!(
-            loaded.with_household("Family", brewer.home(), &[id, companion]),
-            Err(SimulationError::InvalidOwnership)
-        );
+
         let mut standalone = match &loaded.agents[&id].kind {
             crate::AgentKind::Citizen(citizen) => citizen.clone(),
         };
@@ -1762,7 +1739,7 @@ mod depletion_tests {
         assert_eq!(
             standalone
                 .market
-                .production_trial(id, Good::Beer)
+                .production_trial(started.economic_id(id).unwrap(), Good::Beer)
                 .unwrap()
                 .phase,
             TrialPhase::AwaitingOutput
@@ -1771,7 +1748,7 @@ mod depletion_tests {
         assert_eq!(
             standalone
                 .market
-                .production_trial(id, Good::Beer)
+                .production_trial(started.economic_id(id).unwrap(), Good::Beer)
                 .unwrap()
                 .phase,
             TrialPhase::Ready

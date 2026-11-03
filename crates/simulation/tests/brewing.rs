@@ -167,7 +167,7 @@ fn skill_reduces_labor_but_never_fermentation_and_batches_are_discounted() {
     let worker = citizen(&world, id)
         .with_skill_practice_ms(Skill::Brewing, Some(MAX_SKILL_PRACTICE_MS))
         .unwrap();
-    let start_wealth = worker.wealth().unwrap();
+    let start_wealth = worker.economic_wealth().unwrap();
     let input_value: f64 = Recipe::BrewBeer
         .inputs()
         .iter()
@@ -179,7 +179,7 @@ fn skill_reduces_labor_but_never_fermentation_and_batches_are_discounted() {
         PREPARATION_MS / 2
     );
     assert!(
-        (started.wealth().unwrap()
+        (started.economic_wealth().unwrap()
             - (start_wealth - input_value
                 + worker.prices().value(Good::Beer, 1000).unwrap() * 0.7))
             .abs()

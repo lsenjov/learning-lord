@@ -1313,7 +1313,7 @@ mod tests {
         assert!(readout.contains("Clothing: 20.0"));
         assert!(!readout.contains("Water: 0 g"));
         assert!(!readout.contains("Bread: 0 rolls"));
-        assert!(readout.contains("coins 0 | wealth 0.260"));
+        assert!(readout.contains("Shared coins 0 | shared wealth 0.260"));
     }
 
     #[test]

@@ -1599,7 +1599,10 @@ mod tests {
             )
             .unwrap();
         let (world, second) = world
-            .with_citizen(
+            .with_household_member(
+                match &world.agents()[&first].kind {
+                    AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
                 "Ben",
                 Citizen::new(0.0)
                     .unwrap()
@@ -1607,10 +1610,11 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        let AgentKind::Citizen(worker) = &world.agents()[&first].kind;
-        let (world, household) = world
-            .with_household("Family", worker.home(), &[first, second])
-            .unwrap();
+        let AgentKind::Citizen(_worker) = &world.agents()[&first].kind;
+        let household = match &world.agents()[&first].kind {
+            AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         let (mut world, bakery) = world.with_property(first, Location::Bakery).unwrap();
         for &(good, units) in Recipe::BakeRolls.inputs() {
             world = world

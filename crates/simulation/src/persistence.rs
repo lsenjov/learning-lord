@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 16;
+pub const SAVE_VERSION: u32 = 17;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -76,7 +76,7 @@ impl<'de> Visitor<'de> for SaveLoader<'_> {
                         return Err(de::Error::duplicate_field("version"));
                     }
                     let value = map.next_value::<u32>()?;
-                    if value != SAVE_VERSION && value != 15 {
+                    if value != SAVE_VERSION {
                         *self.unsupported_version = Some(value);
                         return Err(de::Error::custom("unsupported save version"));
                     }
@@ -150,10 +150,6 @@ impl Universe {
             citizen.coins = coins;
         }
         universe.validate_save_context()?;
-        if universe.construction.next_sequence.is_none() {
-            universe.migrate_construction();
-            universe.validate_save()?;
-        }
         if universe.agents.values().any(|agent| {
             let AgentKind::Citizen(citizen) = &agent.kind;
             citizen
@@ -174,11 +170,6 @@ impl Universe {
                 .restore_treasury_context(universe.town_treasury);
         }
         Ok(universe)
-    }
-
-    fn validate_save(&self) -> Result<(), SaveError> {
-        self.validate_save_sources()?;
-        self.validate_save_context()
     }
 
     fn validate_save_sources(&self) -> Result<(), SaveError> {
@@ -259,7 +250,7 @@ impl Universe {
     fn valid_goods_owner(&self, owner: crate::storage::GoodsOwner) -> bool {
         match owner {
             crate::storage::GoodsOwner::Town => true,
-            crate::storage::GoodsOwner::Agent(id) => self.agents.contains_key(&id),
+            crate::storage::GoodsOwner::Agent(id) => self.guilds.contains_key(&id),
             crate::storage::GoodsOwner::Household(id) => self.households.contains_key(&id),
         }
     }
@@ -269,13 +260,11 @@ impl Universe {
         for (id, household) in &self.households {
             if *id != household.id
                 || self.agents.contains_key(id)
+                || self.guilds.contains_key(id)
                 || household.coins < 0
                 || household.members.is_empty()
                 || !self.map.place(household.home).is_ok_and(|place| {
-                    place.kind == Location::Home
-                        && place
-                            .owner
-                            .is_some_and(|owner| household.members.contains(&owner))
+                    place.kind == Location::Home && place.owner.is_some_and(|owner| owner == *id)
                 })
             {
                 return Err(SaveError::InvalidState(
@@ -313,7 +302,7 @@ impl Universe {
                     return Err(SaveError::InvalidState("invalid citizen household context"));
                 }
             } else {
-                self.validate_maintenance(*id, &citizen.maintenance)?;
+                return Err(SaveError::InvalidState("citizen has no household"));
             }
         }
         for (key, _) in self.storage.stock() {
@@ -452,7 +441,7 @@ impl Universe {
         use crate::taxation::ReservationStock;
         let mut arrears = imbl::HashMap::new();
         for (key, account) in &self.taxation.accounts {
-            if self.account_owner(key.payer).is_err()
+            if self.economic_id(key.payer).ok() != Some(key.payer)
                 || self.map.place(key.place).is_err()
                 || !self.taxation.rules.contains_key(&key.rule)
             {
@@ -743,7 +732,10 @@ mod tests {
             )
             .unwrap();
         let (world, second) = world
-            .with_citizen(
+            .with_household_member(
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
                 "Second",
                 Citizen::new(0.0)
                     .unwrap()
@@ -754,10 +746,11 @@ mod tests {
             .unwrap();
         let (world, mill) = world.with_property(first, Location::Mill).unwrap();
         let world = world.with_designated_workplace(first, mill).unwrap();
-        let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        let (world, household) = world
-            .with_household("Family", citizen.home(), &[first, second])
-            .unwrap();
+        let AgentKind::Citizen(_citizen) = &world.agents[&first].kind;
+        let household = match &world.agents()[&first].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         let world = world.with_designated_workplace(second, mill).unwrap();
         (world, first, second, household, mill)
     }
@@ -778,7 +771,15 @@ mod tests {
             .with_citizen("Other", Citizen::new(0.0).unwrap())
             .unwrap();
         world = updated;
-        world.market.list(other, mill, Good::Flour, 100).unwrap();
+        world
+            .market
+            .list(
+                crate::marketplace::MarketParty::Household(world.economic_id(other).unwrap()),
+                mill,
+                Good::Flour,
+                100,
+            )
+            .unwrap();
         world
             .market
             .bind_unplaced_orders(&world.map, &world.storage)
@@ -810,7 +811,10 @@ mod tests {
             complete
                 .market
                 .orders()
-                .filter(|order| order.seller == crate::marketplace::MarketParty::Citizen(other))
+                .filter(|order| order.seller
+                    == crate::marketplace::MarketParty::Household(
+                        complete.economic_id(other).unwrap()
+                    ))
                 .map(|order| order.units)
                 .sum::<u64>(),
             100
@@ -885,7 +889,7 @@ mod tests {
     #[test]
     fn rejects_inconsistent_households_work_reservations_and_maintenance() {
         let (world, first, _, household, mill) = household_world();
-        for case in 0..7 {
+        for case in 0..11 {
             let mut invalid = world.clone();
             match case {
                 0 => invalid
@@ -937,10 +941,43 @@ mod tests {
                         .claimant = Some(first);
                     invalid.refresh_market();
                 }
-                _ => {
+                6 => {
                     let AgentKind::Citizen(citizen) =
                         &mut invalid.agents.get_mut(&first).unwrap().kind;
                     citizen.coins += 1;
+                }
+                7 => {
+                    let AgentKind::Citizen(citizen) =
+                        &mut invalid.agents.get_mut(&first).unwrap().kind;
+                    citizen.household = None;
+                }
+                8 => {
+                    invalid
+                        .households
+                        .get_mut(&household)
+                        .unwrap()
+                        .members
+                        .clear();
+                }
+                9 => {
+                    invalid.map.places_mut().get_mut(&mill).unwrap().buildings[0].owner = first;
+                    invalid.refresh_market();
+                }
+                _ => {
+                    invalid
+                        .storage
+                        .set_units(
+                            crate::storage::StockKey {
+                                place: mill,
+                                owner: GoodsOwner::Agent(first),
+                                good: Good::Wheat,
+                            },
+                            10,
+                            &invalid.map,
+                            &invalid.market,
+                        )
+                        .unwrap();
+                    invalid.refresh_market();
                 }
             }
             assert!(
@@ -1008,7 +1045,14 @@ mod tests {
             )
             .unwrap();
         let mut world = world
-            .with_stored_good(field, GoodsOwner::Agent(seller), Good::Wheat, 37)
+            .with_stored_good(
+                field,
+                match &world.agents()[&seller].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Wheat,
+                37,
+            )
             .unwrap();
         world
             .map
@@ -1026,7 +1070,7 @@ mod tests {
             AccountKey {
                 place: field,
                 rule: tax,
-                payer: seller,
+                payer: world.economic_id(seller).unwrap(),
                 good: Some(Good::BreadRoll),
             },
             TaxAccount {
@@ -1187,7 +1231,7 @@ mod tests {
         let key = AccountKey {
             place: home,
             rule,
-            payer: id,
+            payer: world.economic_id(id).unwrap(),
             good: Some(Good::BreadRoll),
         };
         let mut valid = world.clone();
@@ -1213,7 +1257,7 @@ mod tests {
                 time_ms,
                 rule,
                 place: home,
-                payer: id,
+                payer: world.economic_id(id).unwrap(),
                 good: Some(Good::BreadRoll),
                 amount: crate::taxation::TaxAmount::Reservation {
                     assessed: 1,
@@ -1292,7 +1336,7 @@ mod tests {
 
     #[test]
     fn rejects_other_versions_before_decoding_the_universe() {
-        for version in [0, 14, SAVE_VERSION + 1, u32::MAX] {
+        for version in (0..SAVE_VERSION).chain([SAVE_VERSION + 1, u32::MAX]) {
             let input = format!("(version: {version}, universe: invalid old schema)");
             assert!(matches!(
                 Universe::from_save_str(&input),

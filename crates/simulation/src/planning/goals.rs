@@ -2641,7 +2641,7 @@ mod tests {
             .with_good(Good::Water, 5000)
             .unwrap();
         source.household = Some(crate::households::HouseholdContext {
-            id: crate::AgentId(uuid::Uuid::new_v4()),
+            id: source.economic_id(),
             members: vec![source.id, crate::AgentId(uuid::Uuid::new_v4())],
             allegiance: 0.0,
             other_carried: [10000; Good::COUNT],
@@ -2673,7 +2673,7 @@ mod tests {
             ],
         );
         source.household = Some(crate::households::HouseholdContext {
-            id: crate::AgentId(uuid::Uuid::new_v4()),
+            id: source.economic_id(),
             members: vec![source.id, crate::AgentId(uuid::Uuid::new_v4())],
             allegiance: 0.0,
             other_carried: [0; Good::COUNT],
@@ -4930,13 +4930,13 @@ mod tests {
 
     #[test]
     fn fully_stored_production_inputs_are_collected_without_market_purchases() {
-        use crate::storage::{GoodsOwner, StockKey};
+        use crate::storage::StockKey;
         let mut worker = bread_only(buying_baker(2000)).with_coins(0).unwrap();
         for (good, units) in [(Good::Flour, 2000), (Good::Wood, 2000), (Good::Water, 2000)] {
             worker.set_inventory_units(good, 0);
             let key = StockKey {
                 place: worker.map.public_place(crate::locations::Location::Market),
-                owner: GoodsOwner::Agent(worker.id()),
+                owner: worker.goods_owner(),
                 good,
             };
             worker
@@ -4978,7 +4978,7 @@ mod tests {
                 .production_place(crate::production::Recipe::BakeRolls)
                 .unwrap(),
         );
-        let household = crate::AgentId(uuid::Uuid::new_v4());
+        let household = worker.economic_id();
         worker.household = Some(crate::households::HouseholdContext {
             id: household,
             members: vec![worker.id()],
@@ -5019,12 +5019,12 @@ mod tests {
 
     #[test]
     fn production_restock_collects_stored_inputs_before_buying() {
-        use crate::storage::{GoodsOwner, StockKey};
+        use crate::storage::StockKey;
         let mut worker = bread_only(buying_baker(2000));
         let place = worker.map.public_place(crate::locations::Location::Market);
         let key = StockKey {
             place,
-            owner: GoodsOwner::Agent(worker.id()),
+            owner: worker.goods_owner(),
             good: Good::Flour,
         };
         worker
@@ -5049,7 +5049,7 @@ mod tests {
         let market_place = worker.selling_place();
         let mut market = worker.market().clone();
         market
-            .list(worker.id(), market_place, Good::Flour, 100)
+            .list(worker.market_party(), market_place, Good::Flour, 100)
             .unwrap();
         worker = worker.with_market(market);
         let recipes =

@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::{
     AgentKind, Citizen, CitizenAction, SimulationError, Universe,
     locations::{Location, Map, PlaceId, Position},
@@ -58,7 +55,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
             .into_iter()
             .map(|good| stocked.prices().value(good, stocked.units(good)).unwrap())
             .sum::<f64>();
-    assert!((stocked.wealth().unwrap() - expected).abs() < 1e-12);
+    assert!((stocked.economic_wealth().unwrap() - expected).abs() < 1e-12);
     let eaten = stocked
         .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 200)
         .unwrap()
@@ -83,7 +80,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     assert_eq!(sold.berries_units(), 150);
     assert_eq!(sold.market().listed_units(sold.id(), Good::Berries), 50);
     assert_eq!(sold.coins(), 200);
-    assert!((sold.wealth().unwrap() - stocked.wealth().unwrap()).abs() < 1e-12);
+    assert!((sold.economic_wealth().unwrap() - stocked.economic_wealth().unwrap()).abs() < 1e-12);
     for good in [
         Good::Wheat,
         Good::Flour,
@@ -114,7 +111,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         45
     );
     assert_eq!(
-        bread_only.wealth().unwrap(),
+        bread_only.economic_wealth().unwrap(),
         Good::BreadRoll.core_price() * 50.0
     );
 }
@@ -186,7 +183,10 @@ fn ownership_is_multiple_homes_are_private_and_workplaces_allow_customers() {
         assert!(ada_citizen.start_action(action).is_ok());
         assert!(citizen(&universe, bram).start_action(action).is_ok());
     }
-    assert_eq!(ada_citizen.wealth(), citizen(&before, ada).wealth());
+    assert_eq!(
+        ada_citizen.economic_wealth(),
+        citizen(&before, ada).economic_wealth()
+    );
     let map = Map::default();
     assert!(
         map.with_place(Location::Home, Position::default(), None, "Invalid")

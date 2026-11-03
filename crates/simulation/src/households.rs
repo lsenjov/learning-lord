@@ -49,12 +49,7 @@ impl Citizen {
         self.designated_workplace
     }
     pub(crate) fn may_use_owner(&self, owner: AgentId) -> bool {
-        owner == self.id
-            || owner == self.economic_id()
-            || self
-                .household
-                .as_ref()
-                .is_some_and(|household| household.members.contains(&owner))
+        owner == self.economic_id()
     }
     pub fn decision_score(&self) -> Result<f64, SimulationError> {
         let value = self.personal_wellbeing()?
@@ -75,7 +70,7 @@ impl Universe {
     pub fn households(&self) -> &HashMap<AgentId, Household> {
         &self.households
     }
-    pub(crate) fn economic_id(&self, worker: AgentId) -> Result<AgentId, SimulationError> {
+    pub fn economic_id(&self, worker: AgentId) -> Result<AgentId, SimulationError> {
         if self.guilds.contains_key(&worker) || self.households.contains_key(&worker) {
             return Ok(worker);
         }
@@ -84,47 +79,44 @@ impl Universe {
             .get(&worker)
             .ok_or(SimulationError::AgentNotFound)?
             .kind;
-        Ok(citizen.economic_id())
+        citizen
+            .household_id()
+            .filter(|id| self.households.contains_key(id))
+            .ok_or(SimulationError::InvalidOwnership)
     }
     pub(crate) fn account_owner(&self, account: AgentId) -> Result<GoodsOwner, SimulationError> {
+        let account = self.economic_id(account)?;
         if self.households.contains_key(&account) {
             Ok(GoodsOwner::Household(account))
-        } else if self.agents.contains_key(&account) || self.guilds.contains_key(&account) {
+        } else if self.guilds.contains_key(&account) {
             Ok(GoodsOwner::Agent(account))
         } else {
             Err(SimulationError::AgentNotFound)
         }
     }
     pub(crate) fn account_coins(&self, account: AgentId) -> Result<Coins, SimulationError> {
+        let account = self.economic_id(account)?;
         if let Some(guild) = self.guilds.get(&account) {
             return Ok(guild.coins);
         }
         if let Some(household) = self.households.get(&account) {
             return Ok(household.coins);
         }
-        let AgentKind::Citizen(citizen) = &self
-            .agents
-            .get(&account)
-            .ok_or(SimulationError::AgentNotFound)?
-            .kind;
-        Ok(citizen.coins)
+        Err(SimulationError::AgentNotFound)
     }
+
     pub(crate) fn set_account_coins(
         &mut self,
         account: AgentId,
         coins: Coins,
     ) -> Result<(), SimulationError> {
+        let account = self.economic_id(account)?;
         if let Some(guild) = self.guilds.get_mut(&account) {
             guild.coins = coins;
         } else if let Some(household) = self.households.get_mut(&account) {
             household.coins = coins;
         } else {
-            let AgentKind::Citizen(citizen) = &mut self
-                .agents
-                .get_mut(&account)
-                .ok_or(SimulationError::AgentNotFound)?
-                .kind;
-            citizen.coins = coins;
+            return Err(SimulationError::AgentNotFound);
         }
         Ok(())
     }
@@ -133,6 +125,7 @@ impl Universe {
         account: AgentId,
         good: Good,
     ) -> Result<Quantity, SimulationError> {
+        let account = self.economic_id(account)?;
         let owner = self.account_owner(account)?;
         self.agents
             .values()
@@ -170,130 +163,6 @@ impl Universe {
         universe.refresh_workplace_supplies()?;
         universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok(universe)
-    }
-    pub fn with_household(
-        &self,
-        name: impl Into<String>,
-        home: PlaceId,
-        members: &[AgentId],
-    ) -> Result<(Self, AgentId), SimulationError> {
-        if members.is_empty()
-            || members
-                .iter()
-                .enumerate()
-                .any(|(index, id)| members[..index].contains(id))
-        {
-            return Err(SimulationError::InvalidOwnership);
-        }
-        if self.construction.contracts.values().any(|contract| {
-            let project = &self.construction.projects[&contract.project];
-            (contract.status.open()
-                && (project
-                    .client
-                    .account()
-                    .is_some_and(|id| members.contains(&id))
-                    || contract
-                        .quotes
-                        .iter()
-                        .any(|quote| members.contains(&quote.carpenter))))
-                || (!project.completed
-                    && (project.completed_base_ms > 0 || project.installed_wood > 0)
-                    && project
-                        .client
-                        .account()
-                        .is_some_and(|id| members.contains(&id)))
-        }) {
-            return Err(SimulationError::CitizenBusy);
-        }
-        let home_place = self.map.place(home)?;
-        if home_place.kind != crate::locations::Location::Home
-            || !home_place
-                .owner
-                .is_some_and(|owner| members.contains(&owner))
-        {
-            return Err(SimulationError::PrivateProperty);
-        }
-        let mut coins: Coins = 0;
-        for id in members {
-            let AgentKind::Citizen(citizen) = &self
-                .agents
-                .get(id)
-                .ok_or(SimulationError::AgentNotFound)?
-                .kind;
-            if self
-                .workshop_fees
-                .iter()
-                .any(|((payer, _), fee)| *payer == *id && (fee.unpaid > 0 || fee.remainder > 0))
-            {
-                return Err(SimulationError::InvalidOwnership);
-            }
-            if citizen.household.is_some()
-                || citizen.active_action.is_some()
-                || citizen.active_plan.is_some()
-                || citizen.tax_reserved.values().any(|units| *units != 0)
-            {
-                return Err(SimulationError::CitizenBusy);
-            }
-            if self
-                .market
-                .orders()
-                .any(|order| order.seller.account() == Some(*id))
-                || self.market.account_has_committed_production_trial(*id)
-                || self.taxation.accounts.keys().any(|key| key.payer == *id)
-            {
-                return Err(SimulationError::InvalidOwnership);
-            }
-            coins = coins
-                .checked_add(citizen.coins)
-                .ok_or(SimulationError::WealthOverflow)?;
-        }
-        let id = AgentId(uuid::Uuid::new_v4());
-        let mut universe = self.clone();
-        for member in members {
-            universe.market.cancel_unoffered_production_trials(*member);
-        }
-        universe
-            .workshop_fees
-            .retain(|(payer, _), _| !members.contains(payer));
-        universe.households.insert(
-            id,
-            Household {
-                id,
-                name: name.into(),
-                home,
-                members: members.to_vec(),
-                coins,
-                maintenance: crate::maintenance::MaintenanceState::default(),
-            },
-        );
-        for member in members {
-            universe.map.assign_bedroom(home, *member, members)?;
-            let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(member).unwrap().kind;
-            citizen.home = home;
-            citizen.position = universe.map.position(home);
-            citizen.household = Some(HouseholdContext {
-                id,
-                members: members.to_vec(),
-                allegiance: 1.0,
-                other_carried: [0; Good::COUNT],
-                other_consumption_value: 0.0,
-                other_clothing_replacements: 0,
-            });
-            citizen.coins = coins;
-        }
-        let stock: Vec<_> = universe.storage.stock().iter().filter(|(key,_)| matches!(key.owner, GoodsOwner::Agent(owner) if members.contains(&owner))).map(|(key,units)| (*key,*units)).collect();
-        for (key, _) in stock {
-            universe
-                .storage
-                .reassign_owner(key, GoodsOwner::Household(id))?;
-        }
-        universe.household_histories.insert(
-            id,
-            crate::household_history::HouseholdHistory::new(universe.current_time_ms, coins),
-        );
-        universe.refresh_household_history(universe.current_time_ms, false)?;
-        universe.refresh_market();
-        Ok((universe, id))
     }
 }
 
@@ -575,6 +444,116 @@ mod tests {
     };
 
     #[test]
+    fn household_first_creation_preserves_live_accounts_and_individual_items() {
+        let alice = Citizen::new(0.0)
+            .unwrap()
+            .with_coins(100)
+            .unwrap()
+            .with_good(Good::BreadRoll, 7)
+            .unwrap()
+            .with_home_good(Good::Water, 100)
+            .unwrap();
+        let (world, first) = Universe::default()
+            .with_new_household("Family", "Alice", alice)
+            .unwrap();
+        let account = world.economic_id(first).unwrap();
+        let (world, mill) = world.with_property(first, Location::Mill).unwrap();
+        let world = world
+            .with_stored_good(mill, GoodsOwner::Household(account), Good::Wheat, 300)
+            .unwrap()
+            .start_action(first, CitizenAction::Wait)
+            .unwrap()
+            .advance(1000)
+            .unwrap();
+        let before = world.household_history(account).unwrap().clone();
+        let bob = Citizen::new(0.0)
+            .unwrap()
+            .with_coins(50)
+            .unwrap()
+            .with_good(Good::Berries, 9)
+            .unwrap()
+            .with_home_good(Good::Water, 200)
+            .unwrap();
+        let (next, second) = world.with_household_member(account, "Bob", bob).unwrap();
+        assert_eq!(next.households.len(), 1);
+        assert_eq!(next.households[&account].members, vec![first, second]);
+        assert_eq!(next.households[&account].coins, 150);
+        assert_eq!(
+            next.household_history(account).unwrap().completed,
+            before.completed
+        );
+        assert_eq!(
+            next.household_history(account)
+                .unwrap()
+                .current
+                .opening_coins,
+            100
+        );
+        assert_eq!(
+            next.household_history(account)
+                .unwrap()
+                .current
+                .introduced_coins,
+            50
+        );
+        for member in [first, second] {
+            let AgentKind::Citizen(citizen) = &next.agents[&member].kind;
+            assert_eq!(citizen.household_id(), Some(account));
+            assert_eq!(citizen.coins(), 150);
+            assert!(citizen.accessible_place(mill).is_ok());
+            assert_eq!(next.map.place(citizen.home).unwrap().owner, Some(account));
+        }
+        for place in next
+            .map
+            .places()
+            .values()
+            .filter(|place| place.owner.is_some())
+        {
+            assert_eq!(place.owner, Some(account));
+            assert!(
+                place
+                    .buildings
+                    .iter()
+                    .all(|building| building.owner == account)
+            );
+        }
+        let AgentKind::Citizen(alice) = &next.agents[&first].kind;
+        let AgentKind::Citizen(bob) = &next.agents[&second].kind;
+        assert_eq!(alice.units(Good::BreadRoll), 7);
+        assert_eq!(bob.units(Good::BreadRoll), 0);
+        assert_eq!(bob.units(Good::Berries), 9);
+        assert_eq!(alice.units(Good::Berries), 0);
+        assert_eq!(
+            next.storage
+                .owned_units(GoodsOwner::Household(account), Good::Wheat),
+            300
+        );
+        assert_eq!(bob.home_units(Good::Water), 300);
+        assert_eq!(world.households[&account].members, vec![first]);
+        assert_eq!(world.households[&account].coins, 100);
+        assert_eq!(
+            Universe::from_save_str(&next.to_save_string().unwrap()).unwrap(),
+            next
+        );
+        assert!(
+            next.with_household_member(account, "Alice again", alice.clone())
+                .is_err()
+        );
+        assert!(
+            next.with_household_member(
+                AgentId(uuid::Uuid::new_v4()),
+                "Missing",
+                Citizen::new(0.0).unwrap()
+            )
+            .is_err()
+        );
+        assert!(
+            next.with_stored_good(mill, GoodsOwner::Agent(first), Good::Wheat, 1)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn shared_collection_and_equipment_contention_preserve_goods_and_finish_safely() {
         for scenario in 0..3 {
             let (world, first) = Universe::with_map(Map::default())
@@ -586,7 +565,10 @@ mod tests {
                 )
                 .unwrap();
             let (world, second) = world
-                .with_citizen(
+                .with_household_member(
+                    match &world.agents()[&first].kind {
+                        crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                    },
                     "Second",
                     Citizen::new(0.0)
                         .unwrap()
@@ -594,10 +576,11 @@ mod tests {
                 )
                 .unwrap();
             let (world, site) = world.with_property(first, Location::Brewery).unwrap();
-            let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-            let (mut world, household) = world
-                .with_household("Shared", citizen.home(), &[first, second])
-                .unwrap();
+            let AgentKind::Citizen(_citizen) = &world.agents[&first].kind;
+            let household = match &world.agents()[&first].kind {
+                crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+            };
+            let mut world = world;
             let owner = GoodsOwner::Household(household);
             let action = match scenario {
                 0 => {
@@ -720,7 +703,10 @@ mod tests {
             )
             .unwrap();
         let (world, second) = world
-            .with_citizen(
+            .with_household_member(
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
                 "Second",
                 Citizen::new(0.0)
                     .unwrap()
@@ -728,10 +714,11 @@ mod tests {
             )
             .unwrap();
         let (world, brewery) = world.with_property(first, Location::Brewery).unwrap();
-        let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        let (mut world, household) = world
-            .with_household("Brewers", citizen.home(), &[first, second])
-            .unwrap();
+        let AgentKind::Citizen(_citizen) = &world.agents[&first].kind;
+        let household = match &world.agents()[&first].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+        let mut world = world;
         let room = &mut world.map.places_mut().get_mut(&brewery).unwrap().buildings[0].rooms[0];
         room.size = crate::locations::RoomSize::Large;
         room.objects.push(crate::locations::Object::new(
@@ -781,26 +768,26 @@ mod tests {
     fn workplace_requirements_scale_with_designated_workers_and_shared_requests_accumulate() {
         let mut world = Universe::with_map(Map::default());
         let mut members = Vec::new();
+        let mut household = None;
         for index in 0..4 {
-            let (next, id) = world
-                .with_citizen(
-                    format!("Baker{index}"),
-                    Citizen::new(0.0)
-                        .unwrap()
-                        .with_starting_role(StartingRole::Baker)
-                        .with_coins(1000)
-                        .unwrap(),
-                )
+            let citizen = Citizen::new(0.0)
+                .unwrap()
+                .with_starting_role(StartingRole::Baker)
+                .with_coins(1000)
                 .unwrap();
+            let (next, id) = if let Some(household) = household {
+                world.with_household_member(household, format!("Baker{index}"), citizen)
+            } else {
+                world.with_new_household("Bakers", format!("Baker{index}"), citizen)
+            }
+            .unwrap();
             world = next;
+            let AgentKind::Citizen(citizen) = &world.agents[&id].kind;
+            household = citizen.household_id();
             members.push(id);
         }
+        let household = household.unwrap();
         let (next, bakery) = world.with_property(members[0], Location::Bakery).unwrap();
-        world = next;
-        let AgentKind::Citizen(citizen) = &world.agents[&members[0]].kind;
-        let (next, household) = world
-            .with_household("Bakers", citizen.home(), &members)
-            .unwrap();
         world = next;
         world = world.with_designated_workplace(members[0], bakery).unwrap();
         let AgentKind::Citizen(one) = &world.agents[&members[0]].kind;
@@ -863,7 +850,14 @@ mod physical_tests {
         let (world, first) = world.with_property(worker, Location::Mill).unwrap();
         let (world, second) = world.with_property(worker, Location::Mill).unwrap();
         let world = world
-            .with_stored_good(second, GoodsOwner::Agent(worker), Good::Wheat, 600)
+            .with_stored_good(
+                second,
+                match &world.agents()[&worker].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Wheat,
+                600,
+            )
             .unwrap();
         assert_eq!(
             world.start_action(
@@ -889,21 +883,33 @@ mod physical_tests {
             .advance(citizen.active_action().unwrap().remaining_ms())
             .unwrap();
         assert_eq!(
-            finished
-                .storage
-                .units(first, GoodsOwner::Agent(worker), Good::Flour),
+            finished.storage.units(
+                first,
+                match &finished.agents()[&worker].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Flour
+            ),
             0
         );
         assert_eq!(
-            finished
-                .storage
-                .units(second, GoodsOwner::Agent(worker), Good::Flour),
+            finished.storage.units(
+                second,
+                match &finished.agents()[&worker].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Flour
+            ),
             240
         );
         assert_eq!(
-            finished
-                .storage
-                .units(second, GoodsOwner::Agent(worker), Good::Wheat),
+            finished.storage.units(
+                second,
+                match &finished.agents()[&worker].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Wheat
+            ),
             300
         );
     }
@@ -914,16 +920,20 @@ mod physical_tests {
             .with_citizen("First", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
             .unwrap();
         let (world, second) = world
-            .with_citizen(
+            .with_household_member(
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
                 "Second",
                 Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
         let home = citizen.home();
-        let (world, household) = world
-            .with_household("Family", home, &[first, second])
-            .unwrap();
+        let household = match &world.agents()[&first].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         let world = world
             .with_stored_good(home, GoodsOwner::Household(household), Good::BreadRoll, 20)
             .unwrap();

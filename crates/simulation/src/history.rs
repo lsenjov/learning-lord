@@ -452,12 +452,14 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                     citizen.available_drink_units() as f64
                         + active.drink_units as f64 * water_ratio,
                 ) - citizen.water_reserve_wellbeing();
-                value += citizen
-                    .prices
-                    .value(active.drink_good, active.drink_units)
-                    .unwrap_or(0.0)
-                    * (water_ratio - initial_water_ratio)
-                    * crate::WEALTH_WELLBEING_PER_COIN;
+                if citizen.household.is_none() {
+                    value += citizen
+                        .prices
+                        .value(active.drink_good, active.drink_units)
+                        .unwrap_or(0.0)
+                        * (water_ratio - initial_water_ratio)
+                        * crate::WEALTH_WELLBEING_PER_COIN;
+                }
             }
             let meal_value: f64 = Good::FOOD
                 .into_iter()
@@ -468,7 +470,9 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                         .unwrap_or(0.0)
                 })
                 .sum();
-            value += meal_value * (ratio - initial_ratio) * crate::WEALTH_WELLBEING_PER_COIN;
+            if citizen.household.is_none() {
+                value += meal_value * (ratio - initial_ratio) * crate::WEALTH_WELLBEING_PER_COIN;
+            }
             let drink_ratio =
                 (active.drink_duration_ms() as f64 - passed as f64 - elapsed as f64 * fraction)
                     .max(0.0)
@@ -713,7 +717,11 @@ mod tests {
             };
             assert!((average(&whole) - average(&split)).abs() < 1e-10);
             assert_eq!(
-                whole.citizen_history(seller).unwrap().current.coins_earned,
+                whole
+                    .household_history(whole.economic_id(seller).unwrap())
+                    .unwrap()
+                    .current
+                    .sales_receipts,
                 1
             );
         }
@@ -796,5 +804,71 @@ mod tests {
         assert_eq!(day.food_goal_ms, 1000);
         assert_eq!(day.activity.eating_ms, 1000);
         assert_eq!(day.elapsed_ms, 1000);
+    }
+    #[test]
+    fn simultaneous_buyers_compete_deterministically_and_partial_fills_conserve_stock() {
+        fn citizen(world: &Universe, id: crate::AgentId) -> &Citizen {
+            let crate::AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
+            citizen
+        }
+        let (universe, seller) = Universe::with_map(crate::locations::Map::default())
+            .with_prices(crate::marketplace::Prices::new(100.0).unwrap())
+            .with_citizen(
+                "Seller",
+                Citizen::new(0.0).unwrap().with_berries(150).unwrap(),
+            )
+            .unwrap();
+        let universe = universe
+            .start_action(seller, CitizenAction::List(Good::Berries, 150))
+            .unwrap()
+            .advance(TRADE_DURATION_MS)
+            .unwrap();
+        let (universe, a) = universe
+            .with_citizen("A", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .unwrap();
+        let (universe, b) = universe
+            .with_citizen("B", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .unwrap();
+        let started = universe
+            .start_action(
+                a,
+                CitizenAction::Buy(crate::marketplace::ShoppingList::single(Good::Berries, 100)),
+            )
+            .unwrap()
+            .start_action(
+                b,
+                CitizenAction::Buy(crate::marketplace::ShoppingList::single(Good::Berries, 100)),
+            )
+            .unwrap();
+        let direct = started.advance(TRADE_DURATION_MS).unwrap();
+        let mut split = started
+            .advance(1000)
+            .unwrap()
+            .advance(TRADE_DURATION_MS - 1000)
+            .unwrap();
+        for (id, history) in &direct.citizen_histories {
+            let actual = &mut split.citizen_histories.get_mut(id).unwrap().current;
+            assert!((history.current.mean_wellbeing - actual.mean_wellbeing).abs() < 1e-10);
+            // Floating integration can differ by a few ulps; every other field stays exact.
+            actual.mean_wellbeing = history.current.mean_wellbeing;
+        }
+        assert_eq!(direct, split);
+        let first = if a.0 < b.0 { a } else { b };
+        let second = if first == a { b } else { a };
+        assert_eq!(citizen(&direct, first).berries_units(), 100);
+        assert_eq!(citizen(&direct, second).berries_units(), 50);
+        let quote = started.market().orders().next().unwrap().quoted_price;
+        assert_eq!(
+            citizen(&direct, seller).coins(),
+            (quote * 0.1).ceil() as i64 + (quote * 0.05).ceil() as i64
+        );
+        assert_eq!(
+            citizen(&direct, a).coins()
+                + citizen(&direct, b).coins()
+                + citizen(&direct, seller).coins(),
+            200
+        );
+        assert_eq!(direct.market().orders().count(), 0);
+        assert_eq!(direct.market().trades().len(), 2);
     }
 }

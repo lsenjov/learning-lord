@@ -1706,13 +1706,37 @@ mod tests {
         let (mut universe, id) = Universe::with_map(buyer.map())
             .with_citizen("Buyer", buyer)
             .unwrap();
-        assert_eq!(universe.market().requested(id).units(Good::BreadRoll), 3);
-        assert_eq!(universe.market().requested(id).units(Good::FlaxGarment), 1);
+        assert_eq!(
+            universe
+                .market()
+                .requested(universe.economic_id(id).unwrap())
+                .units(Good::BreadRoll),
+            3
+        );
+        assert_eq!(
+            universe
+                .market()
+                .requested(universe.economic_id(id).unwrap())
+                .units(Good::FlaxGarment),
+            1
+        );
         let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
         citizen.active_plan.as_mut().unwrap().plan.decision = None;
         universe.register_action_request(id).unwrap();
-        assert_eq!(universe.market().requested(id).units(Good::BreadRoll), 2);
-        assert_eq!(universe.market().requested(id).units(Good::FlaxGarment), 0);
+        assert_eq!(
+            universe
+                .market()
+                .requested(universe.economic_id(id).unwrap())
+                .units(Good::BreadRoll),
+            2
+        );
+        assert_eq!(
+            universe
+                .market()
+                .requested(universe.economic_id(id).unwrap())
+                .units(Good::FlaxGarment),
+            0
+        );
     }
 
     #[test]
@@ -1750,7 +1774,12 @@ mod tests {
         let (universe, id) = Universe::with_map(map)
             .with_citizen("Buyer", buyer.clone())
             .unwrap();
-        assert_eq!(universe.market().requested(id), ShoppingList::default());
+        assert_eq!(
+            universe
+                .market()
+                .requested(universe.economic_id(id).unwrap()),
+            ShoppingList::default()
+        );
 
         let execution = buyer.active_plan.as_mut().unwrap();
         execution.plan.goals = vec![PlanGoal {
@@ -1771,7 +1800,9 @@ mod tests {
             .with_citizen("Buyer", buyer)
             .unwrap();
         assert_eq!(
-            universe.market().requested(id),
+            universe
+                .market()
+                .requested(universe.economic_id(id).unwrap()),
             ShoppingList::single(Good::BreadRoll, 60)
         );
         let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
@@ -1781,7 +1812,7 @@ mod tests {
         let AgentKind::Citizen(citizen) = &arrived.agents()[&id].kind;
         assert!(citizen.active_plan().unwrap().elapsed_ms() > TWO_HOURS_MS);
         assert_eq!(
-            arrived.market().requested(id),
+            arrived.market().requested(arrived.economic_id(id).unwrap()),
             ShoppingList::single(Good::BreadRoll, 60)
         );
         let finished = arrived.advance(crate::TRADE_DURATION_MS).unwrap();

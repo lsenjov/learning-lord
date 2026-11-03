@@ -443,14 +443,18 @@ mod tests {
         world = world
             .with_stored_good(
                 home,
-                crate::storage::GoodsOwner::Agent(worker),
+                match &world.agents()[&worker].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
                 Good::BreadRoll,
                 10_000,
             )
             .unwrap()
             .with_stored_good(
                 home,
-                crate::storage::GoodsOwner::Agent(worker),
+                match &world.agents()[&worker].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
                 Good::Water,
                 100_000,
             )
@@ -616,7 +620,10 @@ mod tests {
         world = world.advance(HOUR_MS / 2).unwrap();
         let project = world.repair_project(place, target).unwrap();
         assert!(project.repair_damage_units >= MAX_CONDITION_UNITS / 20);
-        assert_eq!(project.client, ConstructionClient::Account(owner));
+        assert_eq!(
+            project.client,
+            ConstructionClient::Account(world.economic_id(owner).unwrap())
+        );
         let budget = world.construction_budget(owner).unwrap();
         assert!(budget.cash >= budget.essential_reserve);
         assert!(project.funding_offer > 0);
@@ -800,10 +807,13 @@ mod tests {
     }
 
     #[test]
-    fn unawarded_repair_rebinds_to_household_and_records_household_escrow() {
+    fn unawarded_repair_keeps_household_and_records_reposted_escrow() {
         let (mut world, owner, _, place, target) = fixture(false);
-        let (next, partner) = world
-            .with_citizen(
+        let (next, _partner) = world
+            .with_household_member(
+                match &world.agents()[&owner].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
                 "Partner",
                 Citizen::new(-100.0)
                     .unwrap()
@@ -825,9 +835,14 @@ mod tests {
             .id;
         let world = world.cancel_construction(owner, contract).unwrap();
         let personal_before = world.citizen_histories[&owner].current.construction;
-        let (mut world, household) = world
-            .with_household("Family", place, &[owner, partner])
-            .unwrap();
+        let household = match &world.agents()[&owner].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+        let deposited = world.household_histories[&household]
+            .current
+            .construction
+            .escrow_deposited;
+        let mut world = world;
         world.commission_repairs().unwrap();
         let project = &world.construction.projects[&project_id];
         assert_eq!(project.client, ConstructionClient::Account(household));
@@ -840,7 +855,7 @@ mod tests {
                 .current
                 .construction
                 .escrow_deposited,
-            project.funding_offer
+            deposited + project.funding_offer
         );
         assert_eq!(
             world,

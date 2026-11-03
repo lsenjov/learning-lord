@@ -47,7 +47,15 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
     assert!(before.market().trades().is_empty());
     let after = before.advance(1).unwrap();
     assert_eq!(after.agents().len(), 1);
-    assert_eq!(after.market().listed_units(seller, Good::BreadRoll), 4);
+    assert_eq!(
+        after.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                after.economic_id(seller).unwrap()
+            ),
+            Good::BreadRoll
+        ),
+        4
+    );
     let receipts = after.market().trades()[0].recipient_coins;
     assert_eq!(citizen(&after, seller).coins(), receipts - receipts / 5);
     assert_eq!(after.town_treasury(), receipts / 5);
@@ -57,11 +65,19 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
         (market, MarketParty::Caravan, receipts, 5)
     );
     assert_eq!(
-        after.citizen_history(seller).unwrap().current.start_ms,
+        after
+            .household_history(after.economic_id(seller).unwrap())
+            .unwrap()
+            .current
+            .start_ms,
         UPDATE_TIME_MS
     );
     assert_eq!(
-        after.citizen_history(seller).unwrap().current.sold[Good::BreadRoll as usize],
+        after
+            .household_history(after.economic_id(seller).unwrap())
+            .unwrap()
+            .current
+            .sold[Good::BreadRoll as usize],
         5
     );
     assert_eq!(
@@ -154,7 +170,11 @@ fn imports_deliver_at_market_purchase_cash_leaves_town_and_forecast_is_immutable
         (5, 2, 0)
     );
     assert_eq!(
-        purchased.citizen_history(buyer).unwrap().current.bought[Good::BreadRoll as usize],
+        purchased
+            .household_history(purchased.economic_id(buyer).unwrap())
+            .unwrap()
+            .current
+            .bought[Good::BreadRoll as usize],
         2
     );
     assert_eq!(requested.market().caravan_units(Good::BreadRoll), 0);
@@ -274,7 +294,12 @@ fn export_controls_limit_volume_without_consuming_reserve_stock() {
             .advance(UPDATE_TIME_MS - TRADE_DURATION_MS)
             .unwrap();
         assert_eq!(
-            after.market().listed_units(seller, Good::BreadRoll),
+            after.market().listed_units(
+                learning_lord_simulation::marketplace::MarketParty::Household(
+                    after.economic_id(seller).unwrap()
+                ),
+                Good::BreadRoll
+            ),
             10 - exported
         );
         assert_eq!(after.town_stock(Good::BreadRoll), 10 - exported);
@@ -300,7 +325,15 @@ fn full_export_tariff_disables_exports() {
     let after = disabled
         .advance(UPDATE_TIME_MS - TRADE_DURATION_MS)
         .unwrap();
-    assert_eq!(after.market().listed_units(seller, Good::BreadRoll), 10);
+    assert_eq!(
+        after.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                after.economic_id(seller).unwrap()
+            ),
+            Good::BreadRoll
+        ),
+        10
+    );
     assert_eq!(after.town_treasury(), 0);
 }
 
@@ -319,7 +352,14 @@ fn town_reserve_includes_carried_storage_and_town_goods_once() {
         .unwrap();
     let market = world.map().public_place(Location::Market);
     let world = world
-        .with_stored_good(market, GoodsOwner::Agent(holder), Good::BreadRoll, 4)
+        .with_stored_good(
+            market,
+            match &world.agents()[&holder].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::BreadRoll,
+            4,
+        )
         .unwrap()
         .with_stored_good(market, GoodsOwner::Town, Good::BreadRoll, 5)
         .unwrap();
@@ -332,7 +372,15 @@ fn town_reserve_includes_carried_storage_and_town_goods_once() {
         .advance(UPDATE_TIME_MS - TRADE_DURATION_MS)
         .unwrap();
     assert_eq!(after.town_stock(Good::BreadRoll), 20);
-    assert_eq!(after.market().listed_units(seller, Good::BreadRoll), 8);
+    assert_eq!(
+        after.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                after.economic_id(seller).unwrap()
+            ),
+            Good::BreadRoll
+        ),
+        8
+    );
     assert_eq!(citizen(&after, holder).units(Good::BreadRoll), 3);
     assert_eq!(after.storage(), world.storage());
 }
@@ -384,7 +432,11 @@ fn export_tariff_grosses_up_net_receipts_and_income_tax_uses_only_receipts() {
         citizen(&after, seller).coins() + after.town_treasury()
     );
     assert_eq!(
-        after.citizen_history(seller).unwrap().current.coins_earned,
+        after
+            .household_history(after.economic_id(seller).unwrap())
+            .unwrap()
+            .current
+            .sales_receipts,
         5
     );
     let activity = after.market().current_period().goods[Good::BreadRoll as usize];

@@ -96,16 +96,24 @@ fn socage_carries_exact_fractions_and_only_authoritative_outputs_are_taxed() {
     for batch in 1..=4 {
         world = produce(world, id, Recipe::MakeClothingBlock);
         assert_eq!(
-            world
-                .storage()
-                .units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+            world.storage().units(
+                place,
+                match &world.agents()[&id].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::FlaxBlock
+            ),
             batch
         );
         assert_eq!(world.town_stock(Good::FlaxBlock), batch);
         assert_eq!(
-            world
-                .storage()
-                .reserved_units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+            world.storage().reserved_units(
+                place,
+                match &world.agents()[&id].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::FlaxBlock
+            ),
             u64::from(batch == 4)
         );
     }
@@ -164,15 +172,23 @@ fn stacked_fraction_claims_never_take_more_than_the_current_batch() {
         Recipe::MakeClothingBlock,
     );
     assert_eq!(
-        world
-            .storage()
-            .units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+        world.storage().units(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxBlock
+        ),
         2
     );
     assert_eq!(
-        world
-            .storage()
-            .reserved_units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+        world.storage().reserved_units(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxBlock
+        ),
         1
     );
     assert_eq!(
@@ -195,24 +211,36 @@ fn stacked_fraction_claims_never_take_more_than_the_current_batch() {
     let world = world.without_tax_rule(second).unwrap();
     let world = produce(world, id, Recipe::MakeClothingBlock);
     assert_eq!(
-        world
-            .storage()
-            .units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+        world.storage().units(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxBlock
+        ),
         3
     );
     assert_eq!(
-        world
-            .storage()
-            .reserved_units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+        world.storage().reserved_units(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxBlock
+        ),
         2
     );
     let world = world
         .advance(FIRST_WEEKLY_SETTLEMENT_MS - world.current_time_ms())
         .unwrap();
     assert_eq!(
-        world
-            .storage()
-            .units(place, GoodsOwner::Agent(id), Good::FlaxBlock),
+        world.storage().units(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxBlock
+        ),
         1
     );
     assert_eq!(citizen(&world, id).town_carried_units(Good::FlaxBlock), 0);
@@ -269,7 +297,14 @@ fn assets_tax_goods_owners_at_current_prices_and_exclude_town_carried_and_buildi
         .unwrap();
     let (world, payer) = world.with_citizen("Bram", payer).unwrap();
     let world = world
-        .with_stored_good(place, GoodsOwner::Agent(payer), Good::FlaxBlock, 10)
+        .with_stored_good(
+            place,
+            match &world.agents()[&payer].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxBlock,
+            10,
+        )
         .unwrap()
         .with_stored_good(place, GoodsOwner::Town, Good::FlaxBlock, 500)
         .unwrap();
@@ -398,7 +433,15 @@ fn sale_income_is_stacked_on_original_revenue_and_asset_assesses_order_escrow() 
         )
         .advance(FIRST_WEEKLY_SETTLEMENT_MS - before_sale.current_time_ms())
         .unwrap();
-    assert_eq!(weekly.market().listed_units(seller, Good::BreadRoll), 10);
+    assert_eq!(
+        weekly.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                weekly.economic_id(seller).unwrap()
+            ),
+            Good::BreadRoll
+        ),
+        10
+    );
     let assessment_price = weekly
         .market()
         .history()
@@ -809,7 +852,7 @@ fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
     );
     let ada_receipts: Vec<_> = receipts
         .iter()
-        .filter(|receipt| receipt.payer == ada)
+        .filter(|receipt| receipt.payer == world.economic_id(ada).unwrap())
         .collect();
     assert!(matches!(
         ada_receipts[0].amount,
@@ -830,17 +873,20 @@ fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
     assert!(
         receipts
             .iter()
-            .any(|receipt| receipt.place == first && receipt.payer == ada)
+            .any(|receipt| receipt.place == first
+                && receipt.payer == world.economic_id(ada).unwrap())
     );
     assert!(
         receipts
             .iter()
-            .any(|receipt| receipt.place == second && receipt.payer == ada)
+            .any(|receipt| receipt.place == second
+                && receipt.payer == world.economic_id(ada).unwrap())
     );
     assert!(
         receipts
             .iter()
-            .any(|receipt| receipt.place == third && receipt.payer == ben)
+            .any(|receipt| receipt.place == third
+                && receipt.payer == world.economic_id(ben).unwrap())
     );
     let retired = world.without_tax_rule(rule).unwrap();
     assert_eq!(retired.tax_arrears(rule, ada), 20);
@@ -901,26 +947,41 @@ fn whole_garment_is_private_wealth_but_unusable_until_sunday_changes_owner() {
     let world = produce(world, id, Recipe::AssembleGarment);
     let worker = citizen(&world, id);
     assert_eq!(
-        world
-            .storage()
-            .units(place, GoodsOwner::Agent(id), Good::FlaxGarment),
+        world.storage().units(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         1
     );
     assert_eq!(
-        world
-            .storage()
-            .reserved_units(place, GoodsOwner::Agent(id), Good::FlaxGarment),
+        world.storage().reserved_units(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         1
     );
     assert_eq!(worker.available_units(Good::FlaxGarment), 0);
-    assert_eq!(worker.wealth(), predicted.wealth());
+    assert_eq!(worker.economic_wealth(), predicted.economic_wealth());
     assert_eq!(worker.personal_wellbeing(), predicted.personal_wellbeing());
     assert_eq!(
         world.start_action(id, CitizenAction::EquipClothing),
         Err(SimulationError::MissingInputs)
     );
     assert_eq!(
-        world.with_stored_good(place, GoodsOwner::Agent(id), Good::FlaxGarment, 0),
+        world.with_stored_good(
+            place,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment,
+            0
+        ),
         Err(SimulationError::MissingInputs)
     );
     let listed = world
@@ -929,14 +990,26 @@ fn whole_garment_is_private_wealth_but_unusable_until_sunday_changes_owner() {
     let listed = listed
         .advance(citizen(&listed, id).active_action().unwrap().remaining_ms())
         .unwrap();
-    assert_eq!(listed.market().listed_units(id, Good::FlaxGarment), 0);
+    assert_eq!(
+        listed.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                listed.economic_id(id).unwrap()
+            ),
+            Good::FlaxGarment
+        ),
+        0
+    );
     let almost = listed
         .advance(FIRST_WEEKLY_SETTLEMENT_MS - listed.current_time_ms() - 1)
         .unwrap();
     assert_eq!(
-        almost
-            .storage()
-            .units(place, GoodsOwner::Agent(id), Good::FlaxGarment),
+        almost.storage().units(
+            place,
+            match &almost.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         1
     );
     let settled = almost.advance(1).unwrap();
@@ -949,7 +1022,7 @@ fn whole_garment_is_private_wealth_but_unusable_until_sunday_changes_owner() {
         citizen(&settled, id).tax_reserved_units(Good::FlaxGarment),
         0
     );
-    assert_eq!(citizen(&settled, id).wealth().unwrap(), 100.0);
+    assert_eq!(citizen(&settled, id).economic_wealth().unwrap(), 100.0);
     assert_eq!(
         settled
             .storage()
@@ -980,7 +1053,14 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
         .with_citizen("Ben", Citizen::new(0.0).unwrap())
         .unwrap();
     let world = world
-        .with_stored_good(destination, GoodsOwner::Agent(id), Good::FlaxBlock, 8)
+        .with_stored_good(
+            destination,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxBlock,
+            8,
+        )
         .unwrap();
     let world = produce(world, id, Recipe::AssembleGarment);
     let world = world
@@ -988,9 +1068,13 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
         .unwrap();
     let world = produce(world, id, Recipe::AssembleGarment);
     assert_eq!(
-        world
-            .storage()
-            .units(origin, GoodsOwner::Agent(id), Good::FlaxGarment),
+        world.storage().units(
+            origin,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         2
     );
     let world = world
@@ -1001,23 +1085,38 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
         .unwrap();
     assert_eq!(citizen(&world, id).tax_reserved_units(Good::FlaxGarment), 1);
     assert_eq!(
-        world
-            .storage()
-            .reserved_units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        world.storage().reserved_units(
+            destination,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         0
     );
     let world = world
         .deposit_goods(id, destination, Good::FlaxGarment, 1)
         .unwrap();
     assert_eq!(
-        world
-            .storage()
-            .reserved_units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        world.storage().reserved_units(
+            destination,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         1
     );
     assert_eq!(world.town_stock(Good::FlaxGarment), 2);
     assert_eq!(
-        world.with_stored_good(destination, GoodsOwner::Agent(id), Good::FlaxGarment, 0),
+        world.with_stored_good(
+            destination,
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment,
+            0
+        ),
         Err(SimulationError::MissingInputs)
     );
     let world = world
@@ -1041,9 +1140,13 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
         .advance(FIRST_WEEKLY_SETTLEMENT_MS - world.current_time_ms())
         .unwrap();
     assert_eq!(
-        settled
-            .storage()
-            .units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        settled.storage().units(
+            destination,
+            match &settled.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         1
     );
     assert_eq!(
@@ -1053,9 +1156,13 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
         1
     );
     assert_eq!(
-        settled
-            .storage()
-            .reserved_units(destination, GoodsOwner::Agent(id), Good::FlaxGarment),
+        settled.storage().reserved_units(
+            destination,
+            match &settled.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::FlaxGarment
+        ),
         0
     );
     let receipt = settled
@@ -1064,7 +1171,7 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
         .find(|receipt| receipt.rule == socage && matches!(receipt.amount, TaxAmount::Goods { .. }))
         .unwrap();
     assert_eq!(receipt.place, origin);
-    assert_eq!(receipt.payer, id);
+    assert_eq!(receipt.payer, settled.economic_id(id).unwrap());
     assert!(settled.tax_history().iter().any(|receipt| receipt.rule == asset && matches!(receipt.amount, TaxAmount::Coins { assessed, .. } if assessed == expected)));
     assert_eq!(
         citizen(&settled, id2).town_carried_units(Good::FlaxGarment),

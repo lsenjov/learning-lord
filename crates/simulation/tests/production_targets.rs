@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::locations::Map;
 use learning_lord_simulation::marketplace::{DAY_MS, Good, ShoppingList};
 use learning_lord_simulation::production::{
@@ -98,9 +95,21 @@ fn absent_weaver_inputs_still_generate_affordable_market_demand() {
     assert!(!projection.recipes.is_empty());
     assert!(projection.purchases.units(Good::Flax) > 0);
     assert!(decision.blocked_requests.units(Good::Flax) > 0);
-    assert!(planned.market().requested(id).units(Good::Flax) > 0);
+    assert!(
+        planned
+            .market()
+            .requested(planned.economic_id(id).unwrap())
+            .units(Good::Flax)
+            > 0
+    );
     assert!(planned.market().unmet_units(Good::Flax) > 0);
-    assert!(planned.market().affordable_request(id).units(Good::Flax) > 0);
+    assert!(
+        planned
+            .market()
+            .affordable_request(planned.economic_id(id).unwrap())
+            .units(Good::Flax)
+            > 0
+    );
     assert_eq!(worker.units(Good::Flax), 0);
 }
 

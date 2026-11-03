@@ -706,7 +706,7 @@ mod tests {
             place: place.id,
             building: building.id,
             room: Some(building.rooms[0].id),
-            owner,
+            owner: citizen.economic_id(),
         };
         (world, destination)
     }

@@ -43,6 +43,7 @@ pub struct DailyHouseholdHistory {
     pub end_ms: u64,
     pub opening_coins: Coins,
     pub closing_coins: Coins,
+    pub introduced_coins: Coins,
     pub sales_receipts: Coins,
     pub purchases: Coins,
     pub taxes_paid: Coins,
@@ -63,6 +64,7 @@ impl DailyHouseholdHistory {
             end_ms: now,
             opening_coins: coins,
             closing_coins: coins,
+            introduced_coins: 0,
             sales_receipts: 0,
             purchases: 0,
             taxes_paid: 0,
@@ -323,6 +325,7 @@ impl Universe {
                     || previous_coins.is_some_and(|coins| coins != day.opening_coins)
                     || [
                         day.opening_coins,
+                        day.introduced_coins,
                         day.closing_coins,
                         day.sales_receipts,
                         day.purchases,
@@ -335,7 +338,9 @@ impl Universe {
                     ]
                     .iter()
                     .any(|coins| *coins < 0)
-                    || i128::from(day.opening_coins) + i128::from(day.sales_receipts)
+                    || i128::from(day.opening_coins)
+                        + i128::from(day.introduced_coins)
+                        + i128::from(day.sales_receipts)
                         - i128::from(day.purchases)
                         - i128::from(day.taxes_paid)
                         - i128::from(day.workshop_fees_paid)
@@ -427,13 +432,20 @@ mod tests {
 
     fn household(world: Universe, name: &str, citizen: Citizen) -> (Universe, AgentId, AgentId) {
         let (world, member) = world.with_citizen(name, citizen).unwrap();
-        let (world, second) = world
-            .with_citizen("Other member", Citizen::new(0.0).unwrap())
+        let (world, _second) = world
+            .with_household_member(
+                match &world.agents()[&member].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
+                "Other member",
+                Citizen::new(0.0).unwrap(),
+            )
             .unwrap();
-        let AgentKind::Citizen(citizen) = &world.agents[&member].kind;
-        let (world, id) = world
-            .with_household(name, citizen.home(), &[member, second])
-            .unwrap();
+        let AgentKind::Citizen(_citizen) = &world.agents[&member].kind;
+        let id = match &world.agents()[&member].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         (world, member, id)
     }
     fn base(citizen: Citizen) -> (Universe, AgentId, AgentId) {

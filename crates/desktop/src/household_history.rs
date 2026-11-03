@@ -228,6 +228,12 @@ pub(crate) fn render(
             day.closing_coins
         ),
     );
+    if day.introduced_coins != 0 {
+        label(
+            parent,
+            format!("New member funds: {} coins", day.introduced_coins),
+        );
+    }
     if let Some(cashflow) = crate::construction::cashflow(day.construction) {
         label(parent, cashflow);
     }

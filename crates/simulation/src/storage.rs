@@ -935,7 +935,7 @@ mod transport_tests {
             let other = AgentId(uuid::Uuid::new_v4());
             if shared {
                 citizen.household = Some(crate::households::HouseholdContext {
-                    id: other,
+                    id: citizen.id,
                     members: vec![citizen.id, other],
                     allegiance: 0.0,
                     other_carried: [0; Good::COUNT],
@@ -946,7 +946,12 @@ mod transport_tests {
             let owner = citizen.goods_owner();
             let (map, other_home) = citizen
                 .map
-                .with_place(Location::Home, citizen.position, Some(other), "Other home")
+                .with_place(
+                    Location::Home,
+                    citizen.position,
+                    Some(citizen.economic_id()),
+                    "Other home",
+                )
                 .unwrap();
             let (map, distant) = map
                 .with_place(
@@ -1039,16 +1044,23 @@ mod transport_tests {
         let AgentKind::Citizen(after) = &deposited.agents()[&id].kind;
         assert_eq!(after.units(Good::BreadRoll), 30);
         assert_eq!(
-            deposited
-                .storage()
-                .units(home, GoodsOwner::Agent(id), Good::BreadRoll),
+            deposited.storage().units(
+                home,
+                match &deposited.agents()[&id].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::BreadRoll
+            ),
             70
         );
         assert_eq!(citizen.units(Good::BreadRoll), 100);
         assert_eq!(
-            world
-                .storage()
-                .owned_units(GoodsOwner::Agent(id), Good::BreadRoll),
+            world.storage().owned_units(
+                match &world.agents()[&id].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::BreadRoll
+            ),
             0
         );
         let predicted = after
@@ -1406,7 +1418,12 @@ mod physical_tests {
         world = world2;
         let (map, building) = world
             .map
-            .with_building(place, Location::Mill, other, "Private mill")
+            .with_building(
+                place,
+                Location::Mill,
+                world.economic_id(other).unwrap(),
+                "Private mill",
+            )
             .unwrap();
         world.map = map;
         let object = world
@@ -1425,7 +1442,7 @@ mod physical_tests {
             .id;
         let key = StockKey {
             place,
-            owner: GoodsOwner::Agent(id),
+            owner: world.account_owner(id).unwrap(),
             good: Good::Wheat,
         };
         world
@@ -1458,7 +1475,7 @@ mod physical_tests {
             )
             .unwrap();
         let (world, mill) = world.with_property(id, Location::Mill).unwrap();
-        let owner = GoodsOwner::Agent(id);
+        let owner = world.account_owner(id).unwrap();
         let blocked = world
             .with_stored_good(mill, owner, Good::Wheat, 600)
             .unwrap()
@@ -1504,7 +1521,7 @@ mod physical_tests {
             )
             .unwrap();
         let (world, mill) = world.with_property(id, Location::Mill).unwrap();
-        let owner = GoodsOwner::Agent(id);
+        let owner = world.account_owner(id).unwrap();
         let started = world
             .with_stored_good(mill, owner, Good::Wheat, 600)
             .unwrap()
@@ -1647,9 +1664,12 @@ mod physical_tests {
         let completed = contested.advance(duration).unwrap();
         assert_eq!(completed.map.place(field).unwrap().plots()[0], Some(crop));
         assert_eq!(
-            completed
-                .storage
-                .owned_units(GoodsOwner::Agent(id), Good::Hops),
+            completed.storage.owned_units(
+                match &completed.agents()[&id].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Hops
+            ),
             0
         );
         assert_eq!(completed.tax_arrears(rule, id), 0);
@@ -1675,14 +1695,21 @@ mod physical_tests {
             )
             .unwrap();
         let (world, other) = world
-            .with_citizen("Other", Citizen::new(0.0).unwrap())
+            .with_household_member(
+                match &world.agents()[&worker].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
+                "Other",
+                Citizen::new(0.0).unwrap(),
+            )
             .unwrap();
-        let home = match &world.agents[&worker].kind {
+        let _home = match &world.agents[&worker].kind {
             AgentKind::Citizen(citizen) => citizen.home(),
         };
-        let (world, household) = world
-            .with_household("Family", home, &[worker, other])
-            .unwrap();
+        let household = match &world.agents()[&worker].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         let (world, mill) = world.with_property(worker, Location::Mill).unwrap();
         let mut world = world
             .with_stored_good(mill, GoodsOwner::Household(household), Good::Wheat, 300)
@@ -1728,7 +1755,12 @@ mod physical_tests {
             let (mut world, place) = world.with_property(id, Location::Bakery).unwrap();
             let (map, building) = world
                 .map
-                .with_building(place, Location::Bakery, other, "Foreign bakery")
+                .with_building(
+                    place,
+                    Location::Bakery,
+                    world.economic_id(other).unwrap(),
+                    "Foreign bakery",
+                )
                 .unwrap();
             world.map = map;
             let own = world.map.place(place).unwrap().buildings[0]
@@ -1754,7 +1786,7 @@ mod physical_tests {
                 .id;
             let key = StockKey {
                 place,
-                owner: GoodsOwner::Agent(id),
+                owner: world.account_owner(id).unwrap(),
                 good: Good::BreadRoll,
             };
             world

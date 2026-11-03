@@ -93,7 +93,7 @@ fn prices_revalue_inventory_and_listed_goods_without_forcing_replanning() {
         citizen(&listed, id).units(Good::Berries),
         citizen(&updated, id).units(Good::Berries)
     );
-    assert_eq!(citizen(&updated, id).wealth(), Ok(40.0));
+    assert_eq!(citizen(&updated, id).economic_wealth(), Ok(40.0));
     assert_eq!(updated.advance(0).unwrap(), updated);
 }
 

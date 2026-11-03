@@ -11,7 +11,7 @@ fn worn_garments_are_separate_from_inventory_and_scale_wealth_and_need() {
     assert_eq!(dressed.clothing_need(), 10.0);
     assert_eq!(dressed.units(Good::FlaxGarment), 0);
     assert_eq!(
-        dressed.wealth().unwrap() - bare.wealth().unwrap(),
+        dressed.economic_wealth().unwrap() - bare.economic_wealth().unwrap(),
         Good::FlaxGarment.core_price() * 0.5
     );
     assert_eq!(bare.garment_condition(), None);

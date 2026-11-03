@@ -336,13 +336,14 @@ pub fn refresh(
     let site_layout: Vec<_> = sites
         .iter()
         .map(|place| {
-            if place.owner.is_some() && place.owner != selection.0 {
+            if place.owner.is_some() && place.owner != citizen.map(|citizen| citizen.economic_id())
+            {
                 return None;
             }
             let label = if let Some(owner) = place.owner {
                 format!(
                     "{}'s\n{}",
-                    universe.agents()[&owner].name,
+                    crate::locations::name(universe, owner),
                     place.kind.name()
                 )
             } else {
@@ -409,7 +410,9 @@ pub fn refresh(
                     node.top = next;
                 }
                 if let Some(mut color) = color {
-                    let next = if place.owner.is_some() && place.owner == selection.0 {
+                    let next = if place.owner.is_some()
+                        && place.owner == citizen.map(|citizen| citizen.economic_id())
+                    {
                         Color::srgb(1.0, 0.75, 0.20)
                     } else {
                         match place.kind {
@@ -679,18 +682,18 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let names = visible_names(&app);
-        assert_eq!(names.len(), 6);
-        assert!(names.contains(&"Ada's\nhome".into()));
-        assert!(names.contains(&"Ada's\nfield".into()));
+        assert_eq!(names.len(), 7);
+        assert!(names.contains(&"Ada and Iris household's\nhome".into()));
+        assert!(names.contains(&"Ada and Iris household's\nfield".into()));
         for public in ["Forest", "River", "Market"] {
             assert!(names.contains(&public.into()));
         }
         app.world_mut().resource_mut::<Selection>().0 = Some(bram);
         app.update();
         let names = visible_names(&app);
-        assert_eq!(names.len(), 6);
-        assert!(names.contains(&"Bram's\nhome".into()));
-        assert!(names.contains(&"Bram's\nmill".into()));
+        assert_eq!(names.len(), 7);
+        assert!(names.contains(&"Bram and Dara household's\nhome".into()));
+        assert!(names.contains(&"Bram and Dara household's\nmill".into()));
         assert!(names.iter().all(|name| !name.starts_with("Ada")));
         for marker in markers {
             assert_eq!(

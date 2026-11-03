@@ -3008,7 +3008,7 @@ mod tests {
         assert!(world.market.trades.iter().all(|trade| trade.time_ms > 0));
         assert_eq!(
             world
-                .citizen_history(buyer)
+                .household_history(world.economic_id(buyer).unwrap())
                 .unwrap()
                 .completed
                 .back()
@@ -3018,7 +3018,7 @@ mod tests {
         );
         assert_eq!(
             world
-                .citizen_history(seller)
+                .household_history(world.economic_id(seller).unwrap())
                 .unwrap()
                 .completed
                 .back()

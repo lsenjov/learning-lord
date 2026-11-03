@@ -194,7 +194,7 @@ fn harvest_reserves_socage_on_actual_yield_and_records_crop_labor_and_output() {
         let history = world.citizen_history(id).unwrap();
         assert_eq!(history.current.produced[Good::Wheat as usize], expected);
         assert!(history.current.activity.production_ms > 0);
-        assert!(citizen(&world, id).wealth().unwrap() > before.wealth().unwrap());
+        assert!(citizen(&world, id).economic_wealth().unwrap() > before.economic_wealth().unwrap());
     }
 }
 
@@ -238,7 +238,7 @@ fn weekly_assets_exclude_standing_crops() {
     );
     let world = world.advance(settlement - world.current_time_ms()).unwrap();
     assert!(citizen(&world, id).crop(field, 0).unwrap().is_some());
-    assert!(citizen(&world, id).wealth().unwrap() > 100.0);
+    assert!(citizen(&world, id).economic_wealth().unwrap() > 100.0);
     assert_eq!(citizen(&world, id).coins(), 100);
     assert_eq!(world.town_treasury(), 0);
 }

@@ -396,9 +396,9 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
     }
     groups.sort_by(|a, b| {
         a.name.cmp(&b.name).then_with(|| {
-            a.id.citizen()
+            a.id.account()
                 .map(|id| id.0)
-                .cmp(&b.id.citizen().map(|id| id.0))
+                .cmp(&b.id.account().map(|id| id.0))
         })
     });
     groups
@@ -454,7 +454,7 @@ fn order_label(good: Good, units: u64, price: f64) -> String {
 pub(crate) fn buyer_requests(universe: &Universe, good: Good) -> String {
     let market = universe.market();
     let mut buyers: Vec<_> = universe
-        .agents()
+        .households()
         .iter()
         .filter_map(|(id, agent)| {
             let requested = market.requested(*id).units(good);
@@ -657,7 +657,7 @@ pub fn refresh(
     }
     let good = selection.good();
     let buyer_key = universe
-        .agents()
+        .households()
         .iter()
         .filter_map(|(id, agent)| {
             let units = universe.market().requested(*id).units(good);
@@ -684,7 +684,7 @@ pub fn refresh(
                 .despawn_children()
                 .with_children(|content| {
                     let mut requested: Vec<_> = universe
-                        .agents()
+                        .households()
                         .iter()
                         .filter(|(id, _)| universe.market().requested(**id).units(good) > 0)
                         .collect();
@@ -697,7 +697,7 @@ pub fn refresh(
                         crate::navigation::link(
                             content,
                             &agent.name,
-                            crate::navigation::Target::Citizen(**id),
+                            crate::navigation::Target::Household(**id),
                         );
                         if requested
                             .iter()
@@ -848,7 +848,7 @@ pub fn refresh(
                                     &group.location,
                                     crate::navigation::Target::Location(group.place),
                                 );
-                                if let Some(id) = group.id.citizen()
+                                if let Some(id) = group.id.account()
                                     && groups
                                         .iter()
                                         .filter(|other| other.name == group.name)
@@ -1140,8 +1140,14 @@ mod tests {
             .with_purchase_request(water_buyer, ShoppingList::single(Good::Water, 400))
             .unwrap();
         let mut expected = [
-            (funded, "200 g requested  |  100 g affordable"),
-            (cashless, "300 g requested  |  0 g affordable"),
+            (
+                universe.economic_id(funded).unwrap(),
+                "200 g requested  |  100 g affordable",
+            ),
+            (
+                universe.economic_id(cashless).unwrap(),
+                "300 g requested  |  0 g affordable",
+            ),
         ];
         expected.sort_by_key(|(id, _)| id.0);
         let expected = expected
@@ -1185,8 +1191,12 @@ mod tests {
             .iter(app.world())
             .copied()
             .collect::<Vec<_>>();
-        assert!(targets.contains(&crate::navigation::Target::Citizen(funded)));
-        assert!(targets.contains(&crate::navigation::Target::Citizen(cashless)));
+        assert!(targets.contains(&crate::navigation::Target::Household(
+            universe.economic_id(funded).unwrap()
+        )));
+        assert!(targets.contains(&crate::navigation::Target::Household(
+            universe.economic_id(cashless).unwrap()
+        )));
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe
             .with_purchase_request(cashless, ShoppingList::default())
             .unwrap();
@@ -1260,14 +1270,14 @@ mod tests {
             .unwrap();
         let groups = seller_orders(&universe, Good::Berries);
         assert_eq!(groups.len(), 2);
-        assert!(groups.iter().all(|group| group.name == "Same"));
+        assert!(groups.iter().all(|group| group.name == "Same household"));
         let first_group = groups
             .iter()
-            .find(|group| group.id == MarketParty::Citizen(first))
+            .find(|group| group.id == MarketParty::Household(universe.economic_id(first).unwrap()))
             .unwrap();
         let second_group = groups
             .iter()
-            .find(|group| group.id == MarketParty::Citizen(second))
+            .find(|group| group.id == MarketParty::Household(universe.economic_id(second).unwrap()))
             .unwrap();
         for group in [first_group, second_group] {
             let rate = universe

@@ -577,13 +577,20 @@ mod tests {
             )
             .unwrap();
         let (world, second) = world
-            .with_citizen("Second", Citizen::new(0.0).unwrap())
+            .with_household_member(
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
+                "Second",
+                Citizen::new(0.0).unwrap(),
+            )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        let home = citizen.home();
-        let (world, account) = world
-            .with_household("Family", home, &[first, second])
-            .unwrap();
+        let _home = citizen.home();
+        let account = match &world.agents()[&first].kind {
+            crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         (world, first, second, account)
     }
 
@@ -709,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_citizens_use_personal_consumption_and_fee_history() {
+    fn single_member_households_use_shared_consumption_and_fee_history() {
         let (world, member) = Universe::with_map(Map::default())
             .with_citizen(
                 "Worker",
@@ -719,15 +726,24 @@ mod tests {
         let mut world = world
             .advance(DAY_MS + crate::marketplace::UPDATE_TIME_MS)
             .unwrap();
+        let account = world.economic_id(member).unwrap();
         let day = world
-            .citizen_histories
-            .get_mut(&member)
+            .household_histories
+            .get_mut(&account)
             .unwrap()
             .completed
             .back_mut()
             .unwrap();
         day.workshop_fees_paid = 100;
-        day.personal_consumed[Good::Beer as usize] = 10_000;
+        day.taxes_paid = 50;
+        world
+            .citizen_histories
+            .get_mut(&member)
+            .unwrap()
+            .completed
+            .back_mut()
+            .unwrap()
+            .personal_consumed[Good::Beer as usize] = 10_000;
         world
             .taxation
             .history
@@ -735,7 +751,7 @@ mod tests {
                 time_ms: DAY_MS,
                 rule: crate::taxation::TaxRuleId(99),
                 place: world.map.public_place(crate::locations::Location::Market),
-                payer: member,
+                payer: account,
                 good: None,
                 amount: crate::taxation::TaxAmount::Coins {
                     assessed: 50,

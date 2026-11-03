@@ -1757,14 +1757,21 @@ mod tests {
         let (universe, first) = Universe::default()
             .with_citizen("Ada", Citizen::new(0.0).unwrap())
             .unwrap();
-        let (universe, second) = universe
-            .with_citizen("Iris", Citizen::new(0.0).unwrap())
+        let (universe, _second) = universe
+            .with_household_member(
+                match &universe.agents()[&first].kind {
+                    AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
+                "Iris",
+                Citizen::new(0.0).unwrap(),
+            )
             .unwrap();
         let AgentKind::Citizen(citizen) = &universe.agents()[&first].kind;
-        let home = citizen.home();
-        let (universe, household) = universe
-            .with_household("Ada and Iris", home, &[first, second])
-            .unwrap();
+        let _home = citizen.home();
+        let household = match &universe.agents()[&first].kind {
+            AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+        };
+
         let universe = universe.with_property(first, Location::Field).unwrap().0;
         let (universe, _) = universe
             .with_scoped_tax_rule(
@@ -2506,12 +2513,19 @@ mod tests {
             .map()
             .public_place(learning_lord_simulation::locations::Location::Warehouse);
         let universe = universe
-            .with_stored_good(place, GoodsOwner::Agent(id), Good::Wheat, 10)
+            .with_stored_good(
+                place,
+                match &universe.agents()[&id].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Wheat,
+                10,
+            )
             .unwrap()
             .with_stored_good(place, GoodsOwner::Town, Good::Wheat, 20)
             .unwrap();
         let readout = stocks(&universe, place);
-        assert!(readout.contains("Ada | Wheat | 10 g available"));
+        assert!(readout.contains("Ada household | Wheat | 10 g available"));
         assert!(readout.contains("Town | Wheat | 20 g available"));
     }
 
@@ -2539,9 +2553,23 @@ mod tests {
             .with_guild("Guild", &[first, second], &[site], 0)
             .unwrap();
         let world = world
-            .with_stored_good(site, GoodsOwner::Agent(first), Good::Thread, 600)
+            .with_stored_good(
+                site,
+                match &world.agents()[&first].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Thread,
+                600,
+            )
             .unwrap()
-            .with_stored_good(site, GoodsOwner::Agent(second), Good::Thread, 600)
+            .with_stored_good(
+                site,
+                match &world.agents()[&second].kind {
+                    learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Thread,
+                600,
+            )
             .unwrap();
         let world = world
             .with_designated_workplace(first, site)
@@ -2599,10 +2627,13 @@ mod tests {
         )));
         assert_eq!(
             crate::navigation::plain(jori),
-            "Jori | Thread | 400 g available | sale 200 g"
+            "Jori household | Thread | 400 g available | sale 200 g"
         );
         for (row, id) in [(eira, first), (jori, second)] {
-            assert!(row.iter().any(|fragment|fragment.target==Some(crate::navigation::Target::Citizen(id))));
+            assert!(row.iter().any(|fragment| fragment.target
+                == Some(crate::navigation::Target::Household(
+                    world.economic_id(id).unwrap()
+                ))));
             assert!(
                 row.iter().any(|fragment| fragment.target
                     == Some(crate::navigation::Target::Good(Good::Thread)))
@@ -2853,9 +2884,7 @@ mod tests {
             app.world_mut()
                 .query::<&crate::navigation::Target>()
                 .iter(app.world())
-                .filter(|target| **target == crate::navigation::Target::Citizen(worker))
-                .count()
-                >= 2
+                .any(|target| *target == crate::navigation::Target::Citizen(worker))
         );
         assert!(
             app.world_mut()

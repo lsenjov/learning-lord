@@ -47,8 +47,18 @@ fn affordable_shortages_preserve_reference_and_repeated_requests_replace_intent(
     for _ in 0..20 {
         u = u.with_purchase_request(id, list).unwrap();
     }
-    assert_eq!(u.market().requested(id).units(Good::Berries), 100);
-    assert_eq!(u.market().affordable_request(id).units(Good::Berries), 100);
+    assert_eq!(
+        u.market()
+            .requested(u.economic_id(id).unwrap())
+            .units(Good::Berries),
+        100
+    );
+    assert_eq!(
+        u.market()
+            .affordable_request(u.economic_id(id).unwrap())
+            .units(Good::Berries),
+        100
+    );
     let before = u.advance(UPDATE_TIME_MS - 1).unwrap();
     assert_eq!(before.prices(), Prices::new(100.0).unwrap());
     assert!(before.market().history().is_empty());
@@ -65,7 +75,14 @@ fn affordable_shortages_preserve_reference_and_repeated_requests_replace_intent(
     assert_eq!(next.market().history()[1].start_ms, UPDATE_TIME_MS);
     assert_eq!(next.market().history()[1].end_ms, UPDATE_TIME_MS + DAY_MS);
     assert!(source.market().history().is_empty());
-    assert!(source.market().requested(id).items().next().is_none());
+    assert!(
+        source
+            .market()
+            .requested(source.economic_id(id).unwrap())
+            .items()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -74,11 +91,17 @@ fn unfunded_requests_do_not_drive_prices_and_cancellation_removes_demand() {
     let requested = source
         .with_purchase_request(id, ShoppingList::single(Good::Berries, 100))
         .unwrap();
-    assert_eq!(requested.market().requested(id).units(Good::Berries), 100);
     assert_eq!(
         requested
             .market()
-            .affordable_request(id)
+            .requested(requested.economic_id(id).unwrap())
+            .units(Good::Berries),
+        100
+    );
+    assert_eq!(
+        requested
+            .market()
+            .affordable_request(requested.economic_id(id).unwrap())
             .units(Good::Berries),
         0
     );
@@ -94,7 +117,14 @@ fn unfunded_requests_do_not_drive_prices_and_cancellation_removes_demand() {
         .unwrap()
         .advance(UPDATE_TIME_MS)
         .unwrap();
-    assert!(cleared.market().requested(id).items().next().is_none());
+    assert!(
+        cleared
+            .market()
+            .requested(cleared.economic_id(id).unwrap())
+            .items()
+            .next()
+            .is_none()
+    );
     assert!(cleared.market().history().is_empty());
 }
 
@@ -110,7 +140,12 @@ fn unsold_supply_marks_down_seller_quotes_after_observation_and_preserves_refere
         (initial_quote + 100.0) / 2.0,
     );
     let observed = after.advance(2 * DAY_MS).unwrap();
-    let rate = f64::from(observed.market().seller_adjustment_rate(seller).unwrap()) / 100.0;
+    let rate = f64::from(
+        observed
+            .market()
+            .seller_adjustment_rate(observed.economic_id(seller).unwrap())
+            .unwrap(),
+    ) / 100.0;
     close(
         observed.market().orders().next().unwrap().quoted_price,
         ((initial_quote + 100.0) / 2.0 + 100.0) / 4.0 + 100.0 * (1.0 - rate) / 2.0,
@@ -140,9 +175,21 @@ fn actual_fills_reduce_requests_and_record_volume_and_observed_prices() {
             CitizenAction::Buy(ShoppingList::single(Good::Berries, 100)),
         )
         .unwrap();
-    assert_eq!(started.market().requested(id).units(Good::Berries), 100);
+    assert_eq!(
+        started
+            .market()
+            .requested(started.economic_id(id).unwrap())
+            .units(Good::Berries),
+        100
+    );
     let bought = started.advance(TRADE_DURATION_MS).unwrap();
-    assert_eq!(bought.market().requested(id).units(Good::Berries), 0);
+    assert_eq!(
+        bought
+            .market()
+            .requested(bought.economic_id(id).unwrap())
+            .units(Good::Berries),
+        0
+    );
     let cost = (u.market().orders().next().unwrap().quoted_price * 0.1).ceil() as i64;
     assert_eq!(citizen(&bought, seller).coins(), cost);
     let after = bought
@@ -179,9 +226,24 @@ fn one_coin_budget_is_shared_across_goods_and_available_asks_override_reference_
     let request =
         ShoppingList::new([(Good::Flour, 100), (Good::Wood, 100), (Good::Water, 100)]).unwrap();
     let u = source.with_purchase_request(id, request).unwrap();
-    assert_eq!(u.market().affordable_request(id).units(Good::Flour), 100);
-    assert_eq!(u.market().affordable_request(id).units(Good::Wood), 40);
-    assert_eq!(u.market().affordable_request(id).units(Good::Water), 0);
+    assert_eq!(
+        u.market()
+            .affordable_request(u.economic_id(id).unwrap())
+            .units(Good::Flour),
+        100
+    );
+    assert_eq!(
+        u.market()
+            .affordable_request(u.economic_id(id).unwrap())
+            .units(Good::Wood),
+        40
+    );
+    assert_eq!(
+        u.market()
+            .affordable_request(u.economic_id(id).unwrap())
+            .units(Good::Water),
+        0
+    );
     let (u, _) = supply(100);
     let (u, id) = u
         .with_prices(Prices::new(200.0).unwrap())
@@ -193,7 +255,7 @@ fn one_coin_budget_is_shared_across_goods_and_available_asks_override_reference_
     assert_eq!(
         requested
             .market()
-            .affordable_request(id)
+            .affordable_request(requested.economic_id(id).unwrap())
             .units(Good::Berries),
         (10000.0 / requested.market().orders().next().unwrap().quoted_price).floor() as u64
     );
@@ -216,7 +278,12 @@ fn seller_income_funds_an_existing_request_without_accumulating_retries() {
     let u = u
         .with_purchase_request(seller, ShoppingList::single(Good::Flour, 100))
         .unwrap();
-    assert_eq!(u.market().affordable_request(seller).units(Good::Flour), 0);
+    assert_eq!(
+        u.market()
+            .affordable_request(u.economic_id(seller).unwrap())
+            .units(Good::Flour),
+        0
+    );
     let (u, id) = u
         .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
         .unwrap();
@@ -229,10 +296,19 @@ fn seller_income_funds_an_existing_request_without_accumulating_retries() {
         .advance(TRADE_DURATION_MS)
         .unwrap();
     assert_eq!(
-        after.market().affordable_request(seller).units(Good::Flour),
+        after
+            .market()
+            .affordable_request(after.economic_id(seller).unwrap())
+            .units(Good::Flour),
         100
     );
-    assert_eq!(after.market().requested(seller).units(Good::Flour), 100);
+    assert_eq!(
+        after
+            .market()
+            .requested(after.economic_id(seller).unwrap())
+            .units(Good::Flour),
+        100
+    );
 }
 
 #[test]
@@ -272,7 +348,10 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
     );
     let remaining = direct.market().orders().next().unwrap();
     assert_eq!(remaining.id, original_order.id);
-    assert_eq!(remaining.seller.citizen(), Some(seller));
+    assert_eq!(
+        remaining.seller.account(),
+        Some(direct.economic_id(seller).unwrap())
+    );
     assert_eq!(remaining.good, original_order.good);
     assert_eq!(remaining.units, 50);
     close(remaining.quoted_price, original_order.quoted_price);
@@ -288,7 +367,15 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
         after.market().trades()[1].coins,
         (original_order.quoted_price * 0.05).ceil() as i64
     );
-    assert_eq!(after.market().listed_units(seller, Good::Berries), 0);
+    assert_eq!(
+        after.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                after.economic_id(seller).unwrap()
+            ),
+            Good::Berries
+        ),
+        0
+    );
 }
 
 #[test]
@@ -311,7 +398,14 @@ fn prediction_does_not_register_demands_or_publish_history() {
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    assert!(isolated.market().requested(id).items().next().is_none());
+    assert!(
+        isolated
+            .market()
+            .requested(isolated.economic_id())
+            .items()
+            .next()
+            .is_none()
+    );
     assert!(isolated.market().trades().is_empty());
     assert!(isolated.market().history().is_empty());
     assert_eq!(u, before);
@@ -339,7 +433,15 @@ fn purchases_crossing_four_preserve_independent_seller_quotes() {
         (initial_quote + 100.0) / 2.0,
     );
     assert!(boundary.market().trades().is_empty());
-    assert_eq!(boundary.market().listed_units(seller, Good::Berries), 150);
+    assert_eq!(
+        boundary.market().listed_units(
+            learning_lord_simulation::marketplace::MarketParty::Household(
+                boundary.economic_id(seller).unwrap()
+            ),
+            Good::Berries
+        ),
+        150
+    );
     let completed = boundary.advance(TRADE_DURATION_MS / 2).unwrap();
     assert_eq!(completed.market().trades()[0].units, 100);
     let cost = (((initial_quote + 100.0) / 2.0) * 0.1).ceil() as i64;

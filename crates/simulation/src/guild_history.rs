@@ -250,8 +250,7 @@ impl Universe {
                         if fee.unpaid < 0
                             || fee.remainder >= FEE_HOUR_MS
                             || *fee == WorkshopFeeAccount::default()
-                            || (!self.agents.contains_key(payer)
-                                && !self.households.contains_key(payer))
+                            || !self.households.contains_key(payer)
                             || !self
                                 .account_workers(*payer)
                                 .iter()

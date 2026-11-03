@@ -632,7 +632,7 @@ impl Citizen {
         self.map
             .places()
             .values()
-            .filter(|place| place.owner == Some(self.id))
+            .filter(|place| place.owner == Some(self.economic_id()))
     }
     pub(crate) fn accessible_properties(&self) -> impl Iterator<Item = &locations::Place> {
         self.map
@@ -764,7 +764,7 @@ impl Citizen {
         self.economic_wealth()
     }
 
-    pub(crate) fn economic_wealth(&self) -> Result<f64, SimulationError> {
+    pub fn economic_wealth(&self) -> Result<f64, SimulationError> {
         let mut wealth = self.coins as f64 + self.construction_escrow as f64
             - self.workshop_fee_liability()
             + self.prices.value(Good::FlaxGarment, 1).unwrap_or(0.0)
@@ -2202,7 +2202,7 @@ impl Universe {
         let listed: u128 = self
             .market
             .orders()
-            .filter(|order| order.good == good && order.seller.citizen().is_some())
+            .filter(|order| order.good == good && order.seller.account().is_some())
             .map(|order| u128::from(order.units))
             .sum();
         carried + stored + listed
@@ -2234,8 +2234,12 @@ impl Universe {
     ) -> Result<Self, SimulationError> {
         self.map.place(place)?;
         match owner {
-            GoodsOwner::Agent(id) if !self.agents.contains_key(&id) => {
-                return Err(SimulationError::AgentNotFound);
+            GoodsOwner::Agent(id) if !self.guilds.contains_key(&id) => {
+                return Err(if self.agents.contains_key(&id) {
+                    SimulationError::InvalidOwnership
+                } else {
+                    SimulationError::AgentNotFound
+                });
             }
             GoodsOwner::Household(id) if !self.households.contains_key(&id) => {
                 return Err(SimulationError::AgentNotFound);
@@ -2252,9 +2256,8 @@ impl Universe {
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
         universe.refresh_guild_history(universe.current_time_ms, false);
-        if let GoodsOwner::Agent(id) = owner {
-            let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
-            citizen.wealth()?;
+        if let GoodsOwner::Household(id) = owner {
+            universe.household_wealth(id)?;
         }
         Ok(universe)
     }
@@ -2431,40 +2434,211 @@ impl Universe {
         &self.agents
     }
 
+    /// Creates a named single-member household and returns the citizen ID.
     pub fn with_citizen(
         &self,
         name: impl Into<String>,
         citizen: Citizen,
     ) -> Result<(Self, AgentId), SimulationError> {
         let name = name.into();
+        self.with_new_household(name.clone(), name, citizen)
+    }
+
+    /// Creates a household with its first member and returns the citizen ID.
+    pub fn with_new_household(
+        &self,
+        household_name: impl Into<String>,
+        name: impl Into<String>,
+        citizen: Citizen,
+    ) -> Result<(Self, AgentId), SimulationError> {
+        self.insert_citizen(name.into(), citizen, None, Some(household_name.into()))
+    }
+
+    /// Adds a new citizen directly to an existing household.
+    pub fn with_household_member(
+        &self,
+        household: AgentId,
+        name: impl Into<String>,
+        citizen: Citizen,
+    ) -> Result<(Self, AgentId), SimulationError> {
+        if !self.households.contains_key(&household) {
+            return Err(SimulationError::AgentNotFound);
+        }
+        self.insert_citizen(name.into(), citizen, Some(household), None)
+    }
+
+    fn insert_citizen(
+        &self,
+        name: String,
+        citizen: Citizen,
+        household: Option<AgentId>,
+        household_name: Option<String>,
+    ) -> Result<(Self, AgentId), SimulationError> {
         let id = citizen.id;
-        if self.agents.contains_key(&id) {
+        if self.agents.contains_key(&id)
+            || self.households.contains_key(&id)
+            || self.guilds.contains_key(&id)
+        {
             return Err(SimulationError::AgentAlreadyExists);
         }
-        if !citizen.guilds.is_empty() || !citizen.workshop_fees.is_empty() {
-            return Err(SimulationError::InvalidOwnership);
+        if citizen.coins < 0 {
+            return Err(SimulationError::InvalidCoins);
         }
         if citizen.tax_reserved.values().any(|units| *units > 0) {
             return Err(SimulationError::ReservedCitizenImport);
         }
+        if citizen.household.is_some()
+            || !citizen.guilds.is_empty()
+            || !citizen.workshop_fees.is_empty()
+        {
+            return Err(SimulationError::InvalidOwnership);
+        }
+        if citizen.storage.stock().keys().any(|key| {
+            key.owner == citizen.goods_owner()
+                && (citizen
+                    .storage
+                    .reserved_units(key.place, key.owner, key.good)
+                    > 0
+                    || citizen.storage.work_reserved_units(*key) > 0)
+        }) {
+            return Err(SimulationError::ReservedCitizenImport);
+        }
+        let starting_home = citizen.home;
+        let starting_stock: Vec<_> = citizen
+            .storage
+            .stock()
+            .iter()
+            .filter(|(key, _)| key.owner == citizen.goods_owner())
+            .map(|(key, units)| (*key, *units))
+            .collect();
         let mut universe = self.clone();
         let mut citizen = citizen.with_prices(self.prices());
-        if citizen.map != self.map {
-            let (map, home) = universe.map.with_place(
-                Location::Home,
-                universe.map.next_position(Location::Home),
-                Some(id),
-                format!("{name}'s home"),
-            )?;
-            universe.map = map;
+        let account = household.unwrap_or_else(|| AgentId(uuid::Uuid::new_v4()));
+        let starting_coins = citizen.coins;
+        if let Some(household) = household {
+            let home = universe.households[&household].home;
+            universe.map.assign_bedroom(home, id, &[household])?;
             citizen.home = home;
             citizen.position = universe.map.position(home);
             citizen.active_action = None;
             citizen.active_plan = None;
+            let family = universe.households.get_mut(&household).unwrap();
+            family.coins = family
+                .coins
+                .checked_add(starting_coins)
+                .ok_or(SimulationError::WealthOverflow)?;
+            family.members.push(id);
+            let history = &mut universe
+                .household_histories
+                .get_mut(&household)
+                .unwrap()
+                .current;
+            history.introduced_coins = history
+                .introduced_coins
+                .checked_add(starting_coins)
+                .ok_or(SimulationError::WealthOverflow)?;
+        } else {
+            if citizen.map != self.map {
+                let (map, home) = universe.map.with_place(
+                    Location::Home,
+                    universe.map.next_position(Location::Home),
+                    Some(id),
+                    format!("{name}'s home"),
+                )?;
+                universe.map = map;
+                citizen.home = home;
+                citizen.position = universe.map.position(home);
+                citizen.active_action = None;
+                citizen.active_plan = None;
+            }
+            for (_, place) in universe.map.places_mut().iter_mut() {
+                if place.owner == Some(id) {
+                    place.owner = Some(account);
+                }
+                for building in &mut place.buildings {
+                    if building.owner == id {
+                        building.owner = account;
+                    }
+                }
+            }
+            universe.map.assign_bedroom(citizen.home, id, &[account])?;
+            let household_name = household_name.unwrap();
+            universe.map = universe
+                .map
+                .with_place_name(citizen.home, format!("{household_name}'s home"))?;
+            universe.households.insert(
+                account,
+                households::Household {
+                    id: account,
+                    name: household_name,
+                    home: citizen.home,
+                    members: vec![id],
+                    coins: starting_coins,
+                    maintenance: maintenance::MaintenanceState::default(),
+                },
+            );
+            universe.household_histories.insert(
+                account,
+                household_history::HouseholdHistory::new(universe.current_time_ms, starting_coins),
+            );
         }
-        universe.map = universe
-            .map
-            .with_place_name(citizen.home, format!("{name}'s home"))?;
+        for (key, units) in starting_stock {
+            let place = if key.place == starting_home {
+                citizen.home
+            } else {
+                key.place
+            };
+            universe.map.place(place)?;
+            let key = StockKey {
+                place,
+                owner: GoodsOwner::Household(account),
+                good: key.good,
+            };
+            let existing = universe
+                .storage
+                .units(place, GoodsOwner::Agent(id), key.good);
+            if existing == 0 {
+                let units = universe
+                    .storage
+                    .units(place, key.owner, key.good)
+                    .checked_add(units)
+                    .ok_or(SimulationError::InventoryOverflow)?;
+                universe
+                    .storage
+                    .set_units(key, units, &universe.map, &universe.market)?;
+            }
+        }
+        let imported_stock: Vec<_> = universe
+            .storage
+            .stock()
+            .keys()
+            .filter(|key| key.owner == GoodsOwner::Agent(id))
+            .copied()
+            .collect();
+        for key in imported_stock {
+            universe
+                .storage
+                .reassign_owner(key, GoodsOwner::Household(account))?;
+        }
+        let family = &universe.households[&account];
+        citizen.coins = family.coins;
+        citizen.maintenance = family.maintenance;
+        citizen.household = Some(households::HouseholdContext {
+            id: account,
+            members: family.members.clone(),
+            allegiance: 1.0,
+            other_carried: [0; Good::COUNT],
+            other_consumption_value: 0.0,
+            other_clothing_replacements: 0,
+        });
+        for (_, agent) in universe.agents.iter_mut() {
+            let AgentKind::Citizen(existing) = &mut agent.kind;
+            if let Some(context) = &mut existing.household {
+                if context.id == account {
+                    context.members = family.members.clone();
+                }
+            }
+        }
         citizen.map = universe.map.clone();
         citizen.market = universe.market.clone();
         citizen.storage = universe.storage.clone();
@@ -2487,6 +2661,9 @@ impl Universe {
         universe.register_action_request(id)?;
         universe.refresh_tax_rates();
         universe.refresh_market();
+        universe.refresh_construction_context()?;
+        universe.refresh_workplace_supplies()?;
+        universe.refresh_household_history(universe.current_time_ms, false)?;
         Ok((universe, id))
     }
 
@@ -2495,15 +2672,18 @@ impl Universe {
         owner: AgentId,
         kind: Location,
     ) -> Result<(Self, PlaceId), SimulationError> {
-        let agent = self
-            .agents
+        let owner = self.economic_id(owner)?;
+        let name = self
+            .households
             .get(&owner)
+            .map(|household| &household.name)
+            .or_else(|| self.guilds.get(&owner).map(|guild| &guild.name))
             .ok_or(SimulationError::AgentNotFound)?;
         let (map, id) = self.map.with_place(
             kind,
             self.map.next_position(kind),
             Some(owner),
-            format!("{}'s {}", agent.name, kind.name()),
+            format!("{name}'s {}", kind.name()),
         )?;
         let mut universe = self.clone();
         universe.map = map;
@@ -3481,13 +3661,12 @@ impl fmt::Display for SimulationError {
 
 impl std::error::Error for SimulationError {}
 
-#[cfg(test)]
 impl Citizen {
-    pub(crate) fn with_home_good(
-        &self,
-        good: Good,
-        units: Quantity,
-    ) -> Result<Self, SimulationError> {
+    /// Sets home stock in an isolated setup snapshot.
+    pub fn with_home_good(&self, good: Good, units: Quantity) -> Result<Self, SimulationError> {
+        if self.active_action.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
         let mut citizen = self.clone();
         citizen.storage.set_units(
             storage::StockKey {
@@ -3501,7 +3680,10 @@ impl Citizen {
         )?;
         Ok(citizen)
     }
+}
 
+#[cfg(test)]
+impl Citizen {
     pub(crate) fn reserve_home_good(&mut self, good: Good, units: Quantity) {
         self.storage
             .set_reserved(

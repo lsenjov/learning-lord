@@ -99,14 +99,25 @@ fn storage_retains_goods_ownership_independently_and_snapshots_are_immutable() {
         .id;
     let before = world.clone();
     let stored = world
-        .with_stored_good(home, GoodsOwner::Agent(bram), Good::BreadRoll, 15)
+        .with_stored_good(
+            home,
+            match &world.agents()[&bram].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::BreadRoll,
+            15,
+        )
         .unwrap()
         .with_stored_good(home, GoodsOwner::Town, Good::BreadRoll, 35)
         .unwrap();
     assert_eq!(
-        stored
-            .storage()
-            .units(home, GoodsOwner::Agent(bram), Good::BreadRoll),
+        stored.storage().units(
+            home,
+            match &stored.agents()[&bram].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::BreadRoll
+        ),
         15
     );
     assert_eq!(
@@ -115,7 +126,7 @@ fn storage_retains_goods_ownership_independently_and_snapshots_are_immutable() {
             .units(home, GoodsOwner::Town, Good::BreadRoll),
         35
     );
-    assert_eq!(citizen(&stored, bram).wealth().unwrap(), 45.0);
+    assert_eq!(citizen(&stored, bram).economic_wealth().unwrap(), 45.0);
     assert_eq!(citizen(&stored, bram).units(Good::BreadRoll), 0);
     assert_eq!(citizen(&stored, bram).food_nutrition(), 0.0);
     assert_eq!(
@@ -149,14 +160,18 @@ fn local_transfers_conserve_wealth_and_never_use_another_owners_stock() {
     let deposited = world.deposit_goods(ada, home, Good::BreadRoll, 20).unwrap();
     assert_eq!(citizen(&deposited, ada).units(Good::BreadRoll), 5);
     assert_eq!(
-        deposited
-            .storage()
-            .units(home, GoodsOwner::Agent(ada), Good::BreadRoll),
+        deposited.storage().units(
+            home,
+            match &deposited.agents()[&ada].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::BreadRoll
+        ),
         20
     );
     assert_eq!(
-        citizen(&deposited, ada).wealth().unwrap(),
-        citizen(&world, ada).wealth().unwrap()
+        citizen(&deposited, ada).economic_wealth().unwrap(),
+        citizen(&world, ada).economic_wealth().unwrap()
     );
     assert_eq!(citizen(&deposited, ada).food_nutrition(), 50.0);
     assert_eq!(
@@ -215,7 +230,14 @@ fn storage_validates_references_and_overflow_without_changing_source() {
         Err(SimulationError::AgentNotFound)
     );
     assert_eq!(
-        world.with_stored_good(home, GoodsOwner::Agent(ada), Good::BreadRoll, u64::MAX),
+        world.with_stored_good(
+            home,
+            match &world.agents()[&ada].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::BreadRoll,
+            u64::MAX
+        ),
         Err(SimulationError::WealthOverflow)
     );
     let town = world
@@ -273,15 +295,22 @@ fn storage_transfers_preserve_active_production_inputs_and_completion() {
     assert_eq!(citizen(&finished, ada).units(Good::Wheat), 0);
     assert_eq!(citizen(&finished, ada).units(Good::Flour), 0);
     assert!(
-        finished
-            .storage()
-            .units(mill, GoodsOwner::Agent(ada), Good::Flour)
-            > 0
+        finished.storage().units(
+            mill,
+            match &finished.agents()[&ada].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::Flour
+        ) > 0
     );
     assert_eq!(
-        finished
-            .storage()
-            .units(mill, GoodsOwner::Agent(ada), Good::Wheat),
+        finished.storage().units(
+            mill,
+            match &finished.agents()[&ada].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
+            Good::Wheat
+        ),
         450 - input
     );
 }

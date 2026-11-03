@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::planning::plan;
 use learning_lord_simulation::{
     AgentId, AgentKind, Citizen, CitizenAction, SimulationError, Universe,

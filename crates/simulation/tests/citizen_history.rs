@@ -172,23 +172,39 @@ fn purchases_record_both_sides_and_ignore_price_revaluation() {
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    let before = world.citizen_history(seller_id).unwrap().current.clone();
+    let before = world
+        .household_history(world.economic_id(seller_id).unwrap())
+        .unwrap()
+        .current
+        .clone();
     let world = world.with_prices(world.prices().with_price(Good::Berries, 4.0).unwrap());
-    assert_eq!(world.citizen_history(seller_id).unwrap().current, before);
+    assert_eq!(
+        world
+            .household_history(world.economic_id(seller_id).unwrap())
+            .unwrap()
+            .current,
+        before
+    );
     let world = world
         .start_action(buyer_id, CitizenAction::BuyFood(Good::Berries))
         .unwrap()
         .advance(TRADE_DURATION_MS)
         .unwrap();
-    let seller = &world.citizen_history(seller_id).unwrap().current;
-    let buyer = &world.citizen_history(buyer_id).unwrap().current;
+    let seller = &world
+        .household_history(world.economic_id(seller_id).unwrap())
+        .unwrap()
+        .current;
+    let buyer = &world
+        .household_history(world.economic_id(buyer_id).unwrap())
+        .unwrap()
+        .current;
     assert_eq!(
         seller.sold[Good::Berries as usize],
         buyer.bought[Good::Berries as usize]
     );
     assert!(seller.sold[Good::Berries as usize] > 0);
-    assert_eq!(seller.coins_earned, buyer.coins_spent);
-    assert!(seller.coins_earned > 0);
-    assert_eq!(seller.coins_spent, 0);
-    assert_eq!(buyer.coins_earned, 0);
+    assert_eq!(seller.sales_receipts, buyer.purchases);
+    assert!(seller.sales_receipts > 0);
+    assert_eq!(seller.purchases, 0);
+    assert_eq!(buyer.sales_receipts, 0);
 }

@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::{Citizen, CitizenAction, SimulationError, Universe};
 
 const MINUTE_MS: u64 = 60_000;
@@ -203,7 +200,9 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     let original = original
         .with_stored_good(
             ada.home(),
-            learning_lord_simulation::storage::GoodsOwner::Agent(id),
+            match &original.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
             learning_lord_simulation::marketplace::Good::Berries,
             155,
         )
@@ -226,7 +225,7 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     assert_eq!(after.thirst(), before.thirst());
     assert_eq!(after.tiredness(), before.tiredness());
     assert_eq!(after.position(), before.position());
-    assert_eq!(after.wealth(), before.wealth());
+    assert_eq!(after.economic_wealth(), before.economic_wealth());
     for good in learning_lord_simulation::marketplace::Good::ALL {
         assert_eq!(after.units(good), before.units(good));
         assert_eq!(
@@ -253,7 +252,7 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     assert_eq!(eat_other.hunger(), wait_other.hunger());
     assert_eq!(eat_other.thirst(), wait_other.thirst());
     assert_eq!(eat_other.tiredness(), wait_other.tiredness());
-    assert_eq!(eat_other.wealth(), wait_other.wealth());
+    assert_eq!(eat_other.economic_wealth(), wait_other.economic_wealth());
     assert_eq!(eat_other.position(), wait_other.position());
     assert_close(
         eaten.agents()[&id].personal_wellbeing().unwrap(),
@@ -261,7 +260,7 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     );
     assert_close(
         waited.agents()[&id].personal_wellbeing().unwrap(),
-        -20.0 + 5.0 + 155.0 / 1000.0 * 0.05 * 10.0 - 3.0 * 100.0 / 24.0 * 31.0 / 60.0,
+        -20.0 + 5.0 - 3.0 * 100.0 / 24.0 * 31.0 / 60.0,
     );
     assert_eq!(eating, eating_snapshot);
     assert_eq!(original, snapshot);

@@ -171,7 +171,11 @@ impl Universe {
         for id in workshops {
             let place = self.map.place(*id)?;
             if !supported_workshop(place.kind)
-                || !place.owner.is_some_and(|owner| members.contains(&owner))
+                || !place.owner.is_some_and(|owner| {
+                    members
+                        .iter()
+                        .any(|member| self.economic_id(*member).ok() == Some(owner))
+                })
             {
                 return Err(SimulationError::InvalidOwnership);
             }
@@ -333,7 +337,7 @@ impl Universe {
         }
         for place in self.map.places().values() {
             if place.owner.is_some_and(|owner| {
-                !self.agents.contains_key(&owner)
+                !self.households.contains_key(&owner)
                     && !self
                         .guilds
                         .get(&owner)
@@ -358,6 +362,12 @@ mod tests {
     };
 
     fn workshop(coins: Coins) -> (Universe, AgentId, AgentId, PlaceId, AgentId) {
+        workshop_with_household(coins, false)
+    }
+    fn workshop_with_household(
+        coins: Coins,
+        shared: bool,
+    ) -> (Universe, AgentId, AgentId, PlaceId, AgentId) {
         let (world, first) = Universe::with_map(Map::default())
             .with_citizen(
                 "First",
@@ -368,16 +378,17 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        let (world, second) = world
-            .with_citizen(
-                "Second",
-                Citizen::new(0.0)
-                    .unwrap()
-                    .with_starting_role(StartingRole::Weaver)
-                    .with_coins(coins)
-                    .unwrap(),
-            )
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Weaver)
+            .with_coins(coins)
             .unwrap();
+        let (world, second) = if shared {
+            world.with_household_member(world.economic_id(first).unwrap(), "Second", citizen)
+        } else {
+            world.with_citizen("Second", citizen)
+        }
+        .unwrap();
         let (world, place) = world.with_property(first, Location::Weavery).unwrap();
         let (world, guild) = world
             .with_guild("Weavers", &[first, second], &[place], 1)
@@ -390,7 +401,14 @@ mod tests {
         for worker in [first, second] {
             for &(good, units) in Recipe::WeaveCloth.inputs() {
                 world = world
-                    .with_stored_good(place, GoodsOwner::Agent(worker), good, units * 20)
+                    .with_stored_good(
+                        place,
+                        match &world.agents()[&worker].kind {
+                            crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                        },
+                        good,
+                        units * 20,
+                    )
                     .unwrap();
             }
         }
@@ -432,15 +450,23 @@ mod tests {
         let finished = start(world, first, place).advance(duration).unwrap();
         for &(good, units) in Recipe::WeaveCloth.outputs() {
             assert_eq!(
-                finished
-                    .storage
-                    .units(place, GoodsOwner::Agent(first), good),
+                finished.storage.units(
+                    place,
+                    match &finished.agents()[&first].kind {
+                        crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                    },
+                    good
+                ),
                 units
             );
             assert_eq!(
-                finished
-                    .storage
-                    .units(place, GoodsOwner::Agent(second), good),
+                finished.storage.units(
+                    place,
+                    match &finished.agents()[&second].kind {
+                        crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                    },
+                    good
+                ),
                 0
             );
         }
@@ -472,6 +498,7 @@ mod tests {
     #[test]
     fn fees_are_exact_split_invariant_and_only_charge_actual_work() {
         let (world, first, _, place, guild) = workshop(10);
+        let account = world.economic_id(first).unwrap();
         let started = start(world, first, place);
         let AgentKind::Citizen(citizen) = &started.agents[&first].kind;
         let duration = citizen.active_action().unwrap().remaining_ms();
@@ -484,7 +511,7 @@ mod tests {
         assert_eq!(once.guild_history(guild), split.guild_history(guild));
         assert_eq!(once.workshop_fees, split.workshop_fees);
         assert_eq!(once.guilds[&guild].coins, split.guilds[&guild].coins);
-        let fee = once.workshop_fees[&(first, guild)];
+        let fee = once.workshop_fees[&(account, guild)];
         assert_eq!(fee.remainder, duration % FEE_HOUR_MS);
         assert_eq!(fee.unpaid, 0);
         assert_eq!(once.guilds[&guild].coins, (duration / FEE_HOUR_MS) as Coins);
@@ -505,6 +532,7 @@ mod tests {
     #[test]
     fn unpaid_fees_reduce_wealth_without_blocking_work_and_settle_when_cash_arrives() {
         let (world, first, _, place, guild) = workshop(0);
+        let account = world.economic_id(first).unwrap();
         let AgentKind::Citizen(before) = &world.agents[&first].kind;
         let gross_profit =
             crate::production::recipe_profit_for_site(Recipe::WeaveCloth, before, Some(place))
@@ -525,18 +553,22 @@ mod tests {
         for _ in 0..3 {
             world = start(world, first, place).advance(duration).unwrap();
         }
-        let fee = world.workshop_fees[&(first, guild)];
+        let fee = world.workshop_fees[&(account, guild)];
         assert!(fee.unpaid > 0);
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
         assert_eq!(citizen.coins(), 0);
         let mut forgiven = citizen.clone();
         forgiven.workshop_fees.clear();
         assert!(
-            (forgiven.wealth().unwrap() - citizen.wealth().unwrap() - fee.liability()).abs() < 1e-9
+            (forgiven.economic_wealth().unwrap()
+                - citizen.economic_wealth().unwrap()
+                - fee.liability())
+            .abs()
+                < 1e-9
         );
         let day = &world.guild_history(guild).unwrap().current;
         assert_eq!(day.fees_accrued, fee);
-        assert_eq!(day.closing_outstanding[&first], fee);
+        assert_eq!(day.closing_outstanding[&account], fee);
         assert_eq!(day.payments_received, 0);
         let restored = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
         assert_eq!(restored, world);
@@ -545,12 +577,12 @@ mod tests {
         world.refresh_guild_history(world.current_time_ms, false);
         let day = &world.guild_history(guild).unwrap().current;
         assert_eq!(day.payments_received, fee.unpaid);
-        assert_eq!(day.closing_outstanding[&first].remainder, fee.remainder);
+        assert_eq!(day.closing_outstanding[&account].remainder, fee.remainder);
         assert_eq!(day.fees_accrued, fee);
         assert_eq!(world.guilds[&guild].coins, fee.unpaid);
-        assert_eq!(world.workshop_fees[&(first, guild)].unpaid, 0);
+        assert_eq!(world.workshop_fees[&(account, guild)].unpaid, 0);
         assert_eq!(
-            world.workshop_fees[&(first, guild)].remainder,
+            world.workshop_fees[&(account, guild)].remainder,
             fee.remainder
         );
         assert_eq!(world.account_coins(first).unwrap(), 10 - fee.unpaid);
@@ -559,10 +591,11 @@ mod tests {
     #[test]
     fn fee_overflow_is_atomic_and_corrupt_fee_saves_are_rejected() {
         let (world, first, _, place, guild) = workshop(10);
+        let account = world.economic_id(first).unwrap();
         let mut world = start(world, first, place);
         world.guilds.get_mut(&guild).unwrap().coins = Coins::MAX;
         world.workshop_fees.insert(
-            (first, guild),
+            (account, guild),
             WorkshopFeeAccount {
                 unpaid: 0,
                 remainder: FEE_HOUR_MS - 1,
@@ -578,7 +611,7 @@ mod tests {
         let mut world = before;
         world.guilds.get_mut(&guild).unwrap().coins = 0;
         world.workshop_fees.insert(
-            (first, guild),
+            (account, guild),
             WorkshopFeeAccount {
                 unpaid: 0,
                 remainder: FEE_HOUR_MS,
@@ -609,7 +642,14 @@ mod tests {
         assert_eq!(world.account_coins(first).unwrap(), 10);
         assert_eq!(world.tax_arrears(rule, guild), 0);
         world = world
-            .with_stored_good(place, GoodsOwner::Agent(first), Good::Cloth, 200)
+            .with_stored_good(
+                place,
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Cloth,
+                200,
+            )
             .unwrap();
         let (mut world, _) = world
             .with_tax_rule(
@@ -626,9 +666,13 @@ mod tests {
             .tax_production(first, place, Good::Cloth, 200, 0)
             .unwrap();
         assert_eq!(
-            world
-                .storage
-                .reserved_units(place, GoodsOwner::Agent(first), Good::Cloth),
+            world.storage.reserved_units(
+                place,
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Cloth
+            ),
             100
         );
         assert!(
@@ -636,7 +680,8 @@ mod tests {
                 .taxation
                 .accounts
                 .keys()
-                .any(|key| key.payer == first && key.good == Some(Good::Cloth))
+                .any(|key| key.payer == world.economic_id(first).unwrap()
+                    && key.good == Some(Good::Cloth))
         );
         assert!(
             !world
@@ -647,32 +692,26 @@ mod tests {
         );
 
         assert_eq!(
-            world
-                .storage
-                .owned_units(GoodsOwner::Agent(first), Good::Cloth),
+            world.storage.owned_units(
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Cloth
+            ),
             200
         );
     }
     #[test]
     fn concurrent_workers_share_account_fractions_without_pooling_independent_goods() {
         for shared in [false, true] {
-            let (mut world, first, second, place, guild) = workshop(10);
+            let (mut world, first, second, place, guild) = workshop_with_household(10, shared);
             let room = &mut world.map.places_mut().get_mut(&place).unwrap().buildings[0].rooms[0];
             room.size = crate::locations::RoomSize::Large;
             room.objects.push(crate::locations::Object::new(
                 crate::locations::ObjectKind::Loom,
             ));
             world.refresh_market();
-            let account = if shared {
-                let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-                let (next, household) = world
-                    .with_household("Weaving family", citizen.home(), &[first, second])
-                    .unwrap();
-                world = next;
-                household
-            } else {
-                first
-            };
+            let account = world.economic_id(first).unwrap();
             let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
             let duration = citizen
                 .action_duration_ms(CitizenAction::ProduceAt {
@@ -698,7 +737,7 @@ mod tests {
                 let day = &once.household_histories[&account].current;
                 assert_eq!(day.workshop_fees_paid, (expected / FEE_HOUR_MS) as Coins);
                 assert_eq!(
-                    day.opening_coins - day.workshop_fees_paid,
+                    day.opening_coins + day.introduced_coins - day.workshop_fees_paid,
                     day.closing_coins
                 );
             }
@@ -710,8 +749,9 @@ mod tests {
     }
 
     #[test]
-    fn historical_individual_debt_remains_valid_after_household_formation() {
+    fn household_debt_history_survives_adding_a_new_member() {
         let (mut world, first, second, place, guild) = workshop(0);
+        let account = world.economic_id(first).unwrap();
         world.guilds.get_mut(&guild).unwrap().hourly_fee = FEE_HOUR_MS as Coins;
         for id in [first, second] {
             let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&id).unwrap().kind;
@@ -730,21 +770,32 @@ mod tests {
                 .completed
                 .back()
                 .unwrap()
-                .closing_outstanding[&first]
+                .closing_outstanding[&account]
                 .unpaid,
             duration as Coins
         );
-        world.set_account_coins(first, duration as Coins).unwrap();
+        world = world
+            .with_household_member(
+                account,
+                "Funding member",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_coins(duration as Coins)
+                    .unwrap(),
+            )
+            .unwrap()
+            .0;
         world = world.advance(1).unwrap();
         assert_eq!(
-            world.workshop_fees[&(first, guild)],
+            world.workshop_fees[&(account, guild)],
             WorkshopFeeAccount::default()
         );
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
         assert!(world.market.production_trial(first, Good::Cloth).is_none());
         let cloth = citizen.resource_units(Good::Cloth).unwrap();
-        let (world, account) = world
-            .with_household("Family", citizen.home(), &[first, second])
+        let account = world.economic_id(first).unwrap();
+        let (world, _) = world
+            .with_household_member(account, "New member", Citizen::new(0.0).unwrap())
             .unwrap();
         assert!(world.market.production_trial(first, Good::Cloth).is_none());
         assert_eq!(
@@ -786,6 +837,7 @@ mod tests {
     #[test]
     fn caravan_repayment_after_four_closes_old_debt_and_records_payment_in_new_day() {
         let (world, first, _, place, guild) = workshop(0);
+        let account = world.economic_id(first).unwrap();
         let mut world = world.with_prices(
             crate::marketplace::Prices::default()
                 .with_price(Good::Cloth, Good::Cloth.export_threshold() * 0.5)
@@ -800,7 +852,7 @@ mod tests {
                 .advance(citizen.active_action().unwrap().remaining_ms())
                 .unwrap();
         }
-        let unpaid = world.workshop_fees[&(first, guild)].unpaid;
+        let unpaid = world.workshop_fees[&(account, guild)].unpaid;
         assert!(unpaid > 0);
         let world = world
             .start_action(first, CitizenAction::List(Good::Cloth, 200))
@@ -823,9 +875,9 @@ mod tests {
         let after = before.advance(1).unwrap();
         let history = after.guild_history(guild).unwrap();
         assert_eq!(history.completed.back().unwrap().payments_received, 0);
-        assert_eq!(history.current.opening_outstanding[&first].unpaid, unpaid);
+        assert_eq!(history.current.opening_outstanding[&account].unpaid, unpaid);
         assert_eq!(history.current.payments_received, unpaid);
-        assert_eq!(history.current.closing_outstanding[&first].unpaid, 0);
+        assert_eq!(history.current.closing_outstanding[&account].unpaid, 0);
         assert_eq!(history.current.fees_accrued, WorkshopFeeAccount::default());
         assert_eq!(
             Universe::from_save_str(&after.to_save_string().unwrap()).unwrap(),
@@ -888,6 +940,7 @@ mod tests {
     #[test]
     fn guild_history_rejects_corrupted_accounting_and_activity() {
         let (world, first, _, place, guild) = workshop(10);
+        let _account = world.economic_id(first).unwrap();
         let started = start(world, first, place);
         let AgentKind::Citizen(citizen) = &started.agents[&first].kind;
         let world = started
@@ -917,6 +970,7 @@ mod tests {
         let (world, first, _, place, guild) = workshop(10);
         let boundary = crate::production::period_start(1);
         let world = world.advance(boundary - 1000).unwrap();
+        let _account = world.economic_id(first).unwrap();
         let started = start(world, first, place);
         let AgentKind::Citizen(citizen) = &started.agents[&first].kind;
         let duration = citizen.active_action().unwrap().remaining_ms();
@@ -962,32 +1016,19 @@ mod tests {
     }
 
     #[test]
-    fn household_formation_rejects_outstanding_fees_and_cleans_zero_accounts() {
-        let (world, first, second, place, guild) = workshop(10);
-        let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        let home = citizen.home();
-        let duration = citizen
-            .action_duration_ms(CitizenAction::ProduceAt {
-                place,
-                recipe: Recipe::WeaveCloth,
-            })
+    fn adding_member_preserves_outstanding_household_fees() {
+        let (world, first, _, place, guild) = workshop(0);
+        let _account = world.economic_id(first).unwrap();
+        let account = world.economic_id(first).unwrap();
+        let charged = start(world, first, place).advance(1000).unwrap();
+        let fee = charged.workshop_fees[&(account, guild)];
+        let history = charged.guild_history(guild).unwrap().clone();
+        let (world, member) = charged
+            .with_household_member(account, "New member", Citizen::new(0.0).unwrap())
             .unwrap();
-        let charged = start(world.clone(), first, place)
-            .advance(duration)
-            .unwrap();
-        assert_eq!(
-            charged.with_household("Family", home, &[first, second]),
-            Err(SimulationError::InvalidOwnership)
-        );
-        let mut world = world;
-        world
-            .workshop_fees
-            .insert((first, guild), WorkshopFeeAccount::default());
-        world.refresh_market();
-        let (world, _) = world
-            .with_household("Family", home, &[first, second])
-            .unwrap();
-        assert!(world.workshop_fees.is_empty());
+        assert_eq!(world.workshop_fees[&(account, guild)], fee);
+        assert_eq!(world.guild_history(guild).unwrap(), &history);
+        assert_eq!(world.economic_id(member).unwrap(), account);
         assert_eq!(
             Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
             world
@@ -1021,7 +1062,6 @@ mod object_access_tests {
         locations::{Location, Map},
         marketplace::Good,
         production::{Recipe, Skill},
-        storage::GoodsOwner,
     };
 
     #[test]
@@ -1049,7 +1089,14 @@ mod object_access_tests {
         for (id, recipe) in [(first, Recipe::WeaveCloth), (second, Recipe::SpinThread)] {
             for &(good, units) in recipe.inputs() {
                 world = world
-                    .with_stored_good(site, GoodsOwner::Agent(id), good, units)
+                    .with_stored_good(
+                        site,
+                        match &world.agents()[&id].kind {
+                            crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                        },
+                        good,
+                        units,
+                    )
                     .unwrap();
             }
         }
@@ -1095,12 +1142,24 @@ mod object_access_tests {
         let (mut world, guild) = world.with_guild("Weavers", &[first], &[site], 10).unwrap();
         world.map = world
             .map
-            .with_building(site, Location::Mill, first, "Private mill")
+            .with_building(
+                site,
+                Location::Mill,
+                world.economic_id(first).unwrap(),
+                "Private mill",
+            )
             .unwrap()
             .0;
         world.refresh_market();
         world = world
-            .with_stored_good(site, GoodsOwner::Agent(first), Good::Wheat, 1000)
+            .with_stored_good(
+                site,
+                match &world.agents()[&first].kind {
+                    crate::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+                },
+                Good::Wheat,
+                1000,
+            )
             .unwrap();
         let AgentKind::Citizen(worker) = &world.agents[&first].kind;
         let action = CitizenAction::ProduceAt {

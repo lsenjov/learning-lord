@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::{Citizen, CitizenAction, SimulationError, planning::plan};
 
 const HALF_HOUR_MS: u64 = 1_800_000;

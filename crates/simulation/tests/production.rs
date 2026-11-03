@@ -1,6 +1,3 @@
-mod support;
-use support::HomeStock;
-
 use learning_lord_simulation::locations::Map;
 use learning_lord_simulation::marketplace::Good;
 use learning_lord_simulation::production::{Recipe, Skill, starting_inputs};
@@ -9,6 +6,12 @@ use learning_lord_simulation::{
 };
 
 fn worker(recipe: Recipe) -> Citizen {
+    let (world, id) = worker_world(recipe);
+    let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
+    citizen.clone()
+}
+
+fn worker_world(recipe: Recipe) -> (Universe, learning_lord_simulation::AgentId) {
     let role = match recipe {
         Recipe::GrowWheat | Recipe::GrowFlax | Recipe::GrowCabbage | Recipe::GrowHops => {
             StartingRole::Farmer
@@ -31,8 +34,7 @@ fn worker(recipe: Recipe) -> Citizen {
     if !recipe.location().is_public() {
         universe = universe.with_property(id, recipe.location()).unwrap().0;
     }
-    let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
-    citizen.clone()
+    (universe, id)
 }
 
 trait Numeric {
@@ -180,15 +182,15 @@ fn practice_shortens_future_work_and_caps_at_half_duration() {
 
 #[test]
 fn failed_production_does_not_consume_inputs_or_change_progress() {
-    let source = worker(Recipe::BakeRolls);
+    let (world, id) = worker_world(Recipe::BakeRolls);
+    let AgentKind::Citizen(source) = &world.agents()[&id].kind;
     let site = source.production_place(Recipe::BakeRolls).unwrap();
-    let (world, id) = Universe::with_map(source.map())
-        .with_citizen("Baker", source)
-        .unwrap();
     let world = world
         .with_stored_good(
             site,
-            learning_lord_simulation::storage::GoodsOwner::Agent(id),
+            match &world.agents()[&id].kind {
+                learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
+            },
             Good::BreadRoll,
             u64::MAX,
         )
