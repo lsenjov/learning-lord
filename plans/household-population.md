@@ -27,4 +27,9 @@ Use focused behavioral tests for each simulation change, formatting and relevant
 
 ## Progress
 
-- Plan recorded; implementation pending.
+- Unit 1 complete. Independent review approved with no findings and independently repeated the simulation suite excluding the confirmed pre-existing clock-overflow failure. Units 2-4 pending.
+  - Doubled room/built-object base lifetime from 100 to 200 days and garment lifetime from 10 to 20 days. Preserved room-damage wear multipliers, resource exemptions, repair/construction speed, needs growth and diet decay.
+  - Audited condition mutations, universe condition advancement, action execution, garment history interpolation, forecasts and clothing replacement budgets. Actions have no additional usage-specific wear path; elapsed wear applies during use. Shared garment lifetime also updates history, forecasts and replacement budgets consistently.
+  - Added fixed ten-day base/room wear assertions; updated map behavior and fixed five-day clothing expectations. Existing partition invariance, repair, history, prediction and save round-trip coverage passes. Updated README lifetimes.
+  - Checks: `cargo fmt --all -- --check`, `git diff --check` and `cargo check --workspace --locked` passed. Full `cargo test -p learning-lord-simulation --locked` hit `empty_universe_advances_and_rejects_clock_overflow`, overflowing the unchanged labour-day addition at `construction.rs:515`. The same failure reproduces with both original lifetime constants restored. All remaining tests pass with `cargo test -p learning-lord-simulation --locked -- --skip empty_universe_advances_and_rejects_clock_overflow` (6 manual tests ignored).
+  - Save caveat: fixed-point condition units derive from lifetime, so old save condition fractions are incompatible. No migration added, as authorized by this plan. Parent should retain the planned old-save rejection in unit 2.

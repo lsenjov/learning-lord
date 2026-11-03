@@ -2,7 +2,7 @@
 //! lifetime's worth of units, retaining fractional object wear without floats.
 use crate::{SimulationError, marketplace::DAY_MS};
 
-pub const CONDITION_LIFETIME_MS: u64 = 100 * DAY_MS;
+pub const CONDITION_LIFETIME_MS: u64 = 200 * DAY_MS;
 pub const MAX_CONDITION_UNITS: u128 = CONDITION_LIFETIME_MS as u128 * CONDITION_LIFETIME_MS as u128;
 const SCALE: u128 = CONDITION_LIFETIME_MS as u128;
 
@@ -107,6 +107,22 @@ pub(crate) fn base_wear(elapsed_ms: u64) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_and_room_wear_use_two_hundred_day_lifetime() {
+        let elapsed = 10 * DAY_MS;
+        assert_eq!(base_wear(elapsed), MAX_CONDITION_UNITS / 20);
+        let full = Condition::default();
+        assert_eq!(
+            room_object_wear(full, elapsed, 0),
+            MAX_CONDITION_UNITS * 55 / 1_000
+        );
+        let ruined = Condition::from_units(0).unwrap();
+        assert_eq!(
+            room_object_wear(ruined, elapsed, 0),
+            MAX_CONDITION_UNITS / 4
+        );
+    }
 
     #[test]
     fn room_wear_integrates_condition_and_zero_crossing() {

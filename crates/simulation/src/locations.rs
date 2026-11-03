@@ -1058,21 +1058,21 @@ mod space_tests {
 
     #[test]
     fn condition_wears_constructed_objects_and_preserves_exempt_resources() {
-        use crate::condition::{CONDITION_LIFETIME_MS, MAX_CONDITION_UNITS};
+        use crate::{condition::MAX_CONDITION_UNITS, marketplace::DAY_MS};
         let owner = AgentId(Uuid::new_v4());
         let (mut map, home) = Map::default()
             .with_place(Location::Home, Position::default(), Some(owner), "Home")
             .unwrap();
         let before = map.clone();
-        map.advance_conditions(CONDITION_LIFETIME_MS / 10, &[], &[]);
+        map.advance_conditions(10 * DAY_MS, &[], &[]);
         let room = &map.place(home).unwrap().buildings[0].rooms[0];
         assert_eq!(
             room.condition.condition_units(),
-            MAX_CONDITION_UNITS * 9 / 10
+            MAX_CONDITION_UNITS * 95 / 100
         );
         assert_eq!(
             room.objects[0].condition.condition_units(),
-            MAX_CONDITION_UNITS * 88 / 100
+            MAX_CONDITION_UNITS * 945 / 1_000
         );
         for location in [Location::Forest, Location::River] {
             let site = map.public_place(location);
@@ -1084,14 +1084,14 @@ mod space_tests {
                 if object.degrades_in(location) {
                     assert_eq!(
                         object.condition.condition_units(),
-                        MAX_CONDITION_UNITS * 9 / 10
+                        MAX_CONDITION_UNITS * 95 / 100
                     );
                 }
             }
         }
         let mut split = before;
-        split.advance_conditions(CONDITION_LIFETIME_MS / 20, &[], &[]);
-        split.advance_conditions(CONDITION_LIFETIME_MS / 20, &[], &[]);
+        split.advance_conditions(5 * DAY_MS, &[], &[]);
+        split.advance_conditions(5 * DAY_MS, &[], &[]);
         assert_eq!(map, split);
     }
 

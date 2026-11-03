@@ -41,7 +41,7 @@ fn wear_is_continuous_partition_independent_and_clamped() {
         .unwrap()
         .with_garment_condition(Some(1.0))
         .unwrap();
-    let elapsed = GARMENT_LIFETIME_MS / 4;
+    let elapsed = 5 * 24 * 60 * 60_000;
     let whole = source.advance(elapsed).unwrap();
     let split = source
         .advance(elapsed / 3)
