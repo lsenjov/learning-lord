@@ -229,6 +229,11 @@ pub(crate) fn render(
         });
 }
 pub(crate) fn account(universe: &learning_lord_simulation::Universe, id: AgentId) -> Fragment {
+    if universe.departed_citizens().contains_key(&id)
+        || universe.departed_households().contains_key(&id)
+    {
+        return Fragment::text(crate::locations::name(universe, id));
+    }
     Fragment::entity(
         crate::locations::name(universe, id),
         if universe.guilds().contains_key(&id) {
@@ -608,5 +613,25 @@ mod tests {
             app.world().resource::<market::Selection>().good,
             Some(Good::Wheat)
         );
+    }
+}
+
+pub(crate) fn historical_citizen(
+    parent: &mut ChildSpawnerCommands,
+    universe: &learning_lord_simulation::Universe,
+    id: AgentId,
+) {
+    if universe.agents().contains_key(&id) {
+        link(
+            parent,
+            crate::locations::name(universe, id),
+            Target::Citizen(id),
+        );
+    } else {
+        parent.spawn(text(
+            crate::locations::name(universe, id),
+            14.0,
+            crate::TEXT,
+        ));
     }
 }

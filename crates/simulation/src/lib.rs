@@ -10,6 +10,7 @@ pub mod calendar;
 pub mod condition;
 pub mod construction;
 pub mod construction_finance;
+pub mod departure;
 pub mod storage;
 pub mod taxation;
 use storage::{GoodsOwner, StockKey, Storage};
@@ -2139,6 +2140,8 @@ pub struct Universe {
     town_treasury: Coins,
     taxation: taxation::Taxation,
     construction: construction::Construction,
+    departed_citizens: HashMap<AgentId, departure::DepartedCitizen>,
+    departed_households: HashMap<AgentId, departure::DepartedHousehold>,
 }
 
 impl Default for Universe {
@@ -2158,6 +2161,8 @@ impl Default for Universe {
             town_treasury: 0,
             taxation: taxation::Taxation::default(),
             construction: construction::Construction::default(),
+            departed_citizens: HashMap::new(),
+            departed_households: HashMap::new(),
         }
     }
 }
@@ -2595,8 +2600,8 @@ impl Universe {
                     place.owner = Some(account);
                 }
                 for building in &mut place.buildings {
-                    if building.owner == id {
-                        building.owner = account;
+                    if building.owner == Some(id) {
+                        building.owner = Some(account);
                     }
                 }
             }

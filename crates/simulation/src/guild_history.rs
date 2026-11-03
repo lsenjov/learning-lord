@@ -31,6 +31,7 @@ pub struct DailyGuildHistory {
     pub construction: crate::construction::ConstructionCash,
     /// Exact accrued amount; `unpaid` holds whole coins, regardless of settlement.
     pub fees_accrued: WorkshopFeeAccount,
+    pub fees_written_off: WorkshopFeeAccount,
     pub opening_outstanding: HashMap<AgentId, WorkshopFeeAccount>,
     pub closing_outstanding: HashMap<AgentId, WorkshopFeeAccount>,
     pub contributions: HashMap<(AgentId, PlaceId), ProductionContribution>,
@@ -46,6 +47,7 @@ impl DailyGuildHistory {
             expenses_paid: 0,
             construction: Default::default(),
             fees_accrued: WorkshopFeeAccount::default(),
+            fees_written_off: WorkshopFeeAccount::default(),
             opening_outstanding: outstanding.clone(),
             closing_outstanding: outstanding,
             contributions: HashMap::new(),
@@ -216,6 +218,8 @@ impl Universe {
                     ]
                     .iter()
                     .any(|coins| *coins < 0)
+                    || day.fees_written_off.unpaid < 0
+                    || day.fees_written_off.remainder >= FEE_HOUR_MS
                     || day.fees_accrued.remainder >= FEE_HOUR_MS
                     || i128::from(day.opening_coins) + i128::from(day.payments_received)
                         - i128::from(day.expenses_paid)
@@ -225,6 +229,7 @@ impl Universe {
                         != i128::from(day.closing_coins)
                     || total(&day.opening_outstanding) + amount(&day.fees_accrued)
                         - i128::from(day.payments_received) * i128::from(FEE_HOUR_MS)
+                        - amount(&day.fees_written_off)
                         != total(&day.closing_outstanding)
                 {
                     return Err(invalid());
@@ -250,11 +255,8 @@ impl Universe {
                         if fee.unpaid < 0
                             || fee.remainder >= FEE_HOUR_MS
                             || *fee == WorkshopFeeAccount::default()
-                            || !self.households.contains_key(payer)
-                            || !self
-                                .account_workers(*payer)
-                                .iter()
-                                .any(|member| guild.members.contains(member))
+                            || !(self.households.contains_key(payer)
+                                || self.departed_households.contains_key(payer))
                         {
                             return Err(invalid());
                         }
@@ -263,7 +265,13 @@ impl Universe {
                 let mut member_ms: HashMap<AgentId, u128> = HashMap::new();
                 let mut work_ms = 0u128;
                 for ((member, place), c) in &day.contributions {
-                    if !guild.members.contains(member) || !guild.workshops.contains(place) {
+                    if !(guild.members.contains(member)
+                        || self
+                            .departed_citizens
+                            .get(member)
+                            .is_some_and(|citizen| citizen.guilds.contains(id)))
+                        || !guild.workshops.contains(place)
+                    {
                         return Err(invalid());
                     }
                     let sum = member_ms.entry(*member).or_default();

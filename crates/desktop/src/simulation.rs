@@ -40,6 +40,8 @@ pub enum Command {
 
 #[derive(Clone)]
 pub enum Mutation {
+    RemoveCitizen(learning_lord_simulation::AgentId),
+    RemoveHousehold(learning_lord_simulation::AgentId),
     AddCitizen {
         household: Option<learning_lord_simulation::AgentId>,
         role: learning_lord_simulation::StartingRole,
@@ -89,6 +91,8 @@ pub enum Mutation {
 impl Mutation {
     fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
         match self {
+            Self::RemoveCitizen(id) => universe.remove_citizen(id),
+            Self::RemoveHousehold(id) => universe.remove_household(id),
             Self::AddCitizen {
                 household,
                 role,
@@ -543,7 +547,7 @@ impl WorkerState {
             self.mutation_revision += 1;
             match mutation.clone().apply(&self.universe) {
                 Ok(universe) => {
-                    self.planner.cancel_pending();
+                    self.planner.synchronize(&universe);
                     self.universe = universe;
                     self.mutation_error = None;
                 }
@@ -838,6 +842,111 @@ mod tests {
             mutation_revision: 0,
             generation: 0,
         }
+    }
+
+    #[test]
+    fn dev_removal_updates_busy_world_and_planner_and_rejects_stale_targets() {
+        let mut state = worker_state(new_universe().unwrap());
+        state.advance(1_000);
+        let household = *state
+            .universe
+            .households()
+            .iter()
+            .find(|(_, h)| h.members.len() > 1)
+            .unwrap()
+            .0;
+        let member = state.universe.households()[&household].members[0];
+        assert!(state.planner.history(member).is_some());
+        let before = state.universe.clone();
+        state.apply(
+            Command::Mutate {
+                generation: 1,
+                mutation: Mutation::RemoveCitizen(member),
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(state.universe, before);
+        assert_eq!(state.mutation_revision, 0);
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::RemoveCitizen(member),
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_none(), "{:?}", state.mutation_error);
+        assert!(!state.universe.agents().contains_key(&member));
+        assert!(state.planner.history(member).is_none());
+        assert!(state.universe.households().contains_key(&household));
+        assert_eq!(
+            state.universe,
+            Universe::from_save_str(&state.universe.to_save_string().unwrap()).unwrap()
+        );
+        let after = state.universe.clone();
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::RemoveCitizen(member),
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_some());
+        assert_eq!(state.universe, after);
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::RemoveHousehold(household),
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_none(), "{:?}", state.mutation_error);
+        assert!(!state.universe.households().contains_key(&household));
+        assert_eq!(
+            state.universe,
+            Universe::from_save_str(&state.universe.to_save_string().unwrap()).unwrap()
+        );
+        state.advance(1_000);
+        assert!(state.error.is_none(), "{:?}", state.error);
+    }
+
+    #[test]
+    fn dev_removal_of_all_busy_households_retains_town_and_empty_guilds() {
+        let mut state = worker_state(new_universe().unwrap());
+        state.advance(2 * 3_600_000);
+        assert!(state.error.is_none(), "{:?}", state.error);
+        let places = state.universe.map().places().len();
+        let households: Vec<_> = state.universe.households().keys().copied().collect();
+        for household in households {
+            state.apply(
+                Command::Mutate {
+                    generation: 0,
+                    mutation: Mutation::RemoveHousehold(household),
+                },
+                Duration::ZERO,
+            );
+            assert!(state.mutation_error.is_none(), "{:?}", state.mutation_error);
+        }
+        assert!(state.universe.agents().is_empty());
+        assert!(state.universe.households().is_empty());
+        assert_eq!(state.universe.guilds().len(), 2);
+        assert!(
+            state
+                .universe
+                .guilds()
+                .values()
+                .all(|guild| guild.members.is_empty())
+        );
+        assert_eq!(state.universe.map().places().len(), places);
+        assert_eq!(
+            state.universe,
+            Universe::from_save_str(&state.universe.to_save_string().unwrap()).unwrap()
+        );
+        state.advance(24 * 3_600_000);
+        assert!(state.error.is_none(), "{:?}", state.error);
+        assert_eq!(
+            state.universe,
+            Universe::from_save_str(&state.universe.to_save_string().unwrap()).unwrap()
+        );
     }
 
     #[test]
@@ -1239,20 +1348,30 @@ mod tests {
     }
 
     #[test]
-    fn replacement_and_shutdown_interrupt_waits_without_publishing_stale_advances() {
+    fn replacement_removal_and_shutdown_interrupt_waits_without_publishing_stale_advances() {
+        let (universe, citizen) =
+            Universe::with_map(learning_lord_simulation::locations::Map::default())
+                .with_citizen(
+                    "Ada",
+                    Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+                )
+                .unwrap();
+        let household = universe.economic_id(citizen).unwrap();
+        let source = universe.clone();
         for interrupt in [
             Command::Restart,
             Command::Load(Box::new(Universe::default().advance(4321).unwrap())),
             Command::Shutdown,
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::RemoveCitizen(citizen),
+            },
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::RemoveHousehold(household),
+            },
         ] {
-            let (universe, _) =
-                Universe::with_map(learning_lord_simulation::locations::Map::default())
-                    .with_citizen(
-                        "Ada",
-                        Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
-                    )
-                    .unwrap();
-            let source = universe.clone();
+            let universe = universe.clone();
             let (commands, receiver) = mpsc::channel();
             let (waiting, started) = mpsc::channel();
             let (release, gate) = mpsc::channel();
@@ -1294,6 +1413,13 @@ mod tests {
                     assert!(!state.pacing.running);
                 }
                 Command::Shutdown => assert_eq!(outcome, None),
+                Command::Mutate { .. } => {
+                    assert_eq!(outcome, Some(true));
+                    assert!(state.universe.agents().is_empty());
+                    assert!(state.universe.households().is_empty());
+                    assert!(state.universe.departed_citizens().contains_key(&citizen));
+                    assert_eq!(state.universe.current_time_ms(), source.current_time_ms());
+                }
                 _ => unreachable!(),
             }
         }

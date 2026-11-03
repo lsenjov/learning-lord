@@ -363,6 +363,12 @@ pub(crate) fn name(universe: &Universe, id: AgentId) -> String {
     if let Some(household) = universe.households().get(&id) {
         return format!("{} household", household.name);
     }
+    if let Some(citizen) = universe.departed_citizens().get(&id) {
+        return format!("{} (departed)", citizen.name);
+    }
+    if let Some(household) = universe.departed_households().get(&id) {
+        return format!("{} household (departed)", household.name);
+    }
     universe
         .agents()
         .get(&id)
@@ -373,7 +379,7 @@ pub(crate) fn place_owner(
     universe: &Universe,
     place: &learning_lord_simulation::locations::Place,
 ) -> String {
-    if place.kind.is_town_owned() {
+    if !place.kind.is_public() && place.owner.is_none() {
         "Town".into()
     } else {
         place
@@ -689,7 +695,10 @@ fn render_hierarchy(
                         header,
                         &[
                             F::text(format!("{} | Owner: ", building.name)),
-                            crate::navigation::account(universe, building.owner),
+                            building.owner.map_or_else(
+                                || crate::navigation::Fragment::text("Town"),
+                                |owner| crate::navigation::account(universe, owner),
+                            ),
                         ],
                         15.0,
                         TEXT,
@@ -1659,6 +1668,23 @@ fn treasury_rows(universe: &Universe) -> Vec<Vec<crate::navigation::Fragment>> {
             amount.push(F::text(": "));
         }
         amount.push(F::text(match receipt.amount {
+            TaxAmount::WrittenOff {
+                coins,
+                fractional_coins,
+                goods,
+            } => {
+                let mut amounts = Vec::new();
+                if coins > 0 {
+                    amounts.push(format!("{coins} coins"));
+                }
+                if fractional_coins > 0.0 {
+                    amounts.push(format!("{fractional_coins:.4} fractional coins"));
+                }
+                if goods > 0.0 {
+                    amounts.push(format!("{goods:.4} units"));
+                }
+                format!("{} written off", amounts.join(" + "))
+            }
             TaxAmount::Coins {
                 assessed,
                 paid,

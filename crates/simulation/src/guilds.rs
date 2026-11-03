@@ -206,8 +206,8 @@ impl Universe {
             let previous = place.owner;
             place.owner = Some(id);
             for building in &mut place.buildings {
-                if Some(building.owner) == previous {
-                    building.owner = id;
+                if building.owner == previous {
+                    building.owner = Some(id);
                 }
             }
         }
@@ -267,7 +267,6 @@ impl Universe {
                 || guild.name.trim().is_empty()
                 || guild.coins < 0
                 || guild.hourly_fee < 0
-                || guild.members.is_empty()
                 || guild.workshops.is_empty()
                 || guild
                     .members
@@ -331,10 +330,6 @@ impl Universe {
                 || (!self.agents.contains_key(payer) && !self.households.contains_key(payer))
                 || self.economic_id(*payer).ok() != Some(*payer)
                 || !self.guilds.contains_key(payee)
-                || !self
-                    .account_workers(*payer)
-                    .iter()
-                    .any(|id| self.guilds[payee].members.contains(id))
             {
                 return Err(invalid());
             }

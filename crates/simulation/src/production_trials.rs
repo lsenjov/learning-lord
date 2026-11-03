@@ -1299,6 +1299,26 @@ mod tests {
     }
 
     #[test]
+    fn individual_departure_keeps_household_listing_as_ordinary_stock() {
+        let (mut market, account, _, order) = offered();
+        let before = market.order(order).unwrap().clone();
+        let worker = market
+            .production_trial(account, Good::Thread)
+            .unwrap()
+            .worker;
+        market.remove_departed(&[worker], None);
+        assert_eq!(market.order(order), Some(&before));
+        assert!(!market.order_is_trial(order));
+        assert!(market.production_trial(account, Good::Thread).is_none());
+        assert!(
+            market
+                .production_trial_result(account, Good::Thread)
+                .is_none()
+        );
+        market.validate_production_trial_state().unwrap();
+    }
+
+    #[test]
     fn full_canary_withdrawal_clears_trial_without_sale_or_retry_penalty() {
         let (mut market, account, place, order) = offered();
         assert_eq!(
@@ -1858,5 +1878,26 @@ mod depletion_tests {
                 .phase,
             TrialPhase::Ready
         );
+    }
+}
+
+impl ProductionTrials {
+    pub(crate) fn remove_departed(
+        &mut self,
+        members: &[AgentId],
+        account: Option<AgentId>,
+    ) -> Vec<OrderId> {
+        let orders = self
+            .active
+            .iter()
+            .filter(|((id, _), trial)| Some(*id) == account || members.contains(&trial.worker))
+            .filter_map(|(_, trial)| trial.order)
+            .collect();
+        self.active
+            .retain(|(id, _), trial| Some(*id) != account && !members.contains(&trial.worker));
+        self.results.retain(|(id, _), result| {
+            Some(*id) != account && !members.contains(&result.trial.worker)
+        });
+        orders
     }
 }

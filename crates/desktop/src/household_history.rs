@@ -1,7 +1,6 @@
 use crate::{
     MUTED, PANEL, SELECTED, TEXT, citizens,
     collectives::{label, place_link, row},
-    locations,
     navigation::{self, Target},
     text,
 };
@@ -228,6 +227,12 @@ pub(crate) fn render(
             day.closing_coins
         ),
     );
+    if day.departed_coins != 0 {
+        label(
+            parent,
+            format!("Departed funds: {} coins", day.departed_coins),
+        );
+    }
     if day.introduced_coins != 0 {
         label(
             parent,
@@ -254,7 +259,7 @@ pub(crate) fn render(
     }
     for (id, member) in members {
         row(parent, |row| {
-            navigation::link(row, locations::name(universe, *id), Target::Citizen(*id));
+            navigation::historical_citizen(row, universe, *id);
             label(
                 row,
                 format!(
@@ -301,11 +306,7 @@ pub(crate) fn render(
                 place_link(row, universe, place);
             }
             if let Some(carrier) = stock.carrier {
-                navigation::link(
-                    row,
-                    locations::name(universe, carrier),
-                    Target::Citizen(carrier),
-                );
+                navigation::historical_citizen(row, universe, carrier);
             }
             navigation::link(row, stock.good.name(), Target::Good(stock.good));
             let available = stock

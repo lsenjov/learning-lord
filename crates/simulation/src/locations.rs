@@ -124,7 +124,7 @@ pub struct ObjectId(pub Uuid);
 pub struct Building {
     pub id: BuildingId,
     pub name: String,
-    pub owner: AgentId,
+    pub owner: Option<AgentId>,
     pub rooms: Vec<Room>,
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -425,7 +425,7 @@ impl Place {
                     .iter()
                     .any(|room| room.objects.iter().any(|object| object.id == id))
             })
-            .map(|building| building.owner)
+            .and_then(|building| building.owner)
             .or_else(|| {
                 self.outdoor_objects
                     .iter()
@@ -503,7 +503,7 @@ impl Building {
         Self {
             id: BuildingId(Uuid::new_v4()),
             name: kind.name().into(),
-            owner,
+            owner: Some(owner),
             rooms,
         }
     }
@@ -797,7 +797,7 @@ impl Map {
                 || !place.position.valid()
                 || place.used_area_m2() > PLOT_AREA_LIMIT_M2
                 || !identities.insert(id.0)
-                || (place.kind.is_public() || place.kind.is_town_owned()) != place.owner.is_none()
+                || (place.kind.is_public() || place.kind.is_town_owned()) && place.owner.is_some()
                 || (place.kind == Location::Field
                     && place.plots().len() != crate::farming::FIELD_PLOTS)
             {
@@ -916,7 +916,7 @@ impl Map {
             .ok_or(SimulationError::PlaceNotFound)?;
         if site.owner != Some(owner)
             || site.buildings.len() != 1
-            || site.buildings[0].owner != owner
+            || site.buildings[0].owner != Some(owner)
         {
             return Err(SimulationError::InvalidOwnership);
         }
@@ -960,7 +960,11 @@ impl Map {
             .place(home)?
             .buildings
             .iter()
-            .filter(|building| allowed_owners.contains(&building.owner))
+            .filter(|building| {
+                building
+                    .owner
+                    .is_some_and(|owner| allowed_owners.contains(&owner))
+            })
             .flat_map(|building| &building.rooms)
             .flat_map(|room| &room.objects)
             .any(|object| {
@@ -973,17 +977,21 @@ impl Map {
             return Ok(());
         }
         let place = self.place(home)?;
-        if !place
-            .buildings
-            .iter()
-            .any(|building| allowed_owners.contains(&building.owner))
-        {
+        if !place.buildings.iter().any(|building| {
+            building
+                .owner
+                .is_some_and(|owner| allowed_owners.contains(&owner))
+        }) {
             return Err(SimulationError::MissingProperty);
         }
         let vacant_bed = place
             .buildings
             .iter()
-            .filter(|building| allowed_owners.contains(&building.owner))
+            .filter(|building| {
+                building
+                    .owner
+                    .is_some_and(|owner| allowed_owners.contains(&owner))
+            })
             .flat_map(|building| &building.rooms)
             .flat_map(|room| &room.objects)
             .any(|object| object.kind == ObjectKind::Bed { resident: None });
@@ -1005,7 +1013,11 @@ impl Map {
         if let Some(bed) = place
             .buildings
             .iter_mut()
-            .filter(|building| allowed_owners.contains(&building.owner))
+            .filter(|building| {
+                building
+                    .owner
+                    .is_some_and(|owner| allowed_owners.contains(&owner))
+            })
             .flat_map(|building| &mut building.rooms)
             .flat_map(|room| &mut room.objects)
             .find(|object| object.kind == ObjectKind::Bed { resident: None })
@@ -1018,7 +1030,11 @@ impl Map {
         place
             .buildings
             .iter_mut()
-            .find(|building| allowed_owners.contains(&building.owner))
+            .find(|building| {
+                building
+                    .owner
+                    .is_some_and(|owner| allowed_owners.contains(&owner))
+            })
             .expect("accessible home building exists")
             .rooms
             .push(Room {

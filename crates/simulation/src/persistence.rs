@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 18;
+pub const SAVE_VERSION: u32 = 19;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -174,6 +174,7 @@ impl Universe {
 
     fn validate_save_sources(&self) -> Result<(), SaveError> {
         self.map.validate_save()?;
+        self.validate_departures()?;
         self.validate_objects()?;
         self.market.validate_save()?;
         self.storage.validate_save()?;
@@ -245,6 +246,23 @@ impl Universe {
         }) {
             return Err(SaveError::InvalidState("invalid tax account"));
         }
+        for receipt in &self.taxation.history {
+            if let crate::taxation::TaxAmount::WrittenOff {
+                coins,
+                fractional_coins,
+                goods,
+            } = receipt.amount
+                && (coins < 0
+                    || !fractional_coins.is_finite()
+                    || !(0.0..2.0).contains(&fractional_coins)
+                    || !goods.is_finite()
+                    || goods < 0.0
+                    || receipt.time_ms > self.current_time_ms
+                    || !self.departed_households.contains_key(&receipt.payer))
+            {
+                return Err(SaveError::InvalidState("invalid departure tax loss"));
+            }
+        }
         self.validate_tax_reservations()?;
         Ok(())
     }
@@ -268,7 +286,10 @@ impl Universe {
                 || household.home.is_some_and(|home| {
                     !self.map.place(home).is_ok_and(|place| {
                         place.owner == Some(*id)
-                            && place.buildings.iter().any(|building| building.owner == *id)
+                            && place
+                                .buildings
+                                .iter()
+                                .any(|building| building.owner == Some(*id))
                     })
                 })
             {
@@ -974,7 +995,8 @@ mod tests {
                         .clear();
                 }
                 9 => {
-                    invalid.map.places_mut().get_mut(&mill).unwrap().buildings[0].owner = first;
+                    invalid.map.places_mut().get_mut(&mill).unwrap().buildings[0].owner =
+                        Some(first);
                     invalid.refresh_market();
                 }
                 _ => {

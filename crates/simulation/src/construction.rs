@@ -399,7 +399,7 @@ impl Universe {
         }
     }
 
-    fn compact_construction(&mut self) {
+    pub(crate) fn compact_construction(&mut self) {
         let mut closed: Vec<_> = self
             .construction
             .contracts
@@ -601,7 +601,12 @@ impl Universe {
             .iter()
             .find(|candidate| candidate.id == building)
             .ok_or(SimulationError::MissingProperty)?;
-        if self.economic_id(building.owner)? != account {
+        if building
+            .owner
+            .ok_or(SimulationError::PrivateProperty)
+            .and_then(|owner| self.economic_id(owner))?
+            != account
+        {
             return Err(SimulationError::PrivateProperty);
         }
         match item {
@@ -2239,7 +2244,9 @@ impl Universe {
                 .iter()
                 .find(|building| Some(building.id) == project.building)
                 .ok_or_else(invalid)?;
-            if self.economic_id(building.owner).ok()
+            if building
+                .owner
+                .and_then(|owner| self.economic_id(owner).ok())
                 != project
                     .client
                     .account()
@@ -4169,6 +4176,144 @@ mod tests {
                 .filter(|quote| quote.procurement_cash > 0)
                 .count(),
             1
+        );
+    }
+    #[test]
+    fn departure_cancels_active_client_work_preserves_progress_and_refunds() {
+        let (world, client, worker, contract) =
+            fixture(ConstructionItem::Room(RoomSize::Small), 6_000);
+        let world = award(world, worker).advance(HOUR_MS).unwrap();
+        let project = world.construction.contracts[&contract].project;
+        let before = world.construction.projects[&project].clone();
+        assert!(before.completed_base_ms > 0);
+        let account = world.economic_id(client).unwrap();
+        let coins = world.households[&account].coins;
+        let refund = before.escrow
+            + world
+                .construction
+                .contracts
+                .values()
+                .filter(|c| c.project == project && c.status.open())
+                .map(|c| c.escrow)
+                .sum::<Coins>();
+        let removed = world.remove_citizen(client).unwrap();
+        let retained = &removed.construction.projects[&project];
+        assert_eq!(retained.completed_base_ms, before.completed_base_ms);
+        assert_eq!(retained.installed_wood, before.installed_wood);
+        assert_eq!(retained.client, ConstructionClient::Town);
+        assert_eq!(retained.escrow, 0);
+        assert!(!retained.scheduling);
+        assert!(
+            !removed
+                .construction
+                .contracts
+                .values()
+                .any(|c| c.project == project)
+        );
+        assert_eq!(
+            removed.departed_households()[&account]
+                .history
+                .current
+                .departed_coins,
+            coins + refund
+        );
+        assert_eq!(
+            removed,
+            Universe::from_save_str(&removed.to_save_string().unwrap()).unwrap()
+        );
+        let next = removed.advance(1_000).unwrap();
+        assert_eq!(
+            next,
+            Universe::from_save_str(&next.to_save_string().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn departure_cancels_active_carpenter_without_removing_client_assets() {
+        let (world, client, worker, contract) =
+            fixture(ConstructionItem::Room(RoomSize::Small), 6_000);
+        let world = award(world, worker).advance(HOUR_MS).unwrap();
+        let project = world.construction.contracts[&contract].project;
+        let progress = world.construction.projects[&project].completed_base_ms;
+        let account = world.economic_id(client).unwrap();
+        let before_coins = world.households[&account].coins;
+        let removed = world.remove_citizen(worker).unwrap();
+        assert_eq!(
+            removed.construction.projects[&project].completed_base_ms,
+            progress
+        );
+        assert_eq!(
+            removed.construction.projects[&project].client,
+            ConstructionClient::Account(account)
+        );
+        assert!(removed.households[&account].coins > before_coins);
+        assert_eq!(
+            removed,
+            Universe::from_save_str(&removed.to_save_string().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn departure_protects_other_members_construction_financing_and_withdraws_own_quotes() {
+        let (world, _, worker, _) = fixture(ConstructionItem::FishCrate, 1_000);
+        let account = world.economic_id(worker).unwrap();
+        let (world, sibling) = world
+            .with_household_member(account, "Sibling", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let committed = world.construction_commitments(account, None).unwrap();
+        assert!(committed > 0);
+        let coins = world.households[&account].coins;
+        let removed = world.remove_citizen(sibling).unwrap();
+        assert_eq!(
+            removed.households[&account].coins,
+            coins - (coins - committed) / 2
+        );
+        assert_eq!(
+            removed.construction_commitments(account, None).unwrap(),
+            committed
+        );
+        assert_eq!(
+            removed,
+            Universe::from_save_str(&removed.to_save_string().unwrap()).unwrap()
+        );
+        let removed = world.remove_citizen(worker).unwrap();
+        assert!(
+            removed
+                .construction
+                .contracts
+                .values()
+                .all(|c| c.quotes.iter().all(|q| q.carpenter != worker))
+        );
+        assert_eq!(
+            removed,
+            Universe::from_save_str(&removed.to_save_string().unwrap()).unwrap()
+        );
+    }
+    #[test]
+    fn departure_preserves_earned_milestone_payments() {
+        let (world, client, worker, _) = fixture(ConstructionItem::Room(RoomSize::Small), 6_000);
+        let world = award(world, worker)
+            .advance(MILESTONE_BASE_MS + HOUR_MS)
+            .unwrap();
+        let worker_account = world.economic_id(worker).unwrap();
+        let earned = world.household_histories[&worker_account]
+            .current
+            .construction
+            .payments_received;
+        assert!(earned > 0);
+        let coins = world.households[&worker_account].coins;
+        let removed = world.remove_citizen(client).unwrap();
+        assert_eq!(removed.households[&worker_account].coins, coins);
+        assert_eq!(
+            removed.household_histories[&worker_account]
+                .current
+                .construction
+                .payments_received,
+            earned
+        );
+        assert_eq!(
+            removed,
+            Universe::from_save_str(&removed.to_save_string().unwrap()).unwrap()
         );
     }
 }

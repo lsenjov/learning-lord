@@ -44,6 +44,7 @@ pub struct DailyHouseholdHistory {
     pub opening_coins: Coins,
     pub closing_coins: Coins,
     pub introduced_coins: Coins,
+    pub departed_coins: Coins,
     pub sales_receipts: Coins,
     pub purchases: Coins,
     pub taxes_paid: Coins,
@@ -65,6 +66,7 @@ impl DailyHouseholdHistory {
             opening_coins: coins,
             closing_coins: coins,
             introduced_coins: 0,
+            departed_coins: 0,
             sales_receipts: 0,
             purchases: 0,
             taxes_paid: 0,
@@ -191,7 +193,7 @@ impl Universe {
                     &mut history.current.tax_collected[receipt.good.unwrap() as usize],
                     collected,
                 )?,
-                TaxAmount::Reservation { .. } => {}
+                TaxAmount::Reservation { .. } | TaxAmount::WrittenOff { .. } => {}
             }
         }
         Ok(())
@@ -303,11 +305,23 @@ impl Universe {
         if self.household_histories.len() != self.households.len() {
             return Err(invalid());
         }
-        for (id, household) in &self.households {
-            let history = self.household_histories.get(id).ok_or_else(invalid)?;
+        let live = self.households.iter().map(|(id, household)| {
+            Ok((
+                id,
+                self.household_histories.get(id).ok_or_else(invalid)?,
+                self.current_time_ms,
+                household.coins,
+            ))
+        });
+        let departed = self
+            .departed_households
+            .iter()
+            .map(|(id, household)| Ok((id, &household.history, household.time_ms, 0)));
+        for entry in live.chain(departed) {
+            let (id, history, now, coins): (_, _, _, Coins) = entry?;
             if history.completed.len() > COMPLETED_DAYS
-                || history.current.end_ms != self.current_time_ms
-                || history.current.closing_coins != household.coins
+                || history.current.end_ms != now
+                || history.current.closing_coins != coins
             {
                 return Err(invalid());
             }
@@ -319,13 +333,14 @@ impl Universe {
                 .chain(std::iter::once(&history.current))
             {
                 if day.start_ms > day.end_ms
-                    || day.end_ms > self.current_time_ms
+                    || day.end_ms > now
                     || day.end_ms - day.start_ms > crate::marketplace::DAY_MS
                     || previous_end.is_some_and(|end| end != day.start_ms)
                     || previous_coins.is_some_and(|coins| coins != day.opening_coins)
                     || [
                         day.opening_coins,
                         day.introduced_coins,
+                        day.departed_coins,
                         day.closing_coins,
                         day.sales_receipts,
                         day.purchases,
@@ -338,8 +353,8 @@ impl Universe {
                     ]
                     .iter()
                     .any(|coins| *coins < 0)
-                    || i128::from(day.opening_coins)
-                        + i128::from(day.introduced_coins)
+                    || i128::from(day.opening_coins) + i128::from(day.introduced_coins)
+                        - i128::from(day.departed_coins)
                         + i128::from(day.sales_receipts)
                         - i128::from(day.purchases)
                         - i128::from(day.taxes_paid)
@@ -363,7 +378,7 @@ impl Universe {
                 let mut produced = [0u128; Good::COUNT];
                 let mut consumed = [0u128; Good::COUNT];
                 for (member, contribution) in &day.members {
-                    if !household.members.contains(member)
+                    if !self.historical_member(*member, *id)
                         || contribution
                             .production_ms
                             .checked_add(contribution.travel_ms)
@@ -394,7 +409,7 @@ impl Universe {
                             .is_some_and(|place| self.map.place(place).is_err())
                         || stock
                             .carrier
-                            .is_some_and(|carrier| !household.members.contains(&carrier))
+                            .is_some_and(|carrier| !self.historical_member(carrier, *id))
                         || stock.carrier.is_some() && stock.listed_units != 0
                         || stock
                             .listed_units
@@ -410,7 +425,7 @@ impl Universe {
                 previous_coins = Some(day.closing_coins);
             }
             if crate::production::work_period(history.current.start_ms)
-                != crate::production::work_period(self.current_time_ms)
+                != crate::production::work_period(now)
             {
                 return Err(invalid());
             }

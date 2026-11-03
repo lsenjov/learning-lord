@@ -529,7 +529,7 @@ mod tests {
                 place
                     .buildings
                     .iter()
-                    .all(|building| building.owner == account)
+                    .all(|building| building.owner == Some(account))
             );
         }
         let AgentKind::Citizen(alice) = &next.agents[&first].kind;

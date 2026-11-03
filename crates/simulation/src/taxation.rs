@@ -59,6 +59,11 @@ pub struct TaxRule {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum TaxAmount {
+    WrittenOff {
+        coins: Coins,
+        fractional_coins: f64,
+        goods: f64,
+    },
     Reservation {
         assessed: Quantity,
         reserved: Quantity,
@@ -330,7 +335,9 @@ impl Universe {
         if let TaxKind::FlatFee { payer, coins } = rule.kind {
             match (rule.scope, payer) {
                 (TaxScope::Location(_), TaxPayer::Agent(payer)) => {
-                    if self.account_coins(payer).is_err() {
+                    if self.account_coins(payer).is_err()
+                        && (rule.active || !self.departed_households.contains_key(&payer))
+                    {
                         return Err(SimulationError::AgentNotFound);
                     }
                 }
@@ -485,6 +492,28 @@ impl Universe {
         &mut self,
         time_ms: u64,
     ) -> Result<Vec<AgentId>, SimulationError> {
+        self.settle_reservations_for(time_ms, None)
+    }
+
+    pub(crate) fn settle_departure_reservations(
+        &mut self,
+        time_ms: u64,
+        members: &[AgentId],
+        whole: bool,
+    ) -> Result<Vec<AgentId>, SimulationError> {
+        self.settle_reservations_for(time_ms, Some((members, whole)))
+    }
+
+    fn settle_reservations_for(
+        &mut self,
+        time_ms: u64,
+        members: Option<(&[AgentId], bool)>,
+    ) -> Result<Vec<AgentId>, SimulationError> {
+        let accounts: Vec<_> = members
+            .map_or(&[][..], |(members, _)| members)
+            .iter()
+            .map(|id| self.economic_id(*id))
+            .collect::<Result<_, _>>()?;
         let mut stocks: Vec<_> = self
             .taxation
             .reservations
@@ -508,6 +537,21 @@ impl Universe {
             let mut claims: Vec<_> = claims.into_iter().collect();
             claims.sort_by_key(|(key, _)| (key.rule, key.place.0, key.payer.0));
             for (key, units) in claims {
+                if let Some((members, whole)) = members {
+                    let selected = if whole {
+                        accounts.contains(&key.payer)
+                    } else {
+                        matches!(stock, ReservationStock::Carried(id, _) if members.contains(&id))
+                    };
+                    if !selected {
+                        continue;
+                    }
+                }
+                self.taxation
+                    .reservations
+                    .get_mut(&stock)
+                    .unwrap()
+                    .remove(&key);
                 let good = key.good.expect("goods reservation");
                 match stock {
                     ReservationStock::Carried(carrier, _) => {
@@ -563,12 +607,14 @@ impl Universe {
                 changed.push(key.payer);
             }
         }
-        self.taxation.reservations.clear();
+        self.taxation
+            .reservations
+            .retain(|_, claims| !claims.is_empty());
         self.refresh_market();
         Ok(changed)
     }
 
-    fn collect_coin_account(
+    pub(crate) fn collect_coin_account(
         &mut self,
         key: AccountKey,
         assessed: Coins,
@@ -859,7 +905,10 @@ impl Universe {
                     TaxKind::FlatFee { payer, coins } => {
                         let payer = match payer {
                             TaxPayer::Agent(id) => *id,
-                            TaxPayer::LocationOwner => owner.expect("private location owner"),
+                            TaxPayer::LocationOwner => match owner {
+                                Some(owner) => owner,
+                                None => continue,
+                            },
                         };
                         let payer = self.economic_id(payer)?;
                         let coins = *coins;
@@ -1508,5 +1557,62 @@ mod tests {
         let AgentKind::Citizen(worker) = &near.agents[&id].kind;
         assert_eq!(worker.tax_reserved_units(Good::FlaxGarment), 1);
         assert_eq!(worker.town_carried_units(Good::FlaxGarment), 0);
+    }
+    #[test]
+    fn departure_collects_carried_and_stored_socage_preserving_town_property() {
+        for stored in [false, true] {
+            let (world, id, place) = reserved_worker(Good::Cloth, 100);
+            let account = world.economic_id(id).unwrap();
+            let world = if stored {
+                world.deposit_goods(id, place, Good::Cloth, 100).unwrap()
+            } else {
+                world
+            };
+            let world = world.remove_citizen(id).unwrap();
+            assert!(world.taxation.reservations.is_empty());
+            assert!(world.taxation.reserved_accounts.is_empty());
+            assert!(
+                world
+                    .taxation
+                    .accounts
+                    .keys()
+                    .all(|key| key.payer != account)
+            );
+            assert_eq!(world.storage.owned_units(GoodsOwner::Town, Good::Cloth), 50);
+            assert_eq!(
+                world
+                    .storage
+                    .owned_units(GoodsOwner::Household(account), Good::Cloth),
+                0
+            );
+            assert_eq!(
+                world,
+                Universe::from_save_str(&world.to_save_string().unwrap()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn departure_leaves_town_owned_private_kind_valid_for_weekly_type_taxes() {
+        let (world, id, place) = reserved_worker(Good::Cloth, 100);
+        let (world, _) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Tailory),
+                "Rent",
+                TaxKind::FlatFee {
+                    payer: TaxPayer::LocationOwner,
+                    coins: 3,
+                },
+            )
+            .unwrap();
+        let world = world.remove_citizen(id).unwrap();
+        assert_eq!(world.map.place(place).unwrap().kind, Location::Tailory);
+        let world = world
+            .advance(crate::calendar::FIRST_WEEKLY_SETTLEMENT_MS)
+            .unwrap();
+        assert_eq!(
+            world,
+            Universe::from_save_str(&world.to_save_string().unwrap()).unwrap()
+        );
     }
 }

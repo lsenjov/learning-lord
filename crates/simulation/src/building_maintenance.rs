@@ -82,13 +82,13 @@ impl Universe {
     ) -> Result<ConstructionClient, SimulationError> {
         let site = self.map.place(place)?;
         let owner = match target {
-            RepairTarget::Room(id) => Some(
+            RepairTarget::Room(id) => {
                 site.buildings
                     .iter()
                     .find(|building| building.rooms.iter().any(|room| room.id == id))
                     .ok_or(SimulationError::MissingProperty)?
-                    .owner,
-            ),
+                    .owner
+            }
             RepairTarget::Object(id) => {
                 if !site.objects().any(|object| object.id == id) {
                     return Err(SimulationError::MissingProperty);
@@ -98,10 +98,7 @@ impl Universe {
         };
         match owner {
             Some(id) => Ok(ConstructionClient::Account(self.economic_id(id)?)),
-            None if matches!(site.kind, Location::Market | Location::Warehouse) => {
-                Ok(ConstructionClient::Town)
-            }
-            None => Err(SimulationError::MissingProperty),
+            None => Ok(ConstructionClient::Town),
         }
     }
 

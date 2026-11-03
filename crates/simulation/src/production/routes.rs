@@ -1000,7 +1000,7 @@ mod tests {
         let place = citizen.map.places_mut().get_mut(&site).unwrap();
         place.owner = Some(guild);
         for building in &mut place.buildings {
-            building.owner = guild;
+            building.owner = Some(guild);
         }
         citizen.guilds.insert(
             guild,

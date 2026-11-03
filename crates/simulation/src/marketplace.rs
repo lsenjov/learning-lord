@@ -4359,3 +4359,22 @@ mod tests {
         assert_eq!(market.prices.price(Good::Berries), Some(5.0));
     }
 }
+
+impl Market {
+    pub(crate) fn remove_departed(&mut self, members: &[AgentId], account: Option<AgentId>) {
+        for member in members {
+            self.requests.remove(member);
+            self.affordable_requests.remove(member);
+        }
+        if let Some(account) = account {
+            self.requests.remove(&account);
+            self.affordable_requests.remove(&account);
+            self.demand_budgets.remove(&account);
+            self.seller_rates.remove(&account);
+            self.seller_states.retain(|(id, _, _), _| *id != account);
+        }
+        for order in self.production_trials.remove_departed(members, account) {
+            self.mark_trial_order(order, false);
+        }
+    }
+}

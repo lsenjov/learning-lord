@@ -28,8 +28,10 @@ impl PlanningRuntime {
         self.histories.clear();
     }
 
-    pub fn cancel_pending(&mut self) {
+    pub fn synchronize(&mut self, world: &crate::Universe) {
         self.abort_advance();
+        self.histories
+            .retain(|id, _| world.agents().contains_key(id));
     }
 
     pub(crate) fn abort_advance(&mut self) {

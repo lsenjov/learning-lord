@@ -52,7 +52,7 @@ impl Citizen {
         } else {
             place.object_owner(object.id)
         };
-        owner.is_none_or(|owner| {
+        owner.map_or(place.kind.is_public(), |owner| {
             self.may_use_owner(owner)
                 || self
                     .guilds
@@ -208,7 +208,7 @@ impl crate::Universe {
                 || place
                     .buildings
                     .iter()
-                    .any(|building| !valid_owner(building.owner))
+                    .any(|building| building.owner.is_some_and(|owner| !valid_owner(owner)))
             {
                 return Err(invalid());
             }
@@ -879,7 +879,7 @@ mod tests {
             )
             .unwrap();
         let owner = world.economic_id(outsider).unwrap();
-        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = owner;
+        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = Some(owner);
         world.map = world
             .map
             .with_building(
@@ -955,7 +955,7 @@ mod tests {
             )
             .unwrap();
         let owner = world.economic_id(outsider).unwrap();
-        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = owner;
+        world.map.places_mut().get_mut(&site).unwrap().buildings[0].owner = Some(owner);
         world.map = world
             .map
             .with_building(

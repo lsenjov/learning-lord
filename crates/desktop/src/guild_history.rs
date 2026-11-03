@@ -2,7 +2,6 @@ use crate::{
     MUTED, TEXT,
     collectives::{label, place_link, row},
     household_history::{self, View},
-    locations,
     navigation::{self, Target},
     text,
 };
@@ -117,6 +116,15 @@ pub(crate) fn render(
             day.closing_coins
         ),
     );
+    if day.fees_written_off.liability() > 0.0 {
+        label(
+            parent,
+            format!(
+                "Fees written off: {:.3} coins",
+                day.fees_written_off.liability()
+            ),
+        );
+    }
     if let Some(cashflow) = crate::construction::cashflow(day.construction) {
         label(parent, cashflow);
     }
@@ -160,11 +168,7 @@ pub(crate) fn render(
     }
     for ((member, workshop), contribution) in contributions {
         row(parent, |row| {
-            navigation::link(
-                row,
-                locations::name(universe, *member),
-                Target::Citizen(*member),
-            );
+            navigation::historical_citizen(row, universe, *member);
             label(row, "at");
             place_link(row, universe, *workshop);
         });

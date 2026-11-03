@@ -66,6 +66,8 @@ pub(crate) enum Choice {
     Funds,
     Member,
     Household,
+    RemoveCitizen,
+    RemoveHousehold,
 }
 
 pub(crate) fn spawn(parent: &mut ChildSpawnerCommands) {
@@ -117,6 +119,7 @@ pub(crate) fn handle(
     snapshot: Res<DisplaySnapshot>,
     worker: Res<SimulationWorker>,
     selected: Res<collectives::State>,
+    citizen: Res<crate::citizens::Selection>,
     controls: Res<crate::Controls>,
     mut locations: ResMut<crate::locations::State>,
     construction: Res<crate::construction::State>,
@@ -141,7 +144,7 @@ pub(crate) fn handle(
             .0
             .mutation_error
             .clone()
-            .unwrap_or_else(|| "Citizen added".into());
+            .unwrap_or_else(|| "Change saved".into());
     }
     if locations.editing() || caravan.editing() || controls.restart_pending {
         state.editing = false;
@@ -169,6 +172,42 @@ pub(crate) fn handle(
                 crate::caravan_controls::stop_editing(&mut caravan);
                 state.editing = true;
                 state.replace = true;
+            }
+            Choice::RemoveCitizen | Choice::RemoveHousehold => {
+                state.editing = false;
+                if locations.pending() || construction.pending() || caravan.pending() {
+                    state.status = "Another change is saving. Try again when it finishes.".into();
+                    continue;
+                }
+                let mutation = if matches!(choice, Choice::RemoveCitizen) {
+                    let Some(id) = citizen
+                        .0
+                        .filter(|id| snapshot.0.universe.agents().contains_key(id))
+                    else {
+                        state.status = "Select a citizen".into();
+                        continue;
+                    };
+                    Mutation::RemoveCitizen(id)
+                } else {
+                    let Some(id) = selected.selected().filter(|id| {
+                        selected.tab() == collectives::Tab::Households
+                            && snapshot.0.universe.households().contains_key(id)
+                    }) else {
+                        state.status = "Select a household in Collectives > Households".into();
+                        continue;
+                    };
+                    Mutation::RemoveHousehold(id)
+                };
+                match worker.send(Command::Mutate {
+                    generation: snapshot.0.generation,
+                    mutation,
+                }) {
+                    Ok(()) => {
+                        state.pending = Some(snapshot.0.mutation_revision);
+                        state.status = "Removing...".into();
+                    }
+                    Err(error) => state.status = error,
+                }
             }
             Choice::Member | Choice::Household => {
                 state.editing = false;
@@ -265,6 +304,10 @@ pub(crate) fn refresh(
                 button(p, "Add citizen", Choice::Member, false, "Add to the household selected in Collectives > Households. Shares its home, without adding a bed.");
                 button(p, "New household", Choice::Household, false, "Create a homeless household with one citizen and the chosen funds.");
             });
+            p.spawn(Node { column_gap: px(4), ..default() }).with_children(|p| {
+                button(p, "Remove citizen", Choice::RemoveCitizen, false, "Remove the selected citizen. The final member removes the household.");
+                button(p, "Remove household", Choice::RemoveHousehold, false, "Remove the household selected in Collectives > Households, settling debts and transferring buildings to town.");
+            });
             if !state.status.is_empty() { p.spawn(text(&state.status, 13.0, TEXT)); }
         });
     }
@@ -284,6 +327,7 @@ mod tests {
             .insert_resource(worker)
             .init_resource::<State>()
             .init_resource::<collectives::State>()
+            .init_resource::<crate::citizens::Selection>()
             .init_resource::<crate::Controls>()
             .init_resource::<crate::locations::State>()
             .init_resource::<crate::construction::State>()
@@ -308,7 +352,7 @@ mod tests {
         press(&mut app, Choice::Household);
         assert!(!app.world().resource::<State>().pending());
         press(&mut app, Choice::Toggle);
-        assert_eq!(choice_count(&mut app), 5);
+        assert_eq!(choice_count(&mut app), 7);
         press(&mut app, Choice::Funds);
         assert!(app.world().resource::<State>().editing());
         press(&mut app, Choice::Toggle);
@@ -439,5 +483,84 @@ mod tests {
                 .values()
                 .any(|h| h.home.is_none() && h.coins == 42)
         );
+    }
+    #[test]
+    fn remove_controls_use_selected_targets_and_refresh_status() {
+        for household_removal in [false, true] {
+            let mut app = app();
+            let family = app
+                .world()
+                .resource::<DisplaySnapshot>()
+                .0
+                .universe
+                .households()
+                .values()
+                .find(|h| h.members.len() > 1)
+                .unwrap()
+                .clone();
+            let member = family.members[0];
+            app.world_mut()
+                .resource_mut::<crate::citizens::Selection>()
+                .0 = Some(member);
+            app.world_mut()
+                .resource_mut::<collectives::State>()
+                .select(family.id);
+            press(&mut app, Choice::Toggle);
+            press(
+                &mut app,
+                if household_removal {
+                    Choice::RemoveHousehold
+                } else {
+                    Choice::RemoveCitizen
+                },
+            );
+            assert!(app.world().resource::<State>().pending());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let snapshot = app.world().resource::<SimulationWorker>().snapshot();
+                if snapshot.mutation_revision > 0 {
+                    assert!(
+                        snapshot.mutation_error.is_none(),
+                        "{:?}",
+                        snapshot.mutation_error
+                    );
+                    assert!(!snapshot.universe.agents().contains_key(&member));
+                    assert_eq!(
+                        !snapshot.universe.households().contains_key(&family.id),
+                        household_removal
+                    );
+                    app.world_mut().insert_resource(DisplaySnapshot(snapshot));
+                    app.update();
+                    assert!(!app.world().resource::<State>().pending());
+                    assert_eq!(app.world().resource::<State>().status, "Change saved");
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    #[test]
+    fn remove_controls_require_valid_selection_and_dev_mode() {
+        let mut app = app();
+        press(&mut app, Choice::RemoveCitizen);
+        assert!(!app.world().resource::<State>().pending());
+        press(&mut app, Choice::Toggle);
+        press(&mut app, Choice::RemoveCitizen);
+        assert!(
+            app.world()
+                .resource::<State>()
+                .status
+                .contains("Select a citizen")
+        );
+        press(&mut app, Choice::RemoveHousehold);
+        assert!(
+            app.world()
+                .resource::<State>()
+                .status
+                .contains("Select a household")
+        );
+        assert!(!app.world().resource::<State>().pending());
     }
 }

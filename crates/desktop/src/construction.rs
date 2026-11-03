@@ -166,11 +166,14 @@ pub(crate) fn render_choices(
     room: Option<RoomId>,
     state: &State,
 ) {
+    let Some(owner) = building.owner else {
+        return;
+    };
     let destination = Destination {
         place: place.id,
         building: building.id,
         room,
-        owner: building.owner,
+        owner,
     };
     let selected = state.expanded == Some(destination);
     let label = if room.is_some() {
@@ -203,11 +206,14 @@ pub(crate) fn render_menu(
     room: Option<RoomId>,
     state: &State,
 ) {
+    let Some(owner) = building.owner else {
+        return;
+    };
     let destination = Destination {
         place: place.id,
         building: building.id,
         room,
-        owner: building.owner,
+        owner,
     };
     if state.expanded != Some(destination) {
         return;
