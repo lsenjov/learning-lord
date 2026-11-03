@@ -337,6 +337,8 @@ mod tests {
     fn surplus_is_included_in_route_margin_revenue_and_pays_income_tax() {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Baker)
             .with_skill_practice_ms(Skill::Milling, Some(0))
             .unwrap();
@@ -440,7 +442,7 @@ mod tests {
 
     #[test]
     fn supplier_matches_global_lookup_across_skills_and_site_access() {
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let foreign_owner = AgentId(uuid::Uuid::new_v4());
         let mut map = citizen.map().clone();
         for owner in [citizen.id(), citizen.id(), foreign_owner] {
@@ -542,6 +544,8 @@ mod tests {
 
     fn tailor() -> (Citizen, PlaceId) {
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Tailor);
         let (map, site) = citizen
@@ -798,6 +802,8 @@ mod tests {
                 .is_none()
         );
         let baker = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Baker)
             .with_skill_practice_ms(Skill::Milling, Some(0))

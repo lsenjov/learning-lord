@@ -1132,6 +1132,8 @@ mod tests {
             quoted_weaver(10000),
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_starting_role(StartingRole::Farmer),
         ] {
             let snapshot = ProjectionSnapshot::new(&citizen);
@@ -1226,6 +1228,8 @@ mod tests {
     fn production_snapshot_values_owned_inputs_at_competitive_prices_and_stays_fixed() {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Weaver);
         let place = citizen.selling_place();
         let mut market = citizen.market().clone();
@@ -1266,6 +1270,8 @@ mod tests {
     #[test]
     fn production_margin_is_profit_over_net_revenue_after_taxes() {
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Weaver);
         let mut prices = ProductionPrices {
@@ -1324,6 +1330,8 @@ mod tests {
     fn bulk_stock_accounts_for_active_production_and_input_clamping() {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Miller);
         let (map, mill) = citizen
             .map()
@@ -1359,6 +1367,8 @@ mod tests {
         use crate::farming::{Crop, CropKind};
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Farmer);
         let foreign_owner = crate::AgentId(uuid::Uuid::new_v4());
         let mut map = citizen.map().clone();
@@ -1390,6 +1400,8 @@ mod tests {
     #[test]
     fn bulk_stock_preserves_rounding_with_large_inventory_and_separate_batches() {
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Brewer)
             .with_good(Good::Beer, (1_u64 << 60) + 129)
@@ -1542,7 +1554,7 @@ mod tests {
     #[test]
     fn universal_gathering_uses_local_stock_caps() {
         for recipe in [Recipe::Forage, Recipe::FetchWater] {
-            let base = Citizen::new(0.0).unwrap();
+            let base = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
             assert!(recipe_profit(recipe, &base).is_some_and(|profit| profit > 0.0));
             let cap = stock_cap_batches(recipe, &base).unwrap().ceil() as u64;
             let (good, units) = recipe.outputs()[0];
@@ -1570,6 +1582,8 @@ mod tests {
             .unwrap();
         let fisher = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Fisher)
             .with_prices(prices)
             .with_good(Good::Fish, 7)
@@ -1593,6 +1607,8 @@ mod tests {
     #[test]
     fn export_valuation_changes_at_the_cap_and_respects_tariffs_and_disabled_goods() {
         let fisher = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Fisher)
             .with_prices(Prices::default().with_price(Good::Fish, 100.0).unwrap())
@@ -1623,6 +1639,8 @@ mod tests {
     #[test]
     fn owned_ingredients_keep_reference_value_and_local_budgets_stop_at_export_loss() {
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Miller);
         let (map, _) = citizen
@@ -1669,6 +1687,8 @@ mod tests {
 
     fn quoted_weaver(owned: Quantity) -> Citizen {
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Weaver);
         let (map, _) = citizen
@@ -1726,14 +1746,14 @@ mod tests {
     #[test]
     fn ingredient_projection_uses_workshop_outputs_but_waits_for_future_crops() {
         let workshop = recipe_requirements(
-            &Citizen::new(0.0).unwrap(),
+            &Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
             &[Recipe::SpinThread, Recipe::WeaveCloth],
         )
         .unwrap();
         assert_eq!(workshop.units(Good::Flax), 200);
         assert_eq!(workshop.units(Good::Thread), 0);
         let crop = recipe_requirements(
-            &Citizen::new(0.0).unwrap(),
+            &Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
             &[Recipe::GrowFlax, Recipe::SpinThread],
         )
         .unwrap();
@@ -1742,7 +1762,7 @@ mod tests {
 
     #[test]
     fn projected_dependencies_exclude_socage_and_carry_fractional_whole_item_claims() {
-        let mut citizen = Citizen::new(0.0).unwrap();
+        let mut citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         citizen.socage_rates.insert(
             (Recipe::SpinThread, Good::Thread),
             crate::taxation::TaxRate::new(5000).unwrap(),
@@ -1775,6 +1795,8 @@ mod tests {
     #[test]
     fn imported_ingredients_do_not_consume_tax_reserved_stock_for_recipe_ratios() {
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Baker);
         let (map, _) = citizen
@@ -1843,6 +1865,8 @@ mod tests {
     fn crop_caps_amortise_work_and_pending_plant_output_is_counted_once() {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Farmer);
         let (map, field) = citizen
             .map()
@@ -1873,6 +1897,8 @@ mod tests {
     fn promised_crop_care_requires_time_for_travel_and_work_but_uses_active_remaining_time() {
         use crate::farming::{Crop, CropKind, HOUR_MS};
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Farmer);
         let (map, field) = citizen
@@ -1966,6 +1992,8 @@ mod tests {
             .list(seller, map.public_place(Location::Forest), Good::Wood, 150)
             .unwrap();
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(crate::StartingRole::Baker)
             .with_map(map.clone())

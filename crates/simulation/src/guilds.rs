@@ -173,7 +173,7 @@ impl Universe {
             if self
                 .households
                 .values()
-                .any(|household| household.home == *id)
+                .any(|household| household.home == Some(*id))
                 || !supported_workshop(place.kind)
                 || !place.owner.is_some_and(|owner| {
                     members
@@ -377,12 +377,16 @@ mod tests {
                 "First",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Weaver)
                     .with_coins(coins)
                     .unwrap(),
             )
             .unwrap();
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Weaver)
             .with_coins(coins)
@@ -437,9 +441,12 @@ mod tests {
         assert_eq!(world.guilds[&guild].coins, 0);
         let AgentKind::Citizen(a) = &world.agents[&first].kind;
         let AgentKind::Citizen(b) = &world.agents[&second].kind;
-        assert_ne!(a.home(), b.home());
+        assert_ne!(a.home().unwrap(), b.home().unwrap());
         assert_ne!(a.goods_owner(), b.goods_owner());
-        assert!(b.start_action(CitizenAction::Travel(a.home())).is_err());
+        assert!(
+            b.start_action(CitizenAction::Travel(a.home().unwrap()))
+                .is_err()
+        );
         assert!(b.production_place(Recipe::WeaveCloth).is_ok());
         assert!(b.production_place(Recipe::AssembleGarment).is_err());
         let (_, first_target) = a.stocking_requirements_at(Some(place)).unwrap();
@@ -478,6 +485,8 @@ mod tests {
             .with_citizen(
                 "Visitor",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Weaver),
             )
@@ -784,6 +793,8 @@ mod tests {
                 "Funding member",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_coins(duration as Coins)
                     .unwrap(),
             )
@@ -799,7 +810,11 @@ mod tests {
         let cloth = citizen.resource_units(Good::Cloth).unwrap();
         let account = world.economic_id(first).unwrap();
         let (world, _) = world
-            .with_household_member(account, "New member", Citizen::new(0.0).unwrap())
+            .with_household_member(
+                account,
+                "New member",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         assert!(world.market.production_trial(first, Good::Cloth).is_none());
         assert_eq!(
@@ -1028,7 +1043,11 @@ mod tests {
         let fee = charged.workshop_fees[&(account, guild)];
         let history = charged.guild_history(guild).unwrap().clone();
         let (world, member) = charged
-            .with_household_member(account, "New member", Citizen::new(0.0).unwrap())
+            .with_household_member(
+                account,
+                "New member",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         assert_eq!(world.workshop_fees[&(account, guild)], fee);
         assert_eq!(world.guild_history(guild).unwrap(), &history);
@@ -1042,7 +1061,10 @@ mod tests {
     fn guild_creation_and_saves_reject_crop_and_brewing_workshops() {
         for kind in [Location::Field, Location::Brewery, Location::Home] {
             let (world, worker) = Universe::with_map(Map::default())
-                .with_citizen("Member", Citizen::new(0.0).unwrap())
+                .with_citizen(
+                    "Member",
+                    Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+                )
                 .unwrap();
             let (world, site) = world.with_property(worker, kind).unwrap();
             assert_eq!(
@@ -1075,6 +1097,8 @@ mod object_access_tests {
                 "First",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Weaver),
             )
             .unwrap();
@@ -1082,6 +1106,8 @@ mod object_access_tests {
             .with_citizen(
                 "Second",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Weaver),
             )
@@ -1134,6 +1160,8 @@ mod object_access_tests {
             .with_citizen(
                 "Worker",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Weaver)
                     .with_skill_practice_ms(Skill::Milling, Some(0))

@@ -1044,7 +1044,12 @@ mod tests {
             )
             .with_citizen(
                 "Caravan",
-                Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(1000)
+                    .unwrap(),
             )
             .unwrap();
         let universe = universe
@@ -1124,13 +1129,27 @@ mod tests {
 
         let (universe, funded) = Universe::with_map(Map::default())
             .with_prices(Prices::new(10.0).unwrap())
-            .with_citizen("Same", Citizen::new(0.0).unwrap().with_coins(1).unwrap())
+            .with_citizen(
+                "Same",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(1)
+                    .unwrap(),
+            )
             .unwrap();
         let (universe, cashless) = universe
-            .with_citizen("Same", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Same",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let (universe, water_buyer) = universe
-            .with_citizen("Water buyer", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Water buyer",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let universe = universe
             .with_purchase_request(funded, ShoppingList::single(Good::Berries, 200))
@@ -1228,17 +1247,35 @@ mod tests {
             .with_prices(Prices::new(1.0).unwrap())
             .with_citizen(
                 "Same",
-                Citizen::new(0.0).unwrap().with_berries(1_000).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_berries(1_000)
+                    .unwrap(),
             )
             .unwrap();
         let (universe, second) = universe
             .with_citizen(
                 "Same",
-                Citizen::new(0.0).unwrap().with_berries(1_000).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_berries(1_000)
+                    .unwrap(),
             )
             .unwrap();
         let (universe, buyer) = universe
-            .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(10).unwrap())
+            .with_citizen(
+                "Buyer",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(10)
+                    .unwrap(),
+            )
             .unwrap();
         let universe = universe
             .start_action(first, CitizenAction::List(Good::Berries, 200))

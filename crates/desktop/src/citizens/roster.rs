@@ -707,6 +707,8 @@ mod tests {
                 "Ada",
                 Citizen::new(10.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_coins(100)
                     .unwrap()
                     .with_garment_condition(Some(1.0))
@@ -721,6 +723,8 @@ mod tests {
                 "Bram",
                 Citizen::new(30.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_coins(300)
                     .unwrap()
                     .with_garment_condition(Some(0.25))
@@ -732,6 +736,8 @@ mod tests {
             .with_citizen(
                 "Cleo",
                 Citizen::new(80.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_coins(50)
                     .unwrap()
@@ -944,7 +950,7 @@ mod tests {
     fn current_action_categories_cover_all_actions() {
         let world = household_world();
         let AgentKind::Citizen(citizen) = &sorted_agents(&world)[0].1.kind;
-        let place = citizen.home();
+        let place = citizen.home().unwrap();
         let list = ShoppingList::default();
         let cases = [
             (CitizenAction::Eat, "Personal needs"),
@@ -1230,7 +1236,7 @@ mod tests {
         let AgentKind::Citizen(citizen) = &agent.kind;
         let next = world
             .with_stored_good(
-                citizen.home(),
+                citizen.home().unwrap(),
                 match &world.agents()[&other].kind {
                     learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
                 },

@@ -239,7 +239,7 @@ fn day_label_with_goods(
 ) -> String {
     let a = day.activity;
     format!(
-        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals {}\n\n{}COINS\nEarned {}  |  Spent {}  |  Net {:+}{}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}",
+        "{} to {}\n{}  |  {} observed\n\nACTUAL ACTIVITY TIME\nProduction / gathering {}  |  Travel {}  |  Sleep {}\nMarket activity {}  |  Eating {}  |  Drinking {}  |  Other / idle / waiting {}\nFood goals {}\n\n{}COINS\nEarned {}  |  Spent {}  |  Net {:+}{}\n\nWELLBEING AND NEEDS\nAverage wellbeing {}\nWorst hunger {:.1}  |  Thirst {:.1}  |  Tiredness {:.1}  |  Clothing need {:.1}  |  Discomfort {:.1}",
         crate::format_clock(day.start_ms),
         crate::format_clock(day.end_ms),
         if partial {
@@ -269,7 +269,8 @@ fn day_label_with_goods(
         day.worst_hunger,
         day.worst_thirst,
         day.worst_tiredness,
-        day.worst_clothing_need
+        day.worst_clothing_need,
+        day.worst_discomfort
     )
 }
 
@@ -444,7 +445,10 @@ mod tests {
     fn history_formats_empty_and_partial_days_and_resets_selection() {
         use learning_lord_simulation::{Citizen, Universe};
         let (universe, id) = Universe::default()
-            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let history = universe.citizen_history(id).unwrap();
         let mut day = history.current.clone();

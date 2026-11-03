@@ -1708,7 +1708,10 @@ mod tests {
         let (world, member) = Universe::default()
             .with_citizen(
                 "Worker",
-                learning_lord_simulation::Citizen::new(0.0).unwrap(),
+                learning_lord_simulation::Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap(),
             )
             .unwrap();
         let (world, site) = world
@@ -1794,7 +1797,10 @@ mod tests {
     fn treasury_reports_household_arrears_once() {
         use learning_lord_simulation::{Citizen, taxation::TaxPayer};
         let (universe, first) = Universe::default()
-            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let (universe, _second) = universe
             .with_household_member(
@@ -1802,11 +1808,11 @@ mod tests {
                     AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Iris",
-                Citizen::new(0.0).unwrap(),
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &universe.agents()[&first].kind;
-        let _home = citizen.home();
+        let _home = citizen.home().unwrap();
         let household = match &universe.agents()[&first].kind {
             AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
         };
@@ -2041,7 +2047,13 @@ mod tests {
     #[test]
     fn individual_view_distinguishes_shared_and_local_rules() {
         let (universe, owner) = Universe::default()
-            .with_citizen("Ada", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                learning_lord_simulation::Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap(),
+            )
             .unwrap();
         let (universe, place) = universe.with_property(owner, Location::Field).unwrap();
         let fee = TaxKind::FlatFee {
@@ -2099,7 +2111,13 @@ mod tests {
     #[test]
     fn individual_default_name_uses_actual_property_name() {
         let (universe, owner) = Universe::default()
-            .with_citizen("Ada", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                learning_lord_simulation::Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap(),
+            )
             .unwrap();
         let (universe, place) = universe.with_property(owner, Location::Field).unwrap();
         assert_eq!(
@@ -2401,7 +2419,13 @@ mod tests {
     #[test]
     fn switching_to_socage_removes_goods_the_location_cannot_produce() {
         let (universe, owner) = Universe::default()
-            .with_citizen("Ada", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                learning_lord_simulation::Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap(),
+            )
             .unwrap();
         let (universe, place) = universe.with_property(owner, Location::Field).unwrap();
         let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
@@ -2546,7 +2570,13 @@ mod tests {
     #[test]
     fn stock_readout_keeps_owners_and_escrow_separate() {
         let (universe, id) = Universe::default()
-            .with_citizen("Ada", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                learning_lord_simulation::Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap(),
+            )
             .unwrap();
         let place = universe
             .map()
@@ -2576,6 +2606,8 @@ mod tests {
                 "Eira",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Weaver),
             )
             .unwrap();
@@ -2583,6 +2615,8 @@ mod tests {
             .with_citizen(
                 "Jori",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Weaver),
             )
@@ -2691,6 +2725,8 @@ mod tests {
         let inputs = Recipe::SpinThread.inputs();
         let mut citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Weaver);
         for &(good, units) in inputs {
             citizen = citizen.with_good(good, units).unwrap();
@@ -2785,6 +2821,8 @@ mod tests {
         use learning_lord_simulation::{Citizen, CitizenAction, StartingRole};
         let mut brewer = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Brewer);
         for &(good, units) in Recipe::BrewBeer.inputs() {
             brewer = brewer.with_good(good, units).unwrap();
@@ -2858,11 +2896,13 @@ mod tests {
                     "Farmer",
                     Citizen::new(0.0)
                         .unwrap()
+                        .with_furnished_home()
+                        .unwrap()
                         .with_starting_role(StartingRole::Farmer),
                 )
                 .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents()[&worker].kind;
-        let home = citizen.home();
+        let home = citizen.home().unwrap();
         let (world, field) = world.with_property(worker, Location::Field).unwrap();
         let world = world
             .start_action(

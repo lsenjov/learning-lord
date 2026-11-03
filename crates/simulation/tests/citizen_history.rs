@@ -13,7 +13,7 @@ fn world(citizen: Citizen) -> (Universe, learning_lord_simulation::AgentId) {
 
 #[test]
 fn actual_yields_and_activity_live_only_on_universe_snapshots() {
-    let (source, id) = world(Citizen::new(0.0).unwrap());
+    let (source, id) = world(Citizen::new(0.0).unwrap().with_furnished_home().unwrap());
     let started = source
         .start_action(id, CitizenAction::Produce(Recipe::Forage))
         .unwrap();
@@ -38,6 +38,8 @@ fn actual_yields_and_activity_live_only_on_universe_snapshots() {
 fn wellbeing_integral_is_independent_of_advance_chunk_size_and_need_clamps() {
     let citizen = Citizen::with_needs(-2.0, -2.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_garment_condition(Some(0.0001))
         .unwrap();
     let (world, id) = world(citizen);
@@ -60,7 +62,7 @@ fn wellbeing_integral_is_independent_of_advance_chunk_size_and_need_clamps() {
 
 #[test]
 fn production_reward_is_not_spread_across_the_completed_action() {
-    let (world, id) = world(Citizen::new(0.0).unwrap());
+    let (world, id) = world(Citizen::new(0.0).unwrap().with_furnished_home().unwrap());
     let active = world
         .start_action(id, CitizenAction::Produce(Recipe::Forage))
         .unwrap();
@@ -81,10 +83,17 @@ fn production_reward_is_not_spread_across_the_completed_action() {
 
 #[test]
 fn meals_record_reserved_food_and_integrate_consumption_continuously() {
-    let (world, id) = world(Citizen::new(50.0).unwrap().with_berries(310).unwrap());
+    let (world, id) = world(
+        Citizen::new(50.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_berries(310)
+            .unwrap(),
+    );
     let AgentKind::Citizen(diner) = &world.agents()[&id].kind;
     let world = world
-        .deposit_goods(id, diner.home(), Good::Berries, 310)
+        .deposit_goods(id, diner.home().unwrap(), Good::Berries, 310)
         .unwrap();
     let started = world.start_action(id, CitizenAction::Eat).unwrap();
     let duration = match &started.agents()[&id].kind {
@@ -126,7 +135,7 @@ fn meals_record_reserved_food_and_integrate_consumption_continuously() {
 
 #[test]
 fn day_boundary_keeps_completion_in_closing_day_and_retains_thirty() {
-    let (world, id) = world(Citizen::new(0.0).unwrap());
+    let (world, id) = world(Citizen::new(0.0).unwrap().with_furnished_home().unwrap());
     let world = world
         .advance(UPDATE_TIME_MS - ACTION_DURATION_MS)
         .unwrap()
@@ -147,13 +156,20 @@ fn day_boundary_keeps_completion_in_closing_day_and_retains_thirty() {
 
 #[test]
 fn purchases_record_both_sides_and_ignore_price_revaluation() {
-    let seller = Citizen::new(0.0).unwrap().with_berries(1000).unwrap();
+    let seller = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap()
+        .with_berries(1000)
+        .unwrap();
     let map = seller.map();
     let seller = seller
         .with_position(map.position(map.public_place(Location::Market)))
         .unwrap();
     let (world, seller_id) = world(seller);
     let buyer = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_map(world.map())
         .unwrap()

@@ -359,6 +359,8 @@ mod tests {
     ) {
         let owner = Citizen::with_needs(-100.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Baker)
             .with_coins(1_000_000)
             .unwrap()
@@ -372,13 +374,15 @@ mod tests {
             .with_citizen("Owner", owner)
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&owner].kind;
-        let place = citizen.home;
+        let place = citizen.home.unwrap();
         let target = RepairTarget::Room(world.map.place(place).unwrap().buildings[0].rooms[0].id);
         let worker = if carpenter {
             let (next, worker) = world
                 .with_citizen(
                     "Carpenter",
                     Citizen::with_needs(-100.0, -100.0)
+                        .unwrap()
+                        .with_furnished_home()
                         .unwrap()
                         .with_thirst(-100.0)
                         .unwrap()
@@ -439,7 +443,7 @@ mod tests {
     fn start_repair(mut world: Universe, worker: crate::AgentId, place: PlaceId) -> Universe {
         world = world.advance(BIDDING_MS).unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
-        let home = citizen.home;
+        let home = citizen.home.unwrap();
         world = world
             .with_stored_good(
                 home,
@@ -816,6 +820,8 @@ mod tests {
                 },
                 "Partner",
                 Citizen::new(-100.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Baker)
                     .with_coins(1_000)

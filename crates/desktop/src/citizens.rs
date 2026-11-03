@@ -48,6 +48,7 @@ pub enum Need {
     Thirst,
     Sleep,
     Clothing,
+    Discomfort,
 }
 
 impl Need {
@@ -57,6 +58,7 @@ impl Need {
             Self::Thirst => citizen.thirst(),
             Self::Sleep => citizen.tiredness(),
             Self::Clothing => citizen.clothing_need(),
+            Self::Discomfort => citizen.discomfort(),
         }
     }
     fn name(self) -> &'static str {
@@ -65,6 +67,7 @@ impl Need {
             Self::Thirst => "Thirst",
             Self::Sleep => "Sleep",
             Self::Clothing => "Clothing",
+            Self::Discomfort => "Discomfort",
         }
     }
 }
@@ -190,14 +193,14 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
             body.spawn((ViewPanel(View::Needs), Node { flex_direction: FlexDirection::Column,
                 row_gap: px(7), flex_shrink: 0.0, ..default() })).with_children(|needs| {
                 needs.spawn(LinkedReadout::bundle(Section::Needs));
-                for need in [Need::Hunger, Need::Thirst, Need::Sleep, Need::Clothing] {
+                for need in [Need::Hunger, Need::Thirst, Need::Sleep, Need::Clothing, Need::Discomfort] {
                     needs.spawn((text("", 14.0, TEXT), NeedLabel(need)));
                     needs.spawn((Node { width: percent(100), height: px(5), flex_shrink: 0.0, ..default() },
                         BackgroundColor(Color::srgb(0.04, 0.06, 0.08))))
                     .with_children(|bar| {
                         bar.spawn((Node { position_type: PositionType::Absolute, height: percent(100), ..default() },
                             BackgroundColor(SELECTED), NeedFill(need)));
-                        if !matches!(need, Need::Clothing) {
+                        if !matches!(need, Need::Clothing | Need::Discomfort) {
                             bar.spawn((Node { position_type: PositionType::Absolute, left: percent(50), width: px(1),
                                 height: percent(100), ..default() }, BackgroundColor(MUTED)));
                         }
@@ -606,7 +609,7 @@ impl Need {
                 -value.max(0.0) - 4.0 * (value - 100.0).max(0.0) - (-value - 100.0).max(0.0)
             }
             Self::Thirst => -value.max(0.0) - 4.0 * (value - 100.0).max(0.0),
-            Self::Sleep | Self::Clothing => -value.max(0.0),
+            Self::Sleep | Self::Clothing | Self::Discomfort => -value.max(0.0),
         }
     }
 }
@@ -643,6 +646,13 @@ pub fn refresh_cards(
                 |v| format!("Garment {:.1}%", v * 100.0),
             ),
             Need::Thirst => thirst_label(citizen.thirst()).into(),
+            Need::Discomfort => {
+                if citizen.discomfort() == 0.0 {
+                    "Comfortable".into()
+                } else {
+                    "Uncomfortable".into()
+                }
+            }
             _ => need_label(need.value(citizen), matches!(need, Need::Sleep)).into(),
         };
         let contribution = need.contribution(citizen);
@@ -667,10 +677,10 @@ pub fn refresh_cards(
             continue;
         };
         let value = fill.0.value(citizen);
-        let (left, width) = if matches!(fill.0, Need::Clothing) {
-            clothing_geometry(value)
-        } else {
-            need_geometry(value)
+        let (left, width) = match fill.0 {
+            Need::Clothing => clothing_geometry(value),
+            Need::Discomfort => (0.0, value.clamp(0.0, 100.0) as f32),
+            _ => need_geometry(value),
         };
         node.left = percent(left);
         node.width = percent(width);
@@ -1036,7 +1046,8 @@ fn section_rows(
                         })
                         .fold(0_u64, u64::saturating_add);
                     citizen
-                        .stored_available_units(citizen.home(), good)
+                        .home()
+                        .map_or(0, |home| citizen.stored_available_units(home, good))
                         .saturating_add(carried) as f64
                         * good.nutrition_per_unit().unwrap()
                 })
@@ -1336,7 +1347,7 @@ pub(crate) fn location_fragments(citizen: &Citizen) -> Vec<crate::navigation::Fr
         .places()
         .values()
         .filter(|place| place.position == citizen.position())
-        .min_by_key(|place| (place.id != citizen.home(), place.name.clone()));
+        .min_by_key(|place| (Some(place.id) != citizen.home(), place.name.clone()));
     vec![
         F::text("Location: "),
         place.map_or_else(
@@ -1379,7 +1390,13 @@ pub(crate) fn readout(universe: &Universe, selected: Option<AgentId>) -> String 
     .collect::<Vec<_>>();
     if let Some(agent) = selected_agent(universe, selected) {
         let AgentKind::Citizen(citizen) = &agent.kind;
-        for need in [Need::Hunger, Need::Thirst, Need::Sleep, Need::Clothing] {
+        for need in [
+            Need::Hunger,
+            Need::Thirst,
+            Need::Sleep,
+            Need::Clothing,
+            Need::Discomfort,
+        ] {
             rows.push(format!("{}: {:.1}", need.name(), need.value(citizen)));
         }
         rows.push(format!(
@@ -1411,12 +1428,17 @@ mod tests {
         let (world, id) = Universe::default()
             .with_citizen(
                 "Builder",
-                Citizen::new(0.0).unwrap().with_coins(100_000).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100_000)
+                    .unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
         let map = world.map();
-        let place = map.place(citizen.home()).unwrap();
+        let place = map.place(citizen.home().unwrap()).unwrap();
         let building = &place.buildings[0];
         let (world, contract) = world
             .request_construction(
@@ -1432,6 +1454,20 @@ mod tests {
             [&world.construction().contracts[&contract].project]
             .clone();
         (world, id, project)
+    }
+
+    #[test]
+    fn discomfort_need_reports_its_full_wellbeing_penalty() {
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .start_action(learning_lord_simulation::CitizenAction::Sleep)
+            .unwrap()
+            .advance(8 * 3_600_000)
+            .unwrap();
+        let discomfort = 25.0 - 10.0 / 3.0;
+        assert!((Need::Discomfort.value(&citizen) - discomfort).abs() < 1e-10);
+        assert!((Need::Discomfort.contribution(&citizen) + discomfort).abs() < 1e-10);
+        assert_eq!(Need::Discomfort.name(), "Discomfort");
     }
 
     #[test]
@@ -1511,6 +1547,8 @@ mod tests {
                 "Eater",
                 Citizen::with_needs(60.0, 100.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_berries(310)
                     .unwrap(),
             )
@@ -1519,7 +1557,7 @@ mod tests {
         let needs_world = needs_world
             .deposit_goods(
                 eater,
-                eater_citizen.home(),
+                eater_citizen.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Berries,
                 310,
             )
@@ -1569,10 +1607,15 @@ mod tests {
             (25.0, -25.0),
             (125.0, -225.0),
         ] {
-            let citizen = Citizen::new(hunger).unwrap();
+            let citizen = Citizen::new(hunger).unwrap().with_furnished_home().unwrap();
             assert_eq!(Need::Hunger.contribution(&citizen), contribution);
         }
-        let citizen = Citizen::new(0.0).unwrap().with_thirst(-150.0).unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_thirst(-150.0)
+            .unwrap();
         assert_eq!(Need::Thirst.contribution(&citizen), 0.0);
         assert!(Need::Clothing.contribution(&citizen) < 0.0);
         let (universe, id) = Universe::with_map(Map::default())
@@ -1593,6 +1636,8 @@ mod tests {
                 "Ada",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(learning_lord_simulation::StartingRole::Baker)
                     .with_good(Good::Berries, 12)
                     .unwrap(),
@@ -1605,6 +1650,8 @@ mod tests {
                 },
                 "Ben",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_good(Good::Water, 34)
                     .unwrap(),
@@ -1805,19 +1852,24 @@ mod tests {
         use learning_lord_simulation::diet::DietCategory;
         let eater = Citizen::new(50.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_good(learning_lord_simulation::marketplace::Good::Fish, 2)
             .unwrap();
         let (universe, eater_id) = Universe::with_map(Map::default())
             .with_citizen("Eater", eater)
             .unwrap();
         let (universe, empty_id) = universe
-            .with_citizen("Empty", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Empty",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let AgentKind::Citizen(eater) = &universe.agents()[&eater_id].kind;
         let universe = universe
             .deposit_goods(
                 eater_id,
-                eater.home(),
+                eater.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Fish,
                 2,
             )
@@ -2116,18 +2168,23 @@ mod tests {
                 "Ada",
                 Citizen::with_needs(60.0, 100.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_berries(310)
                     .unwrap(),
             )
             .unwrap();
         let (universe, bram) = universe
-            .with_citizen("Bram", Citizen::new(-10.0).unwrap())
+            .with_citizen(
+                "Bram",
+                Citizen::new(-10.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let AgentKind::Citizen(eater) = &universe.agents()[&ada].kind;
         let universe = universe
             .deposit_goods(
                 ada,
-                eater.home(),
+                eater.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Berries,
                 310,
             )

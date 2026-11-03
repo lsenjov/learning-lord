@@ -331,8 +331,7 @@ impl ActivePlan {
                             crate::marketplace::Good::Beer,
                         ])
                         .any(|good| {
-                            citizen.stored_available_units(citizen.home(), good)
-                                > previous.stored_available_units(previous.home(), good)
+                            citizen.provisioned_units(good) > previous.provisioned_units(good)
                         }),
                     _ => false,
                 };
@@ -513,10 +512,12 @@ impl ActivePlan {
 fn replan_check(citizen: &Citizen, action: CitizenAction, action_index: usize) -> bool {
     action_index > 0
         && match action {
-            CitizenAction::Eat => citizen.home_meal_nutrition() < REPLAN_MIN_NUTRITION,
+            CitizenAction::Eat => citizen.consumption_food_nutrition() < REPLAN_MIN_NUTRITION,
             CitizenAction::Drink => {
-                citizen.position() != citizen.map().position(citizen.home())
-                    || citizen.home_drink_units() == 0
+                citizen.consumption_available_units()[crate::marketplace::Good::Water as usize] == 0
+                    && citizen.consumption_available_units()
+                        [crate::marketplace::Good::Beer as usize]
+                        == 0
             }
             CitizenAction::EquipClothing => {
                 citizen.available_units(crate::marketplace::Good::FlaxGarment) == 0
@@ -1022,6 +1023,8 @@ mod tests {
         };
         let mut citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Tailor)
             .with_good(Good::Berries, 20_000)
             .unwrap();
@@ -1053,6 +1056,8 @@ mod tests {
     fn priority_stops_after_the_first_feasible_need() {
         use crate::marketplace::Good;
         let citizen = Citizen::with_needs(50.0, 50.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(50.0)
             .unwrap()
@@ -1124,6 +1129,8 @@ mod tests {
         .unwrap();
         let source = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(80.0)
             .unwrap()
             .with_map(map.clone())
@@ -1144,7 +1151,7 @@ mod tests {
         assert_eq!(next.active_plan().unwrap().action_index(), 0);
         assert_eq!(
             next.active_action().unwrap().action(),
-            CitizenAction::Travel(source.home())
+            CitizenAction::Travel(source.home().unwrap())
         );
     }
 
@@ -1157,6 +1164,8 @@ mod tests {
             production::{ProductionTargets, Recipe},
         };
         let mut worker = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(-100.0)
             .unwrap()
@@ -1221,6 +1230,8 @@ mod tests {
             production::Recipe,
         };
         let worker = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(-100.0)
             .unwrap()
@@ -1306,6 +1317,8 @@ mod tests {
         use crate::{StartingRole, locations::Location, marketplace::Good, production::Recipe};
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Baker)
             .with_good(Good::Flour, 1200)
             .unwrap()
@@ -1375,9 +1388,11 @@ mod tests {
         };
         let hungry = Citizen::with_needs(70.0, 10.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_berries(33)
             .unwrap();
-        let seller = Citizen::new(0.0).unwrap();
+        let seller = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let mut market = Market::default();
         market
             .list(
@@ -1402,11 +1417,15 @@ mod tests {
         let trader = hungry.with_coins(100).unwrap().with_market(market);
         let mut tailor = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Tailor)
             .with_good(Good::FlaxGarment, 1)
             .unwrap();
         tailor.refresh_production_targets(true).unwrap();
         let mut producer = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Tailor)
             .with_good(Good::Cloth, 800)
@@ -1417,12 +1436,15 @@ mod tests {
             .unwrap();
         producer.refresh_production_targets(true).unwrap();
         for citizen in [
-            Citizen::new(0.0).unwrap(),
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
             hungry,
             trader,
             tailor,
             producer,
-            Citizen::with_needs(0.0, f64::MAX).unwrap(),
+            Citizen::with_needs(0.0, f64::MAX)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap(),
         ] {
             let snapshot = citizen.clone();
             let expected = sequential_reference(&citizen).unwrap();
@@ -1437,9 +1459,14 @@ mod tests {
     fn parallel_planning_preserves_errors() {
         let busy = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .start_action(CitizenAction::Wait)
             .unwrap();
-        let overflow = Citizen::with_hunger_rate(0.0, f64::MAX).unwrap();
+        let overflow = Citizen::with_hunger_rate(0.0, f64::MAX)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         for citizen in [busy, overflow] {
             let expected = sequential_reference(&citizen).unwrap_err();
             assert_eq!(plan(&citizen).unwrap_err(), expected);
@@ -1449,7 +1476,12 @@ mod tests {
     #[test]
     fn committed_production_purchase_bounds_survive_save_and_market_changes() {
         use crate::marketplace::{Good, Market, ShoppingList};
-        let source = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
+        let source = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(100)
+            .unwrap();
         let place = source.selling_place();
         let mut ceilings = [0.0; Good::COUNT];
         ceilings[Good::Flour as usize] = 11.0;
@@ -1494,7 +1526,7 @@ mod tests {
     #[test]
     fn shopping_requests_cover_remaining_stops_within_the_current_goal() {
         use crate::marketplace::{Good, ShoppingList};
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let place = citizen.selling_place();
         let mut execution = ActivePlan {
             plan: Plan {
@@ -1599,7 +1631,10 @@ mod tests {
 
     #[test]
     fn failed_garment_purchase_replans_before_equipping() {
-        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         assert!(replan_check(&citizen, CitizenAction::EquipClothing, 1));
         let planned = executing(
             &citizen,
@@ -1617,6 +1652,8 @@ mod tests {
     fn goal_completion_prioritizes_wearing_an_acquired_garment() {
         use crate::{StartingRole, marketplace::Good};
         let mut citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Tailor)
             .with_good(Good::FlaxGarment, 1)
@@ -1655,6 +1692,8 @@ mod tests {
     fn selected_plans_use_each_goal_once_and_reset_on_replanning() {
         let source = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_berries(300)
             .unwrap();
         for citizen in [&source, &source.with_coins(300).unwrap()] {
@@ -1679,6 +1718,8 @@ mod tests {
             marketplace::{Good, ShoppingList},
         };
         let source = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_coins(1000)
             .unwrap();
@@ -1756,6 +1797,8 @@ mod tests {
         let purchase = CitizenAction::Buy(ShoppingList::single(Good::BreadRoll, 60));
         let source = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_map(map.clone())
             .unwrap();
         let mut buyer = executing(&source, vec![travel, purchase]);
@@ -1829,6 +1872,8 @@ mod tests {
         use crate::marketplace::Prices;
         let citizen = Citizen::with_needs(70.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(-100.0)
             .unwrap()
             .with_prices(Prices::new(200.0).unwrap());
@@ -1871,6 +1916,8 @@ mod tests {
     fn goal_boundaries_cover_actions_and_metadata_survives_execution() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(crate::marketplace::Good::Berries, 310)
             .unwrap();
         let started = start(&citizen).unwrap();
@@ -1902,7 +1949,10 @@ mod tests {
 
     #[test]
     fn gathering_order_execution_delivers_each_primitive_random_yield() {
-        let citizen = Citizen::with_needs(-50.0, -100.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let mut planned = executing(
             &citizen,
             vec![CitizenAction::Produce(crate::production::Recipe::Forage); 4],
@@ -1922,7 +1972,10 @@ mod tests {
 
     #[test]
     fn a_long_compound_goal_finishes_before_replanning() {
-        let source = Citizen::with_needs(-50.0, -100.0).unwrap();
+        let source = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let actions = vec![CitizenAction::Produce(crate::production::Recipe::Forage); 6];
         let planned = executing(&source, actions.clone());
         let crossed = planned.advance(TWO_HOURS_MS).unwrap();
@@ -1935,7 +1988,10 @@ mod tests {
 
     #[test]
     fn single_goals_allow_long_final_actions() {
-        let citizen = Citizen::with_needs(-50.0, 100.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, 100.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
         let sleep = goals::variants_after(&initial, Effect::ReduceTiredness)
             .unwrap()
@@ -1950,6 +2006,8 @@ mod tests {
     #[test]
     fn wait_commits_for_two_hours() {
         let citizen = Citizen::with_needs(-100.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(-100.0)
             .unwrap()
@@ -2004,6 +2062,8 @@ mod tests {
         use crate::marketplace::Prices;
         for prices in [Prices::new(200.0).unwrap(), Prices::new(100.0).unwrap()] {
             let citizen = Citizen::with_needs(50.0, -100.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_prices(prices)
                 .with_home_good(crate::marketplace::Good::Berries, 33)
@@ -2063,6 +2123,8 @@ mod tests {
     fn goal_evaluation_compares_all_variants() {
         let citizen = Citizen::with_needs(1.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_prices(crate::marketplace::Prices::new(500.0).unwrap())
             .with_home_good(crate::marketplace::Good::Berries, 120)
             .unwrap();
@@ -2093,6 +2155,8 @@ mod tests {
     fn report_remains_a_snapshot_until_replanning() {
         use crate::marketplace::Prices;
         let source = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .start_planning()
             .unwrap();
@@ -2140,9 +2204,19 @@ mod tests {
             AgentKind, Universe,
             marketplace::{Good, Prices, UPDATE_TIME_MS},
         };
-        let citizen = Citizen::new(0.0).unwrap().with_coins(200).unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(200)
+            .unwrap();
         let mut market = citizen.market().clone();
-        let seller = Citizen::new(0.0).unwrap().with_map(citizen.map()).unwrap();
+        let seller = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_map(citizen.map())
+            .unwrap();
         market
             .list(
                 seller.id(),
@@ -2211,6 +2285,8 @@ mod tests {
     fn fresh_plan_can_start_with_a_partial_meal_below_the_replan_threshold() {
         let citizen = Citizen::with_needs(100.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(crate::marketplace::Good::Berries, 39)
             .unwrap();
         let mut execution = executing(&citizen, vec![CitizenAction::Wait])
@@ -2236,6 +2312,8 @@ mod tests {
     fn replan_check_is_strictly_below_twenty_nutrition_and_only_before_later_meals() {
         for units in [0, 61, 62, 77] {
             let citizen = Citizen::with_needs(100.0, -100.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_home_good(crate::marketplace::Good::Berries, units)
                 .unwrap();
@@ -2282,6 +2360,8 @@ mod tests {
     fn a_low_actual_forage_yield_replans_from_actual_inventory() {
         let mut citizen = Citizen::with_needs(100.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_berries(30)
             .unwrap();
         let (source, actual) = (0..100)
@@ -2325,7 +2405,7 @@ mod tests {
 
     #[test]
     fn an_empty_first_meal_is_skipped_and_an_exhausted_plan_is_replaced() {
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let mut active = ActivePlan {
             plan: Plan {
                 actions: vec![CitizenAction::Eat, CitizenAction::Wait],
@@ -2352,6 +2432,8 @@ mod tests {
     fn stocked_hungry_citizens_forecast_at_most_one_meal() {
         for (hunger, units) in [(50.0, 200), (150.0, 1000), (500.0, 1000), (500.0, 10_000)] {
             let citizen = Citizen::new(hunger)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_home_good(crate::marketplace::Good::Berries, units)
                 .unwrap();

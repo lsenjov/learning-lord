@@ -33,11 +33,24 @@ fn explicit_setup_prices_share_citizen_context_without_running_the_daily_update(
         .with_prices(Prices::new(100.0).unwrap())
         .with_citizen(
             "Seller",
-            Citizen::new(0.0).unwrap().with_berries(100).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(100)
+                .unwrap(),
         )
         .unwrap();
     let (universe, buyer) = universe
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let listed = universe
         .start_action(seller, CitizenAction::List(Good::Berries, 100))
@@ -72,6 +85,8 @@ fn explicit_setup_prices_share_citizen_context_without_running_the_daily_update(
 fn prices_revalue_inventory_and_listed_goods_without_forcing_replanning() {
     let source = Citizen::with_needs(-50.0, -100.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_berries(200)
         .unwrap();
     let (universe, id) = Universe::with_map(Map::default())
@@ -101,6 +116,8 @@ fn prices_revalue_inventory_and_listed_goods_without_forcing_replanning() {
 fn predictions_hold_prices_fixed_beyond_the_daily_update() {
     let source = Citizen::with_needs(-50.0, 50.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_thirst(-100.0)
         .unwrap()
         .with_good(Good::Water, 400)
@@ -110,7 +127,7 @@ fn predictions_hold_prices_fixed_beyond_the_daily_update() {
     let (universe, id) = Universe::with_map(Map::default())
         .with_citizen("Ada", source)
         .unwrap();
-    let home = citizen(&universe, id).home();
+    let home = citizen(&universe, id).home().unwrap();
     let universe = universe
         .deposit_goods(id, home, Good::Water, 400)
         .unwrap()

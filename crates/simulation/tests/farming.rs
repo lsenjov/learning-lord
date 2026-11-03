@@ -17,6 +17,8 @@ fn farmer(world: Universe) -> (Universe, AgentId, PlaceId) {
             "Farmer",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_starting_role(StartingRole::Farmer)
                 .with_coins(100)
                 .unwrap(),

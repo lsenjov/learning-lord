@@ -479,7 +479,7 @@ mod tests {
         let guild = *universe.guilds().keys().next().unwrap();
         let household = *universe.households().keys().next().unwrap();
         let member = universe.households()[&household].members[0];
-        let home = universe.households()[&household].home;
+        let home = universe.households()[&household].home.unwrap();
         click(&mut app, Target::Citizen(member));
         assert!(app.world().resource::<citizens::RosterState>().detail);
         click(&mut app, Target::Household(household));
@@ -563,7 +563,7 @@ mod tests {
         let universe = crate::simulation::new_universe().unwrap();
         let learning_lord_simulation::AgentKind::Citizen(citizen) =
             &universe.agents().values().next().unwrap().kind;
-        let site = citizen.home();
+        let site = citizen.home().unwrap();
         let row = action(
             CitizenAction::BuyAt {
                 place: site,

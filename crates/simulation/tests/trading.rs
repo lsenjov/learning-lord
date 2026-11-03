@@ -16,7 +16,12 @@ fn supply(grams: u64) -> (Universe, AgentId) {
         .with_prices(Prices::new(100.0).unwrap())
         .with_citizen(
             "Seller",
-            Citizen::new(0.0).unwrap().with_berries(grams).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(grams)
+                .unwrap(),
         )
         .unwrap();
     let universe = universe
@@ -35,6 +40,8 @@ fn purchases_top_up_at_completion_without_borrowing() {
             .with_citizen(
                 "Buyer",
                 Citizen::new(10.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_berries(berries)
                     .unwrap()
@@ -97,6 +104,8 @@ fn purchases_top_up_at_completion_without_borrowing() {
 fn listing_preserves_ownership_wealth_and_coins_until_someone_buys() {
     let source = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_berries(126)
         .unwrap()
         .with_good(Good::Wood, 12)
@@ -128,7 +137,12 @@ fn listing_preserves_ownership_wealth_and_coins_until_someone_buys() {
 #[test]
 fn empty_or_unaffordable_purchases_take_time_without_creating_goods_or_coins() {
     for coins in [0, -100, 100] {
-        let source = Citizen::new(0.0).unwrap().with_coins(coins).unwrap();
+        let source = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(coins)
+            .unwrap();
         let done = source
             .start_action(CitizenAction::BuyFood(
                 learning_lord_simulation::marketplace::Good::Berries,
@@ -152,6 +166,8 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_thirst(-100.0)
                 .unwrap()
                 .with_coins(meal_cost)
@@ -160,7 +176,7 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
         .unwrap();
     let source = source
         .with_stored_good(
-            citizen(&source, buyer).home(),
+            citizen(&source, buyer).home().unwrap(),
             match &source.agents()[&buyer].kind {
                 learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
             },
@@ -196,7 +212,7 @@ fn a_hungry_citizen_can_buy_a_finite_owners_stock_for_a_meal_without_mutating_pr
     assert_eq!(citizen(&bought, buyer).berries_units(), 155);
     assert_eq!(
         citizen(&bought, buyer)
-            .stored_available_units(citizen(&bought, buyer).home(), Good::Berries),
+            .stored_available_units(citizen(&bought, buyer).home().unwrap(), Good::Berries),
         0
     );
     assert_eq!(
@@ -228,7 +244,12 @@ fn withdrawal_is_partial_owned_and_requires_a_market_action() {
     let (universe, stranger) = universe
         .with_citizen(
             "Stranger",
-            Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
         )
         .unwrap();
     let no_stock = universe
@@ -277,7 +298,12 @@ fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
     let (universe, expensive) = universe
         .with_citizen(
             "Expensive",
-            Citizen::new(0.0).unwrap().with_berries(100).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(100)
+                .unwrap(),
         )
         .unwrap();
     let universe = universe
@@ -286,7 +312,15 @@ fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
         .advance(TRADE_DURATION_MS)
         .unwrap();
     let (universe, buyer) = universe
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let done = universe
         .start_action(
@@ -331,7 +365,7 @@ fn buyers_use_cheapest_orders_first_between_daily_price_updates() {
 
 #[test]
 fn seller_coin_overflow_preserves_the_source() {
-    let source = Citizen::new(0.0).unwrap();
+    let source = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     let universe = Universe::with_map(Map::default()).with_prices(Prices::new(100.0).unwrap());
     let (universe, seller) = universe
         .with_citizen(
@@ -349,7 +383,15 @@ fn seller_coin_overflow_preserves_the_source() {
         .advance(TRADE_DURATION_MS)
         .unwrap();
     let (universe, buyer) = universe
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let started = universe
         .start_action(
@@ -387,6 +429,8 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
             "Buyer",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_thirst(-100.0)
                 .unwrap()
                 .with_coins(meal_cost)
@@ -395,7 +439,7 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
         .unwrap();
     let universe = universe
         .with_stored_good(
-            citizen(&universe, buyer).home(),
+            citizen(&universe, buyer).home().unwrap(),
             match &universe.agents()[&buyer].kind {
                 learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
             },
@@ -424,10 +468,26 @@ fn hunger_planning_quotes_live_orders_after_explicit_reference_price_setup() {
 fn earlier_completions_take_stock_before_later_completions_regardless_of_id_order() {
     let (universe, _) = supply(100);
     let (universe, a) = universe
-        .with_citizen("A", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "A",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let (universe, b) = universe
-        .with_citizen("B", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "B",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let early = if a.0 > b.0 { a } else { b };
     let late = if early == a { b } else { a };
@@ -470,6 +530,8 @@ fn earlier_completions_take_stock_before_later_completions_regardless_of_id_orde
 fn listing_identity_and_local_predictions_are_independent_of_tick_partitioning() {
     let source = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_berries(100)
         .unwrap()
         .start_action(CitizenAction::List(Good::Berries, 100))
@@ -482,6 +544,8 @@ fn listing_identity_and_local_predictions_are_independent_of_tick_partitioning()
         .unwrap();
     assert_eq!(direct.market(), split.market());
     let buyer = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_map(direct.map())
         .unwrap()
@@ -503,6 +567,8 @@ fn listing_identity_and_local_predictions_are_independent_of_tick_partitioning()
 
 fn production_supply() -> (Universe, AgentId) {
     let seller = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_good(Good::Flour, 300)
         .unwrap()
@@ -539,7 +605,15 @@ fn one_five_minute_shopping_action_acquires_multiple_inputs_and_records_each_fil
     use learning_lord_simulation::marketplace::ShoppingList;
     let (universe, seller) = production_supply();
     let (universe, buyer) = universe
-        .with_citizen("Baker", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Baker",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let list =
         ShoppingList::new([(Good::Water, 100), (Good::Wood, 25), (Good::Flour, 100)]).unwrap();
@@ -591,7 +665,15 @@ fn a_shopping_list_fills_in_catalogue_order_with_one_shared_budget_and_finite_st
     use learning_lord_simulation::marketplace::ShoppingList;
     let (universe, seller) = production_supply();
     let (universe, buyer) = universe
-        .with_citizen("Baker", Citizen::new(0.0).unwrap().with_coins(13).unwrap())
+        .with_citizen(
+            "Baker",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(13)
+                .unwrap(),
+        )
         .unwrap();
     let list =
         ShoppingList::new([(Good::Water, 100), (Good::Wood, 100), (Good::Flour, 100)]).unwrap();
@@ -624,7 +706,15 @@ fn a_shopping_list_fills_in_catalogue_order_with_one_shared_budget_and_finite_st
     assert_eq!(done.market().trades().len(), 2);
     let remaining = ShoppingList::new([(Good::Flour, 500), (Good::Water, 500)]).unwrap();
     let (done, rich) = done
-        .with_citizen("Rich", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Rich",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let remaining_cost: i64 = done
         .market()
@@ -663,12 +753,25 @@ fn settlement_rounds_once_per_seller_and_good_across_orders() {
     for same_seller in [true, false] {
         let universe = Universe::with_map(Map::default()).with_prices(Prices::new(450.0).unwrap());
         let (universe, first) = universe
-            .with_citizen("First", Citizen::new(0.0).unwrap().with_berries(2).unwrap())
+            .with_citizen(
+                "First",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_berries(2)
+                    .unwrap(),
+            )
             .unwrap();
         let (universe, second) = universe
             .with_citizen(
                 "Second",
-                Citizen::new(0.0).unwrap().with_berries(1).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_berries(1)
+                    .unwrap(),
             )
             .unwrap();
         let universe = universe
@@ -683,7 +786,15 @@ fn settlement_rounds_once_per_seller_and_good_across_orders() {
             .advance(TRADE_DURATION_MS)
             .unwrap();
         let (universe, buyer) = universe
-            .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(2).unwrap())
+            .with_citizen(
+                "Buyer",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(2)
+                    .unwrap(),
+            )
             .unwrap();
         let bought = universe
             .start_action(
@@ -726,7 +837,10 @@ fn purchases_cannot_buy_sub_coin_value_without_a_coin_and_preserve_stock() {
     use learning_lord_simulation::marketplace::ShoppingList;
     let (universe, seller) = supply(1);
     let (universe, buyer) = universe
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let bought = universe
         .start_action(
@@ -765,6 +879,8 @@ fn owned_workshop_sells_compatible_goods_and_customers_visit_without_production_
             "Miller",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::Flour, 100)
                 .unwrap(),
         )
@@ -773,7 +889,12 @@ fn owned_workshop_sells_compatible_goods_and_customers_visit_without_production_
     let (universe, buyer) = universe
         .with_citizen(
             "Customer",
-            Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
         )
         .unwrap();
     assert_eq!(citizen(&universe, seller).selling_place(), mill);
@@ -786,7 +907,9 @@ fn owned_workshop_sells_compatible_goods_and_customers_visit_without_production_
     let customer = citizen(&listed, buyer);
     assert!(customer.start_action(CitizenAction::Travel(mill)).is_ok());
     assert_eq!(
-        customer.start_action(CitizenAction::Travel(citizen(&listed, seller).home())),
+        customer.start_action(CitizenAction::Travel(
+            citizen(&listed, seller).home().unwrap()
+        )),
         Err(SimulationError::PrivateProperty)
     );
     assert_eq!(
@@ -795,7 +918,7 @@ fn owned_workshop_sells_compatible_goods_and_customers_visit_without_production_
     );
     assert_eq!(
         customer.start_action(CitizenAction::BuyAt {
-            place: customer.home(),
+            place: customer.home().unwrap(),
             list: ShoppingList::single(Good::Flour, 1),
         }),
         Err(SimulationError::PrivateProperty)

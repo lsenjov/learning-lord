@@ -38,6 +38,7 @@ pub struct DailyCitizenHistory {
     pub worst_hunger: f64,
     pub worst_thirst: f64,
     pub worst_tiredness: f64,
+    pub worst_discomfort: f64,
     pub worst_clothing_need: f64,
     mean_wellbeing: f64,
 }
@@ -62,6 +63,7 @@ impl DailyCitizenHistory {
             worst_hunger: citizen.hunger(),
             worst_thirst: citizen.thirst(),
             worst_tiredness: citizen.tiredness(),
+            worst_discomfort: citizen.discomfort(),
             worst_clothing_need: citizen.clothing_need(),
             mean_wellbeing: 0.0,
         }
@@ -74,6 +76,7 @@ impl DailyCitizenHistory {
     fn observe(&mut self, citizen: &Citizen) {
         self.worst_thirst = self.worst_thirst.max(citizen.thirst());
         self.worst_hunger = self.worst_hunger.max(citizen.hunger());
+        self.worst_discomfort = self.worst_discomfort.max(citizen.discomfort());
         self.worst_tiredness = self.worst_tiredness.max(citizen.tiredness());
         self.worst_clothing_need = self.worst_clothing_need.max(citizen.clothing_need());
     }
@@ -126,11 +129,13 @@ impl CitizenHistory {
                 || day.elapsed_ms != day.end_ms - day.start_ms
                 || day.elapsed_ms > crate::marketplace::DAY_MS
                 || total != Some(day.elapsed_ms)
+                || !(0.0..=100.0).contains(&day.worst_discomfort)
                 || day.food_goal_ms > day.elapsed_ms
                 || ![
                     day.worst_hunger,
                     day.worst_thirst,
                     day.worst_tiredness,
+                    day.worst_discomfort,
                     day.worst_clothing_need,
                     day.mean_wellbeing,
                 ]
@@ -383,7 +388,7 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
     split(start.hunger(), end.hunger(), &[-100.0, 0.0, 100.0]);
     split(start.tiredness(), end.tiredness(), &[0.0]);
     let reserve = |citizen: &Citizen| {
-        citizen.food_nutrition()
+        (citizen.provisioned_food_nutrition()
             + citizen.active_action.map_or(0.0, |a| {
                 a.drink_nutrition() * a.remaining_fraction(a.drink_duration_ms())
                     + a.meal_nutrition
@@ -391,7 +396,8 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                             .saturating_sub(a.duration_ms - a.remaining_ms)
                             as f64
                         / a.meal_duration_ms.max(1) as f64
-            })
+            }))
+            / citizen.supplied_members() as f64
     };
     split(
         reserve(start),
@@ -402,8 +408,8 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
         ],
     );
     split(
-        start.drinking_water_reserve(),
-        end.drinking_water_reserve(),
+        start.drinking_water_reserve() / start.supplied_members() as f64,
+        end.drinking_water_reserve() / end.supplied_members() as f64,
         &[
             crate::WATER_RESERVE_GRAMS as f64,
             crate::WATER_RESERVE_CAP_GRAMS as f64,
@@ -420,6 +426,12 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
     for (value, rate) in start.diet.into_iter().zip(diet_rates) {
         split(value, value + rate * elapsed as f64, &[0.0, 50.0, 100.0]);
     }
+    let discomfort_rate = start.discomfort_rate(start.active_action);
+    split(
+        start.discomfort,
+        start.discomfort + discomfort_rate * elapsed as f64,
+        &[0.0, 100.0],
+    );
     fractions.sort_by(f64::total_cmp);
     let wellbeing = |fraction: f64| -> Result<f64, SimulationError> {
         let mut citizen = start.clone();
@@ -428,6 +440,8 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
         }
         citizen.thirst = start.thirst + (end.thirst - start.thirst) * fraction;
         citizen.hunger = start.hunger + (end.hunger - start.hunger) * fraction;
+        citizen.discomfort =
+            (start.discomfort + discomfort_rate * elapsed as f64 * fraction).clamp(0.0, 100.0);
         citizen.tiredness = start.tiredness + (end.tiredness - start.tiredness) * fraction;
         citizen.garment_condition = start.garment_condition.map(|value| {
             (value - elapsed as f64 * fraction / crate::GARMENT_LIFETIME_MS as f64).max(0.0)
@@ -449,8 +463,9 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                     / duration as f64;
                 let initial_water_ratio = duration.saturating_sub(passed) as f64 / duration as f64;
                 value += crate::water_reserve_bonus(
-                    citizen.available_drink_units() as f64
-                        + active.drink_units as f64 * water_ratio,
+                    (citizen.provisioned_drink_units() as f64
+                        + active.drink_units as f64 * water_ratio)
+                        / citizen.supplied_members() as f64,
                 ) - citizen.water_reserve_wellbeing();
                 if citizen.household.is_none() {
                     value += citizen
@@ -477,9 +492,10 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
                 (active.drink_duration_ms() as f64 - passed as f64 - elapsed as f64 * fraction)
                     .max(0.0)
                     / active.drink_duration_ms().max(1) as f64;
-            let nutrition = citizen.food_nutrition()
+            let nutrition = (citizen.provisioned_food_nutrition()
                 + active.meal_nutrition * ratio
-                + active.drink_nutrition() * drink_ratio;
+                + active.drink_nutrition() * drink_ratio)
+                / citizen.supplied_members() as f64;
             let bonus = 0.10 * nutrition.min(crate::FOOD_RESERVE_FULL_BONUS_NUTRITION)
                 + 0.02
                     * (nutrition.min(crate::FOOD_RESERVE_CAP_NUTRITION)
@@ -548,9 +564,40 @@ mod tests {
     use crate::{AgentKind, TRADE_DURATION_MS, Universe, marketplace::ShoppingList};
 
     #[test]
+    fn meal_history_uses_usable_provisions_for_reserve_credit() {
+        for housed in [false, true] {
+            let mut citizen = Citizen::new(80.0).unwrap();
+            if housed {
+                citizen = citizen.with_furnished_home().unwrap();
+            }
+            citizen = citizen
+                .with_good(Good::BreadRoll, 40)
+                .unwrap()
+                .with_good(Good::Water, 1600)
+                .unwrap();
+            if !housed {
+                citizen.tax_reserved.insert(Good::BreadRoll, 30);
+                citizen.tax_reserved.insert(Good::Water, 1200);
+            }
+            let start = citizen.start_action(CitizenAction::Eat).unwrap();
+            let elapsed = 1_000;
+            let end = start.advance(elapsed).unwrap();
+            let expected =
+                (start.personal_wellbeing().unwrap() + end.personal_wellbeing().unwrap()) / 2.0;
+            let actual = wellbeing_average(&start, &end, elapsed).unwrap();
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "{housed}: {actual} != {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn beer_history_counts_each_good_once_and_is_chunk_invariant() {
         for beer in [100, 200, 1300] {
             let citizen = Citizen::new(80.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_thirst(80.0)
                 .unwrap()
@@ -602,7 +649,7 @@ mod tests {
     fn diet_history_integrates_decay_clamps_and_bonus_thresholds_exactly() {
         use crate::marketplace::DAY_MS;
         for (initial, expected) in [(25.0, 0.625), (75.0, 4.625), (100.0, 6.0)] {
-            let baseline = Citizen::new(-100.0).unwrap();
+            let baseline = Citizen::new(-100.0).unwrap().with_furnished_home().unwrap();
             let mut dietary = baseline.clone();
             dietary.diet[0] = initial;
             let end = dietary.advance(DAY_MS).unwrap();
@@ -616,6 +663,8 @@ mod tests {
     #[test]
     fn diet_history_is_chunk_invariant_at_meal_caps_and_drink_completion() {
         let mut citizen = Citizen::new(-50.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(Good::Berries, 1)
             .unwrap()
@@ -660,6 +709,8 @@ mod tests {
     fn replacing_an_unworn_garment_records_the_consumed_item() {
         let mut citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_good(Good::FlaxGarment, 1)
             .unwrap();
         citizen.garment_condition = Some(1.0);
@@ -682,8 +733,18 @@ mod tests {
     #[test]
     fn seller_rounding_gain_is_not_applied_before_the_sale_or_by_id_order() {
         for buyer_first in [true, false] {
-            let mut buyer = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
-            let mut seller = Citizen::new(0.0).unwrap().with_berries(1000).unwrap();
+            let mut buyer = Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap();
+            let mut seller = Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(1000)
+                .unwrap();
             buyer.id = AgentId(uuid::Uuid::from_u128(if buyer_first { 1 } else { 2 }));
             seller.id = AgentId(uuid::Uuid::from_u128(if buyer_first { 2 } else { 1 }));
             let (world, buyer) = Universe::with_map(crate::locations::Map::default())
@@ -731,6 +792,8 @@ mod tests {
     fn drinking_reserve_clamps_have_chunk_independent_history() {
         let citizen = Citizen::new(-50.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::Water, 1300)
             .unwrap();
         let (world, id) = Universe {
@@ -756,6 +819,8 @@ mod tests {
     fn concurrent_drink_reserve_history_stops_at_its_component_completion() {
         for water in [500, 1300] {
             let citizen = Citizen::new(-50.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_home_good(Good::Berries, 155)
                 .unwrap()
@@ -784,6 +849,8 @@ mod tests {
     #[test]
     fn planned_meals_count_time_towards_food_goals_without_double_counting_activity() {
         let citizen = Citizen::new(80.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(Good::Berries, 310)
             .unwrap();
@@ -815,7 +882,12 @@ mod tests {
             .with_prices(crate::marketplace::Prices::new(100.0).unwrap())
             .with_citizen(
                 "Seller",
-                Citizen::new(0.0).unwrap().with_berries(150).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_berries(150)
+                    .unwrap(),
             )
             .unwrap();
         let universe = universe
@@ -824,10 +896,26 @@ mod tests {
             .advance(TRADE_DURATION_MS)
             .unwrap();
         let (universe, a) = universe
-            .with_citizen("A", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .with_citizen(
+                "A",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100)
+                    .unwrap(),
+            )
             .unwrap();
         let (universe, b) = universe
-            .with_citizen("B", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .with_citizen(
+                "B",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100)
+                    .unwrap(),
+            )
             .unwrap();
         let started = universe
             .start_action(

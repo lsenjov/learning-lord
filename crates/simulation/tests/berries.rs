@@ -8,7 +8,7 @@ fn assert_close(actual: f64, expected: f64) {
 
 #[test]
 fn inventory_is_integer_and_busy_replacement_is_rejected() {
-    let original = Citizen::new(0.0).unwrap();
+    let original = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     assert_eq!(original.berries_units(), 0);
     let stocked = original.with_berries(310).unwrap();
     assert_eq!(stocked.berries_units(), 310);
@@ -26,6 +26,8 @@ fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() 
     for stock in [155, 310, 500] {
         let source = Citizen::new(20.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(learning_lord_simulation::marketplace::Good::Berries, stock)
             .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
@@ -33,7 +35,7 @@ fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() 
         assert_eq!(started.active_action().unwrap().duration_ms(), duration_ms);
         assert_eq!(
             started.stored_available_units(
-                started.home(),
+                started.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Berries
             ),
             stock - 155
@@ -41,7 +43,7 @@ fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() 
         let halfway = started.advance(duration_ms / 2).unwrap();
         assert_eq!(
             halfway.stored_available_units(
-                halfway.home(),
+                halfway.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Berries
             ),
             stock - 155
@@ -54,7 +56,7 @@ fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() 
         assert_eq!(completed.active_action(), None);
         assert_eq!(
             completed.stored_available_units(
-                completed.home(),
+                completed.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Berries
             ),
             stock - 155
@@ -65,7 +67,7 @@ fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() 
         );
         assert_eq!(
             source.stored_available_units(
-                source.home(),
+                source.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Berries
             ),
             stock
@@ -75,7 +77,7 @@ fn meals_deduct_integer_portions_at_start_and_restore_nutrition_progressively() 
 
 #[test]
 fn empty_meals_skip_and_partial_berries_use_whole_available_units() {
-    let empty = Citizen::new(0.0).unwrap();
+    let empty = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     assert_eq!(empty.start_action(CitizenAction::Eat).unwrap(), empty);
     for units in [1, 154] {
         let citizen = empty
@@ -84,7 +86,7 @@ fn empty_meals_skip_and_partial_berries_use_whole_available_units() {
         let eating = citizen.start_action(CitizenAction::Eat).unwrap();
         assert_eq!(
             eating.stored_available_units(
-                eating.home(),
+                eating.home().unwrap(),
                 learning_lord_simulation::marketplace::Good::Berries
             ),
             0
@@ -101,7 +103,7 @@ fn empty_meals_skip_and_partial_berries_use_whole_available_units() {
 
 #[test]
 fn forage_yields_only_at_completion_and_prediction_preserves_actual_outcomes() {
-    let original = Citizen::new(20.0).unwrap();
+    let original = Citizen::new(20.0).unwrap().with_furnished_home().unwrap();
     let snapshot = original.clone();
     let predicted = plan(&original).unwrap();
     assert_eq!(predicted, plan(&original).unwrap());
@@ -131,7 +133,10 @@ fn forage_yields_only_at_completion_and_prediction_preserves_actual_outcomes() {
 
 #[test]
 fn empty_hungry_citizens_can_plan_and_advance_without_zero_duration_loops() {
-    let source = Citizen::with_needs(50.0, -50.0).unwrap();
+    let source = Citizen::with_needs(50.0, -50.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap();
     let planned = source.start_planning().unwrap();
     assert!(matches!(
         planned.active_action().unwrap().action(),

@@ -619,6 +619,8 @@ mod tests {
     fn weaver() -> Citizen {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Weaver);
         let (map, _) = citizen
             .map()
@@ -1487,6 +1489,8 @@ mod depletion_tests {
     fn weaver() -> Citizen {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Weaver);
         let (map, _) = citizen
             .map()
@@ -1682,6 +1686,8 @@ mod depletion_tests {
     fn brewing_claim_survives_delay_and_save_then_matches_exact_slot() {
         let mut citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Brewer);
         for &(good, units) in Recipe::BrewBeer.inputs() {
             citizen = citizen.with_good(good, units * 2).unwrap();
@@ -1690,7 +1696,10 @@ mod depletion_tests {
             .with_citizen("Brewer", citizen)
             .unwrap();
         let (world, _companion) = universe
-            .with_citizen("Companion", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Companion",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         universe = world;
         let (world, brewery) = universe.with_property(id, Location::Brewery).unwrap();

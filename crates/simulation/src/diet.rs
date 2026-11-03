@@ -146,18 +146,25 @@ impl Citizen {
         forecast.storage = crate::storage::Storage::default();
         forecast.active_action = None;
         forecast.active_plan = None;
-        forecast.position = forecast.map.position(forecast.home);
+        if let Some(home) = forecast.home {
+            forecast.position = forecast.map.position(home);
+        }
         for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-            forecast
-                .set_stored_units(
-                    crate::storage::StockKey {
-                        place: forecast.home,
-                        owner: forecast.goods_owner(),
-                        good,
-                    },
-                    available[good as usize],
-                )
-                .expect("retention stock is valid");
+            if let Some(home) = forecast.home {
+                forecast.set_inventory_units(good, 0);
+                forecast
+                    .set_stored_units(
+                        crate::storage::StockKey {
+                            place: home,
+                            owner: forecast.goods_owner(),
+                            good,
+                        },
+                        available[good as usize],
+                    )
+                    .expect("retention stock is valid");
+            } else {
+                forecast.set_inventory_units(good, available[good as usize]);
+            }
             forecast.tax_reserved.remove(&good);
         }
         let mut retained = forecast
@@ -168,10 +175,8 @@ impl Citizen {
         let mut retained_points = [0.0; 4];
         for good in Good::FOOD.into_iter().chain([Good::Beer]) {
             for (index, points) in good.diet_per_unit().into_iter().enumerate() {
-                stocked[index] += points
-                    * self
-                        .stored_available_units(self.home, good)
-                        .min(available[good as usize]) as f64;
+                stocked[index] +=
+                    points * self.provisioned_units(good).min(available[good as usize]) as f64;
                 retained_points[index] += points * retained[good as usize] as f64;
             }
         }
@@ -195,7 +200,7 @@ impl Citizen {
             for good in foods {
                 let missing = (target - retained_points[category]).max(0.0);
                 let added = self
-                    .stored_available_units(self.home, good)
+                    .provisioned_units(good)
                     .min(available[good as usize])
                     .saturating_sub(retained[good as usize])
                     .min((missing / good.diet_per_unit()[category]).ceil() as crate::Quantity);
@@ -234,7 +239,9 @@ impl Citizen {
         let mut future = self.clone();
         future.active_action = None;
         future.active_plan = None;
-        future.position = future.map.position(future.home);
+        if let Some(home) = future.home {
+            future.position = future.map.position(home);
+        }
         let mut elapsed = 0;
         let mut benefit = 0.0;
         let mut consumed_value = 0.0;
@@ -270,12 +277,12 @@ impl Citizen {
                 let portion = action.meal_units[good as usize];
                 units[good as usize] += portion;
                 future
-                    .consume_home_goods(good, portion)
+                    .consume_personal_goods(good, portion)
                     .expect("forecast consumes available food");
             }
             units[action.drink_good as usize] += action.drink_units;
             future
-                .consume_home_goods(action.drink_good, action.drink_units)
+                .consume_personal_goods(action.drink_good, action.drink_units)
                 .expect("forecast consumes available drink");
             let duration = action.duration_ms.min(horizon - elapsed);
             benefit +=
@@ -356,7 +363,10 @@ impl Citizen {
     #[cfg(test)]
     fn meal_wellbeing(&self, meal_units: [crate::Quantity; Good::COUNT]) -> Option<f64> {
         let (good, units) = self.preferred_drink();
-        self.consumption_wellbeing(meal_units, good, units, self.available_drink_units())
+        let available = self.consumption_available_units();
+        let reserve =
+            available[Good::Water as usize].saturating_add(available[Good::Beer as usize]);
+        self.consumption_wellbeing(meal_units, good, units, reserve)
     }
 
     pub(crate) fn consumption_wellbeing(
@@ -522,6 +532,8 @@ mod tests {
     fn forecast_recounts_food_and_drink_after_each_meal() {
         let mut source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(80.0)
             .unwrap()
             .with_good(Good::BreadRoll, 5)
@@ -534,7 +546,7 @@ mod tests {
                 .storage
                 .set_units(
                     crate::storage::StockKey {
-                        place: source.home,
+                        place: source.home.unwrap(),
                         owner,
                         good,
                     },
@@ -546,16 +558,21 @@ mod tests {
         }
         let first = source.food_forecast(1);
         let later = source.food_forecast(6);
-        assert_eq!(first.units[Good::BreadRoll as usize], 4);
-        assert_eq!(later.units[Good::BreadRoll as usize], 5);
-        assert_eq!(later.units[Good::Water as usize], 0);
+        assert_eq!(first.units[Good::BreadRoll as usize], 5);
+        assert_eq!(later.units[Good::BreadRoll as usize], 10);
+        assert_eq!(later.units[Good::Water as usize], 200);
         assert_eq!(later.units[Good::Beer as usize], 200);
         for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-            assert!(later.units[good as usize] <= source.stored_available_units(source.home, good));
+            assert!(
+                later.units[good as usize]
+                    <= source
+                        .stored_available_units(source.home.unwrap(), good)
+                        .saturating_add(source.carried_available_units(good))
+            );
         }
         assert_eq!(source.units(Good::BreadRoll), 5);
         assert_eq!(
-            source.stored_available_units(source.home, Good::BreadRoll),
+            source.stored_available_units(source.home.unwrap(), Good::BreadRoll),
             5
         );
     }
@@ -563,6 +580,8 @@ mod tests {
     #[test]
     fn beer_drinking_progresses_nutrition_thirst_carbs_and_wealth() {
         let source = Citizen::new(80.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(80.0)
             .unwrap()
@@ -605,6 +624,8 @@ mod tests {
     fn beer_meals_share_forecast_selection_and_separate_component_timelines() {
         for beer in [100, 200] {
             let source = Citizen::new(80.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_thirst(80.0)
                 .unwrap()
@@ -657,6 +678,8 @@ mod tests {
     fn beer_selection_considers_cost_diet_and_thirst_room() {
         let mut source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(80.0)
             .unwrap()
             .with_home_good(Good::BreadRoll, 10)
@@ -683,6 +706,8 @@ mod tests {
         );
         let beer_only = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::Beer, 10_000)
             .unwrap();
         assert!(!beer_only.has_complete_meal());
@@ -691,6 +716,8 @@ mod tests {
     #[test]
     fn beer_consumption_excludes_tax_and_town_stock_and_retains_shared_reserves() {
         let mut source = Citizen::new(80.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(80.0)
             .unwrap()
@@ -716,6 +743,8 @@ mod tests {
         close(source.drinking_water_reserve(), 0.0);
         let mixed = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_good(Good::BreadRoll, 30)
             .unwrap()
             .with_good(Good::Water, 200)
@@ -732,7 +761,7 @@ mod tests {
 
     #[test]
     fn categories_start_empty_decay_and_have_diminishing_bonuses() {
-        let mut citizen = Citizen::new(0.0).unwrap();
+        let mut citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         assert_eq!(citizen.diet, [0.0; 4]);
         for (value, bonus) in [
             (0.0, 0.0),
@@ -759,6 +788,8 @@ mod tests {
             (Good::Cabbage, 2),
         ] {
             let source = Citizen::new(80.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_home_good(good, units)
                 .unwrap();
@@ -787,6 +818,8 @@ mod tests {
     fn meals_consider_diet_cost_and_time_instead_of_only_nutrition_price() {
         let mut source = Citizen::new(40.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::BreadRoll, 5)
             .unwrap()
             .with_home_good(Good::Fish, 2)
@@ -804,6 +837,8 @@ mod tests {
     #[test]
     fn meal_scores_match_consumption_predictions_without_food_reserve_changes() {
         let mut source = Citizen::with_needs(140.0, 20.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(Good::BreadRoll, 10)
             .unwrap()
@@ -877,6 +912,8 @@ mod tests {
     fn starting_a_meal_does_not_add_a_seventh_forecast_meal() {
         let source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_prices(
                 crate::marketplace::Prices::default()
                     .with_price(Good::BreadRoll, 0.1)
@@ -896,6 +933,8 @@ mod tests {
     #[test]
     fn food_forecast_is_continuous_at_meal_completion() {
         let source = Citizen::new(80.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_prices(
                 crate::marketplace::Prices::default()
@@ -928,6 +967,8 @@ mod tests {
     fn dietary_retention_keeps_variety_and_lists_excess_rolls() {
         let mut source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_good(Good::BreadRoll, 70)
             .unwrap()
             .with_good(Good::Fish, 12)
@@ -947,6 +988,8 @@ mod tests {
     fn food_forecast_values_future_diet_without_mutating_the_source() {
         let source = Citizen::new(-50.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::BreadRoll, 100)
             .unwrap();
         let before = source.clone();
@@ -956,7 +999,7 @@ mod tests {
             .benefit;
         assert!(value > 0.0 && value <= 28.0);
         assert_eq!(source, before);
-        let empty = Citizen::new(-50.0).unwrap();
+        let empty = Citizen::new(-50.0).unwrap().with_furnished_home().unwrap();
         close(empty.food_forecast(6).benefit, 0.0);
         let taxed = {
             let mut citizen = source.clone();
@@ -982,6 +1025,8 @@ mod tests {
     fn mixed_whole_food_supplies_a_complete_meal() {
         let source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::Fish, 1)
             .unwrap()
             .with_home_good(Good::Cabbage, 1)
@@ -998,6 +1043,8 @@ mod tests {
     #[test]
     fn mixed_rolls_fish_and_berries_fill_the_remaining_nutrition() {
         let source = Citizen::new(80.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(Good::Fish, 1)
             .unwrap()
@@ -1020,6 +1067,8 @@ mod tests {
     fn minimal_whole_food_overfill_remains_a_complete_meal() {
         let source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::Fish, 1)
             .unwrap()
             .with_home_good(Good::BreadRoll, 3)
@@ -1032,6 +1081,8 @@ mod tests {
     #[test]
     fn mixed_partial_meal_uses_available_food_without_phantom_nutrition() {
         let source = Citizen::new(80.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(Good::Fish, 1)
             .unwrap()
@@ -1051,6 +1102,8 @@ mod tests {
     #[test]
     fn capped_meal_with_a_longer_drink_is_invariant_to_elapsed_chunks() {
         let mut source = Citizen::new(30.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(Good::Berries, 1)
             .unwrap()

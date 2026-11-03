@@ -13,7 +13,7 @@ fn citizen(universe: &Universe, id: learning_lord_simulation::AgentId) -> &Citiz
 
 #[test]
 fn every_good_validates_weights_and_inventory_branches_are_independent() {
-    let empty = Citizen::new(40.0).unwrap();
+    let empty = Citizen::new(40.0).unwrap().with_furnished_home().unwrap();
     let source = empty.clone();
     for good in Good::ALL {
         assert_eq!(empty.units(good), 0);
@@ -30,6 +30,8 @@ fn every_good_validates_weights_and_inventory_branches_are_independent() {
 #[test]
 fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     let mut stocked = Citizen::new(40.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_prices(Prices::new(5.0).unwrap())
         .with_berries(200)
@@ -67,10 +69,13 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         .unwrap();
     assert_eq!(eaten.berries_units(), 200);
     assert_eq!(
-        eaten.stored_available_units(eaten.home(), Good::Berries),
+        eaten.stored_available_units(eaten.home().unwrap(), Good::Berries),
         45
     );
-    assert_eq!(eaten.stored_available_units(eaten.home(), Good::Water), 800);
+    assert_eq!(
+        eaten.stored_available_units(eaten.home().unwrap(), Good::Water),
+        800
+    );
     assert_eq!(eaten.units(Good::BreadRoll), 1000);
     let sold = stocked
         .start_action(CitizenAction::List(Good::Berries, 50))
@@ -93,6 +98,8 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
     }
     let bread_only = Citizen::new(40.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_good(Good::BreadRoll, 50)
         .unwrap();
     let bread_meal = bread_only
@@ -107,7 +114,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
         bread_meal
             .advance(100_000)
             .unwrap()
-            .stored_available_units(bread_meal.home(), Good::BreadRoll),
+            .stored_available_units(bread_meal.home().unwrap(), Good::BreadRoll),
         45
     );
     assert_eq!(
@@ -118,7 +125,7 @@ fn goods_prices_and_food_availability_preserve_unconsumed_inventory() {
 
 #[test]
 fn ownership_is_multiple_homes_are_private_and_workplaces_allow_customers() {
-    let original = Citizen::new(0.0).unwrap();
+    let original = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     let original_id = original.id();
     let (universe, ada) = Universe::default()
         .with_citizen("Ada", original.clone())
@@ -129,7 +136,10 @@ fn ownership_is_multiple_homes_are_private_and_workplaces_allow_customers() {
         Err(SimulationError::AgentAlreadyExists)
     );
     let (universe, bram) = universe
-        .with_citizen("Bram", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Bram",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let before = universe.clone();
     let (universe, field) = universe.with_property(ada, Location::Field).unwrap();
@@ -137,16 +147,19 @@ fn ownership_is_multiple_homes_are_private_and_workplaces_allow_customers() {
     assert_eq!(citizen(&universe, ada).owned_properties().count(), 3);
     assert_eq!(citizen(&before, ada).owned_properties().count(), 1);
     let ada_citizen = citizen(&universe, ada);
-    assert_ne!(ada_citizen.home(), citizen(&universe, bram).home());
+    assert_ne!(
+        ada_citizen.home().unwrap(),
+        citizen(&universe, bram).home().unwrap()
+    );
     assert_eq!(
         ada_citizen.selling_place(),
         if field.0 < mill.0 { field } else { mill }
     );
-    for id in [ada_citizen.home(), field, mill] {
+    for id in [ada_citizen.home().unwrap(), field, mill] {
         assert!(ada_citizen.start_action(CitizenAction::Travel(id)).is_ok());
         let action = CitizenAction::Travel(id);
         let visitor = citizen(&universe, bram);
-        if id == ada_citizen.home() {
+        if id == ada_citizen.home().unwrap() {
             assert_eq!(
                 visitor.start_action(action),
                 Err(SimulationError::PrivateProperty)
@@ -170,7 +183,9 @@ fn ownership_is_multiple_homes_are_private_and_workplaces_allow_customers() {
         Err(SimulationError::PlaceNotFound)
     );
     assert!(ada_citizen.start_action(CitizenAction::Sleep).is_ok());
-    let foreign_home = universe.map().position(citizen(&universe, bram).home());
+    let foreign_home = universe
+        .map()
+        .position(citizen(&universe, bram).home().unwrap());
     assert_eq!(
         ada_citizen
             .with_position(foreign_home)
@@ -205,14 +220,19 @@ fn planning_routes_sleep_to_own_home_with_correct_durations_and_goal_metadata() 
             "Ada",
             Citizen::with_needs(-50.0, 100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_thirst(-100.0)
                 .unwrap(),
         )
         .unwrap();
     let (universe, bram) = universe
-        .with_citizen("Bram", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Bram",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
-    let home = citizen(&universe, ada).home();
+    let home = citizen(&universe, ada).home().unwrap();
     let market = universe.map().public_place(Location::Market);
     let away = citizen(&universe, ada)
         .with_position(universe.map().position(market))
@@ -229,11 +249,9 @@ fn planning_routes_sleep_to_own_home_with_correct_durations_and_goal_metadata() 
     );
     assert_eq!(chosen.goals()[0].goal, Effect::ReduceTiredness);
     assert_eq!(chosen.goals()[0].actions, 0..2);
-    assert!(
-        !chosen
-            .actions()
-            .contains(&CitizenAction::Travel(citizen(&universe, bram).home()))
-    );
+    assert!(!chosen.actions().contains(&CitizenAction::Travel(
+        citizen(&universe, bram).home().unwrap()
+    )));
     let started = away.start_planning().unwrap();
     let at_home = started.advance(chosen.action_durations_ms()[0]).unwrap();
     assert_eq!(at_home.position(), universe.map().position(home));
@@ -241,6 +259,6 @@ fn planning_routes_sleep_to_own_home_with_correct_durations_and_goal_metadata() 
         at_home.active_action().unwrap().action(),
         CitizenAction::Sleep
     );
-    assert_eq!(started.home(), home);
+    assert_eq!(started.home().unwrap(), home);
     assert_eq!(away.position(), universe.map().position(market));
 }

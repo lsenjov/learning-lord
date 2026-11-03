@@ -18,6 +18,8 @@ fn explicit_production_uses_the_selected_colocated_workshop_and_its_tax_rule() {
             "Miller",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_starting_role(StartingRole::Miller)
                 .with_good(Good::Wheat, 600)
                 .unwrap(),
@@ -91,6 +93,8 @@ fn explicit_production_uses_the_selected_colocated_workshop_and_its_tax_rule() {
 fn explicit_production_rejects_private_mismatched_and_unknown_sites() {
     let worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Miller)
         .with_good(Good::Wheat, 300)
         .unwrap();
@@ -151,6 +155,8 @@ fn explicit_production_rejects_private_mismatched_and_unknown_sites() {
 fn explicit_production_requires_arrival_and_preserves_legacy_actions() {
     let worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Miller)
         .with_good(Good::Wheat, 300)
         .unwrap();
@@ -188,7 +194,10 @@ fn explicit_production_requires_arrival_and_preserves_legacy_actions() {
 #[test]
 fn site_socage_lookup_matches_stacked_rules_and_survives_save_roundtrip() {
     let (world, id) = Universe::with_map(Map::default())
-        .with_citizen("Miller", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Miller",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let (world, first) = world.with_property(id, Location::Mill).unwrap();
     let (world, second) = world.with_property(id, Location::Mill).unwrap();

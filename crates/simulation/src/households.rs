@@ -10,7 +10,7 @@ use imbl::HashMap;
 pub struct Household {
     pub id: AgentId,
     pub name: String,
-    pub home: PlaceId,
+    pub home: Option<PlaceId>,
     pub members: Vec<AgentId>,
     pub coins: Coins,
     pub maintenance: crate::maintenance::MaintenanceState,
@@ -208,12 +208,13 @@ impl Universe {
                     .min(units);
                 let portions = [
                     (
-                        citizen.designated_workplace.unwrap_or(citizen.home),
+                        citizen.designated_workplace.or(citizen.home),
                         production_units,
                     ),
                     (citizen.home, units - production_units),
                 ];
                 for (place, units) in portions {
+                    let Some(place) = place else { continue };
                     if units == 0 {
                         continue;
                     }
@@ -236,9 +237,16 @@ impl Universe {
                         Some(&allowed),
                     )?;
                 }
-                citizen.inventory.remove(&good);
+                let retained = portions
+                    .into_iter()
+                    .filter(|(place, _)| place.is_none())
+                    .map(|(_, units)| units)
+                    .sum();
+                citizen.inventory.insert(good, retained);
             }
-            citizen.position = universe.map.position(citizen.home);
+            if let Some(home) = citizen.home {
+                citizen.position = universe.map.position(home);
+            }
         }
         universe.refresh_market();
         universe.refresh_household_history(universe.current_time_ms, false)?;
@@ -447,6 +455,8 @@ mod tests {
     fn household_first_creation_preserves_live_accounts_and_individual_items() {
         let alice = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_coins(100)
             .unwrap()
             .with_good(Good::BreadRoll, 7)
@@ -467,6 +477,8 @@ mod tests {
             .unwrap();
         let before = world.household_history(account).unwrap().clone();
         let bob = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_coins(50)
             .unwrap()
@@ -501,7 +513,10 @@ mod tests {
             assert_eq!(citizen.household_id(), Some(account));
             assert_eq!(citizen.coins(), 150);
             assert!(citizen.accessible_place(mill).is_ok());
-            assert_eq!(next.map.place(citizen.home).unwrap().owner, Some(account));
+            assert_eq!(
+                next.map.place(citizen.home.unwrap()).unwrap().owner,
+                Some(account)
+            );
         }
         for place in next
             .map
@@ -543,7 +558,7 @@ mod tests {
             next.with_household_member(
                 AgentId(uuid::Uuid::new_v4()),
                 "Missing",
-                Citizen::new(0.0).unwrap()
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap()
             )
             .is_err()
         );
@@ -561,6 +576,8 @@ mod tests {
                     "First",
                     Citizen::new(0.0)
                         .unwrap()
+                        .with_furnished_home()
+                        .unwrap()
                         .with_starting_role(StartingRole::Brewer),
                 )
                 .unwrap();
@@ -571,6 +588,8 @@ mod tests {
                     },
                     "Second",
                     Citizen::new(0.0)
+                        .unwrap()
+                        .with_furnished_home()
                         .unwrap()
                         .with_starting_role(StartingRole::Brewer),
                 )
@@ -608,7 +627,7 @@ mod tests {
                     }
                 }
                 _ => {
-                    let home = world.households[&household].home;
+                    let home = world.households[&household].home.unwrap();
                     world = world
                         .with_stored_good(home, owner, Good::FlaxGarment, 1)
                         .unwrap();
@@ -666,7 +685,7 @@ mod tests {
                     );
                     assert_eq!(
                         finished.storage.units(
-                            finished.households[&household].home,
+                            finished.households[&household].home.unwrap(),
                             owner,
                             Good::FlaxGarment
                         ),
@@ -699,6 +718,8 @@ mod tests {
                 "First",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Brewer),
             )
             .unwrap();
@@ -709,6 +730,8 @@ mod tests {
                 },
                 "Second",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Brewer),
             )
@@ -771,6 +794,8 @@ mod tests {
         let mut household = None;
         for index in 0..4 {
             let citizen = Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_starting_role(StartingRole::Baker)
                 .with_coins(1000)
@@ -843,6 +868,8 @@ mod physical_tests {
             .with_citizen(
                 "Miller",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Miller),
             )
@@ -917,7 +944,15 @@ mod physical_tests {
     #[test]
     fn allegiance_counts_shared_wealth_once_and_personal_reserves_scale_per_member() {
         let (world, first) = Universe::with_map(Map::default())
-            .with_citizen("First", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .with_citizen(
+                "First",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100)
+                    .unwrap(),
+            )
             .unwrap();
         let (world, second) = world
             .with_household_member(
@@ -925,11 +960,16 @@ mod physical_tests {
                     crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Second",
-                Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100)
+                    .unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        let home = citizen.home();
+        let home = citizen.home().unwrap();
         let household = match &world.agents()[&first].kind {
             crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
         };

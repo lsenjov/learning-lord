@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 17;
+pub const SAVE_VERSION: u32 = 18;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -265,19 +265,11 @@ impl Universe {
                 || self.guilds.contains_key(id)
                 || household.coins < 0
                 || household.members.is_empty()
-                || !self.map.place(household.home).is_ok_and(|place| {
-                    place.owner == Some(*id)
-                        && place.buildings.iter().any(|building| {
-                            building.owner == *id
-                                && building.rooms.iter().flat_map(|room| &room.objects).any(
-                                    |object| {
-                                        matches!(
-                                            object.kind,
-                                            crate::locations::ObjectKind::Bed { .. }
-                                        )
-                                    },
-                                )
-                        })
+                || household.home.is_some_and(|home| {
+                    !self.map.place(home).is_ok_and(|place| {
+                        place.owner == Some(*id)
+                            && place.buildings.iter().any(|building| building.owner == *id)
+                    })
                 })
             {
                 return Err(SaveError::InvalidState(
@@ -534,6 +526,7 @@ impl Citizen {
                 self.hunger,
                 self.thirst,
                 self.tiredness,
+                self.discomfort,
                 self.hunger_per_hour,
             ]
             .into_iter()
@@ -547,7 +540,8 @@ impl Citizen {
             || self
                 .garment_condition
                 .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
-            || self.map.place(self.home).is_err()
+            || !(0.0..=100.0).contains(&self.discomfort)
+            || self.home.is_some_and(|home| self.map.place(home).is_err())
             || self
                 .last_meal_started_ms
                 .is_some_and(|time| time > self.market_time_ms)
@@ -739,6 +733,8 @@ mod tests {
                 "First",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(crate::StartingRole::Miller)
                     .with_coins(100)
                     .unwrap(),
@@ -751,6 +747,8 @@ mod tests {
                 },
                 "Second",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(crate::StartingRole::Miller)
                     .with_coins(200)
@@ -781,7 +779,10 @@ mod tests {
             )
             .unwrap();
         let (updated, other) = world
-            .with_citizen("Other", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Other",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         world = updated;
         world
@@ -911,7 +912,7 @@ mod tests {
                     .unwrap()
                     .members
                     .push(first),
-                1 => invalid.households.get_mut(&household).unwrap().home = mill,
+                1 => invalid.households.get_mut(&household).unwrap().home = Some(mill),
                 2 => {
                     let AgentKind::Citizen(citizen) =
                         &mut invalid.agents.get_mut(&first).unwrap().kind;
@@ -1015,6 +1016,8 @@ mod tests {
                 "Seller",
                 Citizen::new(12.345678901234567)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_coins(200)
                     .unwrap()
                     .with_good(Good::BreadRoll, 20)
@@ -1024,7 +1027,12 @@ mod tests {
         let (world, buyer) = world
             .with_citizen(
                 "Buyer",
-                Citizen::new(-20.0).unwrap().with_coins(200).unwrap(),
+                Citizen::new(-20.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(200)
+                    .unwrap(),
             )
             .unwrap();
         let market = world.map().public_place(Location::Market);
@@ -1123,7 +1131,10 @@ mod tests {
     #[test]
     fn rejects_malformed_fields_and_out_of_range_legacy_actions() {
         let (world, id) = Universe::with_map(Map::default())
-            .with_citizen("Farmer", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Farmer",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let (world, field) = world.with_property(id, Location::Field).unwrap();
         for count in [0, 11, 12, 13, 23, 25] {
@@ -1150,7 +1161,7 @@ mod tests {
 
     #[test]
     fn mid_forage_round_trip_resumes_the_same_random_stream() {
-        let mut citizen = Citizen::new(0.0).unwrap();
+        let mut citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         citizen.forage_rng = rand::rngs::Xoshiro256PlusPlus::seed_from_u64(42);
         let (world, id) = Universe::with_map(Map::default())
             .with_citizen("Forager", citizen)
@@ -1192,6 +1203,8 @@ mod tests {
             "Hungry",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 10)
                 .unwrap()
                 .with_good(Good::Water, 400)
@@ -1212,7 +1225,10 @@ mod tests {
     fn rejects_history_counter_overflow_and_inconsistent_tax_reservations() {
         use crate::taxation::ReservationStock;
         let (world, id) = Universe::with_map(Map::default())
-            .with_citizen("Citizen", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Citizen",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         for counter in 0..3 {
             let mut invalid = world.clone();
@@ -1228,7 +1244,7 @@ mod tests {
             ));
         }
         let home = match &world.agents[&id].kind {
-            AgentKind::Citizen(citizen) => citizen.home,
+            AgentKind::Citizen(citizen) => citizen.home.unwrap(),
         };
         let (world, rule) = world
             .with_tax_rule(
@@ -1392,7 +1408,10 @@ mod tests {
             Err(SaveError::Format(_))
         ));
         let (mut world, id) = Universe::with_map(Map::default())
-            .with_citizen("Bad", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Bad",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&id).unwrap().kind;
         citizen.hunger = f64::NAN;

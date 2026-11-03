@@ -2569,10 +2569,17 @@ mod tests {
         let (world, client) = Universe::with_map(Map::default())
             .with_citizen(
                 "Client",
-                Citizen::new(-100.0).unwrap().with_coins(1_000_000).unwrap(),
+                Citizen::new(-100.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(1_000_000)
+                    .unwrap(),
             )
             .unwrap();
         let worker = Citizen::with_needs(-100.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(-100.0)
             .unwrap()
@@ -2589,7 +2596,7 @@ mod tests {
             .unwrap();
         let (world, worker) = world.with_citizen("Carpenter", worker).unwrap();
         let AgentKind::Citizen(owner) = &world.agents[&client].kind;
-        let place = owner.home;
+        let place = owner.home.unwrap();
         let mut world = world;
         if item == ConstructionItem::Oven {
             world.map.places_mut().get_mut(&place).unwrap().buildings[0].rooms[0].size =
@@ -2817,7 +2824,7 @@ mod tests {
                     crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Partner",
-                Citizen::new(-100.0).unwrap(),
+                Citizen::new(-100.0).unwrap().with_furnished_home().unwrap(),
             )
             .unwrap();
         let family = match &world.agents()[&first].kind {
@@ -3200,8 +3207,8 @@ mod tests {
         assert!(!world.construction.contracts.contains_key(&id));
         assert_eq!(
             world.construction_reserved_area(
-                citizen.home,
-                Some(world.map.place(citizen.home).unwrap().buildings[0].rooms[0].id)
+                citizen.home.unwrap(),
+                Some(world.map.place(citizen.home.unwrap()).unwrap().buildings[0].rooms[0].id)
             ),
             0
         );
@@ -3460,7 +3467,7 @@ mod tests {
         };
         world = world.with_caravan_policy(policy).unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
-        let home = citizen.home;
+        let home = citizen.home.unwrap();
         world = world
             .with_stored_good(
                 home,
@@ -3603,7 +3610,11 @@ mod tests {
         let contract = world.construction.contracts[&id].clone();
         let history = world.household_histories[&account].clone();
         let (world, new_member) = world
-            .with_household_member(account, "New member", Citizen::new(0.0).unwrap())
+            .with_household_member(
+                account,
+                "New member",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         assert_eq!(world.construction.contracts[&id], contract);
         assert_eq!(world.economic_id(new_member).unwrap(), account);
@@ -3634,6 +3645,8 @@ mod tests {
                 .with_citizen(
                     name,
                     Citizen::new(-100.0)
+                        .unwrap()
+                        .with_furnished_home()
                         .unwrap()
                         .with_good(Good::Wood, wood)
                         .unwrap(),
@@ -3675,6 +3688,8 @@ mod tests {
                 "Later supplier",
                 Citizen::new(-100.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_good(Good::Wood, 300)
                     .unwrap(),
             )
@@ -3703,6 +3718,8 @@ mod tests {
     fn tied_quotes_choose_persisted_random_winner_and_workers_hold_one_quote() {
         let (world, _, first, id) = fixture(ConstructionItem::FishCrate, 1_000);
         let worker = Citizen::with_needs(-100.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(-100.0)
             .unwrap()
@@ -3743,6 +3760,8 @@ mod tests {
         let cancelled = world.construction.contracts[&old].clone();
         let world = world.cancel_construction(client, old).unwrap();
         let second = Citizen::with_needs(-100.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Carpenter)
             .with_garment_condition(Some(1.0))
@@ -3825,6 +3844,8 @@ mod tests {
         let world = world.with_caravan_policy(policy).unwrap();
         let second = Citizen::with_needs(-100.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(-100.0)
             .unwrap()
             .with_starting_role(StartingRole::Carpenter)
@@ -3866,7 +3887,7 @@ mod tests {
             )
             .unwrap();
         let AgentKind::Citizen(owner) = &world.agents[&client].kind;
-        let place = owner.home;
+        let place = owner.home.unwrap();
         let building = &world.map.place(place).unwrap().buildings[0];
         let (next, object_job) = world
             .request_construction(
@@ -3948,6 +3969,8 @@ mod tests {
                 "Second carpenter",
                 Citizen::with_needs(-100.0, -100.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Carpenter)
                     .with_garment_condition(Some(1.0))
                     .unwrap()
@@ -3962,7 +3985,7 @@ mod tests {
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &next.agents[&second].kind;
-        let home = citizen.home;
+        let home = citizen.home.unwrap();
         world = next
             .with_stored_good(
                 home,
@@ -4071,6 +4094,8 @@ mod tests {
                 "Partner",
                 Citizen::new(-100.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Carpenter)
                     .with_good(Good::Wood, 1_000)
                     .unwrap()
@@ -4100,6 +4125,8 @@ mod tests {
             .unwrap();
         let second = Citizen::new(-100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Carpenter)
             .with_garment_condition(Some(1.0))
             .unwrap();
@@ -4113,7 +4140,7 @@ mod tests {
             )
             .unwrap();
         let AgentKind::Citizen(worker) = &world.agents[&first].kind;
-        let _home = worker.home;
+        let _home = worker.home.unwrap();
         let family = match &world.agents()[&first].kind {
             crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
         };

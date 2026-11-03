@@ -565,9 +565,11 @@ fn satisfy(
 }
 
 fn reserve_units(citizen: &Citizen, good: Good) -> u64 {
-    citizen
-        .carried_available_units(good)
-        .saturating_add(citizen.stored_available_units(citizen.home(), good))
+    citizen.carried_available_units(good).saturating_add(
+        citizen
+            .home()
+            .map_or(0, |home| citizen.stored_available_units(home, good)),
+    )
 }
 
 fn reserve_food_nutrition(citizen: &Citizen) -> f64 {
@@ -596,7 +598,9 @@ fn deliver_reserves(
         return Ok(Some(initial.clone()));
     }
     let mut ready = initial.clone();
-    let home = ready.citizen.home();
+    let Some(home) = ready.citizen.home() else {
+        return Ok(Some(ready));
+    };
     if ready.citizen.position() != ready.citizen.map().position(home) {
         let Some(next) = ready.perform(CitizenAction::Travel(home), prior_actions)? else {
             return Ok(None);
@@ -620,8 +624,8 @@ fn pantry_categories(citizen: &Citizen) -> [f64; 4] {
 }
 
 fn provisioning_needed(citizen: &Citizen) -> bool {
-    citizen.home_food_nutrition() < 100.0 * citizen.supplied_members() as f64
-        || citizen.home_drink_units() < 400 * citizen.supplied_members()
+    citizen.provisioned_food_nutrition() < 100.0 * citizen.supplied_members() as f64
+        || citizen.provisioned_drink_units() < 400 * citizen.supplied_members()
         || reserve_units(citizen, Good::FlaxGarment) < citizen.spare_clothing_target()
 }
 
@@ -631,7 +635,7 @@ fn basket_cost(citizen: &Citizen, units: &[crate::Quantity; Good::COUNT]) -> Opt
             citizen
                 .stored_sources(good)
                 .into_iter()
-                .filter(|(place, _)| *place != citizen.home())
+                .filter(|(place, _)| Some(*place) != citizen.home())
                 .map(|(place, stock)| stock.min(citizen.collectable_reserve_units(place, good)))
                 .fold(0, u64::saturating_add),
         );
@@ -736,7 +740,7 @@ fn provisioning_basket(
                         citizen
                             .stored_sources(good)
                             .into_iter()
-                            .filter(|(place, _)| *place != citizen.home())
+                            .filter(|(place, _)| Some(*place) != citizen.home())
                             .map(|(place, units)| {
                                 units.min(citizen.collectable_reserve_units(place, good))
                             })
@@ -782,7 +786,7 @@ fn acquire_provisioning_list(
     for (good, wanted) in list.items() {
         let mut remaining = wanted;
         for (place, stock) in state.citizen.stored_sources(good) {
-            if place == state.citizen.home() {
+            if Some(place) == state.citizen.home() {
                 continue;
             }
             let units = remaining
@@ -2145,13 +2149,22 @@ fn variants_from(
     let mut variants: Vec<Prediction> = Vec::new();
     if matches!(goal, Effect::ReduceHunger | Effect::ReduceThirst) {
         let mut ready = initial.clone();
-        if citizen.position() != citizen.map().position(citizen.home()) {
-            let Some(home) =
-                initial.perform(CitizenAction::Travel(citizen.home()), prior_actions)?
-            else {
+        if let Some(home) = citizen
+            .home()
+            .filter(|home| citizen.position() != citizen.map().position(*home))
+        {
+            let action = if goal == Effect::ReduceHunger {
+                CitizenAction::Eat
+            } else {
+                CitizenAction::Drink
+            };
+            if let Some(consumed) = ready.perform(action, prior_actions)? {
+                variants.push(consumed);
+            }
+            let Some(next) = initial.perform(CitizenAction::Travel(home), prior_actions)? else {
                 return Ok(variants);
             };
-            ready = home;
+            ready = next;
         }
         let action = if goal == Effect::ReduceHunger {
             CitizenAction::Eat
@@ -2245,6 +2258,8 @@ mod tests {
         for textiles in [false, true] {
             let mut citizen = Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::Wheat, 100)
                 .unwrap()
                 .with_good(Good::Hops, 100)
@@ -2316,6 +2331,8 @@ mod tests {
         use crate::locations::{Location, Map, Position};
         let source = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(crate::StartingRole::Brewer)
             .with_map(
                 Map::new(
@@ -2380,6 +2397,8 @@ mod tests {
     fn listing_keeps_only_completed_stops_when_later_travel_exceeds_the_horizon() {
         use crate::locations::{Location, Map, Position};
         let source = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_good(Good::Wheat, 100)
             .unwrap()
@@ -2456,7 +2475,7 @@ mod tests {
         );
         assert_eq!(acquired.actions.len(), 1);
         let delivered = deliver_reserves(&acquired, 0).unwrap().unwrap();
-        assert_eq!(delivered.citizen.home_food_nutrition(), 100.0);
+        assert_eq!(delivered.citizen.provisioned_food_nutrition(), 100.0);
     }
 
     #[test]
@@ -2466,9 +2485,9 @@ mod tests {
         let candidates =
             provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
         let delivered = &candidates[0];
-        assert!(delivered.citizen.home_food_nutrition() > 0.0);
-        assert!(delivered.citizen.home_drink_units() >= 400);
-        assert!(delivered.citizen.home_food_nutrition() < 100.0);
+        assert!(delivered.citizen.provisioned_food_nutrition() > 0.0);
+        assert!(delivered.citizen.provisioned_drink_units() >= 400);
+        assert!(delivered.citizen.provisioned_food_nutrition() < 100.0);
         assert!(matches!(
             delivered.actions.last(),
             Some(CitizenAction::DepositStored { .. })
@@ -2492,7 +2511,7 @@ mod tests {
         let initial = Prediction::new(&source, Cooldowns::default());
         let candidates = provision_household(&initial, 0).unwrap();
         assert!(candidates[0].citizen.home_units(Good::Fish) > 0);
-        assert!(candidates[0].citizen.home_food_nutrition() > 0.0);
+        assert!(candidates[0].citizen.provisioned_food_nutrition() > 0.0);
         assert!(initial.blocked_requests.borrow().items().next().is_some());
     }
 
@@ -2599,7 +2618,7 @@ mod tests {
             .unwrap();
         let supplied =
             provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
-        assert!(supplied[0].citizen.home_food_nutrition() >= 300.0);
+        assert!(supplied[0].citizen.provisioned_food_nutrition() >= 300.0);
         assert_eq!(supplied[0].citizen.home_units(Good::FlaxGarment), 1);
         assert!(supplied[0].actions.contains(&CitizenAction::Travel(remote)));
     }
@@ -2854,7 +2873,7 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_evaluates_food_after_delivery_and_consumption_keeps_travel_cost() {
+    fn carried_food_can_be_eaten_before_delivery_and_stored_food_requires_travel() {
         use crate::locations::{Location, Position};
         let mut source = reserve_shopper(0, &[])
             .with_good(Good::BreadRoll, 30)
@@ -2881,7 +2900,7 @@ mod tests {
             .with_position(Position { x: 100.0, y: 0.0 })
             .unwrap();
         assert!(
-            variants_after(
+            !variants_after(
                 &Prediction::new(&source, Cooldowns::default()),
                 Effect::ReduceHunger
             )
@@ -2892,7 +2911,7 @@ mod tests {
             provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
         assert_eq!(
             delivered[0].actions.first(),
-            Some(&CitizenAction::Travel(source.home()))
+            Some(&CitizenAction::Travel(source.home().unwrap()))
         );
         assert!(delivered[0].elapsed_ms > crate::TRADE_DURATION_MS);
         let away = delivered[0]
@@ -2906,7 +2925,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             meal[0].actions,
-            [CitizenAction::Travel(source.home()), CitizenAction::Eat]
+            [
+                CitizenAction::Travel(source.home().unwrap()),
+                CitizenAction::Eat
+            ]
         );
     }
 
@@ -2927,7 +2949,10 @@ mod tests {
             if citizen.active_action().is_some_and(|active| {
                 matches!(active.action(), CitizenAction::Eat | CitizenAction::Drink)
             }) {
-                assert_eq!(citizen.position(), citizen.map().position(citizen.home()));
+                assert_eq!(
+                    citizen.position(),
+                    citizen.map().position(citizen.home().unwrap())
+                );
                 at_home_meals += 1;
             }
         }
@@ -2940,6 +2965,8 @@ mod tests {
     #[test]
     fn capped_commercial_gathering_is_excluded_while_ingredient_gathering_remains_available() {
         let mut citizen = crate::Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_good(crate::marketplace::Good::Berries, 10_000)
             .unwrap();
@@ -2966,6 +2993,8 @@ mod tests {
     fn full_brewery_production_keeps_thirst_alternatives() {
         use crate::{brewing::Batch, locations::Location, production::Recipe};
         let mut worker = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(crate::StartingRole::Brewer)
             .with_thirst(80.0)
@@ -3027,7 +3056,7 @@ mod tests {
 
     #[test]
     fn prediction_preserves_errors_other_than_missing_inputs() {
-        let mut worker = Citizen::new(0.0).unwrap();
+        let mut worker = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let busy = worker.start_action(CitizenAction::Wait).unwrap();
         assert!(matches!(
             Prediction::new(&busy, Cooldowns::default()).perform(CitizenAction::Wait, 0),
@@ -3057,6 +3086,8 @@ mod tests {
     fn maintenance_is_first_only_and_replenishment_delivers_home() {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_good(Good::BreadRoll, 10)
             .unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
@@ -3068,13 +3099,13 @@ mod tests {
         );
         for variant in &delivered {
             assert!(
-                matches!(variant.actions.last(), Some(CitizenAction::DepositStored { place, .. }) if *place == citizen.home())
+                matches!(variant.actions.last(), Some(CitizenAction::DepositStored { place, .. }) if *place == citizen.home().unwrap())
             );
             assert_eq!(variant.citizen.carried_available_units(Good::BreadRoll), 0);
             assert!(
                 variant
                     .citizen
-                    .stored_available_units(citizen.home(), Good::BreadRoll)
+                    .stored_available_units(citizen.home().unwrap(), Good::BreadRoll)
                     >= 10
             );
         }
@@ -3122,12 +3153,13 @@ mod tests {
             0,
         )
         .unwrap()];
-        assert!(
-            prepared
-                .iter()
-                .any(|p| p.citizen.available_drink_units() >= 400
-                    && p.actions.first() == Some(&CitizenAction::Withdraw(Good::Beer, 100)))
-        );
+        assert!(prepared.iter().any(|p| {
+            p.citizen
+                .carried_available_units(Good::Water)
+                .saturating_add(p.citizen.carried_available_units(Good::Beer))
+                >= 400
+                && p.actions.first() == Some(&CitizenAction::Withdraw(Good::Beer, 100))
+        }));
         let mixed = reserve_shopper(100, &[(Good::Water, 100, 0.01), (Good::Beer, 200, 0.01)])
             .with_good(Good::Water, 100)
             .unwrap();
@@ -3173,6 +3205,8 @@ mod tests {
             production::{Recipe, Skill},
         };
         let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Baker)
             .with_skill_practice_ms(Skill::Milling, Some(0))
@@ -3269,6 +3303,8 @@ mod tests {
             production::Recipe,
         };
         let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(crate::StartingRole::Weaver)
             .with_good(Good::Flax, 1600)
@@ -3467,6 +3503,8 @@ mod tests {
         };
         let worker = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Farmer);
         let (map, first) = worker
             .map()
@@ -3521,7 +3559,7 @@ mod tests {
 
     #[test]
     fn site_specific_forage_preserves_the_existing_gathering_order() {
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let mut initial = Prediction::new(&citizen, Cooldowns::default());
         initial.last_gathering_order =
             Some(CitizenAction::Produce(crate::production::Recipe::Forage));
@@ -3544,6 +3582,8 @@ mod tests {
     fn crop_planting_and_gathering_have_independent_site_candidates() {
         use crate::{StartingRole, locations::Location, production::Recipe};
         let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Farmer)
             .with_good(Good::BreadRoll, 70)
@@ -3600,15 +3640,17 @@ mod tests {
     }
 
     #[test]
-    fn thirst_requires_delivery_before_home_consumption() {
+    fn thirst_can_use_carried_water_before_delivery() {
         let source = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(80.0)
             .unwrap()
             .with_good(Good::Water, 100)
             .unwrap();
         assert!(
-            variants_after(
+            !variants_after(
                 &Prediction::new(&source, Cooldowns::default()),
                 Effect::ReduceThirst
             )
@@ -3624,7 +3666,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(drinks[0].actions, [CitizenAction::Drink]);
-        assert_eq!(drinks[0].citizen.home_drink_units(), 0);
+        assert_eq!(drinks[0].citizen.provisioned_drink_units(), 0);
         assert_eq!(drinks[0].citizen.carried_available_units(Good::Water), 0);
         assert!(drinks[0].citizen.thirst() < delivered.citizen.thirst());
     }
@@ -3633,6 +3675,8 @@ mod tests {
     fn personal_need_goals_require_positive_need_at_their_start() {
         for need in [-1.0, 0.0, 0.001] {
             let mut citizen = Citizen::new(need)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_thirst(need)
                 .unwrap()
@@ -3661,6 +3705,8 @@ mod tests {
         for need in [-110.0, -1.0, 0.0, 100.0] {
             let source = Citizen::with_needs(need, need)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_thirst(need)
                 .unwrap()
                 .with_home_good(Good::Fish, 3)
@@ -3680,6 +3726,8 @@ mod tests {
     #[test]
     fn production_scores_its_gain_after_shared_need_deterioration_cancels() {
         let source = Citizen::with_needs(100.0, 100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(100.0)
             .unwrap();
@@ -3708,6 +3756,8 @@ mod tests {
     fn second_goal_preserves_the_original_uninterrupted_waiting_baseline() {
         let source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::BreadRoll, 30)
             .unwrap()
             .with_home_good(Good::Water, 1000)
@@ -3722,7 +3772,10 @@ mod tests {
         }
         assert_eq!(waited.average().unwrap(), replay.average().unwrap());
         assert_eq!(waited.waiting, replay.waiting);
-        assert_eq!(waited.waiting.home_drink_units(), source.home_drink_units());
+        assert_eq!(
+            waited.waiting.provisioned_drink_units(),
+            source.provisioned_drink_units()
+        );
         assert!(waited.goal_average().unwrap() > 0.0);
         let reset = best_variant(&eaten.citizen, Effect::Wait, eaten.cooldowns, 0)
             .unwrap()
@@ -3734,6 +3787,8 @@ mod tests {
     #[test]
     fn waiting_keeps_position_and_advances_needs_before_the_second_goal() {
         let mut citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(0.0)
             .unwrap()
@@ -3774,6 +3829,8 @@ mod tests {
         for (thirst, eligible) in [(-50.0, false), (0.0, false), (0.001, true)] {
             let citizen = Citizen::new(-50.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_thirst(thirst)
                 .unwrap()
                 .with_home_good(Good::Water, 398)
@@ -3791,6 +3848,8 @@ mod tests {
     fn water_replenishment_triggers_below_four_hundred_per_member() {
         for (water, eligible) in [(399, true), (400, false), (401, false)] {
             let citizen = Citizen::new(-50.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_thirst(-99.789)
                 .unwrap()
@@ -3829,6 +3888,8 @@ mod tests {
     fn meals_still_drink_when_standalone_drinking_is_ineligible() {
         let citizen = Citizen::new(50.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(-75.0)
             .unwrap()
             .with_home_good(Good::BreadRoll, 1)
@@ -3850,7 +3911,12 @@ mod tests {
     #[test]
     fn blocked_purchases_keep_alternatives_and_maximum_affordable_requests() {
         use crate::marketplace::ShoppingList;
-        let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(1000)
+            .unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
         for (good, units) in [
             (Good::BreadRoll, 10),
@@ -3877,7 +3943,12 @@ mod tests {
     #[test]
     fn blocked_purchases_include_present_stock_and_respect_own_food() {
         use crate::marketplace::ShoppingList;
-        let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(1000)
+            .unwrap();
         let mut market = citizen.market().clone();
         let place = citizen
             .map()
@@ -3903,7 +3974,12 @@ mod tests {
 
     #[test]
     fn blocked_demand_keeps_raw_quantities_for_cheaper_candidate_quotes() {
-        let citizen = Citizen::new(0.0).unwrap().with_coins(100).unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(100)
+            .unwrap();
         let place = citizen
             .map()
             .public_place(crate::locations::Location::Market);
@@ -3947,6 +4023,8 @@ mod tests {
         let b = map.public_place(Location::Forest);
         let buyer = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_map(map.clone())
             .unwrap()
             .with_coins(2)
@@ -3981,7 +4059,12 @@ mod tests {
 
     #[test]
     fn shopping_without_any_listings_still_records_affordable_demand() {
-        let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(1000)
+            .unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
         let list = crate::marketplace::ShoppingList::single(Good::FlaxGarment, 1);
         assert!(shopping_trip(&initial, list, 0, 0).unwrap().is_empty());
@@ -3994,7 +4077,12 @@ mod tests {
     #[test]
     fn food_demand_uses_the_goal_target_without_suppressing_recipe_ingredients() {
         use crate::marketplace::ShoppingList;
-        let citizen = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
+        let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_coins(1000)
+            .unwrap();
         let place = citizen.selling_place();
         let mut market = citizen.market().clone();
         market
@@ -4059,6 +4147,8 @@ mod tests {
             .unwrap();
         let market_place = map.public_place(Location::Market);
         let buyer = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_map(map)
             .unwrap()
@@ -4341,6 +4431,8 @@ mod tests {
             )
             .unwrap();
             let citizen = Citizen::with_needs(-50.0, -100.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_map(map)
                 .unwrap()
@@ -5086,6 +5178,8 @@ mod tests {
         for source in 0..3 {
             let mut citizen = Citizen::with_needs(-50.0, -100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_coins(1000)
                 .unwrap();
             if source == 0 {
@@ -5131,6 +5225,8 @@ mod tests {
         for condition in [None, Some(1.0)] {
             let citizen = Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_garment_condition(condition)
                 .unwrap();
             assert!(
@@ -5149,7 +5245,11 @@ mod tests {
         use crate::production::Recipe;
         let mut recipes = vec![Recipe::MakeClothingBlock; 8];
         recipes.push(Recipe::AssembleGarment);
-        let requirements = recipe_requirements(&Citizen::new(0.0).unwrap(), &recipes).unwrap();
+        let requirements = recipe_requirements(
+            &Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            &recipes,
+        )
+        .unwrap();
         assert_eq!(requirements.units(Good::Cloth), 200);
         assert_eq!(requirements.units(Good::FlaxBlock), 0);
     }
@@ -5158,6 +5258,8 @@ mod tests {
     fn tailor_prefixes_keep_blocks_and_allow_downstream_assembly() {
         use crate::{AgentKind, StartingRole, Universe, production::Recipe};
         let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Tailor)
             .with_coins(1000)
@@ -5208,6 +5310,8 @@ mod tests {
     fn hungry(berries: u64) -> Citizen {
         let citizen = Citizen::with_needs(100.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_prices(crate::marketplace::Prices::new(100.0).unwrap())
             .with_berries(berries)
             .unwrap();
@@ -5229,6 +5333,8 @@ mod tests {
     fn baker() -> Citizen {
         use crate::{AgentKind, StartingRole, Universe};
         let worker = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Baker)
             .with_good(Good::Flour, 2000)
@@ -5795,6 +5901,8 @@ mod tests {
         .unwrap();
         let citizen = Citizen::with_needs(10.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_map(map.clone())
             .unwrap();
         let initial = Prediction::new(&citizen, Cooldowns::default());
@@ -5826,6 +5934,8 @@ mod tests {
         )
         .unwrap();
         let citizen = Citizen::with_needs(10.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_map(map.clone())
             .unwrap();
@@ -5859,6 +5969,8 @@ mod tests {
     #[test]
     fn water_reserves_withdraw_own_stock_before_obtaining_the_remainder() {
         let buyer = Citizen::new(-50.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_good(Good::BreadRoll, 30)
             .unwrap()
@@ -5900,7 +6012,7 @@ mod tests {
         let variants =
             provision_household(&Prediction::new(&buyer, Cooldowns::default()), 0).unwrap();
         assert!(variants[0].actions.iter().any(|action| matches!(action, CitizenAction::BuyAt { list, .. } if list.units(Good::Water) > 0)));
-        assert_eq!(variants[0].citizen.home_drink_units(), 1000);
+        assert_eq!(variants[0].citizen.provisioned_drink_units(), 1000);
         assert!(matches!(
             variants[0].actions.last(),
             Some(CitizenAction::DepositStored { .. })
@@ -5915,6 +6027,8 @@ mod tests {
 
     fn reserve_shopper(coins: crate::Coins, listings: &[(Good, u64, f64)]) -> Citizen {
         let buyer = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_coins(coins)
             .unwrap();
@@ -6156,6 +6270,8 @@ mod tests {
     fn reserve_acquisition_can_withdraw_own_food_and_omits_completed_targets() {
         let buyer = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_good(Good::BreadRoll, 20)
             .unwrap();
         let listed = buyer
@@ -6208,6 +6324,8 @@ mod tests {
     fn gathering_completion_wealth_and_reserves_are_spread_across_the_action() {
         let citizen = Citizen::with_needs(-50.0, -100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_prices(crate::marketplace::Prices::new(100.0).unwrap());
         let gathered = Prediction::new(&citizen, Cooldowns::default())
             .perform(CitizenAction::Produce(crate::production::Recipe::Forage), 0)
@@ -6220,6 +6338,8 @@ mod tests {
     fn consumption_scores_use_component_boundaries_and_keep_full_advance_state() {
         for action in [CitizenAction::Eat, CitizenAction::Drink] {
             let source = Citizen::new(80.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_thirst(80.0)
                 .unwrap()
@@ -6276,6 +6396,8 @@ mod tests {
     fn consumption_predictions_preserve_validation_errors() {
         let source = Citizen::new(80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(80.0)
             .unwrap()
             .with_home_good(Good::BreadRoll, 10)
@@ -6327,6 +6449,8 @@ mod tests {
     fn forage_production_uses_current_prices_and_expected_berry_yield() {
         for berries in [1.0, 4.0] {
             let source = Citizen::with_needs(-50.0, -100.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_prices(crate::marketplace::Prices::new(berries).unwrap())
                 .with_good(Good::Water, 10_000)

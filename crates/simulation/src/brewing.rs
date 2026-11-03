@@ -213,6 +213,8 @@ mod tests {
     fn prediction_counts_batches_once_and_never_reserves_consumed_inputs() {
         let mut worker = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Brewer);
         for &(good, units) in Recipe::BrewBeer.inputs() {
             worker = worker.with_good(good, units * 4).unwrap();
@@ -287,6 +289,8 @@ mod tests {
     #[test]
     fn saves_reject_orphan_preparation_and_invalid_slots_or_timestamps() {
         let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Brewer);
         let (world, id) = Universe::with_map(Map::default())

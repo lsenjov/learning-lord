@@ -8,7 +8,12 @@ fn close(actual: f64, expected: f64) {
 
 #[test]
 fn thirst_advances_and_drinks_partial_water_gradually_without_waste() {
-    let citizen = Citizen::new(0.0).unwrap().with_thirst(-50.0).unwrap();
+    let citizen = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap()
+        .with_thirst(-50.0)
+        .unwrap();
     close(citizen.advance(86_400_000).unwrap().thirst(), 50.0);
     let partial = citizen
         .with_home_good(Good::Water, 100)
@@ -17,7 +22,7 @@ fn thirst_advances_and_drinks_partial_water_gradually_without_waste() {
         .unwrap();
     assert_eq!(partial.active_action().unwrap().duration_ms(), 30_000);
     assert_eq!(
-        partial.stored_available_units(partial.home(), Good::Water),
+        partial.stored_available_units(partial.home().unwrap(), Good::Water),
         0
     );
     close(
@@ -33,7 +38,7 @@ fn thirst_advances_and_drinks_partial_water_gradually_without_waste() {
         .unwrap();
     assert_eq!(capped.active_action().unwrap().drinking_units(), 4);
     assert_eq!(
-        capped.stored_available_units(capped.home(), Good::Water),
+        capped.stored_available_units(capped.home().unwrap(), Good::Water),
         196
     );
     assert!(
@@ -53,6 +58,8 @@ fn thirst_advances_and_drinks_partial_water_gradually_without_waste() {
 fn meal_and_water_finish_their_components_in_parallel_and_history_is_chunk_independent() {
     for berries in [20, 155] {
         let citizen = Citizen::with_hunger_rate(0.0, 0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(20.0)
             .unwrap()
@@ -75,7 +82,7 @@ fn meal_and_water_finish_their_components_in_parallel_and_history_is_chunk_indep
             .with_citizen("Ada", citizen)
             .unwrap();
         let AgentKind::Citizen(diner) = &world.agents()[&id].kind;
-        let home = diner.home();
+        let home = diner.home().unwrap();
         let world = world
             .with_stored_good(
                 home,

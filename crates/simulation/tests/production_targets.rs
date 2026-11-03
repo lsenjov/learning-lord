@@ -21,6 +21,8 @@ fn producer(
 ) -> (Universe, AgentId) {
     let mut worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(role)
         .with_coins(coins)
         .unwrap();
@@ -55,6 +57,8 @@ fn targets(universe: &Universe, id: AgentId) -> ProductionTargets {
 fn absent_weaver_inputs_still_generate_affordable_market_demand() {
     let worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Weaver)
         .with_garment_condition(Some(1.0))
         .unwrap()
@@ -67,7 +71,7 @@ fn absent_weaver_inputs_still_generate_affordable_market_demand() {
         .with_property(id, Recipe::SpinThread.location())
         .unwrap();
     let worker = citizen(&universe, id);
-    let home = worker.home();
+    let home = worker.home().unwrap();
     let owner = worker.goods_owner();
     let universe = universe
         .with_stored_good(home, owner, Good::BreadRoll, 30)
@@ -124,7 +128,12 @@ fn demand(universe: Universe, goods: &[(Good, u64)]) -> Universe {
     let (universe, buyer) = universe
         .with_citizen(
             "Buyer",
-            Citizen::new(0.0).unwrap().with_coins(10000).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(10000)
+                .unwrap(),
         )
         .unwrap();
     universe
@@ -431,6 +440,8 @@ fn active_batch_uses_inputs_once_and_subtracts_its_output_from_the_target() {
 fn personal_food_reserve_is_shared_across_edible_goods_and_does_not_block_eating() {
     let worker = Citizen::new(80.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_good(Good::Berries, 124)
         .unwrap()
         .with_good(Good::BreadRoll, 30)
@@ -466,7 +477,7 @@ fn personal_food_reserve_is_shared_across_edible_goods_and_does_not_block_eating
     let remaining: f64 = Good::FOOD
         .into_iter()
         .map(|good| {
-            eaten.stored_available_units(eaten.home(), good) as f64
+            eaten.stored_available_units(eaten.home().unwrap(), good) as f64
                 * good.nutrition_per_unit().unwrap()
         })
         .sum();
@@ -520,7 +531,12 @@ fn sales_history_and_backlog_do_not_change_stock_capacity() {
     let (universe, buyer) = universe
         .with_citizen(
             "Buyer",
-            Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(1000)
+                .unwrap(),
         )
         .unwrap();
     let universe = universe
@@ -632,7 +648,7 @@ fn decision_snapshots_inputs_targets_and_observed_production() {
         &[(Good::Berries, 930)],
         0,
     );
-    let home = citizen(&universe, id).home();
+    let home = citizen(&universe, id).home().unwrap();
     let owner = citizen(&universe, id).goods_owner();
     let universe = universe
         .deposit_goods(id, home, Good::Berries, 930)
@@ -729,7 +745,7 @@ fn decision_leaves_production_unattempted_when_listing_is_selected() {
         &[(Good::Berries, 930), (Good::Wood, 400)],
         0,
     );
-    let home = citizen(&universe, id).home();
+    let home = citizen(&universe, id).home().unwrap();
     let owner = citizen(&universe, id).goods_owner();
     let universe = universe
         .deposit_goods(id, home, Good::Berries, 930)

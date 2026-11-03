@@ -18,7 +18,12 @@ fn buyer(coins: i64) -> (Universe, AgentId) {
         .with_prices(Prices::new(100.0).unwrap())
         .with_citizen(
             "Buyer",
-            Citizen::new(0.0).unwrap().with_coins(coins).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(coins)
+                .unwrap(),
         )
         .unwrap()
 }
@@ -27,7 +32,12 @@ fn supply(grams: u64) -> (Universe, AgentId) {
         .with_prices(Prices::new(100.0).unwrap())
         .with_citizen(
             "Seller",
-            Citizen::new(0.0).unwrap().with_berries(grams).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(grams)
+                .unwrap(),
         )
         .unwrap();
     (
@@ -167,7 +177,15 @@ fn unsold_supply_marks_down_seller_quotes_after_observation_and_preserves_refere
 fn actual_fills_reduce_requests_and_record_volume_and_observed_prices() {
     let (u, seller) = supply(100);
     let (u, id) = u
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let started = u
         .start_action(
@@ -247,7 +265,15 @@ fn one_coin_budget_is_shared_across_goods_and_available_asks_override_reference_
     let (u, _) = supply(100);
     let (u, id) = u
         .with_prices(Prices::new(200.0).unwrap())
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(10).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(10)
+                .unwrap(),
+        )
         .unwrap();
     let requested = u
         .with_purchase_request(id, ShoppingList::single(Good::Berries, 100))
@@ -285,7 +311,15 @@ fn seller_income_funds_an_existing_request_without_accumulating_retries() {
         0
     );
     let (u, id) = u
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let after = u
         .start_action(
@@ -317,7 +351,15 @@ fn boundary_completions_are_in_the_closing_interval_and_tick_partitioning_preser
     let u = u.with_prices(Prices::new(400.0).unwrap());
     let original_order = u.market().orders().next().unwrap().clone();
     let (u, id) = u
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let u = u
         .advance(UPDATE_TIME_MS - u.current_time_ms() - TRADE_DURATION_MS)
@@ -386,6 +428,8 @@ fn prediction_does_not_register_demands_or_publish_history() {
             "Hungry",
             Citizen::with_needs(80.0, -100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_coins(100)
                 .unwrap(),
         )
@@ -417,7 +461,15 @@ fn purchases_crossing_four_preserve_independent_seller_quotes() {
     let source = source.with_prices(Prices::new(400.0).unwrap());
     let initial_quote = source.market().orders().next().unwrap().quoted_price;
     let (source, buyer) = source
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
+        )
         .unwrap();
     let source = source
         .advance(UPDATE_TIME_MS - source.current_time_ms() - TRADE_DURATION_MS / 2)

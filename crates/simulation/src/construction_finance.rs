@@ -454,6 +454,8 @@ mod tests {
                 "Carpenter",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_coins(100_000)
                     .unwrap()
                     .with_skill_practice_ms(crate::production::Skill::Carpentry, Some(0))
@@ -461,7 +463,7 @@ mod tests {
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
-        let place = citizen.home();
+        let place = citizen.home().unwrap();
         let target = world
             .household_budget(worker, 0)
             .unwrap()
@@ -489,12 +491,14 @@ mod tests {
     fn estimates_use_median_skill_and_cap_offers_at_available_cash() {
         let (mut world, client, _, _) = family(100_000);
         let AgentKind::Citizen(client_citizen) = &world.agents[&client].kind;
-        let place = client_citizen.home();
+        let place = client_citizen.home().unwrap();
         for practice in [0, crate::production::MAX_SKILL_PRACTICE_MS] {
             (world, _) = world
                 .with_citizen(
                     "Carpenter",
                     Citizen::new(0.0)
+                        .unwrap()
+                        .with_furnished_home()
                         .unwrap()
                         .with_coins(100_000)
                         .unwrap()
@@ -556,7 +560,7 @@ mod tests {
     fn no_carpenter_estimate_keeps_unskilled_labour_and_remaining_material_cost() {
         let (world, client, _, _) = family(100_000);
         let AgentKind::Citizen(client_citizen) = &world.agents[&client].kind;
-        let place = client_citizen.home();
+        let place = client_citizen.home().unwrap();
         let materials = 200.0 * world.construction_estimated_unit_price(client, Good::Wood);
         let full = world
             .construction_estimate(client, place, 3_600_000, 200)
@@ -573,7 +577,12 @@ mod tests {
         let (world, first) = Universe::with_map(Map::default())
             .with_citizen(
                 "First",
-                Citizen::new(0.0).unwrap().with_coins(coins).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(coins)
+                    .unwrap(),
             )
             .unwrap();
         let (world, second) = world
@@ -582,11 +591,11 @@ mod tests {
                     crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Second",
-                Citizen::new(0.0).unwrap(),
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents[&first].kind;
-        let _home = citizen.home();
+        let _home = citizen.home().unwrap();
         let account = match &world.agents()[&first].kind {
             crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
         };
@@ -620,7 +629,7 @@ mod tests {
         assert!(budget.earning_hours_per_day >= 2.0);
         assert!(budget.replenishment_daily_cost > 0.0);
         assert!(budget.consumption_daily_cost >= budget.essential_daily_cost);
-        let home = world.households[&account].home;
+        let home = world.households[&account].home.unwrap();
         let world = world
             .with_stored_good(
                 home,
@@ -720,7 +729,12 @@ mod tests {
         let (world, member) = Universe::with_map(Map::default())
             .with_citizen(
                 "Worker",
-                Citizen::new(0.0).unwrap().with_coins(100_000).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100_000)
+                    .unwrap(),
             )
             .unwrap();
         let mut world = world

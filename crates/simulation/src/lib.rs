@@ -4,6 +4,7 @@ use rand::{RngExt, rngs::Xoshiro256PlusPlus};
 use std::fmt;
 use uuid::Uuid;
 
+mod accommodation;
 mod building_maintenance;
 pub mod calendar;
 pub mod condition;
@@ -210,7 +211,8 @@ impl CitizenAction {
         match self {
             Self::Construct { place, .. } => Some(place),
             Self::CollectBeer { brewery, .. } => Some(brewery),
-            Self::Sleep | Self::Eat | Self::Drink => Some(citizen.home),
+            Self::Sleep => citizen.sleep_place(),
+            Self::Eat | Self::Drink => None,
             Self::Plant { field, .. }
             | Self::Tend { field, .. }
             | Self::Harvest { field, .. }
@@ -353,6 +355,7 @@ pub struct Citizen {
     garment_condition: Option<f64>,
     hunger_per_hour: f64,
     tiredness: f64,
+    discomfort: f64,
     inventory: HashMap<Good, Quantity>,
     tax_reserved: HashMap<Good, Quantity>,
     town_inventory: HashMap<Good, Quantity>,
@@ -361,7 +364,7 @@ pub struct Citizen {
     sale_income_basis_points: HashMap<(PlaceId, Good), u32>,
     storage: Storage,
     id: AgentId,
-    home: PlaceId,
+    home: Option<PlaceId>,
     starting_role: Option<StartingRole>,
     skills: [Option<u64>; production::Skill::COUNT],
     production_targets: Option<production::ProductionTargets>,
@@ -410,8 +413,8 @@ impl Citizen {
             return Err(SimulationError::InvalidHungerRate);
         }
         let id = AgentId(Uuid::new_v4());
-        let (map, home) =
-            Map::default().with_place(Location::Home, Position::default(), Some(id), "Home")?;
+        let map = Map::default();
+        let home = None;
         Ok(Self {
             hunger,
             thirst: 0.0,
@@ -419,6 +422,7 @@ impl Citizen {
             garment_condition: None,
             hunger_per_hour,
             tiredness: 0.0,
+            discomfort: 0.0,
             inventory: Good::ALL.into_iter().map(|good| (good, 0)).collect(),
             tax_reserved: HashMap::new(),
             town_inventory: HashMap::new(),
@@ -461,6 +465,43 @@ impl Citizen {
         })
     }
 
+    /// Furnishes an isolated setup snapshot explicitly.
+    pub fn with_furnished_home(&self) -> Result<Self, SimulationError> {
+        if self.active_action.is_some() || self.active_plan.is_some() || self.household.is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut citizen = self.clone();
+        if citizen.home.is_none() {
+            let (map, home) = citizen.map.with_place(
+                Location::Home,
+                Position::default(),
+                Some(self.id),
+                "Home",
+            )?;
+            citizen.map = map;
+            citizen.home = Some(home);
+            citizen.map.assign_bedroom(home, self.id, &[self.id])?;
+        }
+        Ok(citizen)
+    }
+
+    pub fn discomfort(&self) -> f64 {
+        self.discomfort
+    }
+
+    pub(crate) fn discomfort_rate(&self, active: Option<ActiveAction>) -> f64 {
+        let sleep = active
+            .filter(|a| a.action == CitizenAction::Sleep)
+            .map_or(0.0, |a| {
+                if a.claimed_objects[0].is_some() {
+                    -25.0
+                } else {
+                    25.0
+                }
+            });
+        -10.0 / marketplace::DAY_MS as f64 + sleep / SLEEP_DURATION_MS as f64
+    }
+
     pub fn position(&self) -> Position {
         self.position
     }
@@ -473,13 +514,12 @@ impl Citizen {
             return Err(SimulationError::CitizenBusy);
         }
         let mut citizen = self.clone();
-        if !map.places().contains_key(&self.home) {
-            let (map, home) =
-                map.with_place(Location::Home, Position::default(), Some(self.id), "Home")?;
-            citizen.map = map;
-            citizen.home = home;
-        } else {
-            citizen.map = map;
+        citizen.map = map;
+        if let Some(home) = self.home {
+            if !citizen.map.places().contains_key(&home) {
+                citizen.home = None;
+                citizen = citizen.with_furnished_home()?;
+            }
         }
         Ok(citizen)
     }
@@ -525,11 +565,6 @@ impl Citizen {
     #[cfg(test)]
     fn drink_units(&self) -> Quantity {
         self.preferred_drink().1
-    }
-
-    pub(crate) fn available_drink_units(&self) -> Quantity {
-        self.available_units(Good::Water)
-            .saturating_add(self.available_units(Good::Beer))
     }
 
     fn preferred_drink(&self) -> (Good, Quantity) {
@@ -625,7 +660,7 @@ impl Citizen {
     pub fn id(&self) -> AgentId {
         self.id
     }
-    pub fn home(&self) -> PlaceId {
+    pub fn home(&self) -> Option<PlaceId> {
         self.home
     }
     pub fn owned_properties(&self) -> impl Iterator<Item = &locations::Place> {
@@ -1218,6 +1253,7 @@ impl Citizen {
             + self
                 .household
                 .as_ref()
+                .filter(|_| self.home.is_some())
                 .map_or(0, |household| household.other_clothing_replacements)
     }
 
@@ -1470,9 +1506,9 @@ impl Citizen {
             return Err(SimulationError::MissingInputs);
         }
         for good in Good::FOOD {
-            citizen.consume_home_goods(good, meal_units[good as usize])?;
+            citizen.consume_personal_goods(good, meal_units[good as usize])?;
         }
-        citizen.consume_home_goods(drink_good, drink_units)?;
+        citizen.consume_personal_goods(drink_good, drink_units)?;
         if action == CitizenAction::Eat {
             citizen.last_meal_started_ms = Some(self.market_time_ms);
         }
@@ -1597,7 +1633,7 @@ impl Citizen {
     }
 
     pub fn food_reserve_wellbeing(&self) -> f64 {
-        let nutrition = self.home_food_nutrition()
+        let nutrition = self.provisioned_food_nutrition()
             + self.active_action.map_or(0.0, |active| {
                 active.drink_nutrition() * active.remaining_fraction(active.drink_duration_ms())
                     + active.meal_nutrition
@@ -1611,7 +1647,7 @@ impl Citizen {
     }
 
     pub fn drinking_water_reserve(&self) -> f64 {
-        self.home_drink_units() as f64
+        self.provisioned_drink_units() as f64
             + self.active_action.map_or(0.0, |active| {
                 let duration = active.drink_units * DRINK_DURATION_MS / DRINK_WATER_GRAMS;
                 active.drink_units as f64
@@ -1632,6 +1668,7 @@ impl Citizen {
             - 4.0 * (self.hunger - 100.0).max(0.0)
             - (-self.hunger - 100.0).max(0.0)
             - self.tiredness.max(0.0)
+            - self.discomfort
             + self.food_reserve_wellbeing()
             + self.water_reserve_wellbeing()
             + self.dietary_wellbeing()
@@ -1891,14 +1928,11 @@ impl Citizen {
                     }
                     Err(error) => return Err(error),
                 }
-                citizen.map.release_objects(
-                    active
-                        .action
-                        .required_place(&citizen)
-                        .unwrap_or(citizen.home),
-                    active.claimed_objects,
-                    citizen.id,
-                );
+                if let Some(place) = active.action.required_place(&citizen) {
+                    citizen
+                        .map
+                        .release_objects(place, active.claimed_objects, citizen.id);
+                }
                 citizen.active_action = None;
             } else {
                 citizen.active_action = Some(active);
@@ -2039,6 +2073,8 @@ impl Citizen {
         elapsed_ms: u64,
         active: Option<ActiveAction>,
     ) -> Result<(), SimulationError> {
+        self.discomfort =
+            (self.discomfort + self.discomfort_rate(active) * elapsed_ms as f64).clamp(0.0, 100.0);
         self.advance_diet(elapsed_ms, active);
         self.garment_condition = self.garment_condition.map(|condition| {
             (condition - elapsed_ms as f64 / GARMENT_LIFETIME_MS as f64).clamp(0.0, 1.0)
@@ -2517,9 +2553,10 @@ impl Universe {
         let starting_coins = citizen.coins;
         if let Some(household) = household {
             let home = universe.households[&household].home;
-            universe.map.assign_bedroom(home, id, &[household])?;
             citizen.home = home;
-            citizen.position = universe.map.position(home);
+            if let Some(home) = home {
+                citizen.position = universe.map.position(home);
+            }
             citizen.active_action = None;
             citizen.active_plan = None;
             let family = universe.households.get_mut(&household).unwrap();
@@ -2538,18 +2575,20 @@ impl Universe {
                 .checked_add(starting_coins)
                 .ok_or(SimulationError::WealthOverflow)?;
         } else {
-            if citizen.map != self.map {
-                let (map, home) = universe.map.with_place(
-                    Location::Home,
-                    universe.map.next_position(Location::Home),
-                    Some(id),
-                    format!("{name}'s home"),
-                )?;
-                universe.map = map;
-                citizen.home = home;
-                citizen.position = universe.map.position(home);
-                citizen.active_action = None;
-                citizen.active_plan = None;
+            if let Some(home) = citizen.home {
+                if !universe.map.places().contains_key(&home) {
+                    let (map, new_home) = universe.map.with_place(
+                        Location::Home,
+                        universe.map.next_position(Location::Home),
+                        Some(id),
+                        format!("{name}'s home"),
+                    )?;
+                    universe.map = map;
+                    citizen.home = Some(new_home);
+                    citizen.position = universe.map.position(new_home);
+                    citizen.active_action = None;
+                    citizen.active_plan = None;
+                }
             }
             for (_, place) in universe.map.places_mut().iter_mut() {
                 if place.owner == Some(id) {
@@ -2561,11 +2600,13 @@ impl Universe {
                     }
                 }
             }
-            universe.map.assign_bedroom(citizen.home, id, &[account])?;
             let household_name = household_name.unwrap();
-            universe.map = universe
-                .map
-                .with_place_name(citizen.home, format!("{household_name}'s home"))?;
+            if let Some(home) = citizen.home {
+                universe.map.assign_bedroom(home, id, &[account])?;
+                universe.map = universe
+                    .map
+                    .with_place_name(home, format!("{household_name}'s home"))?;
+            }
             universe.households.insert(
                 account,
                 households::Household {
@@ -2583,8 +2624,16 @@ impl Universe {
             );
         }
         for (key, units) in starting_stock {
-            let place = if key.place == starting_home {
-                citizen.home
+            if Some(key.place) == starting_home && citizen.home.is_none() {
+                let next = citizen
+                    .units(key.good)
+                    .checked_add(units)
+                    .ok_or(SimulationError::InventoryOverflow)?;
+                citizen.set_inventory_units(key.good, next);
+                continue;
+            }
+            let place = if Some(key.place) == starting_home {
+                citizen.home.ok_or(SimulationError::MissingProperty)?
             } else {
                 key.place
             };
@@ -2667,6 +2716,49 @@ impl Universe {
         Ok((universe, id))
     }
 
+    /// Explicit initial-world furnishing, including a bed for this member.
+    pub fn with_member_accommodation(&self, member: AgentId) -> Result<Self, SimulationError> {
+        let account = self.economic_id(member)?;
+        let household = self
+            .households
+            .get(&account)
+            .ok_or(SimulationError::InvalidOwnership)?;
+        if household.members.iter().any(|id| {
+            let AgentKind::Citizen(citizen) = &self.agents[id].kind;
+            citizen.active_action.is_some() || citizen.active_plan.is_some()
+        }) {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let mut universe = self.clone();
+        let home = if let Some(home) = household.home {
+            home
+        } else {
+            let (map, home) = universe.map.with_place(
+                Location::Home,
+                universe.map.next_position(Location::Home),
+                Some(account),
+                format!("{}'s home", household.name),
+            )?;
+            universe.map = map;
+            universe.households.get_mut(&account).unwrap().home = Some(home);
+            home
+        };
+        universe.map.assign_bedroom(home, member, &[account])?;
+        for (_, agent) in universe.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            if citizen.household_id() == Some(account) {
+                citizen.home = Some(home);
+                if citizen.id == member {
+                    citizen.position = universe.map.position(home);
+                }
+            }
+            citizen.map = universe.map.clone();
+        }
+        universe.refresh_market();
+        universe.refresh_household_history(universe.current_time_ms, false)?;
+        Ok(universe)
+    }
+
     /// Adds a private workshop to the household's existing residential building.
     pub fn with_household_workplace(
         &self,
@@ -2684,7 +2776,7 @@ impl Universe {
         }) {
             return Err(SimulationError::CitizenBusy);
         }
-        let home = household.home;
+        let home = household.home.ok_or(SimulationError::MissingProperty)?;
         let mut universe = self.clone();
         universe.map = self.map.add_home_workshop(home, owner, kind)?;
         for id in universe.taxation.rules.keys() {
@@ -2971,20 +3063,20 @@ impl Universe {
                             after.market.listed_units(after.market_party(), good)
                                 > before.market.listed_units(before.market_party(), good)
                         }),
-                        CitizenAction::DepositStored { place, list } if place == after.home => {
-                            list.items().any(|(good, _)| {
-                                after.storage.units(place, after.goods_owner(), good)
-                                    > before.storage.units(place, before.goods_owner(), good)
-                            })
-                        }
-                        _ => false,
+                        _ => Good::ALL.into_iter().any(|good| {
+                            after.provisioned_units(good) > before.provisioned_units(good)
+                        }),
                     };
                     if changed {
-                        let goal = if matches!(active.action(), CitizenAction::DepositStored { .. })
-                        {
-                            planning::goals::Effect::ReplenishReserves
-                        } else {
+                        let goal = if matches!(
+                            active.action(),
+                            CitizenAction::ListExcess
+                                | CitizenAction::List(..)
+                                | CitizenAction::ListAt { .. }
+                        ) {
                             planning::goals::Effect::ListExcess
+                        } else {
+                            planning::goals::Effect::ReplenishReserves
                         };
                         universe.record_maintenance_work(*id, goal)?;
                     }
@@ -3515,7 +3607,7 @@ impl Universe {
             .and_then(|goal| match goal.goal {
                 planning::goals::Effect::Production => citizen.designated_workplace,
                 planning::goals::Effect::ReplenishReserves
-                | planning::goals::Effect::ListExcess => Some(citizen.home),
+                | planning::goals::Effect::ListExcess => citizen.home,
                 _ => None,
             });
         self.refresh_account_requests()
@@ -3701,7 +3793,7 @@ impl Citizen {
         let mut citizen = self.clone();
         citizen.storage.set_units(
             storage::StockKey {
-                place: citizen.home,
+                place: citizen.home.ok_or(SimulationError::MissingProperty)?,
                 owner: citizen.goods_owner(),
                 good,
             },
@@ -3719,7 +3811,7 @@ impl Citizen {
         self.storage
             .set_reserved(
                 storage::StockKey {
-                    place: self.home,
+                    place: self.home.unwrap(),
                     owner: self.goods_owner(),
                     good,
                 },
@@ -3729,7 +3821,8 @@ impl Citizen {
     }
 
     pub(crate) fn home_units(&self, good: Good) -> Quantity {
-        self.storage.units(self.home, self.goods_owner(), good)
+        self.home
+            .map_or(0, |home| self.storage.units(home, self.goods_owner(), good))
     }
 }
 
@@ -3742,7 +3835,10 @@ mod tests {
     fn mixed_workplace_tax_scopes_stack_and_guild_cannot_take_home() {
         use taxation::{TaxKind, TaxRate, TaxScope};
         let (world, member) = Universe::default()
-            .with_citizen("Worker", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Worker",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let (world, site) = world
             .with_household_workplace(member, Location::Mill)
@@ -3807,7 +3903,10 @@ mod tests {
         );
 
         let (home_world, weaver) = Universe::default()
-            .with_citizen("Weaver", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Weaver",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let (home_world, home) = home_world
             .with_household_workplace(weaver, Location::Weavery)
@@ -3827,6 +3926,8 @@ mod tests {
         use production::Recipe;
         let citizen = Citizen::with_needs(-50.0, 50.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_starting_role(StartingRole::Weaver)
             .with_good(Good::Flax, 400)
             .unwrap();
@@ -3839,11 +3940,13 @@ mod tests {
                 "Tailor",
                 Citizen::new(-50.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Tailor),
             )
             .unwrap();
         let AgentKind::Citizen(before) = &world.agents[&first].kind;
-        let home = before.home;
+        let home = before.home.unwrap();
         let original = world.map.place(home).unwrap().clone();
         let history = world.household_histories.clone();
         let (world, workplace) = world
@@ -3902,6 +4005,8 @@ mod tests {
                 "Visitor",
                 Citizen::new(-50.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Weaver),
             )
             .unwrap();
@@ -3933,7 +4038,7 @@ mod tests {
 
     #[test]
     fn missing_site_socage_rate_does_not_fall_back_to_recipe_rate() {
-        let mut worker = Citizen::new(0.0).unwrap();
+        let mut worker = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let recipe = production::Recipe::ChopWood;
         let place = worker.production_place(recipe).unwrap();
         worker
@@ -3955,6 +4060,8 @@ mod tests {
 
     fn baker_with_targets() -> Citizen {
         let worker = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Baker)
             .with_coins(10000)
@@ -3989,6 +4096,8 @@ mod tests {
     fn drinking_excludes_reserved_and_town_water_and_preserves_active_wealth() {
         let mut source = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(Good::Water, 300)
             .unwrap();
         source.reserve_home_good(Good::Water, 250);
@@ -4011,7 +4120,7 @@ mod tests {
         assert_eq!(done.town_inventory[&Good::Water], 500);
         assert_eq!(
             done.storage
-                .reserved_units(done.home, done.goods_owner(), Good::Water),
+                .reserved_units(done.home.unwrap(), done.goods_owner(), Good::Water),
             250
         );
         assert!(matches!(
@@ -4023,6 +4132,8 @@ mod tests {
     #[test]
     fn water_reserves_credit_only_usable_home_stock_and_unconsumed_drinks() {
         let carried = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_good(Good::Water, 400)
             .unwrap();
@@ -4142,7 +4253,7 @@ mod tests {
             0
         );
         let place = worker.selling_place();
-        worker.position = worker.map.position(worker.home);
+        worker.position = worker.map.position(worker.home.unwrap());
         let eating = worker.start_action(CitizenAction::Eat).unwrap();
         let mut worker = eating
             .advance(eating.active_action().unwrap().duration_ms())
@@ -4230,6 +4341,8 @@ mod tests {
         let reserve = (production::PERSONAL_FOOD_RESERVE / BERRY_NUTRITION_PER_GRAM).ceil() as u64;
         let mut source = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_berries(reserve + 230)
             .unwrap();
         source.production_targets =
@@ -4262,7 +4375,7 @@ mod tests {
 
     #[test]
     fn prediction_uses_average_yield_without_advancing_the_random_stream() {
-        let mut citizen = Citizen::new(0.0).unwrap();
+        let mut citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         citizen.forage_rng = Xoshiro256PlusPlus::seed_from_u64(42);
         let started = citizen
             .start_action(CitizenAction::Produce(crate::production::Recipe::Forage))
@@ -4291,6 +4404,8 @@ mod tests {
     #[test]
     fn complete_meals_consider_mixed_food_and_quoted_value() {
         let source = Citizen::new(50.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_prices(
                 Prices::new(5.0)

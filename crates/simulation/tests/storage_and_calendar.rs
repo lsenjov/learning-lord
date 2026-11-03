@@ -85,12 +85,17 @@ fn storage_retains_goods_ownership_independently_and_snapshots_are_immutable() {
             "Ada",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 25)
                 .unwrap(),
         )
         .unwrap();
     let (world, bram) = world
-        .with_citizen("Bram", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Bram",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let home = citizen(&world, ada)
         .owned_properties()
@@ -148,6 +153,8 @@ fn local_transfers_conserve_wealth_and_never_use_another_owners_stock() {
             "Ada",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 25)
                 .unwrap(),
         )
@@ -202,6 +209,8 @@ fn storage_validates_references_and_overflow_without_changing_source() {
             "Ada",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 5)
                 .unwrap(),
         )
@@ -254,6 +263,8 @@ fn storage_validates_references_and_overflow_without_changing_source() {
 fn storage_transfers_preserve_active_production_inputs_and_completion() {
     use learning_lord_simulation::production::{Recipe, Skill};
     let worker = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_skill_practice_ms(Skill::Milling, Some(0))
         .unwrap()
@@ -328,6 +339,8 @@ fn storage_transfers_require_arrival_and_refuse_travel() {
         .with_citizen(
             "Ada",
             Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_good(Good::BreadRoll, 5)
                 .unwrap(),

@@ -707,7 +707,10 @@ mod tests {
         let mut universe = Universe::with_map(Map::default());
         for name in ["Ada", "Bram", "Cleo", "Dara"] {
             universe = universe
-                .with_citizen(name, Citizen::new(0.0).unwrap())
+                .with_citizen(
+                    name,
+                    Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+                )
                 .unwrap()
                 .0;
         }
@@ -769,7 +772,10 @@ mod tests {
         )
         .unwrap();
         let (universe, id) = Universe::with_map(map.clone())
-            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let travelling = universe
             .start_action(

@@ -12,7 +12,12 @@ fn map() -> Map {
 
 #[test]
 fn travel_moves_continuously_and_arrives_exactly_without_mutating_the_source() {
-    let source = Citizen::new(0.0).unwrap().with_map(map()).unwrap();
+    let source = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap()
+        .with_map(map())
+        .unwrap();
     let walking = source
         .start_action(CitizenAction::Travel(
             source.map().public_place(Location::Forest),
@@ -52,8 +57,10 @@ fn travel_moves_continuously_and_arrives_exactly_without_mutating_the_source() {
 }
 
 #[test]
-fn site_actions_and_eating_require_arrival_but_waiting_does_not() {
+fn site_actions_require_arrival_and_carried_food_can_be_eaten_anywhere() {
     let home = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_map(map())
         .unwrap()
@@ -76,7 +83,7 @@ fn site_actions_and_eating_require_arrival_but_waiting_does_not() {
     ] {
         let at_site = home
             .with_position(home.map().position(if location == Location::Home {
-                home.home()
+                home.home().unwrap()
             } else {
                 home.map().public_place(location)
             }))
@@ -87,14 +94,8 @@ fn site_actions_and_eating_require_arrival_but_waiting_does_not() {
             away.start_action(action),
             Err(SimulationError::WrongLocation)
         );
-        assert_eq!(
-            away.start_action(CitizenAction::Eat),
-            Err(SimulationError::WrongLocation)
-        );
-        assert_eq!(
-            away.start_action(CitizenAction::Drink),
-            Err(SimulationError::WrongLocation)
-        );
+        assert!(away.start_action(CitizenAction::Eat).is_ok());
+        assert!(away.start_action(CitizenAction::Drink).is_ok());
         assert!(away.start_action(CitizenAction::Wait).is_ok());
     }
     let busy = home
@@ -152,7 +153,10 @@ fn each_universe_has_a_distinct_map_and_citizens_start_at_home() {
     for _ in 0..50 {
         let universe = Universe::default();
         let (inhabited, id) = universe
-            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let map = inhabited.map();
         let places: Vec<_> = map.places().values().collect();
@@ -169,7 +173,7 @@ fn each_universe_has_a_distinct_map_and_citizens_start_at_home() {
             }
         }
         let AgentKind::Citizen(citizen) = &inhabited.agents()[&id].kind;
-        assert_eq!(citizen.position(), map.position(citizen.home()));
+        assert_eq!(citizen.position(), map.position(citizen.home().unwrap()));
         assert_eq!(citizen.map(), map);
         let advanced = inhabited.advance(123).unwrap();
         let advanced_map = advanced.map();
@@ -218,7 +222,10 @@ fn travel_is_consistent_across_daily_price_updates_and_snapshot_branches() {
         .advance(4 * 3_600_000 - 120_000)
         .unwrap();
     let (universe, id) = universe
-        .with_citizen("Ada", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Ada",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let walking = universe
         .start_action(

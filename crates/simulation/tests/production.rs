@@ -24,7 +24,11 @@ fn worker_world(recipe: Recipe) -> (Universe, learning_lord_simulation::AgentId)
         Recipe::ChopWood | Recipe::Forage => StartingRole::Woodcutter,
         Recipe::FetchWater | Recipe::BakeRolls | Recipe::BakeBerryPie => StartingRole::Baker,
     };
-    let mut citizen = Citizen::new(0.0).unwrap().with_starting_role(role);
+    let mut citizen = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap()
+        .with_starting_role(role);
     for &(good, grams) in recipe.inputs() {
         citizen = citizen.with_good(good, grams).unwrap();
     }
@@ -137,12 +141,14 @@ fn all_inputs_skill_and_owned_property_are_required_before_work_starts() {
     );
     let farmer = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Farmer);
     assert_eq!(
         farmer.start_action(CitizenAction::Produce(Recipe::GrowWheat)),
         Err(SimulationError::MissingInputs)
     );
-    let public = Citizen::new(0.0).unwrap();
+    let public = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     assert!(
         public
             .start_action(CitizenAction::Produce(Recipe::FetchWater))
@@ -242,6 +248,8 @@ fn starting_inputs_cover_four_baseline_hours_of_the_selected_profession() {
 fn meals_choose_one_available_food_and_keep_other_inventory() {
     let source = Citizen::new(80.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 40)
         .unwrap()
         .with_home_good(Good::BreadRoll, 5)
@@ -250,15 +258,15 @@ fn meals_choose_one_available_food_and_keep_other_inventory() {
         .unwrap();
     let started = source.start_action(CitizenAction::Eat).unwrap();
     assert_eq!(
-        started.stored_available_units(started.home(), Good::BreadRoll),
+        started.stored_available_units(started.home().unwrap(), Good::BreadRoll),
         5
     );
     assert_eq!(
-        started.stored_available_units(started.home(), Good::BerryPie),
+        started.stored_available_units(started.home().unwrap(), Good::BerryPie),
         0
     );
     assert_eq!(
-        started.stored_available_units(started.home(), Good::Berries),
+        started.stored_available_units(started.home().unwrap(), Good::Berries),
         40
     );
     let duration = started.active_action().unwrap().duration_ms();
@@ -286,10 +294,15 @@ fn each_food_requires_a_whole_meal_and_nonfood_is_rejected() {
     ] {
         let source = Citizen::new(40.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(good, units)
             .unwrap();
         let started = source.start_action(CitizenAction::Eat).unwrap();
-        assert_eq!(started.stored_available_units(started.home(), good), 0);
+        assert_eq!(
+            started.stored_available_units(started.home().unwrap(), good),
+            0
+        );
         let duration = started.active_action().unwrap().duration_ms();
         let complete = started.advance(duration).unwrap();
         close(
@@ -300,12 +313,17 @@ fn each_food_requires_a_whole_meal_and_nonfood_is_rejected() {
     assert_eq!(
         Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .start_action(CitizenAction::BuyFood(Good::Wheat)),
         Err(SimulationError::NotFood)
     );
     assert!(
         CitizenAction::BuyFood(Good::Wheat)
-            .input_for(&Citizen::new(0.0).unwrap(), 30.0)
+            .input_for(
+                &Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+                30.0
+            )
             .is_none()
     );
 }

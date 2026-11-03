@@ -6,7 +6,11 @@ use crate::{
 impl Citizen {
     pub(crate) fn abandon_action(&mut self) -> Result<(), SimulationError> {
         if let Some(active) = self.active_action {
-            let site = active.action().required_place(self).unwrap_or(self.home);
+            let Some(site) = active.action().required_place(self) else {
+                self.active_action = None;
+                self.active_plan = None;
+                return Ok(());
+            };
             for (good, units) in active.stored_inputs.items() {
                 self.storage.release_work_for(
                     self.id,
@@ -88,10 +92,29 @@ impl Citizen {
         active.claimed_objects().find_map(|id| site.object_room(id))
     }
 
+    pub(crate) fn sleep_place(&self) -> Option<crate::locations::PlaceId> {
+        let home = self.home?;
+        let place = self.map.place(home).ok()?;
+        place
+            .objects()
+            .any(|object| {
+                object.kind
+                    == ObjectKind::Bed {
+                        resident: Some(self.id),
+                    }
+                    && self.may_use_object(place, object)
+                    && object.available(self.id)
+            })
+            .then_some(home)
+    }
+
     pub(crate) fn action_objects(
         &self,
         action: CitizenAction,
     ) -> Result<[Option<ObjectId>; 2], SimulationError> {
+        if action == CitizenAction::Sleep && self.sleep_place().is_none() {
+            return Ok([None; 2]);
+        }
         let capability = if let Some(recipe) = action.production_recipe() {
             if crate::production::crop_kind(recipe).is_some() {
                 return Err(SimulationError::MissingInputs);
@@ -237,19 +260,21 @@ impl crate::Universe {
         }
         for agent in self.agents.values() {
             let AgentKind::Citizen(worker) = &agent.kind;
-            let home = self.map.place(worker.home()).map_err(|_| invalid())?;
-            if home
-                .objects()
-                .filter(|object| {
-                    object.kind
-                        == ObjectKind::Bed {
-                            resident: Some(worker.id()),
-                        }
-                })
-                .count()
-                != 1
-            {
-                return Err(SaveError::InvalidState("missing designated bed"));
+            if let Some(home) = worker.home() {
+                let home = self.map.place(home).map_err(|_| invalid())?;
+                if home
+                    .objects()
+                    .filter(|object| {
+                        object.kind
+                            == ObjectKind::Bed {
+                                resident: Some(worker.id()),
+                            }
+                    })
+                    .count()
+                    > 1
+                {
+                    return Err(SaveError::InvalidState("duplicate designated bed"));
+                }
             }
             let Some(active) = worker.active_action() else {
                 continue;
@@ -257,7 +282,7 @@ impl crate::Universe {
             let action = active.action();
             let required = usize::from(
                 action.production_recipe().is_some()
-                    || action == CitizenAction::Sleep
+                    || (action == CitizenAction::Sleep && active.claimed_objects[0].is_some())
                     || action.crop_plot().is_some()
                     || matches!(action, CitizenAction::CollectBeer { .. }),
             ) + usize::from(
@@ -362,7 +387,14 @@ mod tests {
         kind: Location,
     ) -> (Universe, AgentId, AgentId, crate::locations::PlaceId) {
         let (world, first) = Universe::with_map(Map::default())
-            .with_citizen("First", Citizen::new(0.0).unwrap().with_starting_role(role))
+            .with_citizen(
+                "First",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_starting_role(role),
+            )
             .unwrap();
         let (world, second) = world
             .with_household_member(
@@ -370,7 +402,11 @@ mod tests {
                     crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Second",
-                Citizen::new(0.0).unwrap().with_starting_role(role),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_starting_role(role),
             )
             .unwrap();
         let AgentKind::Citizen(_worker) = &world.agents[&first].kind;
@@ -521,10 +557,11 @@ mod tests {
     }
 
     #[test]
-    fn household_residents_have_separate_bedrooms() {
+    fn explicitly_furnished_household_residents_have_separate_bedrooms() {
         let (world, first, second, _) = household(StartingRole::Miller, Location::Mill);
-        let home = worker(&world, first).home();
-        assert_eq!(home, worker(&world, second).home());
+        let world = world.with_member_accommodation(second).unwrap();
+        let home = worker(&world, first).home().unwrap();
+        assert_eq!(Some(home), worker(&world, second).home());
         assert_eq!(world.map.place(home).unwrap().buildings[0].rooms.len(), 3);
         assert_eq!(
             world
@@ -630,6 +667,8 @@ mod tests {
                 "First",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Miller),
             )
             .unwrap();
@@ -638,10 +677,12 @@ mod tests {
                 "Second",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Baker),
             )
             .unwrap();
-        let site = worker(&world, first).home();
+        let site = worker(&world, first).home().unwrap();
         world.map = world
             .map
             .with_building(
@@ -832,6 +873,8 @@ mod tests {
                 "Other brewer",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Brewer),
             )
             .unwrap();
@@ -905,6 +948,8 @@ mod tests {
             .with_citizen(
                 "Other brewer",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Brewer),
             )

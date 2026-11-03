@@ -994,7 +994,10 @@ mod tests {
     fn farming_action_labels_identify_crop_field_plot_and_tending_stage() {
         use learning_lord_simulation::{farming::CropKind, locations::Location};
         let (universe, id) = Universe::default()
-            .with_citizen("Ada", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let (universe, field) = universe.with_property(id, Location::Field).unwrap();
         let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
@@ -1033,13 +1036,15 @@ mod tests {
                     "Ada",
                     Citizen::with_needs(1.0, 1.0)
                         .unwrap()
+                        .with_furnished_home()
+                        .unwrap()
                         .with_berries(35)
                         .unwrap(),
                 )
                 .unwrap();
         let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
         let universe = universe
-            .deposit_goods(id, citizen.home(), Good::Berries, 35)
+            .deposit_goods(id, citizen.home().unwrap(), Good::Berries, 35)
             .unwrap();
         assert!(decision_readout(&universe, None).contains("No planning decision yet"));
         let planned = universe.start_planning(id).unwrap();
@@ -1077,7 +1082,7 @@ mod tests {
                     CitizenAction::Produce(learning_lord_simulation::production::Recipe::Forage),
                     CitizenAction::Eat
                 ],
-                &Citizen::new(0.0).unwrap()
+                &Citizen::new(0.0).unwrap().with_furnished_home().unwrap()
             ),
             "Forage x2 > Eat"
         );
@@ -1086,9 +1091,9 @@ mod tests {
     #[test]
     fn production_location_readout_distinguishes_best_and_chosen_sites() {
         use learning_lord_simulation::planning::{GoalForecast, ProductionLocationForecast};
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let mut location = ProductionLocationForecast {
-            place: citizen.home(),
+            place: citizen.home().unwrap(),
             location_name: "North workshop".into(),
             forecast: Some(GoalForecast {
                 actions: vec![CitizenAction::Produce(
@@ -1151,6 +1156,8 @@ mod tests {
                     "Baker",
                     Citizen::new(0.0)
                         .unwrap()
+                        .with_furnished_home()
+                        .unwrap()
                         .with_starting_role(StartingRole::Baker)
                         .with_berries(930)
                         .unwrap(),
@@ -1178,7 +1185,7 @@ mod tests {
             marketplace::ShoppingList,
             production::{ProductionRouteQuote, ProductionRoutes, Recipe},
         };
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let (map, site) = citizen
             .map()
             .with_place(
@@ -1240,6 +1247,8 @@ mod tests {
         };
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_skill_practice_ms(Skill::Tailoring, Some(0))
             .unwrap()
             .with_good(Good::Cloth, 25)
@@ -1289,6 +1298,8 @@ mod tests {
     fn readout_shows_berries_and_goal_completion_replanning() {
         let citizen = Citizen::with_needs(60.0, 100.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_berries(310)
             .unwrap();
         let (universe, id) =
@@ -1298,7 +1309,7 @@ mod tests {
                 .unwrap();
         let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
         let universe = universe
-            .deposit_goods(id, citizen.home(), Good::Berries, 310)
+            .deposit_goods(id, citizen.home().unwrap(), Good::Berries, 310)
             .unwrap();
         let universe = universe
             .start_planning(id)
@@ -1320,6 +1331,8 @@ mod tests {
     fn readout_shows_thirst_and_water_consumed_with_food() {
         let citizen = Citizen::with_needs(50.0, 0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_thirst(25.0)
             .unwrap()
             .with_good(Good::BreadRoll, 5)
@@ -1330,7 +1343,7 @@ mod tests {
             .with_citizen("Ada", citizen)
             .unwrap();
         let learning_lord_simulation::AgentKind::Citizen(diner) = &universe.agents()[&id].kind;
-        let home = diner.home();
+        let home = diner.home().unwrap();
         let universe = universe
             .deposit_goods(id, home, Good::BreadRoll, 5)
             .unwrap()
@@ -1342,7 +1355,10 @@ mod tests {
         assert!(readout.contains("Diet wellbeing: +0.00"));
         assert!(readout.contains("Eating & drinking | 00:01:40 remaining"));
         assert_eq!(
-            action_label(CitizenAction::Drink, &Citizen::new(0.0).unwrap()),
+            action_label(
+                CitizenAction::Drink,
+                &Citizen::new(0.0).unwrap().with_furnished_home().unwrap()
+            ),
             "Drink"
         );
     }
@@ -1350,6 +1366,8 @@ mod tests {
     #[test]
     fn sleeping_readout_counts_down_to_goal_completion() {
         let citizen = Citizen::with_needs(-50.0, 50.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(-100.0)
             .unwrap()
@@ -1362,7 +1380,7 @@ mod tests {
                 .unwrap();
         let AgentKind::Citizen(citizen) = &universe.agents()[&id].kind;
         let universe = universe
-            .deposit_goods(id, citizen.home(), Good::Water, 400)
+            .deposit_goods(id, citizen.home().unwrap(), Good::Water, 400)
             .unwrap();
         let universe = universe
             .start_planning(id)

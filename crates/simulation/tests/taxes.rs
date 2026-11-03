@@ -48,6 +48,8 @@ fn rates(good: Good, bp: u16) -> imbl::HashMap<Good, TaxRate> {
 fn block_worker() -> (Universe, AgentId, PlaceId) {
     let worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_skill_practice_ms(Skill::Tailoring, Some(0))
         .unwrap()
         .with_good(Good::Cloth, 200)
@@ -291,6 +293,8 @@ fn assets_tax_goods_owners_at_current_prices_and_exclude_town_carried_and_buildi
     let (world, owner, place) = block_worker();
     let payer = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_good(Good::FlaxBlock, 10)
         .unwrap()
         .with_coins(1000)
@@ -343,13 +347,20 @@ fn assets_tax_goods_owners_at_current_prices_and_exclude_town_carried_and_buildi
 fn seller_world() -> (Universe, AgentId, AgentId, PlaceId) {
     let seller = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_good(Good::BreadRoll, 50)
         .unwrap();
     let (world, seller) = Universe::with_map(Map::default())
         .with_citizen("Seller", seller)
         .unwrap();
     let (world, shop) = world.with_property(seller, Location::Bakery).unwrap();
-    let buyer = Citizen::new(0.0).unwrap().with_coins(1000).unwrap();
+    let buyer = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap()
+        .with_coins(1000)
+        .unwrap();
     let (world, buyer) = world.with_citizen("Buyer", buyer).unwrap();
     (world, seller, buyer, shop)
 }
@@ -710,7 +721,12 @@ fn cancellation_after_collection_and_treasury_overflow_roll_back_all_tax_state()
     let (world, rich) = world
         .with_citizen(
             "Rich",
-            Citizen::new(0.0).unwrap().with_coins(i64::MAX).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(i64::MAX)
+                .unwrap(),
         )
         .unwrap();
     let (world, _) = world
@@ -726,7 +742,12 @@ fn cancellation_after_collection_and_treasury_overflow_roll_back_all_tax_state()
     let (world, also_rich) = world
         .with_citizen(
             "Also rich",
-            Citizen::new(0.0).unwrap().with_coins(i64::MAX).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(i64::MAX)
+                .unwrap(),
         )
         .unwrap();
     let (world, _) = world
@@ -822,7 +843,15 @@ fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
     let (world, ada, first) = block_worker();
     let (world, second) = world.with_property(ada, Location::Tailory).unwrap();
     let (world, ben) = world
-        .with_citizen("Ben", Citizen::new(0.0).unwrap().with_coins(10).unwrap())
+        .with_citizen(
+            "Ben",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(10)
+                .unwrap(),
+        )
         .unwrap();
     let (world, third) = world.with_property(ben, Location::Tailory).unwrap();
     let (world, rule) = world
@@ -895,6 +924,8 @@ fn shared_fees_charge_each_property_owner_and_keep_per_place_debts() {
 
 fn garment_worker() -> (Universe, AgentId, PlaceId) {
     let worker = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_skill_practice_ms(Skill::Tailoring, Some(0))
         .unwrap()
@@ -1039,7 +1070,7 @@ fn whole_garment_is_private_wealth_but_unusable_until_sunday_changes_owner() {
 #[test]
 fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax() {
     let (world, id, origin) = garment_worker();
-    let destination = citizen(&world, id).home();
+    let destination = citizen(&world, id).home().unwrap();
     let (world, socage) = world
         .with_tax_rule(
             origin,
@@ -1050,7 +1081,10 @@ fn moved_reservations_keep_original_tax_place_and_settle_before_stored_asset_tax
         )
         .unwrap();
     let (world, id2) = world
-        .with_citizen("Ben", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Ben",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let world = world
         .with_stored_good(

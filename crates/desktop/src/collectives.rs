@@ -190,7 +190,11 @@ fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) 
     });
     row(parent, |row| {
         label(row, "Shared home:");
-        place_link(row, universe, household.home);
+        if let Some(home) = household.home {
+            place_link(row, universe, home);
+        } else {
+            label(row, "None");
+        }
     });
     let wealth = universe
         .household_wealth(id)
@@ -1113,7 +1117,7 @@ mod tests {
             .id;
         let household = &snapshot.universe.households()[&id];
         let stored = snapshot.universe.storage().units(
-            household.home,
+            household.home.unwrap(),
             learning_lord_simulation::storage::GoodsOwner::Household(id),
             learning_lord_simulation::marketplace::Good::BreadRoll,
         );

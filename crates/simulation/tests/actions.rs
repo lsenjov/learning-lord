@@ -12,6 +12,8 @@ fn assert_close(actual: f64, expected: f64) {
 fn two_meals_balance_a_day_of_standard_hunger_including_time_spent_eating() {
     let original = Citizen::new(-25.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 310)
         .unwrap();
     assert_close(original.advance(DAY_MS).unwrap().hunger(), 75.0);
@@ -34,6 +36,8 @@ fn two_meals_balance_a_day_of_standard_hunger_including_time_spent_eating() {
 fn meals_nourish_gradually_for_the_duration_of_the_selected_portion() {
     for (action, completed_hunger) in [(CitizenAction::Eat, -50.0), (CitizenAction::Wait, 0.0)] {
         let original = Citizen::with_hunger_rate(0.0, 0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 155)
             .unwrap();
@@ -80,6 +84,8 @@ fn busy_citizens_reject_all_actions_without_replacing_the_current_action() {
     ] {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 155)
             .unwrap()
             .start_action(current)
@@ -109,6 +115,8 @@ fn hunger_advances_during_actions_and_after_their_completion() {
         (CitizenAction::Wait, 100.0 / 24.0),
     ] {
         let started = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 155)
             .unwrap()
@@ -144,6 +152,8 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
     ] {
         let original = Citizen::new(-80.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 150)
             .unwrap()
             .start_action(action)
@@ -165,6 +175,8 @@ fn small_ticks_and_one_large_tick_agree_across_action_completion() {
 fn waiting_avoids_overfull_discomfort_while_eating_helps_a_hungry_citizen() {
     for (hunger, eating_is_better) in [(-80.0, false), (50.0, true)] {
         let citizen = Citizen::new(hunger)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 155)
             .unwrap();
@@ -194,12 +206,15 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
                 .with_price(learning_lord_simulation::marketplace::Good::Berries, 5.0)
                 .unwrap(),
         )
-        .with_citizen("Ada", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Ada",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let learning_lord_simulation::AgentKind::Citizen(ada) = &original.agents()[&id].kind;
     let original = original
         .with_stored_good(
-            ada.home(),
+            ada.home().unwrap(),
             match &original.agents()[&id].kind {
                 learning_lord_simulation::AgentKind::Citizen(citizen) => citizen.goods_owner(),
             },
@@ -208,7 +223,10 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
         )
         .unwrap();
     let (original, other_id) = original
-        .with_citizen("Bea", Citizen::new(10.0).unwrap())
+        .with_citizen(
+            "Bea",
+            Citizen::new(10.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let original = original.advance(MINUTE_MS).unwrap();
     let snapshot = original.clone();
@@ -229,8 +247,8 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     for good in learning_lord_simulation::marketplace::Good::ALL {
         assert_eq!(after.units(good), before.units(good));
         assert_eq!(
-            after.stored_available_units(after.home(), good),
-            before.stored_available_units(before.home(), good)
+            after.stored_available_units(after.home().unwrap(), good),
+            before.stored_available_units(before.home().unwrap(), good)
         );
     }
     assert_eq!(eating.agents()[&id].name, "Ada");
@@ -267,7 +285,10 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
 
     let (_, missing_id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Missing", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Missing",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     assert_eq!(
         original.start_action(missing_id, CitizenAction::Eat),
@@ -285,6 +306,8 @@ fn failed_advances_preserve_action_progress_even_when_failure_is_after_completio
     ] {
         for hunger in [0.0, f64::MAX] {
             let citizen = Citizen::with_hunger_rate(hunger, f64::MAX)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 155)
                 .unwrap()

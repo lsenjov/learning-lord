@@ -6,6 +6,8 @@ use learning_lord_simulation::{ACTION_DURATION_MS, Citizen, CitizenAction, Simul
 fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
     let source = Citizen::with_needs(20.0, 10.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_prices(Prices::new(100.0).unwrap());
     assert_eq!(source.coins(), 0);
     assert_eq!(Prices::default().price(Good::Berries).unwrap(), 650.0);
@@ -32,7 +34,7 @@ fn wealth_values_grams_and_coins_and_preserves_need_penalties() {
 
 #[test]
 fn integer_coin_boundaries_and_busy_setup_are_supported() {
-    let source = Citizen::new(0.0).unwrap();
+    let source = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     for coins in [i64::MIN, 0, i64::MAX] {
         assert_eq!(source.with_coins(coins).unwrap().coins(), coins);
     }
@@ -56,6 +58,8 @@ fn integer_coin_boundaries_and_busy_setup_are_supported() {
 #[test]
 fn berries_arrive_on_completion_and_prediction_preserves_randomness() {
     let source = Citizen::with_needs(-50.0, -100.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_home_good(learning_lord_simulation::marketplace::Good::Water, 10_000)
         .unwrap();

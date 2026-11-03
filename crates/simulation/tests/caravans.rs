@@ -20,6 +20,8 @@ fn daily_exports_credit_seller_tax_origin_and_open_new_history_without_changing_
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 9)
                 .unwrap(),
         )
@@ -124,7 +126,12 @@ fn imports_deliver_at_market_purchase_cash_leaves_town_and_forecast_is_immutable
         )
         .with_citizen(
             "Buyer",
-            Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(1000)
+                .unwrap(),
         )
         .unwrap();
     let requested = world
@@ -204,6 +211,8 @@ fn failed_or_cancelled_daily_settlement_preserves_the_authoritative_snapshot() {
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 1)
                 .unwrap()
                 .with_coins(i64::MAX)
@@ -226,6 +235,8 @@ fn failed_or_cancelled_daily_settlement_preserves_the_authoritative_snapshot() {
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_good(Good::BreadRoll, 1)
                 .unwrap(),
@@ -259,6 +270,8 @@ fn listed_world(units: u64) -> (Universe, AgentId) {
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_good(Good::BreadRoll, units)
                 .unwrap(),
@@ -346,6 +359,8 @@ fn town_reserve_includes_carried_storage_and_town_goods_once() {
             "Holder",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 3)
                 .unwrap(),
         )
@@ -392,6 +407,8 @@ fn export_tariff_grosses_up_net_receipts_and_income_tax_uses_only_receipts() {
         .with_citizen(
             "Seller",
             Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_good(Good::BreadRoll, 10)
                 .unwrap(),
@@ -466,7 +483,12 @@ fn existing_imports_reprice_and_disable_immediately_without_mutating_forecasts()
         )
         .with_citizen(
             "Buyer",
-            Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(1000)
+                .unwrap(),
         )
         .unwrap();
     let imported = world

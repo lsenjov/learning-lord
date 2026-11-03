@@ -1307,7 +1307,12 @@ mod tests {
             )
             .with_citizen(
                 "Buyer",
-                Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(1000)
+                    .unwrap(),
             )
             .unwrap();
         let universe = universe
@@ -1330,7 +1335,15 @@ mod tests {
     #[test]
     fn fills_inactive_days_without_precreation_history_and_carries_prices() {
         let (universe, buyer) = Universe::starting_at(6 * 60 * 60 * 1000)
-            .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(10).unwrap())
+            .with_citizen(
+                "Buyer",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(10)
+                    .unwrap(),
+            )
             .unwrap();
         let universe = universe
             .with_purchase_request(buyer, ShoppingList::single(Good::Water, 100))

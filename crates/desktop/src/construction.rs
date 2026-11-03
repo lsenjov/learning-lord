@@ -695,12 +695,17 @@ mod tests {
         let (world, owner) = Universe::default()
             .with_citizen(
                 "Owner",
-                Citizen::new(0.0).unwrap().with_coins(coins).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(coins)
+                    .unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents()[&owner].kind;
         let map = world.map();
-        let place = map.place(citizen.home()).unwrap();
+        let place = map.place(citizen.home().unwrap()).unwrap();
         let building = &place.buildings[0];
         let destination = Destination {
             place: place.id,
@@ -749,6 +754,8 @@ mod tests {
         use learning_lord_simulation::{StartingRole, marketplace::Good};
         let (world, destination) = fixture(1_000_000);
         let worker = Citizen::with_needs(-100.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_thirst(-100.0)
             .unwrap()

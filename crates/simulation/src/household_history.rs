@@ -438,7 +438,7 @@ mod tests {
                     crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Other member",
-                Citizen::new(0.0).unwrap(),
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(_citizen) = &world.agents[&member].kind;
@@ -464,12 +464,22 @@ mod tests {
         let (world, seller, seller_household) = household(
             world,
             "Seller",
-            Citizen::new(0.0).unwrap().with_berries(500).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(500)
+                .unwrap(),
         );
         let (world, buyer, buyer_household) = household(
             world,
             "Buyer",
-            Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(100)
+                .unwrap(),
         );
         let (world, place) = world.with_property(seller, Location::Bakery).unwrap();
         let world = world.with_designated_workplace(seller, place).unwrap();
@@ -546,8 +556,15 @@ mod tests {
 
     #[test]
     fn production_consumption_and_internal_transfers_reuse_member_totals() {
-        let (world, member, id) = base(Citizen::new(0.0).unwrap().with_berries(1000).unwrap());
-        let home = world.households[&id].home;
+        let (world, member, id) = base(
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(1000)
+                .unwrap(),
+        );
+        let home = world.households[&id].home.unwrap();
         let world = world
             .deposit_goods(member, home, Good::Berries, 400)
             .unwrap();
@@ -595,7 +612,7 @@ mod tests {
 
     #[test]
     fn four_am_closes_contributions_before_new_day_and_keeps_365_complete_days() {
-        let (world, member, id) = base(Citizen::new(0.0).unwrap());
+        let (world, member, id) = base(Citizen::new(0.0).unwrap().with_furnished_home().unwrap());
         let world = world
             .advance(UPDATE_TIME_MS - ACTION_DURATION_MS)
             .unwrap()
@@ -634,8 +651,8 @@ mod tests {
 
     #[test]
     fn stock_reservations_and_collected_socage_are_distinct_from_consumption() {
-        let (world, member, id) = base(Citizen::new(0.0).unwrap());
-        let home = world.households[&id].home;
+        let (world, member, id) = base(Citizen::new(0.0).unwrap().with_furnished_home().unwrap());
+        let home = world.households[&id].home.unwrap();
         let world = world
             .with_stored_good(home, GoodsOwner::Household(id), Good::Berries, 100)
             .unwrap();
@@ -675,6 +692,8 @@ mod tests {
     fn stored_recipe_inputs_and_work_reservations_match_physical_stock() {
         let (world, member, id) = base(
             Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_starting_role(crate::StartingRole::Baker),
         );
@@ -719,8 +738,15 @@ mod tests {
     #[test]
     #[ignore = "writes a varied synthetic 365-day history for an explicit gzip size measurement"]
     fn representative_history_size_sample() {
-        let (world, member, id) = base(Citizen::new(0.0).unwrap().with_coins(1000).unwrap());
-        let home = world.households[&id].home;
+        let (world, member, id) = base(
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(1000)
+                .unwrap(),
+        );
+        let home = world.households[&id].home.unwrap();
         let second = AgentId(uuid::Uuid::new_v4());
         let mut history = HouseholdHistory::new(UPDATE_TIME_MS, 1000);
         let mut balance = 1000;
@@ -778,7 +804,14 @@ mod tests {
 
     #[test]
     fn invalid_history_cash_members_stock_and_retention_are_rejected() {
-        let (world, member, id) = base(Citizen::new(0.0).unwrap().with_berries(100).unwrap());
+        let (world, member, id) = base(
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_berries(100)
+                .unwrap(),
+        );
         for case in 0..6 {
             let mut invalid = world.clone();
             let history = invalid.household_histories.get_mut(&id).unwrap();
@@ -790,7 +823,10 @@ mod tests {
                         .members
                         .insert(AgentId(uuid::Uuid::new_v4()), MemberContribution::default());
                 }
-                2 => history.current.closing_stocks[0].place = Some(world.households[&id].home),
+                2 => {
+                    history.current.closing_stocks[0].place =
+                        Some(world.households[&id].home.unwrap())
+                }
                 3 => history.current.closing_stocks[0].tax_reserved_units = 101,
                 4 => {
                     history.current.members.insert(

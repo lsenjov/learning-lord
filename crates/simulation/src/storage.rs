@@ -748,21 +748,25 @@ impl crate::Citizen {
             .map(|place| place.id)
     }
 
-    pub(crate) fn home_food_nutrition(&self) -> f64 {
+    pub(crate) fn provisioned_units(&self, good: Good) -> Quantity {
+        self.home.map_or_else(
+            || self.carried_available_units(good),
+            |home| self.stored_available_units(home, good),
+        )
+    }
+
+    pub(crate) fn provisioned_food_nutrition(&self) -> f64 {
         Good::FOOD
             .into_iter()
-            .map(|good| {
-                self.stored_available_units(self.home, good) as f64
-                    * good.nutrition_per_unit().unwrap()
-            })
+            .map(|good| self.provisioned_units(good) as f64 * good.nutrition_per_unit().unwrap())
             .sum::<f64>()
-            + self.stored_available_units(self.home, Good::Beer) as f64 * 0.05
+            + self.provisioned_units(Good::Beer) as f64 * 0.05
     }
-    pub(crate) fn home_drink_units(&self) -> Quantity {
-        self.stored_available_units(self.home, Good::Water)
-            .saturating_add(self.stored_available_units(self.home, Good::Beer))
+    pub(crate) fn provisioned_drink_units(&self) -> Quantity {
+        self.provisioned_units(Good::Water)
+            .saturating_add(self.provisioned_units(Good::Beer))
     }
-    pub(crate) fn home_meal_nutrition(&self) -> f64 {
+    pub(crate) fn consumption_food_nutrition(&self) -> f64 {
         let available = self.consumption_available_units();
         Good::FOOD
             .into_iter()
@@ -772,13 +776,15 @@ impl crate::Citizen {
     }
     pub(crate) fn consumption_available_units(&self) -> [Quantity; Good::COUNT] {
         let mut available = [0; Good::COUNT];
-        if self.position != self.map.position(self.home)
-            || self.accessible_place(self.home).is_err()
-        {
-            return available;
-        }
         for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-            available[good as usize] = self.stored_available_units(self.home, good);
+            available[good as usize] = self.carried_available_units(good).saturating_add(
+                self.home
+                    .filter(|home| {
+                        self.position == self.map.position(*home)
+                            && self.accessible_place(*home).is_ok()
+                    })
+                    .map_or(0, |home| self.stored_available_units(home, good)),
+            );
         }
         available
     }
@@ -791,7 +797,7 @@ impl crate::Citizen {
                     .and_then(|active| active.action.required_place(self))
                     != Some(*place),
                 self.designated_workplace != Some(*place),
-                self.home != *place,
+                self.home != Some(*place),
                 place.0,
             )
         });
@@ -804,7 +810,7 @@ impl crate::Citizen {
         self.units(good)
             .saturating_sub(self.tax_reserved_units(good))
     }
-    pub(crate) fn consume_home_goods(
+    pub(crate) fn consume_personal_goods(
         &mut self,
         good: Good,
         units: Quantity,
@@ -812,19 +818,26 @@ impl crate::Citizen {
         if units == 0 {
             return Ok(());
         }
-        if self.position != self.map.position(self.home) {
-            return Err(SimulationError::WrongLocation);
-        }
-        self.accessible_place(self.home)?;
-        if units > self.stored_available_units(self.home, good) {
+        let home = self.home.filter(|home| {
+            self.position == self.map.position(*home) && self.accessible_place(*home).is_ok()
+        });
+        let stored = home
+            .map_or(0, |home| self.stored_available_units(home, good))
+            .min(units);
+        let carried = units - stored;
+        if carried > self.carried_available_units(good) {
             return Err(SimulationError::MissingInputs);
         }
-        let key = StockKey {
-            place: self.home,
-            owner: self.goods_owner(),
-            good,
-        };
-        self.set_stored_units(key, self.storage.units(self.home, key.owner, good) - units)
+        if let Some(home) = home.filter(|_| stored > 0) {
+            let key = StockKey {
+                place: home,
+                owner: self.goods_owner(),
+                good,
+            };
+            self.set_stored_units(key, self.storage.units(home, key.owner, good) - stored)?;
+        }
+        self.set_inventory_units(good, self.units(good) - carried);
+        Ok(())
     }
     pub(crate) fn consume_goods(
         &mut self,
@@ -931,7 +944,7 @@ mod transport_tests {
         use crate::locations::{Location, Position};
 
         for shared in [false, true] {
-            let mut citizen = Citizen::new(80.0).unwrap();
+            let mut citizen = Citizen::new(80.0).unwrap().with_furnished_home().unwrap();
             let other = AgentId(uuid::Uuid::new_v4());
             if shared {
                 citizen.household = Some(crate::households::HouseholdContext {
@@ -966,7 +979,7 @@ mod transport_tests {
                 citizen.inventory.insert(good, 20);
                 citizen.tax_reserved.insert(good, 3);
                 let home_key = StockKey {
-                    place: citizen.home,
+                    place: citizen.home.unwrap(),
                     owner,
                     good,
                 };
@@ -979,9 +992,9 @@ mod transport_tests {
                 for (place, stock_owner, units) in [
                     (other_home, owner, 11),
                     (distant, owner, 100),
-                    (citizen.home, GoodsOwner::Town, 200),
+                    (citizen.home.unwrap(), GoodsOwner::Town, 200),
                     (
-                        citizen.home,
+                        citizen.home.unwrap(),
                         GoodsOwner::Agent(AgentId(uuid::Uuid::new_v4())),
                         300,
                     ),
@@ -1005,15 +1018,17 @@ mod transport_tests {
             for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
                 assert_eq!(
                     available[good as usize],
-                    citizen.stored_available_units(citizen.home, good)
+                    citizen
+                        .stored_available_units(citizen.home.unwrap(), good)
+                        .saturating_add(citizen.carried_available_units(good))
                 );
-                assert_eq!(available[good as usize], 18);
+                assert_eq!(available[good as usize], 35);
             }
             citizen.inventory.insert(Good::Water, Quantity::MAX);
             citizen.tax_reserved.remove(&Good::Water);
             assert_eq!(
                 citizen.consumption_available_units()[Good::Water as usize],
-                18
+                Quantity::MAX
             );
             assert_eq!(citizen.available_units(Good::Water), Quantity::MAX);
         }
@@ -1026,12 +1041,14 @@ mod transport_tests {
                 "Ada",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_good(Good::BreadRoll, 100)
                     .unwrap(),
             )
             .unwrap();
         let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
-        let home = citizen.home();
+        let home = citizen.home().unwrap();
         let action = CitizenAction::DepositStored {
             place: home,
             list: ShoppingList::single(Good::BreadRoll, 70),
@@ -1078,8 +1095,8 @@ mod transport_tests {
 
     #[test]
     fn storage_transport_cannot_take_tax_reserved_stock() {
-        let mut citizen = Citizen::new(0.0).unwrap();
-        let place = citizen.home();
+        let mut citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
+        let place = citizen.home().unwrap();
         let key = StockKey {
             place,
             owner: GoodsOwner::Agent(citizen.id()),
@@ -1160,7 +1177,7 @@ mod physical_tests {
         for good in Good::ALL {
             assert_eq!(kinds.iter().filter(|kind| kind.accepts(good)).count(), 1);
         }
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         for (kind, count) in [
             (Location::Home, 5),
             (Location::Field, 4),
@@ -1264,7 +1281,7 @@ mod physical_tests {
 
     #[test]
     fn occupied_compatible_mixed_storage_is_preferred_over_an_empty_object() {
-        let citizen = Citizen::new(0.0).unwrap();
+        let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let (mut map, place) = citizen
             .map
             .with_place(
@@ -1409,11 +1426,17 @@ mod physical_tests {
     #[test]
     fn goods_in_a_foreign_building_are_unavailable_even_at_an_accessible_site() {
         let (world, id) = Universe::default()
-            .with_citizen("Owner", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Owner",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         let (mut world, place) = world.with_property(id, Location::Mill).unwrap();
         let (world2, other) = world
-            .with_citizen("Other", Citizen::new(0.0).unwrap())
+            .with_citizen(
+                "Other",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
             .unwrap();
         world = world2;
         let (map, building) = world
@@ -1471,6 +1494,8 @@ mod physical_tests {
                 "Miller",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Miller),
             )
             .unwrap();
@@ -1516,6 +1541,8 @@ mod physical_tests {
             .with_citizen(
                 "Miller",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Miller),
             )
@@ -1585,6 +1612,8 @@ mod physical_tests {
                 "Seller",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_good(Good::Wheat, 100)
                     .unwrap()
                     .with_good(Good::Wood, 100)
@@ -1627,6 +1656,8 @@ mod physical_tests {
             .with_citizen(
                 "Farmer",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(StartingRole::Farmer),
             )
@@ -1691,6 +1722,8 @@ mod physical_tests {
                 "Miller",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_starting_role(StartingRole::Miller),
             )
             .unwrap();
@@ -1700,11 +1733,11 @@ mod physical_tests {
                     crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Other",
-                Citizen::new(0.0).unwrap(),
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
             )
             .unwrap();
         let _home = match &world.agents[&worker].kind {
-            AgentKind::Citizen(citizen) => citizen.home(),
+            AgentKind::Citizen(citizen) => citizen.home().unwrap(),
         };
         let household = match &world.agents()[&worker].kind {
             crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
@@ -1747,10 +1780,16 @@ mod physical_tests {
         use crate::taxation::{TaxKind, TaxRate};
         for reserve_foreign in [false, true] {
             let (world, id) = Universe::with_map(Map::default())
-                .with_citizen("Owner", Citizen::new(0.0).unwrap())
+                .with_citizen(
+                    "Owner",
+                    Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+                )
                 .unwrap();
             let (world, other) = world
-                .with_citizen("Other", Citizen::new(0.0).unwrap())
+                .with_citizen(
+                    "Other",
+                    Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+                )
                 .unwrap();
             let (mut world, place) = world.with_property(id, Location::Bakery).unwrap();
             let (map, building) = world

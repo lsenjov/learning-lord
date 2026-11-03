@@ -5,7 +5,7 @@ use learning_lord_simulation::{
 
 #[test]
 fn worn_garments_are_separate_from_inventory_and_scale_wealth_and_need() {
-    let bare = Citizen::new(0.0).unwrap();
+    let bare = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     let dressed = bare.with_garment_condition(Some(0.5)).unwrap();
     assert_eq!(bare.clothing_need(), CLOTHING_MAX_PENALTY);
     assert_eq!(dressed.clothing_need(), 10.0);
@@ -38,6 +38,8 @@ fn worn_garments_are_separate_from_inventory_and_scale_wealth_and_need() {
 #[test]
 fn wear_is_continuous_partition_independent_and_clamped() {
     let source = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_garment_condition(Some(1.0))
         .unwrap();
@@ -78,6 +80,8 @@ fn wear_is_continuous_partition_independent_and_clamped() {
 fn equip_consumes_at_completion_and_discards_old_garment() {
     let source = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_garment_condition(Some(0.25))
         .unwrap()
         .with_good(Good::FlaxGarment, 2)
@@ -101,6 +105,8 @@ fn equip_consumes_at_completion_and_discards_old_garment() {
     assert_eq!(source.units(Good::FlaxGarment), 2);
     assert_eq!(
         Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .start_action(CitizenAction::EquipClothing),
         Err(SimulationError::MissingInputs)
@@ -130,6 +136,8 @@ fn garments_trade_as_whole_items_without_transferring_worn_condition() {
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::FlaxGarment, 1)
                 .unwrap()
                 .with_garment_condition(Some(0.5))
@@ -137,7 +145,15 @@ fn garments_trade_as_whole_items_without_transferring_worn_condition() {
         )
         .unwrap();
     let (town, buyer) = town
-        .with_citizen("Buyer", Citizen::new(0.0).unwrap().with_coins(200).unwrap())
+        .with_citizen(
+            "Buyer",
+            Citizen::new(0.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .with_coins(200)
+                .unwrap(),
+        )
         .unwrap();
     let listed = town
         .start_action(seller, CitizenAction::List(Good::FlaxGarment, 1))
@@ -175,6 +191,8 @@ fn clothing_chain_keeps_exact_integer_intermediates_until_garment_completion() {
         production::{Recipe, Skill},
     };
     let worker = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_starting_role(StartingRole::Farmer)
         .with_skill_practice_ms(Skill::Weaving, Some(0))

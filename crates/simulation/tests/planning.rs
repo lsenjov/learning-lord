@@ -59,6 +59,8 @@ fn goal_planning_scores_action_endpoints_and_preserves_the_source() {
     ] {
         let original = Citizen::with_needs(hunger, tiredness)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(
                 learning_lord_simulation::marketplace::Good::Berries,
                 berries,
@@ -84,7 +86,10 @@ fn goal_planning_scores_action_endpoints_and_preserves_the_source() {
 
 #[test]
 fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
-    let starving = Citizen::with_hunger_rate(150.0, 0.0).unwrap();
+    let starving = Citizen::with_hunger_rate(150.0, 0.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap();
     let chosen = plan(&starving).unwrap();
     assert_close(
         score_actions(&starving, chosen.actions()),
@@ -92,6 +97,8 @@ fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
     );
 
     let satiated = Citizen::with_needs(-100.0, -100.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_home_good(learning_lord_simulation::marketplace::Good::BreadRoll, 15)
         .unwrap()
@@ -111,13 +118,18 @@ fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
 
 #[test]
 fn large_finite_scores_can_be_averaged_without_overflowing() {
-    let citizen = Citizen::with_hunger_rate(-f64::MAX, 0.0).unwrap();
+    let citizen = Citizen::with_hunger_rate(-f64::MAX, 0.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap();
     assert_eq!(plan(&citizen).unwrap().average_wellbeing(), 0.0);
 }
 
 #[test]
 fn execution_keeps_its_plan_for_two_hours_then_replans() {
     let original = Citizen::with_needs(-100.0, -100.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_thirst(-100.0)
         .unwrap()
@@ -193,6 +205,8 @@ fn execution_keeps_its_plan_for_two_hours_then_replans() {
 fn small_and_large_ticks_agree_across_multiple_batches_and_partial_actions() {
     let original = Citizen::with_needs(60.0, 100.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .start_planning()
         .unwrap();
     let snapshot = original.clone();
@@ -225,7 +239,7 @@ fn small_and_large_ticks_agree_across_multiple_batches_and_partial_actions() {
 
 #[test]
 fn planning_rejects_busy_citizens_and_cannot_replace_a_committed_batch() {
-    let idle = Citizen::new(10.0).unwrap();
+    let idle = Citizen::new(10.0).unwrap().with_furnished_home().unwrap();
     let busy = idle.start_action(CitizenAction::Wait).unwrap();
     assert_eq!(plan(&busy), Err(SimulationError::CitizenBusy));
     assert_eq!(busy.start_planning(), Err(SimulationError::CitizenBusy));
@@ -245,10 +259,16 @@ fn planning_rejects_busy_citizens_and_cannot_replace_a_committed_batch() {
 fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches() {
     let (original, id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Ada", Citizen::new(25.0).unwrap())
+        .with_citizen(
+            "Ada",
+            Citizen::new(25.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let (original, other_id) = original
-        .with_citizen("Bea", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Bea",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     let snapshot = original.clone();
     let planned = original.start_planning(id).unwrap();
@@ -300,7 +320,10 @@ fn universe_planning_only_predicts_the_selected_citizen_and_preserves_branches()
 
     let (_, missing_id) = Universe::with_map(learning_lord_simulation::locations::Map::default())
         .with_prices(learning_lord_simulation::marketplace::Prices::default())
-        .with_citizen("Missing", Citizen::new(0.0).unwrap())
+        .with_citizen(
+            "Missing",
+            Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+        )
         .unwrap();
     assert_eq!(
         original.start_planning(missing_id),
@@ -314,7 +337,10 @@ fn prediction_and_replanning_errors_preserve_original_state() {
         (0.0, SimulationError::WellbeingOverflow),
         (f64::MAX, SimulationError::HungerOverflow),
     ] {
-        let original = Citizen::with_hunger_rate(f64::MAX, rate).unwrap();
+        let original = Citizen::with_hunger_rate(f64::MAX, rate)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let snapshot = original.clone();
         assert_eq!(plan(&original), Err(expected));
         assert_eq!(original.start_planning(), Err(expected));
@@ -322,6 +348,8 @@ fn prediction_and_replanning_errors_preserve_original_state() {
     }
 
     let planned = Citizen::with_hunger_rate(-f64::MAX, f64::MAX / 16.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .start_planning()
         .unwrap();
@@ -348,12 +376,16 @@ fn prediction_and_replanning_errors_preserve_original_state() {
 fn planning_sleeps_when_tired_and_eats_before_sleep_when_hungry() {
     let tired = Citizen::with_needs(-50.0, 50.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_thirst(-100.0)
         .unwrap()
         .with_good(learning_lord_simulation::marketplace::Good::Water, 400)
         .unwrap();
     assert_eq!(plan(&tired).unwrap().actions()[0], CitizenAction::Sleep);
     let hungry = Citizen::with_needs(60.0, 100.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 200)
         .unwrap();
@@ -370,6 +402,8 @@ fn planning_sleeps_when_tired_and_eats_before_sleep_when_hungry() {
 #[test]
 fn sleep_replanning_waits_for_whole_goal_completion() {
     let original = Citizen::with_needs(-50.0, 50.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_thirst(-100.0)
         .unwrap()

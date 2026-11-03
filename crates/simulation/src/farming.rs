@@ -333,6 +333,8 @@ mod tests {
     fn farmer() -> (Citizen, PlaceId) {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_skill_practice_ms(Skill::Farming, Some(0))
             .unwrap();
         let (map, field) = citizen
@@ -432,6 +434,8 @@ mod tests {
         let mut ids = Vec::new();
         for role in roles.into_iter().cycle().take(24) {
             let mut citizen = Citizen::with_needs(-50.0, -66.6)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_starting_role(role)
                 .with_good(Good::BreadRoll, 70)
@@ -789,6 +793,8 @@ mod tests {
     fn fields_require_individual_ownership_and_crop_wealth_tracks_yield() {
         let (citizen, field) = farmer();
         let other = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_map(citizen.map())
             .unwrap()

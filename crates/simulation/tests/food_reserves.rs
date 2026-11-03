@@ -18,6 +18,8 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
     ] {
         let citizen = Citizen::new(0.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_home_good(
                 Good::BreadRoll,
                 (nutrition / Good::BreadRoll.nutrition_per_unit().unwrap()).ceil() as u64,
@@ -30,6 +32,8 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
         );
     }
     let mixed = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_home_good(Good::Berries, 155)
         .unwrap()
@@ -44,6 +48,8 @@ fn reserve_bonus_has_two_slopes_and_a_cap() {
 #[test]
 fn listing_excludes_food_from_bonus_and_excess_preserves_the_cap() {
     let citizen = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_home_good(Good::BreadRoll, 40)
         .unwrap();
@@ -73,6 +79,8 @@ fn listing_excludes_food_from_bonus_and_excess_preserves_the_cap() {
 #[test]
 fn eating_loses_reserve_bonus_but_hunger_relief_outweighs_it() {
     let hungry = Citizen::with_needs(80.0, -100.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_good(Good::BreadRoll, 10)
         .unwrap();
@@ -110,6 +118,8 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::BreadRoll, 50)
                 .unwrap(),
         )
@@ -131,6 +141,8 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
             "Buyer",
             Citizen::with_needs(-50.0, -100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_coins(300)
                 .unwrap()
                 .with_good(
@@ -141,7 +153,7 @@ fn market_with_bread(nutrition: f64) -> (Universe, learning_lord_simulation::Age
         )
         .unwrap();
     let AgentKind::Citizen(citizen) = &universe.agents()[&buyer].kind;
-    let home = citizen.home();
+    let home = citizen.home().unwrap();
     let universe = universe
         .deposit_goods(
             buyer,
@@ -237,7 +249,7 @@ fn replenishment_above_meal_stock_chooses_an_actual_purchase_and_reports_it_duri
     let AgentKind::Citizen(citizen) = &bought.agents()[&buyer].kind;
     close(citizen.food_nutrition(), target - 50.0);
     close(
-        citizen.stored_available_units(citizen.home(), Good::BreadRoll) as f64
+        citizen.stored_available_units(citizen.home().unwrap(), Good::BreadRoll) as f64
             * Good::BreadRoll.nutrition_per_unit().unwrap(),
         50.0,
     );
@@ -248,7 +260,7 @@ fn replenishment_above_meal_stock_chooses_an_actual_purchase_and_reports_it_duri
     let AgentKind::Citizen(citizen) = &delivered.agents()[&buyer].kind;
     assert_eq!(citizen.units(Good::BreadRoll), 0);
     assert_eq!(
-        citizen.stored_available_units(citizen.home(), Good::BreadRoll)
+        citizen.stored_available_units(citizen.home().unwrap(), Good::BreadRoll)
             + delivered.citizen_history(buyer).unwrap().current.consumed[Good::BreadRoll as usize],
         30
     );
@@ -261,6 +273,8 @@ fn foraging_does_not_publish_a_food_reserve_wishlist() {
             .with_citizen(
                 "Worker",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_starting_role(learning_lord_simulation::StartingRole::Woodcutter)
                     .with_good(Good::BreadRoll, 5)
@@ -318,6 +332,8 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
             "Seller",
             Citizen::new(0.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_good(Good::Fish, 20)
                 .unwrap()
                 .with_good(Good::Cabbage, 20)
@@ -347,6 +363,8 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
             "Buyer",
             Citizen::with_needs(-100.0, -100.0)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_thirst(-50.0)
                 .unwrap()
                 .with_garment_condition(Some(1.0))
@@ -360,7 +378,7 @@ fn selected_variety_shopping_publishes_and_clears_its_real_basket() {
         )
         .unwrap();
     let AgentKind::Citizen(citizen) = &world.agents()[&buyer].kind;
-    let home = citizen.home();
+    let home = citizen.home().unwrap();
     let world = world
         .deposit_goods(buyer, home, Good::BreadRoll, 5)
         .unwrap()

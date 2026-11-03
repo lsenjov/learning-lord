@@ -2963,6 +2963,8 @@ mod tests {
                 "Seller",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_good(Good::BreadRoll, 10)
                     .unwrap(),
             )
@@ -2970,7 +2972,12 @@ mod tests {
         let (world, buyer) = world
             .with_citizen(
                 "Buyer",
-                Citizen::new(0.0).unwrap().with_coins(1000).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(1000)
+                    .unwrap(),
             )
             .unwrap();
         let market = world.map().public_place(Location::Market);

@@ -15,7 +15,7 @@ fn perform(citizen: Citizen, action: CitizenAction) -> Citizen {
 #[test]
 fn fishing_requires_training_and_produces_one_whole_fish_with_practice() {
     let action = CitizenAction::Produce(Recipe::CatchFish);
-    let untrained = Citizen::new(0.0).unwrap();
+    let untrained = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
     assert_eq!(
         untrained.action_duration_ms(action),
         Err(SimulationError::MissingSkill)
@@ -49,6 +49,8 @@ fn fishing_requires_training_and_produces_one_whole_fish_with_practice() {
 fn cabbage_is_harvested_as_whole_heads_and_obeys_care_windows() {
     for care in 0..=2 {
         let farmer = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_starting_role(StartingRole::Farmer);
         let (map, field) = farmer

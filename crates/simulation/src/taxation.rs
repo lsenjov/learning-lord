@@ -961,7 +961,15 @@ mod tests {
 
     fn household_world() -> (Universe, AgentId, AgentId, AgentId, PlaceId) {
         let (world, first) = Universe::default()
-            .with_citizen("Ada", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .with_citizen(
+                "Ada",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100)
+                    .unwrap(),
+            )
             .unwrap();
         let (world, second) = world
             .with_household_member(
@@ -969,7 +977,12 @@ mod tests {
                     crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
                 },
                 "Ben",
-                Citizen::new(0.0).unwrap().with_coins(100).unwrap(),
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(100)
+                    .unwrap(),
             )
             .unwrap();
         let household = match &world.agents()[&first].kind {
@@ -1120,6 +1133,8 @@ mod tests {
                 "Ada",
                 Citizen::new(0.0)
                     .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
                     .with_good(Good::Wheat, 10)
                     .unwrap(),
             )
@@ -1197,6 +1212,8 @@ mod tests {
     }
     fn reserved_worker(good: Good, units: Quantity) -> (Universe, AgentId, PlaceId) {
         let citizen = Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_skill_practice_ms(crate::production::Skill::Tailoring, Some(0))
             .unwrap()
@@ -1307,7 +1324,7 @@ mod tests {
     fn reserved_food_keeps_wealth_but_has_no_consumption_or_reserve_credit() {
         let (world, id, _) = reserved_worker(Good::BreadRoll, 10);
         let AgentKind::Citizen(worker) = &world.agents[&id].kind;
-        let home = worker.home;
+        let home = worker.home.unwrap();
         let wealth = worker.economic_wealth().unwrap();
         assert_eq!(worker.food_reserve_wellbeing(), 0.0);
         let world = world.deposit_goods(id, home, Good::BreadRoll, 10).unwrap();
@@ -1347,6 +1364,8 @@ mod tests {
             .with_citizen(
                 "Ben",
                 Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
                     .unwrap()
                     .with_good(Good::FlaxGarment, 2)
                     .unwrap(),

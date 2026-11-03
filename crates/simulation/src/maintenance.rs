@@ -123,8 +123,8 @@ impl MaintenanceState {
 impl crate::Citizen {
     pub(crate) fn urgent_provisioning(&self) -> bool {
         let members = self.supplied_members() as f64;
-        self.home_food_nutrition() < 100.0 * members
-            || self.home_drink_units() < 400 * self.supplied_members()
+        self.provisioned_food_nutrition() < 100.0 * members
+            || self.provisioned_drink_units() < 400 * self.supplied_members()
     }
     pub(crate) fn maintenance_available(&self, goal: Effect) -> bool {
         self.maintenance.available(goal, self.current_time_ms())
@@ -138,6 +138,9 @@ impl crate::Citizen {
             .claim_urgent(goal, self.id, self.current_time_ms(), urgent)
     }
     pub(crate) fn supplied_members(&self) -> u64 {
+        if self.home.is_none() {
+            return 1;
+        }
         self.household
             .as_ref()
             .map_or(1, |household| household.members.len() as u64)

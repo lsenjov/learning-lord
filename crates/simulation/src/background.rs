@@ -232,7 +232,10 @@ mod tests {
     #[test]
     fn sleep_window_is_before_waking_instead_of_commitment_expiry() {
         let source = executing_fixture(
-            &Citizen::with_needs(-50.0, 100.0).unwrap(),
+            &Citizen::with_needs(-50.0, 100.0)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap(),
             vec![CitizenAction::Sleep],
         );
         let (boundary, projected, _) = project(&source, 0).unwrap().unwrap();
@@ -254,7 +257,10 @@ mod tests {
 
     #[test]
     fn short_exhaustion_submits_immediately_once_and_expected_forage_preserves_rng() {
-        let citizen = Citizen::with_needs(-50.0, -50.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, -50.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let source = executing_fixture(
             &citizen,
             vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
@@ -277,7 +283,10 @@ mod tests {
 
     #[test]
     fn only_current_known_final_action_can_submit_before_a_boundary() {
-        let citizen = Citizen::with_needs(-50.0, -50.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, -50.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let source = executing_fixture(
             &citizen,
             vec![CitizenAction::Produce(crate::production::Recipe::Forage); 10],
@@ -302,6 +311,8 @@ mod tests {
     fn five_minute_final_action_submits_at_its_start_without_advancing_time() {
         let citizen = Citizen::with_needs(-50.0, -50.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_good(crate::marketplace::Good::FlaxGarment, 1)
             .unwrap();
         let source = executing_fixture(&citizen, vec![CitizenAction::EquipClothing]);
@@ -323,6 +334,8 @@ mod tests {
     fn uncertain_forage_shortage_does_not_predict_a_final_action() {
         let citizen = Citizen::with_needs(-50.0, -50.0)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .with_berries(50)
             .unwrap();
         let source = executing_fixture(
@@ -342,6 +355,8 @@ mod tests {
     #[test]
     fn goal_final_action_submits_at_its_completion() {
         let source = Citizen::with_needs(60.0, 100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(crate::marketplace::Good::Berries, 310)
             .unwrap()
@@ -363,6 +378,8 @@ mod tests {
     #[test]
     fn day_jump_crosses_window_and_adopts_without_overwriting_actual_state() {
         let citizen = Citizen::with_needs(-50.0, 100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_berries(310)
             .unwrap();
@@ -395,6 +412,8 @@ mod tests {
     #[test]
     fn stale_market_result_adopts_only_plan_and_preserves_actual_resources() {
         let citizen = Citizen::with_needs(-50.0, 100.0)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .with_home_good(crate::marketplace::Good::Berries, 310)
             .unwrap();
@@ -438,7 +457,10 @@ mod tests {
 
     #[test]
     fn missing_first_meal_uses_fresh_actual_state_and_reset_discards_old_request() {
-        let citizen = Citizen::with_needs(80.0, -50.0).unwrap();
+        let citizen = Citizen::with_needs(80.0, -50.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let source = executing_fixture(
             &citizen,
             vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
@@ -476,7 +498,10 @@ mod tests {
 
     #[test]
     fn interruption_and_overflow_keep_source_snapshot_and_cancel_pending_work() {
-        let citizen = Citizen::with_needs(-50.0, -50.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, -50.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let (world, _) = universe(executing_fixture(
             &citizen,
             vec![CitizenAction::Produce(crate::production::Recipe::Forage)],
@@ -508,7 +533,10 @@ mod tests {
     }
     #[test]
     fn not_ready_boundary_wait_can_cancel_without_advancing_the_source_snapshot() {
-        let citizen = Citizen::with_needs(-50.0, 100.0).unwrap();
+        let citizen = Citizen::with_needs(-50.0, 100.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         let source = executing_fixture(&citizen, vec![CitizenAction::Sleep]);
         let (world, id) = universe(source.clone());
         let saved = world.clone();
@@ -545,7 +573,7 @@ mod tests {
 
     #[test]
     fn cancelled_and_failed_advances_preserve_published_telemetry() {
-        let (world, id) = universe(Citizen::new(0.0).unwrap());
+        let (world, id) = universe(Citizen::new(0.0).unwrap().with_furnished_home().unwrap());
         let mut runtime = PlanningRuntime::default();
         runtime.samples.push((id, 0, 12.0, 3.0, 1));
         runtime.finish_advance(&world, 0);
@@ -571,7 +599,7 @@ mod tests {
 
     #[test]
     fn telemetry_closes_daily_and_attributes_requests_to_adoption_day() {
-        let (world, id) = universe(Citizen::new(0.0).unwrap());
+        let (world, id) = universe(Citizen::new(0.0).unwrap().with_furnished_home().unwrap());
         let mut runtime = PlanningRuntime::default();
         let boundary = crate::marketplace::UPDATE_TIME_MS;
         runtime.samples.push((id, boundary, 12.0, 3.0, 2));
@@ -642,6 +670,8 @@ mod tests {
             let role = roles[index % 6];
             let mut citizen = Citizen::with_needs(-50.0, -66.6)
                 .unwrap()
+                .with_furnished_home()
+                .unwrap()
                 .with_berries(310)
                 .unwrap()
                 .with_garment_condition(Some(0.5))
@@ -663,7 +693,7 @@ mod tests {
                 )
                 .unwrap();
             map = next;
-            citizen.home = home;
+            citizen.home = Some(home);
             citizen.position = position(slot);
             slot += 1;
             if let Some(kind) = properties[index % 6] {
@@ -699,7 +729,10 @@ mod tests {
         for index in 0..count {
             let id = AgentId(uuid::Uuid::from_u128(index as u128 + 1));
             let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
-            assert_eq!(world.map().position(citizen.home()), position(home_slot));
+            assert_eq!(
+                world.map().position(citizen.home().unwrap()),
+                position(home_slot)
+            );
             assert_eq!(citizen.position(), position(home_slot));
             home_slot += 1 + usize::from(properties[index % 6].is_some());
         }
@@ -778,6 +811,8 @@ mod tests {
         let mut ids = Vec::new();
         for (index, (name, role, property)) in roles.into_iter().enumerate() {
             let mut citizen = Citizen::with_needs(-50.0, -66.6)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_berries(310)
                 .unwrap()
@@ -862,6 +897,8 @@ mod tests {
         let mut ids = Vec::new();
         for (index, (role, property)) in roles.into_iter().enumerate() {
             let mut citizen = Citizen::with_needs(-50.0, -66.6)
+                .unwrap()
+                .with_furnished_home()
                 .unwrap()
                 .with_thirst(-50.0)
                 .unwrap()

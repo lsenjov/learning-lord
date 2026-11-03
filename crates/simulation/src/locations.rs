@@ -461,9 +461,7 @@ impl Building {
     fn initial(kind: Location, owner: AgentId) -> Self {
         use ObjectKind::*;
         let kinds = match kind {
-            Location::Home => vec![Bed {
-                resident: Some(owner),
-            }],
+            Location::Home => vec![Bed { resident: None }],
             Location::Mill => vec![Millstone],
             Location::Bakery => vec![Oven],
             Location::Weavery => vec![SpinningWheel, Loom],

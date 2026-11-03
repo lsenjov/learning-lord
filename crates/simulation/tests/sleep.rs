@@ -8,9 +8,20 @@ fn assert_close(actual: f64, expected: f64) {
 
 #[test]
 fn tiredness_starts_at_zero_or_explicit_finite_values_with_a_floor() {
-    assert_eq!(Citizen::new(0.0).unwrap().tiredness(), 0.0);
     assert_eq!(
-        Citizen::with_hunger_rate(0.0, 0.0).unwrap().tiredness(),
+        Citizen::new(0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .tiredness(),
+        0.0
+    );
+    assert_eq!(
+        Citizen::with_hunger_rate(0.0, 0.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .tiredness(),
         0.0
     );
     for (starting, expected) in [
@@ -20,7 +31,11 @@ fn tiredness_starts_at_zero_or_explicit_finite_values_with_a_floor() {
         (150.0, 150.0),
     ] {
         assert_eq!(
-            Citizen::with_needs(0.0, starting).unwrap().tiredness(),
+            Citizen::with_needs(0.0, starting)
+                .unwrap()
+                .with_furnished_home()
+                .unwrap()
+                .tiredness(),
             expected
         );
     }
@@ -38,7 +53,10 @@ fn tiredness_starts_at_zero_or_explicit_finite_values_with_a_floor() {
 
 #[test]
 fn eight_hours_of_sleep_balance_a_day_of_tiredness_growth() {
-    let original = Citizen::with_needs(0.0, -50.0).unwrap();
+    let original = Citizen::with_needs(0.0, -50.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap();
     assert_close(original.advance(24 * HOUR_MS).unwrap().tiredness(), 50.0);
     let awake = original.advance(16 * HOUR_MS).unwrap();
     let rested = awake
@@ -54,7 +72,10 @@ fn eight_hours_of_sleep_balance_a_day_of_tiredness_growth() {
 
 #[test]
 fn sleep_recovers_continuously_while_hunger_and_tiredness_keep_growing() {
-    let original = Citizen::with_needs(-50.0, 100.0).unwrap();
+    let original = Citizen::with_needs(-50.0, 100.0)
+        .unwrap()
+        .with_furnished_home()
+        .unwrap();
     let sleeping = original.start_action(CitizenAction::Sleep).unwrap();
     assert_eq!(
         sleeping.active_action().unwrap().remaining_ms(),
@@ -78,6 +99,8 @@ fn sleep_recovers_continuously_while_hunger_and_tiredness_keep_growing() {
 #[test]
 fn recovery_stops_at_the_floor_and_idle_time_after_sleep_grows_tiredness() {
     let sleeping = Citizen::with_needs(-50.0, -90.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .start_action(CitizenAction::Sleep)
         .unwrap();
@@ -105,7 +128,10 @@ fn tiredness_penalizes_wellbeing_without_a_bonus_for_negative_values() {
         (110.0, 20.0, -170.0),
         (-110.0, 20.0, -30.0),
     ] {
-        let citizen = Citizen::with_needs(hunger, tiredness).unwrap();
+        let citizen = Citizen::with_needs(hunger, tiredness)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap();
         assert_eq!(citizen.personal_wellbeing(), Ok(expected - 20.0));
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())
@@ -120,11 +146,15 @@ fn tiredness_penalizes_wellbeing_without_a_bonus_for_negative_values() {
     assert_eq!(
         Citizen::with_needs(0.0, f64::MAX)
             .unwrap()
+            .with_furnished_home()
+            .unwrap()
             .personal_wellbeing(),
         Ok(-f64::MAX)
     );
     assert_eq!(
         Citizen::with_needs(-f64::MAX, f64::MAX)
+            .unwrap()
+            .with_furnished_home()
             .unwrap()
             .personal_wellbeing(),
         Err(SimulationError::WellbeingOverflow)

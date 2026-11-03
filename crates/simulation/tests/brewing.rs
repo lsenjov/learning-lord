@@ -15,6 +15,8 @@ fn brewer() -> (Universe, AgentId, PlaceId) {
 fn brewer_batches(batches: u64) -> (Universe, AgentId, PlaceId) {
     let mut worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Brewer)
         .with_thirst(-100.0)
         .unwrap()
@@ -31,7 +33,7 @@ fn brewer_batches(batches: u64) -> (Universe, AgentId, PlaceId) {
 }
 fn stock_home(world: Universe, id: AgentId) -> Universe {
     let worker = citizen(&world, id);
-    let (home, owner) = (worker.home(), worker.goods_owner());
+    let (home, owner) = (worker.home().unwrap(), worker.goods_owner());
     world
         .with_stored_good(home, owner, Good::Berries, 310)
         .unwrap()
@@ -263,6 +265,8 @@ fn old_save_versions_reject_before_decoding_the_old_schema() {
 fn hops_follow_the_four_day_crop_lifecycle() {
     let worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Farmer);
     let (map, field) = worker
         .map()
@@ -357,6 +361,8 @@ fn independent_brewers_preserve_each_others_slots_when_plans_resume() {
     let (world, first, first_site) = brewer_batches(2);
     let mut worker = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Brewer)
         .with_thirst(-100.0)
         .unwrap()
@@ -412,6 +418,8 @@ fn core_prices_charge_inputs_and_all_active_labor() {
 fn finished_batches_are_offered_by_production_planning() {
     let mut worker = Citizen::with_needs(-210.0, -210.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_thirst(-210.0)
         .unwrap()
         .with_starting_role(StartingRole::Brewer)
@@ -438,7 +446,7 @@ fn finished_batches_are_offered_by_production_planning() {
         .unwrap()
         .advance(PREPARATION_MS + FERMENTATION_MS)
         .unwrap();
-    let home = citizen(&world, id).home();
+    let home = citizen(&world, id).home().unwrap();
     let owner = citizen(&world, id).goods_owner();
     let mut world = world
         .with_stored_good(home, owner, Good::Berries, 930)
@@ -470,6 +478,8 @@ fn foreign_breweries_reject_preparation_and_collection() {
     let (world, id, site) = brewer();
     let foreign = Citizen::new(0.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_starting_role(StartingRole::Brewer)
         .with_map(citizen(&world, id).map())
         .unwrap();
@@ -483,6 +493,8 @@ fn foreign_breweries_reject_preparation_and_collection() {
 #[test]
 fn beer_is_not_a_substitute_for_recipe_water() {
     let worker = Citizen::new(0.0)
+        .unwrap()
+        .with_furnished_home()
         .unwrap()
         .with_starting_role(StartingRole::Baker)
         .with_good(Good::Flour, 100)
@@ -510,6 +522,8 @@ fn beer_is_not_a_substitute_for_recipe_water() {
 fn active_beer_meal_persists_and_resumes_identical_benefits_and_history() {
     let worker = Citizen::new(80.0)
         .unwrap()
+        .with_furnished_home()
+        .unwrap()
         .with_thirst(80.0)
         .unwrap()
         .with_good(Good::Beer, 200)
@@ -519,7 +533,7 @@ fn active_beer_meal_persists_and_resumes_identical_benefits_and_history() {
     let (world, id) = Universe::with_map(Map::default())
         .with_citizen("Diner", worker)
         .unwrap();
-    let home = citizen(&world, id).home();
+    let home = citizen(&world, id).home().unwrap();
     let world = world
         .deposit_goods(id, home, Good::Beer, 200)
         .unwrap()
