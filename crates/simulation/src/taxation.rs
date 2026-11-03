@@ -288,7 +288,7 @@ impl Universe {
         }
         match scope {
             TaxScope::Location(id) => id == place,
-            TaxScope::LocationType(kind) => kind == location.kind,
+            TaxScope::LocationType(kind) => location.supports_location_type(kind),
         }
     }
 
@@ -307,7 +307,18 @@ impl Universe {
         TaxRate(total as u16)
     }
 
-    fn validate_tax_rule(&self, id: TaxRuleId) -> Result<(), SimulationError> {
+    pub(crate) fn validate_tax_rule(&self, id: TaxRuleId) -> Result<(), SimulationError> {
+        // Retained projects can be resumed, so tax edits must leave their outputs legal.
+        let mut projected = self.clone();
+        for project in self.construction.projects.values() {
+            if !project.completed && project.repair.is_none() {
+                projected.map.install_construction(project)?;
+            }
+        }
+        projected.validate_installed_tax_rule(id)
+    }
+
+    fn validate_installed_tax_rule(&self, id: TaxRuleId) -> Result<(), SimulationError> {
         let rule = &self.taxation.rules[&id];
         let kind = match rule.scope {
             TaxScope::Location(place) => self.map.place(place)?.kind,
@@ -349,7 +360,7 @@ impl Universe {
                 .map
                 .places()
                 .values()
-                .filter(|place| place.kind == kind)
+                .filter(|place| self.tax_scope_matches(rule.scope, place.id))
             {
                 let total: u64 = self
                     .taxation

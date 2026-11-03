@@ -691,8 +691,7 @@ mod tests {
         app.world_mut().resource_mut::<Selection>().0 = Some(bram);
         app.update();
         let names = visible_names(&app);
-        assert_eq!(names.len(), 7);
-        assert!(names.contains(&"Bram and Dara household's\nhome".into()));
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"Bram and Dara household's\nmill".into()));
         assert!(names.iter().all(|name| !name.starts_with("Ada")));
         for marker in markers {

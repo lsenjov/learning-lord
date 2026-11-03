@@ -380,7 +380,11 @@ pub fn new_universe() -> Result<Universe, SimulationError> {
         universe = next;
         ids.push(id);
         if let Some(kind) = workplace(role).filter(|_| !matches!(name, "Jori" | "Beni")) {
-            let (next, place) = universe.with_property(id, kind)?;
+            let (next, place) = if kind.is_private_workshop() && !matches!(name, "Eira" | "Xena") {
+                universe.with_household_workplace(id, kind)?
+            } else {
+                universe.with_property(id, kind)?
+            };
             universe = next.with_designated_workplace(id, place)?;
         }
     }
@@ -704,10 +708,27 @@ mod tests {
                 })
             })
             .sum();
+        let work_inputs: u64 = universe
+            .agents()
+            .values()
+            .map(|agent| {
+                let learning_lord_simulation::AgentKind::Citizen(member) = &agent.kind;
+                if member.goods_owner() == citizen.goods_owner()
+                    && member.designated_workplace() == Some(citizen.home())
+                {
+                    member.starting_role().map_or(0, |role| {
+                        learning_lord_simulation::production::starting_inputs(role).units(good)
+                    })
+                } else {
+                    0
+                }
+            })
+            .sum();
         universe
             .storage()
             .units(citizen.home(), citizen.goods_owner(), good)
             + consumed
+            - work_inputs
     }
 
     #[test]
@@ -1434,17 +1455,20 @@ mod tests {
     }
 
     #[test]
-    fn initial_town_has_fifty_three_separated_identified_places_and_agreed_starting_roles() {
+    fn initial_town_has_mixed_household_buildings_and_agreed_starting_roles() {
         use learning_lord_simulation::{AgentKind, locations::Location, marketplace::Good};
         for _ in 0..20 {
             let universe = new_universe().unwrap();
             let map = universe.map();
             let places: Vec<_> = map.places().values().collect();
-            assert_eq!(places.len(), 53);
+            assert_eq!(places.len(), 39);
             assert_eq!(
                 places
                     .iter()
-                    .filter(|place| place.kind == Location::Home)
+                    .filter(|place| place.objects().any(|object| matches!(
+                        object.kind,
+                        learning_lord_simulation::locations::ObjectKind::Bed { .. }
+                    )))
                     .count(),
                 27
             );
@@ -1510,7 +1534,9 @@ mod tests {
                     .filter(|member| {
                         let AgentKind::Citizen(member) = &universe.agents()[*member].kind;
                         member.guild_ids().next().is_none()
-                            && member.designated_workplace().is_some()
+                            && member
+                                .designated_workplace()
+                                .is_some_and(|place| place != member.home())
                     })
                     .count();
                 assert_eq!(citizen.owned_properties().count(), 1 + private_workplaces);
@@ -1520,15 +1546,39 @@ mod tests {
                         map.place(designated).unwrap().owner,
                         Some(citizen.guild_ids().next().unwrap_or(citizen.economic_id()))
                     );
-                    assert_eq!(map.place(designated).unwrap().kind, kind);
+                    if citizen.guild_ids().next().is_some() || kind == Location::Field {
+                        assert_ne!(designated, citizen.home());
+                        assert_eq!(map.place(designated).unwrap().kind, kind);
+                    } else {
+                        assert_eq!(designated, citizen.home());
+                        assert_eq!(map.place(designated).unwrap().buildings.len(), 1);
+                    }
                     for (good, units) in
                         learning_lord_simulation::production::starting_inputs(role).items()
                     {
                         assert_eq!(
                             universe
                                 .storage()
-                                .units(designated, citizen.goods_owner(), good),
+                                .units(designated, citizen.goods_owner(), good)
+                                + map
+                                    .place(designated)
+                                    .unwrap()
+                                    .batches()
+                                    .iter()
+                                    .flatten()
+                                    .count() as u64
+                                    * learning_lord_simulation::production::Recipe::BrewBeer
+                                        .inputs()
+                                        .iter()
+                                        .filter(|(input, _)| *input == good)
+                                        .map(|(_, units)| *units)
+                                        .sum::<u64>(),
                             units
+                                + if designated == citizen.home() && good == Good::Water {
+                                    pantry_allocation(&universe, citizen, Good::Water)
+                                } else {
+                                    0
+                                }
                         );
                     }
                 }
@@ -1573,7 +1623,7 @@ mod tests {
             (Good::Wheat, 800),
             (Good::Hops, 80),
             (Good::Wood, 100),
-            (Good::Water, 4000),
+            (Good::Water, 4000 + 7 * 400),
         ] {
             assert_eq!(
                 universe.storage().units(

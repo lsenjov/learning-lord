@@ -2667,6 +2667,37 @@ impl Universe {
         Ok((universe, id))
     }
 
+    /// Adds a private workshop to the household's existing residential building.
+    pub fn with_household_workplace(
+        &self,
+        member: AgentId,
+        kind: Location,
+    ) -> Result<(Self, PlaceId), SimulationError> {
+        let owner = self.economic_id(member)?;
+        let household = self
+            .households
+            .get(&owner)
+            .ok_or(SimulationError::InvalidOwnership)?;
+        if household.members.iter().any(|id| {
+            let AgentKind::Citizen(citizen) = &self.agents[id].kind;
+            citizen.active_action.is_some() || citizen.active_plan.is_some()
+        }) {
+            return Err(SimulationError::CitizenBusy);
+        }
+        let home = household.home;
+        let mut universe = self.clone();
+        universe.map = self.map.add_home_workshop(home, owner, kind)?;
+        for id in universe.taxation.rules.keys() {
+            universe.validate_tax_rule(*id)?;
+        }
+        for (_, agent) in universe.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.map = universe.map.clone();
+        }
+        universe.refresh_tax_rates();
+        Ok((universe, home))
+    }
+
     pub fn with_property(
         &self,
         owner: AgentId,
@@ -3706,6 +3737,199 @@ impl Citizen {
 mod tests {
     use super::*;
     use rand::SeedableRng;
+
+    #[test]
+    fn mixed_workplace_tax_scopes_stack_and_guild_cannot_take_home() {
+        use taxation::{TaxKind, TaxRate, TaxScope};
+        let (world, member) = Universe::default()
+            .with_citizen("Worker", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (world, site) = world
+            .with_household_workplace(member, Location::Mill)
+            .unwrap();
+        let mill_only = world.clone();
+        let (world, _) = world
+            .with_household_workplace(member, Location::Bakery)
+            .unwrap();
+        assert!(!mill_only.tax_scope_matches(TaxScope::LocationType(Location::Bakery), site));
+        assert_eq!(world.map.place(site).unwrap().kind, Location::Mill);
+        assert!(world.tax_scope_matches(TaxScope::LocationType(Location::Bakery), site));
+        assert!(!world.tax_scope_matches(TaxScope::LocationType(Location::Weavery), site));
+        assert!(world.tax_scope_matches(TaxScope::LocationType(Location::Home), site));
+        let tax = |points| TaxKind::Socage {
+            rates: [(Good::BreadRoll, TaxRate::new(points).unwrap())]
+                .into_iter()
+                .collect(),
+        };
+        let (before, _) = mill_only
+            .with_scoped_tax_rule(TaxScope::LocationType(Location::Mill), "Mills", tax(6000))
+            .unwrap();
+        let (before, _) = before
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Bakery),
+                "Future bakeries",
+                tax(4001),
+            )
+            .unwrap();
+        assert_eq!(
+            before.with_household_workplace(member, Location::Bakery),
+            Err(SimulationError::InvalidTaxRule)
+        );
+        let (world, _) = world
+            .with_scoped_tax_rule(TaxScope::LocationType(Location::Mill), "Mills", tax(6000))
+            .unwrap();
+        assert_eq!(
+            world.with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Bakery),
+                "Bakeries",
+                tax(4001)
+            ),
+            Err(SimulationError::InvalidTaxRule)
+        );
+        let (world, rule_id) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(Location::Bakery),
+                "Bakeries",
+                tax(4000),
+            )
+            .unwrap();
+        let mut invalid = world.clone();
+        invalid.taxation.rules.get_mut(&rule_id).unwrap().kind = tax(4001);
+        assert!(Universe::from_save_str(&invalid.to_save_string().unwrap()).is_err());
+        assert_eq!(
+            world.socage_rate(site, Good::BreadRoll).basis_points(),
+            10000
+        );
+        assert!(world.with_tax_rule(site, "Local", tax(1)).is_err());
+        assert_eq!(
+            Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
+            world
+        );
+
+        let (home_world, weaver) = Universe::default()
+            .with_citizen("Weaver", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let (home_world, home) = home_world
+            .with_household_workplace(weaver, Location::Weavery)
+            .unwrap();
+        assert_eq!(
+            home_world.with_guild("Guild", &[weaver], &[home], 0),
+            Err(SimulationError::InvalidOwnership)
+        );
+        assert_eq!(
+            Universe::from_save_str(&home_world.to_save_string().unwrap()).unwrap(),
+            home_world
+        );
+    }
+
+    #[test]
+    fn mixed_household_workplace_preserves_home_and_supports_sleep_production_and_saves() {
+        use production::Recipe;
+        let citizen = Citizen::with_needs(-50.0, 50.0)
+            .unwrap()
+            .with_starting_role(StartingRole::Weaver)
+            .with_good(Good::Flax, 400)
+            .unwrap();
+        let (world, first) = Universe::default().with_citizen("Weaver", citizen).unwrap();
+        let (world, second) = world
+            .with_household_member(
+                match &world.agents[&first].kind {
+                    AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
+                },
+                "Tailor",
+                Citizen::new(-50.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Tailor),
+            )
+            .unwrap();
+        let AgentKind::Citizen(before) = &world.agents[&first].kind;
+        let home = before.home;
+        let original = world.map.place(home).unwrap().clone();
+        let history = world.household_histories.clone();
+        let (world, workplace) = world
+            .with_household_workplace(first, Location::Weavery)
+            .unwrap();
+        let (world, other_workplace) = world
+            .with_household_workplace(second, Location::Tailory)
+            .unwrap();
+        assert_eq!(workplace, home);
+        assert_eq!(other_workplace, home);
+        assert_eq!(world.map.places().len(), 5);
+        let site = world.map.place(home).unwrap();
+        assert_eq!(site.buildings.len(), 1);
+        assert_eq!(site.buildings[0].id, original.buildings[0].id);
+        assert_eq!(
+            &site.buildings[0].rooms[..original.buildings[0].rooms.len()],
+            &original.buildings[0].rooms
+        );
+        assert_eq!(world.household_histories, history);
+        assert!(
+            world
+                .with_household_workplace(first, Location::Weavery)
+                .is_err()
+        );
+        assert!(
+            world
+                .with_household_workplace(first, Location::Field)
+                .is_err()
+        );
+        let world = world
+            .with_designated_workplace(first, home)
+            .unwrap()
+            .with_designated_workplace(second, home)
+            .unwrap()
+            .place_starting_supplies()
+            .unwrap();
+        for id in [first, second] {
+            let sleeping = world.start_action(id, CitizenAction::Sleep).unwrap();
+            assert_eq!(
+                Universe::from_save_str(&sleeping.to_save_string().unwrap()).unwrap(),
+                sleeping
+            );
+            let AgentKind::Citizen(citizen) = &sleeping.agents[&id].kind;
+            let elapsed = citizen.active_action().unwrap().duration_ms();
+            assert!(citizen.advance(elapsed).unwrap().tiredness() < citizen.tiredness());
+        }
+        let AgentKind::Citizen(worker) = &world.agents[&first].kind;
+        assert_eq!(worker.production_place(Recipe::SpinThread).unwrap(), home);
+        let AgentKind::Citizen(tailor) = &world.agents[&second].kind;
+        assert_eq!(
+            tailor.production_place(Recipe::MakeClothingBlock).unwrap(),
+            home
+        );
+        let (visiting_world, visitor) = world
+            .with_citizen(
+                "Visitor",
+                Citizen::new(-50.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Weaver),
+            )
+            .unwrap();
+        let AgentKind::Citizen(outsider) = &visiting_world.agents[&visitor].kind;
+        assert!(outsider.start_action(CitizenAction::Travel(home)).is_ok());
+        assert_eq!(
+            outsider.validate_production_site(home, Recipe::SpinThread),
+            Err(SimulationError::MissingProperty)
+        );
+        let initial_flax = worker.stored_available_units(home, Good::Flax);
+        let producing = world
+            .start_action(
+                first,
+                CitizenAction::ProduceAt {
+                    place: home,
+                    recipe: Recipe::SpinThread,
+                },
+            )
+            .unwrap();
+        let loaded = Universe::from_save_str(&producing.to_save_string().unwrap()).unwrap();
+        assert_eq!(loaded, producing);
+        let AgentKind::Citizen(worker) = &loaded.agents[&first].kind;
+        let completed = worker
+            .advance(worker.active_action().unwrap().duration_ms())
+            .unwrap();
+        assert!(completed.stored_available_units(home, Good::Thread) > 0);
+        assert!(completed.stored_available_units(home, Good::Flax) < initial_flax);
+    }
 
     #[test]
     fn missing_site_socage_rate_does_not_fall_back_to_recipe_rate() {

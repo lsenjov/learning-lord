@@ -217,6 +217,8 @@ impl Universe {
             self.citizen_histories[id].validate_save(self.current_time_ms)?;
         }
         for (id, rule) in &self.taxation.rules {
+            self.validate_tax_rule(*id)
+                .map_err(|_| SaveError::InvalidState("invalid tax rule"))?;
             if *id != rule.id || id.0 >= self.taxation.next_rule_id {
                 return Err(SaveError::InvalidState("invalid tax rule identity"));
             }
@@ -264,7 +266,18 @@ impl Universe {
                 || household.coins < 0
                 || household.members.is_empty()
                 || !self.map.place(household.home).is_ok_and(|place| {
-                    place.kind == Location::Home && place.owner.is_some_and(|owner| owner == *id)
+                    place.owner == Some(*id)
+                        && place.buildings.iter().any(|building| {
+                            building.owner == *id
+                                && building.rooms.iter().flat_map(|room| &room.objects).any(
+                                    |object| {
+                                        matches!(
+                                            object.kind,
+                                            crate::locations::ObjectKind::Bed { .. }
+                                        )
+                                    },
+                                )
+                        })
                 })
             {
                 return Err(SaveError::InvalidState(

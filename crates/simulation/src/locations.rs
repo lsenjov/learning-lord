@@ -87,6 +87,13 @@ impl Location {
             _ => 20.0,
         }
     }
+    pub fn is_private_workshop(self) -> bool {
+        matches!(
+            self,
+            Self::Mill | Self::Bakery | Self::Weavery | Self::Tailory | Self::Brewery
+        )
+    }
+
     pub fn is_town_owned(self) -> bool {
         self == Self::Warehouse
     }
@@ -365,6 +372,20 @@ slots!(
     crate::brewing::Batch
 );
 impl Place {
+    pub fn supports_location_type(&self, kind: Location) -> bool {
+        self.kind == kind
+            || (kind == Location::Home
+                && self
+                    .objects()
+                    .any(|object| matches!(object.kind, ObjectKind::Bed { .. })))
+            || crate::production::Recipe::ALL.into_iter().any(|recipe| {
+                recipe.location() == kind
+                    && self
+                        .objects()
+                        .any(|object| object.kind.same_capability(ObjectKind::for_recipe(recipe)))
+            })
+    }
+
     pub fn used_area_m2(&self) -> u32 {
         self.buildings
             .iter()
@@ -881,6 +902,56 @@ impl Map {
         site.buildings.push(building);
         Ok((map, id))
     }
+    pub(crate) fn add_home_workshop(
+        &self,
+        home: PlaceId,
+        owner: AgentId,
+        kind: Location,
+    ) -> Result<Self, SimulationError> {
+        if !kind.is_private_workshop() {
+            return Err(SimulationError::MissingProperty);
+        }
+        let mut map = self.clone();
+        let site = map
+            .places
+            .get_mut(&home)
+            .ok_or(SimulationError::PlaceNotFound)?;
+        if site.owner != Some(owner)
+            || site.buildings.len() != 1
+            || site.buildings[0].owner != owner
+        {
+            return Err(SimulationError::InvalidOwnership);
+        }
+        let workshop = Building::initial(kind, owner);
+        if workshop
+            .rooms
+            .iter()
+            .map(|room| room.size.area_m2())
+            .sum::<u32>()
+            > site.available_area_m2()
+        {
+            return Err(SimulationError::MissingProperty);
+        }
+        if workshop
+            .rooms
+            .iter()
+            .flat_map(|room| &room.objects)
+            .any(|new| {
+                !new.kind.is_storage()
+                    && site
+                        .objects()
+                        .any(|existing| existing.kind.same_capability(new.kind))
+            })
+        {
+            return Err(SimulationError::MissingProperty);
+        }
+        site.buildings[0].rooms.extend(workshop.rooms);
+        if site.kind == Location::Home {
+            site.kind = kind;
+        }
+        Ok(map)
+    }
+
     pub(crate) fn assign_bedroom(
         &mut self,
         home: PlaceId,
@@ -1055,6 +1126,31 @@ impl Map {
 #[cfg(test)]
 mod space_tests {
     use super::*;
+
+    #[test]
+    fn home_workshop_rejects_insufficient_plot_space_without_altering_furnishings() {
+        let owner = AgentId(Uuid::new_v4());
+        let (mut map, home) = Map::default()
+            .with_place(Location::Home, Position::default(), Some(owner), "Home")
+            .unwrap();
+        while map.place(home).unwrap().available_area_m2() >= RoomSize::Small.area_m2() {
+            map.places.get_mut(&home).unwrap().buildings[0]
+                .rooms
+                .push(Room {
+                    condition: Default::default(),
+                    id: RoomId(Uuid::new_v4()),
+                    name: "Room".into(),
+                    size: RoomSize::Small,
+                    objects: Vec::new(),
+                });
+        }
+        let before = map.clone();
+        assert_eq!(
+            map.add_home_workshop(home, owner, Location::Weavery),
+            Err(SimulationError::MissingProperty)
+        );
+        assert_eq!(map, before);
+    }
 
     #[test]
     fn condition_wears_constructed_objects_and_preserves_exempt_resources() {

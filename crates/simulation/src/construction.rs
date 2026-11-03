@@ -638,6 +638,19 @@ impl Universe {
                 }
             }
         }
+        if let Some(kind) = item.object_kind() {
+            let mut projected = self.clone();
+            projected
+                .map
+                .places_mut()
+                .get_mut(&place)
+                .unwrap()
+                .outdoor_objects
+                .push(crate::locations::Object::new(kind));
+            for id in projected.taxation.rules.keys() {
+                projected.validate_tax_rule(*id)?;
+            }
+        }
         Ok(())
     }
 
@@ -1781,6 +1794,11 @@ impl Universe {
         let site = &self.construction.projects[&project];
         if site.repair.is_none() {
             self.map.install_construction(site)?;
+            for (_, agent) in self.agents.iter_mut() {
+                let AgentKind::Citizen(citizen) = &mut agent.kind;
+                citizen.map = self.map.clone();
+            }
+            self.refresh_tax_rates();
         }
         self.construction
             .projects
@@ -2572,6 +2590,15 @@ mod tests {
         let (world, worker) = world.with_citizen("Carpenter", worker).unwrap();
         let AgentKind::Citizen(owner) = &world.agents[&client].kind;
         let place = owner.home;
+        let mut world = world;
+        if item == ConstructionItem::Oven {
+            world.map.places_mut().get_mut(&place).unwrap().buildings[0].rooms[0].size =
+                RoomSize::Large;
+            for (_, agent) in world.agents.iter_mut() {
+                let AgentKind::Citizen(citizen) = &mut agent.kind;
+                citizen.map = world.map.clone();
+            }
+        }
         let building = &world.map.place(place).unwrap().buildings[0];
         let room = if matches!(item, ConstructionItem::Room(_)) {
             None
@@ -2582,6 +2609,162 @@ mod tests {
             .request_construction(client, place, building.id, room, item, 100_000)
             .unwrap();
         (world, client, worker, contract)
+    }
+
+    fn bread_socage(points: u16) -> crate::taxation::TaxKind {
+        crate::taxation::TaxKind::Socage {
+            rates: [(
+                Good::BreadRoll,
+                crate::taxation::TaxRate::new(points).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn construction_scopes_reject_overlapping_tax_edits_and_preflight() {
+        use crate::taxation::TaxScope;
+        let (mut world, client, _, contract) = fixture(ConstructionItem::Oven, 10_000);
+        let project = world.construction.contracts[&contract].project;
+        let site = world.construction.projects[&project].clone();
+        world.map.places_mut().get_mut(&site.place).unwrap().kind =
+            crate::locations::Location::Mill;
+        let (world, _) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(crate::locations::Location::Mill),
+                "Mill",
+                bread_socage(6000),
+            )
+            .unwrap();
+        assert_eq!(
+            world.with_scoped_tax_rule(
+                TaxScope::LocationType(crate::locations::Location::Bakery),
+                "Bakery",
+                bread_socage(5000)
+            ),
+            Err(SimulationError::InvalidTaxRule)
+        );
+        let mut unrequested = world.cancel_construction(client, contract).unwrap();
+        assert_eq!(
+            unrequested.with_scoped_tax_rule(
+                TaxScope::LocationType(crate::locations::Location::Bakery),
+                "Bakery",
+                bread_socage(5000)
+            ),
+            Err(SimulationError::InvalidTaxRule)
+        );
+        unrequested.construction.projects.remove(&project);
+        let (unrequested, _) = unrequested
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(crate::locations::Location::Bakery),
+                "Bakery",
+                bread_socage(5000),
+            )
+            .unwrap();
+        assert_eq!(
+            unrequested.validate_construction_destination(
+                client,
+                site.place,
+                site.building.unwrap(),
+                site.room,
+                ConstructionItem::Oven
+            ),
+            Err(SimulationError::InvalidTaxRule)
+        );
+        assert_eq!(
+            unrequested.request_construction(
+                client,
+                site.place,
+                site.building.unwrap(),
+                site.room,
+                ConstructionItem::Oven,
+                100_000
+            ),
+            Err(SimulationError::InvalidTaxRule)
+        );
+    }
+
+    #[test]
+    fn oven_completion_refreshes_inherited_tax_snapshots_and_round_trips() {
+        use crate::taxation::{TaxKind, TaxScope};
+        let (mut world, _, worker, contract) = fixture(ConstructionItem::Oven, 10_000);
+        let project = world.construction.contracts[&contract].project;
+        let place = world.construction.projects[&project].place;
+        world.map.places_mut().get_mut(&place).unwrap().kind = crate::locations::Location::Mill;
+        for (_, agent) in world.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen.map = world.map.clone();
+        }
+        let (world, _) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(crate::locations::Location::Mill),
+                "Mill",
+                bread_socage(6000),
+            )
+            .unwrap();
+        let (world, bakery) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(crate::locations::Location::Bakery),
+                "Bakery",
+                bread_socage(4000),
+            )
+            .unwrap();
+        assert_eq!(
+            world.edit_tax_rule(bakery, "Too much", bread_socage(4001)),
+            Err(SimulationError::InvalidTaxRule)
+        );
+        let mut invalid = world.clone();
+        invalid.taxation.rules.get_mut(&bakery).unwrap().kind = bread_socage(4001);
+        assert!(Universe::from_save_str(&invalid.to_save_string().unwrap()).is_err());
+        let TaxKind::Socage { rates } = bread_socage(2500) else {
+            unreachable!()
+        };
+        let (world, _) = world
+            .with_scoped_tax_rule(
+                TaxScope::LocationType(crate::locations::Location::Bakery),
+                "Income",
+                TaxKind::Income { rates },
+            )
+            .unwrap();
+        let AgentKind::Citizen(before) = &world.agents[&worker].kind;
+        assert_eq!(
+            before.site_socage_rates[&(place, Good::BreadRoll)].basis_points(),
+            6000
+        );
+        let world = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+        let done = award(world, worker).advance(7 * DAY_MS).unwrap();
+        assert!(
+            done.construction.projects.is_empty(),
+            "{:?}",
+            done.construction
+        );
+        assert!(
+            done.map
+                .place(place)
+                .unwrap()
+                .supports_location_type(crate::locations::Location::Bakery)
+        );
+        assert!(
+            done.construction.projects.is_empty(),
+            "{:?}",
+            done.construction
+        );
+        for agent in done.agents.values() {
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            assert_eq!(
+                citizen.site_socage_rates[&(place, Good::BreadRoll)].basis_points(),
+                10000
+            );
+            assert_eq!(
+                citizen.sale_income_basis_points[&(place, Good::BreadRoll)],
+                2500
+            );
+        }
+        assert_eq!(
+            done,
+            Universe::from_save_str(&done.to_save_string().unwrap()).unwrap()
+        );
     }
 
     fn award(mut world: Universe, worker: AgentId) -> Universe {

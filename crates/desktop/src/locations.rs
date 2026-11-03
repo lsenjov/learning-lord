@@ -237,13 +237,6 @@ impl State {
     pub(crate) fn select_place(&mut self, place: PlaceId) {
         self.select_scope(Some(TaxScope::Location(place)));
     }
-
-    fn location_kind(&self, universe: &Universe) -> Option<Location> {
-        self.location_type.or_else(|| {
-            self.place
-                .and_then(|id| universe.map().place(id).ok().map(|place| place.kind))
-        })
-    }
 }
 
 fn default_tax_name(universe: &Universe, scope: TaxScope, kind: Kind) -> String {
@@ -995,7 +988,7 @@ fn editor(parent: &mut ChildSpawnerCommands, draft: &Draft, state: &State, unive
             });
         }
     } else {
-        let goods = tax_goods(draft.kind, state.location_kind(universe).unwrap());
+        let goods = scope_tax_goods(universe, state.scope().unwrap(), draft.kind);
         parent.spawn(text(match draft.kind { Kind::Socage => "Percentage of each selected production output. Stacked total cannot exceed 100%.", Kind::Asset => "Weekly percentage of selected goods' stored and sale escrow value.", _ => "Percentage of gross sale revenue at this location." }, 13.0, MUTED));
         row(parent, |row| {
             if !goods.is_empty() {
@@ -1077,6 +1070,24 @@ pub(crate) fn percentage(value: &str) -> Result<TaxRate, String> {
         .and_then(|whole| whole.checked_add(fraction))
         .ok_or("Percentage is too large.")?;
     TaxRate::new(points).map_err(|error| error.to_string())
+}
+
+fn scope_tax_goods(universe: &Universe, scope: TaxScope, kind: Kind) -> Vec<Good> {
+    match scope {
+        TaxScope::LocationType(location) => tax_goods(kind, location),
+        TaxScope::Location(id) => Good::ALL
+            .into_iter()
+            .filter(|good| {
+                kind != Kind::Socage
+                    || universe.map().place(id).is_ok_and(|place| {
+                        Recipe::ALL.into_iter().any(|recipe| {
+                            place.supports_location_type(recipe.location())
+                                && recipe.outputs().iter().any(|(output, _)| output == good)
+                        })
+                    })
+            })
+            .collect(),
+    }
 }
 
 fn tax_goods(kind: Kind, location: Location) -> Vec<Good> {
@@ -1220,7 +1231,7 @@ pub fn handle(
                 None
             }
             Choice::Kind(kind) => {
-                let location = state.location_kind(universe);
+                let scope = state.scope();
                 let name = state
                     .scope()
                     .map(|scope| default_tax_name(universe, scope, kind));
@@ -1232,8 +1243,8 @@ pub fn handle(
                     {
                         draft.name = name;
                     }
-                    if let Some(location) = location {
-                        let goods = tax_goods(kind, location);
+                    if let Some(scope) = scope {
+                        let goods = scope_tax_goods(universe, scope, kind);
                         draft.rates.retain(|(good, _)| goods.contains(good));
                     }
                 }
@@ -1284,7 +1295,7 @@ pub fn handle(
             {
                 Some((draft, scope)) => match tax_kind(
                     draft,
-                    &tax_goods(draft.kind, state.location_kind(universe).unwrap()),
+                    &scope_tax_goods(universe, state.scope().unwrap(), draft.kind),
                 ) {
                     Ok(kind) => Some(Mutation::SaveTax {
                         scope,
@@ -1692,6 +1703,34 @@ fn treasury_rows(universe: &Universe) -> Vec<Vec<crate::navigation::Fragment>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mixed_site_socage_goods_include_all_workshops() {
+        let (world, member) = Universe::default()
+            .with_citizen(
+                "Worker",
+                learning_lord_simulation::Citizen::new(0.0).unwrap(),
+            )
+            .unwrap();
+        let (world, site) = world
+            .with_household_workplace(member, Location::Mill)
+            .unwrap();
+        let (world, _) = world
+            .with_household_workplace(member, Location::Bakery)
+            .unwrap();
+        let goods = scope_tax_goods(&world, TaxScope::Location(site), Kind::Socage);
+        assert!(goods.contains(&Good::Flour));
+        assert!(goods.contains(&Good::BreadRoll));
+        assert!(goods.contains(&Good::BerryPie));
+        assert!(!goods.contains(&Good::Cloth));
+        assert_eq!(
+            scope_tax_goods(
+                &world,
+                TaxScope::LocationType(Location::Bakery),
+                Kind::Socage
+            ),
+            tax_goods(Kind::Socage, Location::Bakery)
+        );
+    }
     use super::*;
 
     #[test]

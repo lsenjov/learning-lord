@@ -170,7 +170,11 @@ impl Universe {
         }
         for id in workshops {
             let place = self.map.place(*id)?;
-            if !supported_workshop(place.kind)
+            if self
+                .households
+                .values()
+                .any(|household| household.home == *id)
+                || !supported_workshop(place.kind)
                 || !place.owner.is_some_and(|owner| {
                     members
                         .iter()
