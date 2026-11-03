@@ -40,6 +40,11 @@ pub enum Command {
 
 #[derive(Clone)]
 pub enum Mutation {
+    AddCitizen {
+        household: Option<learning_lord_simulation::AgentId>,
+        role: learning_lord_simulation::StartingRole,
+        funds: learning_lord_simulation::Coins,
+    },
     RequestConstruction {
         client: learning_lord_simulation::AgentId,
         place: learning_lord_simulation::locations::PlaceId,
@@ -84,6 +89,24 @@ pub enum Mutation {
 impl Mutation {
     fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
         match self {
+            Self::AddCitizen {
+                household,
+                role,
+                funds,
+            } => {
+                if funds < 0 || (household.is_some() && funds != 0) {
+                    return Err(SimulationError::InvalidCoins);
+                }
+                let citizen = Citizen::new(0.0)?
+                    .with_starting_role(role)
+                    .with_coins(funds)?;
+                let name = format!("Citizen {}", universe.agents().len() + 1);
+                match household {
+                    Some(id) => universe.with_household_member(id, name, citizen),
+                    None => universe.with_new_household(name.clone(), name, citizen),
+                }
+                .and_then(|(world, id)| world.start_planning(id))
+            }
             Self::RequestConstruction {
                 client,
                 place,
@@ -815,6 +838,121 @@ mod tests {
             mutation_revision: 0,
             generation: 0,
         }
+    }
+
+    #[test]
+    fn live_dev_creation_preserves_households_assets_and_saves() {
+        use learning_lord_simulation::{AgentKind, StartingRole, production::Skill};
+        let mut state = worker_state(new_universe().unwrap());
+        state.advance(1000);
+        let household = *state.universe.households().keys().next().unwrap();
+        let before = state.universe.households()[&household].clone();
+        let map = state.universe.map().clone();
+        let ids: std::collections::HashSet<_> = state.universe.agents().keys().copied().collect();
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::AddCitizen {
+                    household: Some(household),
+                    role: StartingRole::Carpenter,
+                    funds: 0,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_none());
+        let member = *state
+            .universe
+            .agents()
+            .keys()
+            .find(|id| !ids.contains(id))
+            .unwrap();
+        let AgentKind::Citizen(citizen) = &state.universe.agents()[&member].kind;
+        assert_eq!(citizen.home(), before.home);
+        assert_eq!(citizen.household_id(), Some(household));
+        assert_eq!(citizen.skill_practice_ms(Skill::Carpentry), Some(0));
+        assert_eq!(state.universe.households()[&household].coins, before.coins);
+        assert_eq!(
+            state.universe.households()[&household].members.len(),
+            before.members.len() + 1
+        );
+        assert_eq!(state.universe.map(), map);
+        assert!(state.universe.citizen_history(member).is_some());
+        let count = state.universe.agents().len();
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::AddCitizen {
+                    household: None,
+                    role: StartingRole::Weaver,
+                    funds: 12345,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_none());
+        let added = state
+            .universe
+            .agents()
+            .iter()
+            .find(|(id, _)| !ids.contains(id) && **id != member)
+            .unwrap()
+            .0
+            .to_owned();
+        let AgentKind::Citizen(citizen) = &state.universe.agents()[&added].kind;
+        let account = citizen.household_id().unwrap();
+        assert_eq!(citizen.home(), None);
+        assert_eq!(citizen.guild_ids().count(), 0);
+        assert!(Good::ALL.into_iter().all(|good| citizen.units(good) == 0));
+        assert_eq!(citizen.garment_condition(), None);
+        assert_eq!(citizen.starting_role(), Some(StartingRole::Weaver));
+        assert_eq!(citizen.skill_practice_ms(Skill::Weaving), Some(0));
+        assert_eq!(state.universe.households()[&account].coins, 12345);
+        assert_eq!(state.universe.households()[&account].members, vec![added]);
+        assert_eq!(state.universe.map(), map);
+        assert_eq!(state.universe.agents().len(), count + 1);
+        let saved = state.universe.to_save_string().unwrap();
+        let loaded = Universe::from_save_str(&saved).unwrap();
+        assert_eq!(loaded, state.universe);
+        state.advance(1000);
+        assert!(state.error.is_none(), "{:?}", state.error);
+        assert!(state.planner.history(added).is_some());
+        assert!(state.planner.history(member).is_some());
+        let AgentKind::Citizen(citizen) = &state.universe.agents()[&added].kind;
+        assert!(citizen.active_plan().is_some());
+    }
+
+    #[test]
+    fn dev_creation_rejects_invalid_funds_and_stale_targets_without_mutation() {
+        use learning_lord_simulation::StartingRole;
+        let world = new_universe().unwrap();
+        let household = *world.households().keys().next().unwrap();
+        let missing = Citizen::new(0.0).unwrap().id();
+        for (target, funds) in [(None, -1), (Some(household), 1), (Some(missing), 0)] {
+            assert!(
+                Mutation::AddCitizen {
+                    household: target,
+                    role: StartingRole::Farmer,
+                    funds
+                }
+                .apply(&world)
+                .is_err()
+            );
+        }
+        let mut state = worker_state(world.clone());
+        state.apply(
+            Command::Mutate {
+                generation: 1,
+                mutation: Mutation::AddCitizen {
+                    household: None,
+                    role: StartingRole::Farmer,
+                    funds: 0,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(state.universe, world);
+        assert_eq!(state.mutation_revision, 0);
     }
 
     #[test]

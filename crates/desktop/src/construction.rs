@@ -546,6 +546,7 @@ pub(crate) fn handle(
     selection: Res<market::Selection>,
     buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
     controls: Option<Res<crate::Controls>>,
+    dev: Option<Res<crate::dev_controls::State>>,
     caravan: Option<Res<crate::caravan_controls::State>>,
 ) {
     if state.generation != snapshot.0.generation {
@@ -565,6 +566,7 @@ pub(crate) fn handle(
         locations.invalidate();
     }
     if selection.view != market::View::Locations
+        || dev.is_some_and(|state| state.pending())
         || state.pending()
         || locations.pending()
         || caravan.is_some_and(|state| state.pending())

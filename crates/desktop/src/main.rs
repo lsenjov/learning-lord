@@ -3,6 +3,7 @@ mod citizen_history;
 mod citizens;
 mod collectives;
 mod construction;
+mod dev_controls;
 mod floating_ui;
 mod guild_history;
 mod household_history;
@@ -37,13 +38,16 @@ struct KeyboardShortcuts<'w> {
     keyboard: Res<'w, ButtonInput<KeyCode>>,
     locations: Option<Res<'w, locations::State>>,
     caravan: Option<Res<'w, caravan_controls::State>>,
+    dev: Option<Res<'w, dev_controls::State>>,
 }
 
 impl KeyboardShortcuts<'_> {
     fn editing(&self) -> bool {
-        self.locations
-            .as_ref()
-            .is_some_and(|editor| editor.editing())
+        self.dev.as_ref().is_some_and(|state| state.editing())
+            || self
+                .locations
+                .as_ref()
+                .is_some_and(|editor| editor.editing())
             || self.caravan.as_ref().is_some_and(|editor| editor.editing())
     }
 }
@@ -135,6 +139,7 @@ fn main() -> Result<(), String> {
     .init_resource::<floating_ui::InputCapture>()
     .init_resource::<map_view::MapViewport>()
     .init_resource::<Controls>()
+    .init_resource::<dev_controls::State>()
     .init_resource::<citizens::Selection>()
     .init_resource::<collectives::State>()
     .init_resource::<citizens::RosterState>()
@@ -158,7 +163,7 @@ fn main() -> Result<(), String> {
                 floating_ui::interact,
                 (locations::handle, construction::handle).chain(),
                 caravan_controls::handle,
-                handle_controls,
+                (dev_controls::handle, handle_controls).chain(),
                 citizens::handle_selection,
                 citizen_history::handle_selection,
                 market::handle_selection,
@@ -185,6 +190,7 @@ fn main() -> Result<(), String> {
                 caravan_controls::refresh,
                 market_history::refresh,
                 market_history::hover,
+                dev_controls::refresh,
                 saves::refresh_window,
                 saves::handle_load,
                 tooltip::update,
@@ -330,6 +336,7 @@ fn setup(mut commands: Commands, snapshot: Res<DisplaySnapshot>) {
                 }
             });
             hud.spawn((text("", 13.0, MUTED), Readout::PersistenceStatus));
+            dev_controls::spawn(hud);
         });
     commands
         .spawn((
@@ -1450,6 +1457,8 @@ mod tests {
             .insert_resource(worker)
             .init_resource::<map_view::MapViewport>()
             .init_resource::<Controls>()
+            .init_resource::<dev_controls::State>()
+            .init_resource::<collectives::State>()
             .init_resource::<citizens::Selection>()
             .init_resource::<citizens::RosterState>()
             .init_resource::<citizens::PlanDisplay>()
@@ -1472,7 +1481,7 @@ mod tests {
                     poll_worker,
                     (locations::handle, construction::handle).chain(),
                     caravan_controls::handle,
-                    handle_controls,
+                    (dev_controls::handle, handle_controls).chain(),
                     citizens::handle_selection,
                     citizen_history::handle_selection,
                     citizen_history::refresh,
@@ -1490,6 +1499,7 @@ mod tests {
                     market_history::refresh,
                     (
                         market_history::hover,
+                        dev_controls::refresh,
                         saves::refresh_window,
                         saves::handle_load,
                     )

@@ -1157,6 +1157,7 @@ pub fn handle(
         Option<Res<crate::construction::State>>,
     ),
     controls: Option<Res<crate::Controls>>,
+    dev: Option<Res<crate::dev_controls::State>>,
     mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
     if state.generation != snapshot.0.generation {
@@ -1374,7 +1375,8 @@ pub fn handle(
             },
         };
         if let Some(mutation) = mutation {
-            if caravan.as_ref().is_some_and(|editor| editor.pending())
+            if dev.as_ref().is_some_and(|editor| editor.pending())
+                || caravan.as_ref().is_some_and(|editor| editor.pending())
                 || construction.as_ref().is_some_and(|editor| editor.pending())
             {
                 state.error = Some("Another change is saving. Try again when it finishes.".into());
