@@ -2623,6 +2623,7 @@ impl Universe {
                 {
                     universe.refresh_construction_context()?;
                 }
+                universe.market.set_treasury_budget(universe.town_treasury);
                 let agent_trades_before = universe.market.trades().len();
                 let agent = universe.agents.get_mut(id).unwrap();
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
@@ -3064,6 +3065,7 @@ impl Universe {
     }
 
     fn refresh_market(&mut self) {
+        self.market.set_treasury_budget(self.town_treasury);
         let budgets: Vec<_> = self
             .agents
             .values()

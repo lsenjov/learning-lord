@@ -361,7 +361,7 @@ fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
                     id: order.seller,
                     name: match order.seller {
                         MarketParty::Caravan => {
-                            if universe.caravan_policy().import_tariff_basis_points == 10_000 {
+                            if universe.market().effective_import_threshold(good).is_none() {
                                 "Caravan (imports disabled)".into()
                             } else {
                                 "Caravan".into()
@@ -503,17 +503,18 @@ pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
             crate::quantity_label(good, universe.town_stock(good))
         );
     }
-    let export =
-        if !policy.exports[good as usize].allowed || policy.export_tariff_basis_points == 10_000 {
-            "Exports disabled".into()
-        } else {
-            format!(
-                "Export below {:.3} coins/{}",
-                market.effective_export_threshold(good).unwrap_or_default(),
-                good.price_unit_name()
-            )
-        };
-    let import = if policy.import_tariff_basis_points == 10_000 {
+    let export = if !policy.exports[good as usize].allowed
+        || market.effective_export_threshold(good).is_none()
+    {
+        "Exports disabled".into()
+    } else {
+        format!(
+            "Export below {:.3} coins/{}",
+            market.effective_export_threshold(good).unwrap_or_default(),
+            good.price_unit_name()
+        )
+    };
+    let import = if market.effective_import_threshold(good).is_none() {
         "Imports disabled".into()
     } else {
         format!(
@@ -522,7 +523,7 @@ pub(crate) fn price_details(universe: &Universe, good: Good) -> String {
             good.price_unit_name()
         )
     };
-    let ask = if policy.import_tariff_basis_points == 10_000 {
+    let ask = if market.effective_import_threshold(good).is_none() {
         "disabled".into()
     } else {
         format!(

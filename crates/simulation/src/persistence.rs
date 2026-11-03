@@ -164,6 +164,15 @@ impl Universe {
                 .refresh_workplace_supplies()
                 .map_err(|_| SaveError::InvalidState("cannot refresh workplace supplies"))?;
         }
+        universe
+            .market
+            .restore_treasury_context(universe.town_treasury);
+        for (_, agent) in universe.agents.iter_mut() {
+            let AgentKind::Citizen(citizen) = &mut agent.kind;
+            citizen
+                .market
+                .restore_treasury_context(universe.town_treasury);
+        }
         Ok(universe)
     }
 
@@ -676,6 +685,44 @@ mod tests {
         let loaded = Universe::from_save_str(&encoded).unwrap();
         assert_eq!(&loaded, world);
         loaded
+    }
+
+    #[test]
+    fn signed_caravan_policies_round_trip_and_legacy_goods_get_defaults() {
+        let mut world = Universe::default();
+        world.town_treasury = 42;
+        let mut policy = world.caravan_policy();
+        policy.import_tariff_basis_points = -2500;
+        policy.export_tariff_basis_points = 15000;
+        policy.exports[Good::Flour as usize].import_tariff_basis_points = 12500;
+        policy.exports[Good::Flour as usize].export_tariff_basis_points = -17500;
+        policy.exports[Good::Flour as usize].imports_allowed = false;
+        let world = world.with_caravan_policy(policy).unwrap();
+        let loaded = round_trip(&world);
+        assert_eq!(loaded.caravan_policy(), policy);
+        let legacy = Universe::default().to_save_string().unwrap();
+        let legacy = legacy
+            .lines()
+            .filter(|line| {
+                let line = line.trim();
+                !line.starts_with("imports_allowed:")
+                    && line != "import_tariff_basis_points: 0,"
+                    && line != "export_tariff_basis_points: 0,"
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Global fields existed in old saves, so retain them in every policy block.
+        let legacy = legacy.replace(
+            "exports: (",
+            "import_tariff_basis_points: 0, export_tariff_basis_points: 0, exports: (",
+        );
+        let loaded = Universe::from_save_str(&legacy).unwrap();
+        for good in Good::ALL {
+            let policy = loaded.caravan_policy().exports[good as usize];
+            assert_eq!(policy.imports_allowed, good.caravan_eligible());
+            assert_eq!(policy.import_tariff_basis_points, 0);
+            assert_eq!(policy.export_tariff_basis_points, 0);
+        }
     }
 
     fn household_world() -> (

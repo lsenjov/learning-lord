@@ -18,12 +18,15 @@ use learning_lord_simulation::{
 #[derive(Clone, Copy, PartialEq)]
 enum Field {
     Reserve(Good),
+    GoodImport(Good),
+    GoodExport(Good),
     Import,
     Export,
 }
 #[derive(Component, Clone, Copy)]
 pub(crate) enum Choice {
     Toggle,
+    ToggleImports,
     Field(FieldKind),
     SaveGood,
     SaveTariffs,
@@ -32,12 +35,17 @@ pub(crate) enum Choice {
 #[derive(Clone, Copy)]
 pub(crate) enum FieldKind {
     Reserve,
+    GoodImport,
+    GoodExport,
     Import,
     Export,
 }
 #[derive(Component)]
 pub(crate) enum Readout {
     Toggle,
+    ToggleImports,
+    GoodImport,
+    GoodExport,
     Reserve,
     Import,
     Export,
@@ -46,6 +54,9 @@ pub(crate) enum Readout {
 #[derive(Clone)]
 struct Draft {
     allowed: bool,
+    imports_allowed: bool,
+    import: String,
+    export: String,
     reserve: String,
 }
 #[derive(Clone, Copy)]
@@ -86,6 +97,9 @@ impl State {
                 .iter()
                 .map(|item| Draft {
                     allowed: item.allowed,
+                    imports_allowed: item.imports_allowed,
+                    import: percent(item.import_tariff_basis_points),
+                    export: percent(item.export_tariff_basis_points),
                     reserve: item.minimum_reserve.to_string(),
                 })
                 .collect(),
@@ -97,15 +111,53 @@ impl State {
     }
     fn value_mut(&mut self, field: Field) -> &mut String {
         match field {
+            Field::GoodImport(good) => &mut self.drafts[good as usize].import,
+            Field::GoodExport(good) => &mut self.drafts[good as usize].export,
             Field::Reserve(good) => &mut self.drafts[good as usize].reserve,
             Field::Import => &mut self.import,
             Field::Export => &mut self.export,
         }
     }
 }
-fn percent(points: u16) -> String {
-    format!("{}.{:02}", points / 100, points % 100)
+fn percent(points: i32) -> String {
+    let magnitude = i64::from(points).abs();
+    format!(
+        "{}{}.{:02}",
+        if points < 0 { "-" } else { "" },
+        magnitude / 100,
+        magnitude % 100
+    )
 }
+fn tariff(value: &str) -> Result<i32, String> {
+    let error =
+        || "Tariff must be a signed percentage with at most two decimal places.".to_string();
+    let (negative, digits) = value
+        .strip_prefix('-')
+        .map_or((false, value), |s| (true, s));
+    let mut parts = digits.split('.');
+    let whole = parts.next().ok_or_else(error)?;
+    let fraction = parts.next().unwrap_or("");
+    if whole.is_empty()
+        || !whole.chars().all(|c| c.is_ascii_digit())
+        || fraction.len() > 2
+        || !fraction.chars().all(|c| c.is_ascii_digit())
+        || parts.next().is_some()
+    {
+        return Err(error());
+    }
+    let points = whole
+        .parse::<i64>()
+        .ok()
+        .and_then(|n| n.checked_mul(100))
+        .and_then(|n| {
+            n.checked_add(
+                fraction.parse::<i64>().unwrap_or(0) * if fraction.len() == 1 { 10 } else { 1 },
+            )
+        })
+        .ok_or_else(error)?;
+    i32::try_from(if negative { -points } else { points }).map_err(|_| error())
+}
+
 fn button(
     parent: &mut ChildSpawnerCommands,
     choice: Choice,
@@ -131,22 +183,70 @@ fn button(
         });
 }
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
-    parent.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(6), flex_shrink: 0.0, ..default() }).with_children(|controls| {
-        controls.spawn(text("CARAVAN POLICY", 14.0, MUTED));
-        controls.spawn(Node { column_gap: px(8), row_gap: px(6), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|row| {
-            button(row, Choice::Toggle, "", Some(Readout::Toggle));
-            button(row, Choice::Field(FieldKind::Reserve), "", Some(Readout::Reserve));
-            button(row, Choice::SaveGood, "Save good", None);
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(6),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|controls| {
+            controls.spawn(text("CARAVAN POLICY", 14.0, MUTED));
+            controls
+                .spawn(Node {
+                    column_gap: px(8),
+                    row_gap: px(6),
+                    flex_wrap: FlexWrap::Wrap,
+                    ..default()
+                })
+                .with_children(|row| {
+                    button(row, Choice::Toggle, "", Some(Readout::Toggle));
+                    button(row, Choice::ToggleImports, "", Some(Readout::ToggleImports));
+                    button(
+                        row,
+                        Choice::Field(FieldKind::Reserve),
+                        "",
+                        Some(Readout::Reserve),
+                    );
+                    button(
+                        row,
+                        Choice::Field(FieldKind::GoodImport),
+                        "",
+                        Some(Readout::GoodImport),
+                    );
+                    button(
+                        row,
+                        Choice::Field(FieldKind::GoodExport),
+                        "",
+                        Some(Readout::GoodExport),
+                    );
+                    button(row, Choice::SaveGood, "Save good", None);
+                });
+            controls
+                .spawn(Node {
+                    column_gap: px(8),
+                    row_gap: px(6),
+                    flex_wrap: FlexWrap::Wrap,
+                    ..default()
+                })
+                .with_children(|row| {
+                    button(
+                        row,
+                        Choice::Field(FieldKind::Import),
+                        "",
+                        Some(Readout::Import),
+                    );
+                    button(
+                        row,
+                        Choice::Field(FieldKind::Export),
+                        "",
+                        Some(Readout::Export),
+                    );
+                    button(row, Choice::SaveTariffs, "Save tariffs", None);
+                    button(row, Choice::Reset, "Reset drafts", None);
+                });
+            controls.spawn((text("", 13.0, MUTED), Readout::Status));
         });
-        controls.spawn(Node { column_gap: px(8), row_gap: px(6), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|row| {
-            button(row, Choice::Field(FieldKind::Import), "", Some(Readout::Import));
-            button(row, Choice::Field(FieldKind::Export), "", Some(Readout::Export));
-            button(row, Choice::SaveTariffs, "Save tariffs", None);
-            button(row, Choice::Reset, "Reset drafts", None);
-        });
-        controls.spawn(text("Reserve uses whole grams or items. Town-wide tariffs: 0–100%, at most two decimal places.", 13.0, MUTED));
-        controls.spawn((text("", 13.0, MUTED), Readout::Status));
-    });
 }
 pub fn handle(
     mut state: ResMut<State>,
@@ -176,7 +276,8 @@ pub fn handle(
         return;
     }
     let good = selection.good();
-    if matches!(state.field, Some(Field::Reserve(previous)) if previous != good) {
+    if matches!(state.field, Some(Field::Reserve(previous) | Field::GoodImport(previous) | Field::GoodExport(previous)) if previous != good)
+    {
         state.field = None;
     }
     for (interaction, choice) in &buttons {
@@ -189,7 +290,12 @@ pub fn handle(
         if !good.caravan_eligible()
             && matches!(
                 choice,
-                Choice::Toggle | Choice::Field(FieldKind::Reserve) | Choice::SaveGood
+                Choice::Toggle
+                    | Choice::ToggleImports
+                    | Choice::Field(
+                        FieldKind::Reserve | FieldKind::GoodImport | FieldKind::GoodExport
+                    )
+                    | Choice::SaveGood
             )
         {
             continue;
@@ -199,12 +305,18 @@ pub fn handle(
             state.field = None;
         }
         let mutation = match choice {
+            Choice::ToggleImports => {
+                state.drafts[good as usize].imports_allowed ^= true;
+                None
+            }
             Choice::Toggle => {
                 state.drafts[good as usize].allowed ^= true;
                 None
             }
             Choice::Field(kind) => {
                 state.field = Some(match kind {
+                    FieldKind::GoodImport => Field::GoodImport(good),
+                    FieldKind::GoodExport => Field::GoodExport(good),
                     FieldKind::Reserve => Field::Reserve(good),
                     FieldKind::Import => Field::Import,
                     FieldKind::Export => Field::Export,
@@ -217,28 +329,40 @@ pub fn handle(
             }
             Choice::SaveGood => {
                 let draft = &state.drafts[good as usize];
-                match draft.reserve.parse::<u64>() {
-                    Ok(minimum_reserve) => Some((
+                match draft
+                    .reserve
+                    .parse::<u64>()
+                    .map_err(|_| "Reserve must be a whole non-negative quantity.".to_string())
+                    .and_then(|reserve| {
+                        Ok((reserve, tariff(&draft.import)?, tariff(&draft.export)?))
+                    }) {
+                    Ok((
+                        minimum_reserve,
+                        import_tariff_basis_points,
+                        export_tariff_basis_points,
+                    )) => Some((
                         Mutation::SaveExportPolicy {
                             good,
                             policy: ExportPolicy {
                                 allowed: draft.allowed,
+                                imports_allowed: draft.imports_allowed,
+                                import_tariff_basis_points,
+                                export_tariff_basis_points,
                                 minimum_reserve,
                             },
                         },
                         Saved::Good(good),
                     )),
-                    Err(_) => {
-                        state.error = Some("Reserve must be a whole non-negative quantity.".into());
+                    Err(error) => {
+                        state.error = Some(error);
                         None
                     }
                 }
             }
             Choice::SaveTariffs => {
-                match crate::locations::percentage(&state.import).and_then(|import| {
-                    crate::locations::percentage(&state.export)
-                        .map(|export| (import.basis_points(), export.basis_points()))
-                }) {
+                match tariff(&state.import)
+                    .and_then(|import| tariff(&state.export).map(|export| (import, export)))
+                {
                     Ok((import_basis_points, export_basis_points)) => Some((
                         Mutation::SaveTariffs {
                             import_basis_points,
@@ -284,9 +408,10 @@ pub fn handle(
                 state.value_mut(field).pop();
             }
             Key::Character(value)
-                if value
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || (field != Field::Reserve(good) && c == '.')) =>
+                if value.chars().all(|c| {
+                    c.is_ascii_digit()
+                        || (!matches!(field, Field::Reserve(_)) && matches!(c, '.' | '-'))
+                }) =>
             {
                 let target = state.value_mut(field);
                 if target.len() + value.len() <= 30 {
@@ -319,6 +444,9 @@ pub fn refresh(
                     let saved = policy.exports[good as usize];
                     state.drafts[good as usize] = Draft {
                         allowed: saved.allowed,
+                        imports_allowed: saved.imports_allowed,
+                        import: percent(saved.import_tariff_basis_points),
+                        export: percent(saved.export_tariff_basis_points),
                         reserve: saved.minimum_reserve.to_string(),
                     };
                 }
@@ -335,7 +463,12 @@ pub fn refresh(
         let disabled = !good.caravan_eligible()
             && matches!(
                 choice,
-                Choice::Toggle | Choice::Field(FieldKind::Reserve) | Choice::SaveGood
+                Choice::Toggle
+                    | Choice::ToggleImports
+                    | Choice::Field(
+                        FieldKind::Reserve | FieldKind::GoodImport | FieldKind::GoodExport
+                    )
+                    | Choice::SaveGood
             );
         color.set_if_neq(BackgroundColor(if disabled {
             Color::srgb(0.04, 0.04, 0.04)
@@ -346,8 +479,28 @@ pub fn refresh(
     for (readout, mut label) in &mut readouts {
         let cursor = |field| if state.field == Some(field) { " |" } else { "" };
         let next = match readout {
-            Readout::Toggle if !good.caravan_eligible() => "Caravan trade unavailable".into(),
+            Readout::Toggle | Readout::ToggleImports if !good.caravan_eligible() => {
+                "Caravan trade unavailable".into()
+            }
             Readout::Reserve if !good.caravan_eligible() => "Minimum reserve: unavailable".into(),
+            Readout::ToggleImports => format!(
+                "Imports: {}",
+                if draft.imports_allowed {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ),
+            Readout::GoodImport => format!(
+                "Good import: {}%{}",
+                draft.import,
+                cursor(Field::GoodImport(good))
+            ),
+            Readout::GoodExport => format!(
+                "Good export: {}%{}",
+                draft.export,
+                cursor(Field::GoodExport(good))
+            ),
             Readout::Toggle => format!(
                 "Exports: {}",
                 if draft.allowed { "enabled" } else { "disabled" }
@@ -362,13 +515,13 @@ pub fn refresh(
                 },
                 cursor(Field::Reserve(good))
             ),
-            Readout::Import => format!("Import tariff: {}%{}", state.import, cursor(Field::Import)),
-            Readout::Export => format!("Export tariff: {}%{}", state.export, cursor(Field::Export)),
+            Readout::Import => format!("Global import: {}%{}", state.import, cursor(Field::Import)),
+            Readout::Export => format!("Global export: {}%{}", state.export, cursor(Field::Export)),
             Readout::Status => state.error.clone().unwrap_or_else(|| {
                 if state.pending() {
                     "Saving…".into()
                 } else {
-                    "Changes apply when saved.".into()
+                    String::new()
                 }
             }),
         };
@@ -415,6 +568,18 @@ mod tests {
             std::thread::yield_now();
         }
     }
+    #[test]
+    fn signed_percentages_accept_offsets_above_one_hundred() {
+        for (input, expected) in [("-25", -2500), ("125.01", 12501), ("-0.01", -1), ("0", 0)] {
+            assert_eq!(tariff(input), Ok(expected));
+            assert_eq!(tariff(&percent(expected)), Ok(expected));
+        }
+        for input in ["--1", "1.234", "1-", "", "21474836.48", "1.2.3"] {
+            assert!(tariff(input).is_err(), "{input}");
+        }
+        assert_eq!(tariff("-21474836.48"), Ok(i32::MIN));
+    }
+
     #[test]
     fn switching_goods_preserves_each_reserve_and_clears_focus() {
         let mut app = app();
@@ -479,6 +644,9 @@ mod tests {
         {
             let mut state = app.world_mut().resource_mut::<State>();
             state.drafts[Good::Flour as usize].allowed = false;
+            state.drafts[Good::Flour as usize].imports_allowed = false;
+            state.drafts[Good::Flour as usize].import = "-25".into();
+            state.drafts[Good::Flour as usize].export = "150".into();
             state.drafts[Good::Flour as usize].reserve = "1234".into();
             state.drafts[Good::BreadRoll as usize].reserve = "7".into();
             state.import = "50".into();
@@ -493,6 +661,15 @@ mod tests {
             .universe
             .caravan_policy();
         assert!(!policy.exports[Good::Flour as usize].allowed);
+        assert!(!policy.exports[Good::Flour as usize].imports_allowed);
+        assert_eq!(
+            policy.exports[Good::Flour as usize].import_tariff_basis_points,
+            -2500
+        );
+        assert_eq!(
+            policy.exports[Good::Flour as usize].export_tariff_basis_points,
+            15000
+        );
         assert_eq!(policy.exports[Good::Flour as usize].minimum_reserve, 1234);
         assert_eq!(policy.import_tariff_basis_points, 0);
         assert_eq!(app.world().resource::<State>().import, "50");
@@ -500,8 +677,13 @@ mod tests {
             app.world().resource::<State>().drafts[Good::BreadRoll as usize].reserve,
             "7"
         );
+        app.world_mut().resource_mut::<State>().drafts[Good::Flour as usize].import = "-50".into();
         press(&mut app, Choice::SaveTariffs);
         await_save(&mut app);
+        assert_eq!(
+            app.world().resource::<State>().drafts[Good::Flour as usize].import,
+            "-50"
+        );
         let policy = app
             .world()
             .resource::<DisplaySnapshot>()
@@ -522,10 +704,10 @@ mod tests {
             app.world().resource::<State>().drafts[Good::Flour as usize].reserve,
             "1.5"
         );
-        app.world_mut().resource_mut::<State>().import = "100.01".into();
+        app.world_mut().resource_mut::<State>().import = "100.001".into();
         press(&mut app, Choice::SaveTariffs);
         assert!(app.world().resource::<State>().error.is_some());
-        assert_eq!(app.world().resource::<State>().import, "100.01");
+        assert_eq!(app.world().resource::<State>().import, "100.001");
         app.world_mut().resource_mut::<State>().pending = Some((0, Saved::Tariffs));
         {
             let mut snapshot = app.world_mut().resource_mut::<DisplaySnapshot>();
@@ -533,7 +715,7 @@ mod tests {
             snapshot.0.mutation_error = Some("Worker rejected change".into());
         }
         app.update();
-        assert_eq!(app.world().resource::<State>().import, "100.01");
+        assert_eq!(app.world().resource::<State>().import, "100.001");
         assert_eq!(
             app.world().resource::<State>().error.as_deref(),
             Some("Worker rejected change")

@@ -267,6 +267,7 @@ fn export_controls_limit_volume_without_consuming_reserve_stock() {
             learning_lord_simulation::marketplace::ExportPolicy {
                 allowed,
                 minimum_reserve: reserve,
+                ..learning_lord_simulation::marketplace::ExportPolicy::default()
             };
         let configured = world.with_caravan_policy(policy).unwrap();
         let after = configured
@@ -495,8 +496,12 @@ fn existing_imports_reprice_and_disable_immediately_without_mutating_forecasts()
         Some((Good::BreadRoll.import_threshold() * 2.0).ceil() as i64)
     );
     policy.import_tariff_basis_points = 10_001;
-    assert_eq!(
-        restored.with_caravan_policy(policy),
-        Err(learning_lord_simulation::SimulationError::InvalidTaxRate)
+    assert!(
+        restored
+            .with_caravan_policy(policy)
+            .unwrap()
+            .market()
+            .effective_import_threshold(Good::BreadRoll)
+            .is_none()
     );
 }

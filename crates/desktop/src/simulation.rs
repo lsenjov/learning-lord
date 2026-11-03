@@ -62,8 +62,8 @@ pub enum Mutation {
         policy: learning_lord_simulation::marketplace::ExportPolicy,
     },
     SaveTariffs {
-        import_basis_points: u16,
-        export_basis_points: u16,
+        import_basis_points: i32,
+        export_basis_points: i32,
     },
     SaveTax {
         scope: learning_lord_simulation::taxation::TaxScope,
@@ -837,6 +837,7 @@ mod tests {
         let export = ExportPolicy {
             allowed: false,
             minimum_reserve: 123,
+            ..ExportPolicy::default()
         };
         let universe = Mutation::SaveExportPolicy {
             good: Good::BreadRoll,
@@ -861,7 +862,7 @@ mod tests {
                 export_basis_points: 0
             }
             .apply(&universe)
-            .is_err()
+            .is_ok()
         );
         assert_eq!(universe.caravan_policy().import_tariff_basis_points, 5000);
         assert_eq!(

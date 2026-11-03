@@ -147,6 +147,16 @@ impl Good {
 pub struct ExportPolicy {
     pub allowed: bool,
     pub minimum_reserve: Quantity,
+    #[serde(default = "imports_enabled")]
+    pub imports_allowed: bool,
+    #[serde(default)]
+    pub import_tariff_basis_points: i32,
+    #[serde(default)]
+    pub export_tariff_basis_points: i32,
+}
+
+fn imports_enabled() -> bool {
+    true
 }
 
 impl Default for ExportPolicy {
@@ -154,6 +164,9 @@ impl Default for ExportPolicy {
         Self {
             allowed: true,
             minimum_reserve: 0,
+            imports_allowed: true,
+            import_tariff_basis_points: 0,
+            export_tariff_basis_points: 0,
         }
     }
 }
@@ -161,8 +174,8 @@ impl Default for ExportPolicy {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaravanPolicy {
     pub exports: [ExportPolicy; Good::COUNT],
-    pub import_tariff_basis_points: u16,
-    pub export_tariff_basis_points: u16,
+    pub import_tariff_basis_points: i32,
+    pub export_tariff_basis_points: i32,
 }
 
 impl Default for CaravanPolicy {
@@ -170,6 +183,7 @@ impl Default for CaravanPolicy {
         Self {
             exports: Good::ALL.map(|good| ExportPolicy {
                 allowed: good.caravan_eligible(),
+                imports_allowed: good.caravan_eligible(),
                 ..ExportPolicy::default()
             }),
             import_tariff_basis_points: 0,
@@ -179,10 +193,16 @@ impl Default for CaravanPolicy {
 }
 
 impl CaravanPolicy {
+    pub fn import_rate(self, good: Good) -> i64 {
+        i64::from(self.import_tariff_basis_points)
+            + i64::from(self.exports[good as usize].import_tariff_basis_points)
+    }
+    pub fn export_rate(self, good: Good) -> i64 {
+        i64::from(self.export_tariff_basis_points)
+            + i64::from(self.exports[good as usize].export_tariff_basis_points)
+    }
+
     pub fn validate(self) -> Result<(), SimulationError> {
-        if self.import_tariff_basis_points > 10_000 || self.export_tariff_basis_points > 10_000 {
-            return Err(SimulationError::InvalidTaxRate);
-        }
         Ok(())
     }
 }
@@ -243,10 +263,12 @@ impl ShoppingList {
         if self.purchase_bounds.is_some() {
             return Ok(self);
         }
+        let mut market = market.clone();
         let mut cost: Coins = 0;
         let mut quote_ceilings = [0.0; Good::COUNT];
         for (good, units) in self.items() {
             let fill = market.fill_plan(buyer, Some(place), good, units, None)?;
+            market.apply_fill_budget(good, &fill);
             quote_ceilings[good as usize] = fill
                 .fills
                 .iter()
@@ -525,7 +547,8 @@ impl PartialEq for AffordabilityCache {
 struct AffordabilityInputs {
     orders: HashMap<OrderId, SellOrder>,
     prices: Prices,
-    caravan_purchasable: bool,
+    policy: CaravanPolicy,
+    treasury_budget: Coins,
     accounts: HashMap<AgentId, AffordableAccount>,
 }
 
@@ -535,6 +558,15 @@ struct AffordableAccount {
     budget: Coins,
     request: ShoppingList,
     affordable: ShoppingList,
+}
+
+// This is a planning/settlement snapshot of Universe's authoritative treasury.
+#[derive(Clone, Copy, Debug, Default)]
+struct TreasuryBudget(Coins);
+impl PartialEq for TreasuryBudget {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -551,8 +583,10 @@ pub struct Market {
     demand_budgets: HashMap<AgentId, Coins>,
     pub prices: Prices,
     policy: CaravanPolicy,
-    import_tariff_carry: [u16; Good::COUNT],
-    export_tariff_carry: [u16; Good::COUNT],
+    #[serde(skip)]
+    treasury_budget: TreasuryBudget,
+    import_tariff_carry: [i16; Good::COUNT],
+    export_tariff_carry: [i16; Good::COUNT],
     orders: HashMap<OrderId, SellOrder>,
     trades: Vector<Trade>,
     next_order_id: u64,
@@ -574,6 +608,19 @@ pub(crate) struct Purchase {
 }
 
 impl Market {
+    pub(crate) fn restore_treasury_context(&mut self, coins: Coins) {
+        self.set_treasury_budget(coins);
+        for good in Good::ALL {
+            self.policy.exports[good as usize].imports_allowed &= good.caravan_eligible();
+        }
+    }
+    pub(crate) fn set_treasury_budget(&mut self, coins: Coins) {
+        self.treasury_budget.0 = coins;
+    }
+    fn apply_fill_budget(&mut self, good: Good, fill: &FillPlan) {
+        self.treasury_budget.0 = fill.treasury_budget;
+        self.import_tariff_carry[good as usize] = fill.import_carry;
+    }
     pub fn order_container(&self, id: OrderId) -> Option<crate::locations::ObjectId> {
         self.containers.get(&id).copied()
     }
@@ -694,6 +741,7 @@ impl Market {
                     && order.good == good
                     && order.seller != buyer
                     && self.purchasable(order)
+                    && self.can_fund_first_unit(order)
                     && map
                         .places()
                         .get(&order.place)
@@ -785,6 +833,7 @@ impl Market {
         self.requests
             .iter()
             .map(|(account, request)| {
+                let mut market = self.clone();
                 let mut funds = self
                     .demand_budgets
                     .get(account)
@@ -798,11 +847,17 @@ impl Market {
                 let mut wanted = 0;
                 for (good, requested) in request.items() {
                     let ceiling = if good == target { quote } else { f64::MAX };
-                    let Ok(fill) =
-                        self.fill_plan_at_quote(party, None, good, requested, Some(funds), ceiling)
-                    else {
+                    let Ok(fill) = market.fill_plan_at_quote(
+                        party,
+                        None,
+                        good,
+                        requested,
+                        Some(funds),
+                        ceiling,
+                    ) else {
                         continue;
                     };
+                    market.apply_fill_budget(good, &fill);
                     funds -= fill.coins;
                     let price = if good == target {
                         quote
@@ -814,7 +869,21 @@ impl Market {
                     while low < high {
                         let middle = low + (high - low).div_ceil(2);
                         if charge(middle as f64 * price / good.units_per_price_unit() as f64)
-                            .is_ok_and(|cost| cost <= funds)
+                            .is_ok_and(|cost| {
+                                let mut carry = market.import_tariff_carry[good as usize];
+                                cost <= funds
+                                    && (good != target
+                                        || tariff_share(
+                                            cost,
+                                            market.policy.import_rate(good),
+                                            &mut carry,
+                                        )
+                                        .ok()
+                                        .and_then(|tariff| {
+                                            market.treasury_budget.0.checked_add(tariff)
+                                        })
+                                        .is_some_and(|balance| balance >= 0))
+                            })
                         {
                             low = middle;
                         } else {
@@ -839,17 +908,21 @@ impl Market {
     }
 
     pub fn effective_export_threshold(&self, good: Good) -> Option<f64> {
-        (good.caravan_eligible() && self.policy.export_tariff_basis_points < 10_000).then(|| {
-            good.export_threshold()
-                * (1.0 - f64::from(self.policy.export_tariff_basis_points) / 10_000.0)
-        })
+        (good.caravan_eligible()
+            && self.policy.exports[good as usize].allowed
+            && self.policy.export_rate(good) < 10_000)
+            .then(|| {
+                good.export_threshold() * (1.0 - self.policy.export_rate(good) as f64 / 10_000.0)
+            })
     }
 
     pub fn effective_import_threshold(&self, good: Good) -> Option<f64> {
-        (good.caravan_eligible() && self.policy.import_tariff_basis_points < 10_000).then(|| {
-            good.import_threshold()
-                / (1.0 - f64::from(self.policy.import_tariff_basis_points) / 10_000.0)
-        })
+        (good.caravan_eligible()
+            && self.policy.exports[good as usize].imports_allowed
+            && self.policy.import_rate(good) < 10_000)
+            .then(|| {
+                good.import_threshold() / (1.0 - self.policy.import_rate(good) as f64 / 10_000.0)
+            })
     }
 
     pub(crate) fn set_caravan_policy(
@@ -859,18 +932,16 @@ impl Market {
         policy.validate()?;
         for good in Good::ALL {
             policy.exports[good as usize].allowed &= good.caravan_eligible();
+            policy.exports[good as usize].imports_allowed &= good.caravan_eligible();
         }
         self.policy = policy;
         self.remove_ineligible_caravan_orders();
         for id in self.orders.keys().copied().collect::<Vec<_>>() {
             let good = self.orders[&id].good;
             if self.orders[&id].seller == MarketParty::Caravan {
-                self.orders.get_mut(&id).unwrap().quoted_price =
-                    if policy.import_tariff_basis_points == 10_000 {
-                        good.import_threshold()
-                    } else {
-                        self.effective_import_threshold(good).unwrap()
-                    };
+                self.orders.get_mut(&id).unwrap().quoted_price = self
+                    .effective_import_threshold(good)
+                    .unwrap_or(good.import_threshold());
             }
         }
         Ok(())
@@ -883,9 +954,21 @@ impl Market {
         self.containers.retain(|id, _| self.orders.contains_key(id));
     }
 
+    fn can_fund_first_unit(&self, order: &SellOrder) -> bool {
+        if order.seller != MarketParty::Caravan {
+            return true;
+        }
+        let mut carry = self.import_tariff_carry[order.good as usize];
+        charge(order.quoted_price / order.good.units_per_price_unit() as f64)
+            .and_then(|coins| tariff_share(coins, self.policy.import_rate(order.good), &mut carry))
+            .ok()
+            .and_then(|tariff| self.treasury_budget.0.checked_add(tariff))
+            .is_some_and(|balance| balance >= 0)
+    }
+
     fn purchasable(&self, order: &SellOrder) -> bool {
         order.seller != MarketParty::Caravan
-            || (order.good.caravan_eligible() && self.policy.import_tariff_basis_points < 10_000)
+            || self.effective_import_threshold(order.good).is_some()
     }
 
     pub(crate) fn starting_at(time_ms: u64) -> Self {
@@ -1022,11 +1105,11 @@ impl Market {
                     .map(|id| (id, coins))
             })
             .collect();
-        let caravan_purchasable = self.policy.import_tariff_basis_points < 10_000;
         let previous = self.affordability_cache.0.as_ref().filter(|cached| {
             cached.orders.ptr_eq(&self.orders)
                 && cached.prices == self.prices
-                && cached.caravan_purchasable == caravan_purchasable
+                && cached.policy == self.policy
+                && cached.treasury_budget == self.treasury_budget.0
         });
         let mut accounts = HashMap::new();
         #[cfg(test)]
@@ -1074,7 +1157,8 @@ impl Market {
         self.affordability_cache.0 = Some(AffordabilityInputs {
             orders: self.orders.clone(),
             prices: self.prices,
-            caravan_purchasable,
+            policy: self.policy,
+            treasury_budget: self.treasury_budget.0,
             accounts,
         });
     }
@@ -1085,10 +1169,12 @@ impl Market {
         budget: Coins,
         request: ShoppingList,
     ) -> ShoppingList {
+        let mut market = self.clone();
         let mut funds = budget.max(0);
         let mut items = Vec::new();
         for (good, requested) in request.items() {
-            if let Ok(fill) = self.fill_plan(buyer, None, good, requested, Some(funds)) {
+            if let Ok(fill) = market.fill_plan(buyer, None, good, requested, Some(funds)) {
+                market.apply_fill_budget(good, &fill);
                 funds -= fill.coins;
                 let unavailable = requested.saturating_sub(self.available_units(buyer, good));
                 let mut low = 0;
@@ -1163,10 +1249,12 @@ impl Market {
         list: ShoppingList,
         budget: Coins,
     ) -> Result<ShoppingList, SimulationError> {
+        let mut market = self.clone();
         let mut remaining = budget.max(0);
         let mut fills = Vec::new();
         for (good, units) in list.items() {
-            let fill = self.fill_plan(buyer, place, good, units, Some(remaining))?;
+            let fill = market.fill_plan(buyer, place, good, units, Some(remaining))?;
+            market.apply_fill_budget(good, &fill);
             remaining -= fill.coins;
             fills.push((good, fill.units));
         }
@@ -1203,6 +1291,7 @@ impl Market {
         list: ShoppingList,
         budget: Option<Coins>,
     ) -> Option<(PlaceId, ShoppingList)> {
+        let mut market = self.clone();
         let mut destination = None;
         let mut basket = Vec::new();
         let mut remaining_budget = budget.map(|budget| budget.min(list.spending_budget()));
@@ -1215,6 +1304,7 @@ impl Market {
                         && order.seller != buyer
                         && order.quoted_price <= list.quote_ceiling(good)
                         && self.purchasable(order)
+                        && market.can_fund_first_unit(order)
                         && map
                             .places()
                             .get(&order.place)
@@ -1244,7 +1334,7 @@ impl Market {
                 .take_while(|order| order.place == place)
                 .fold(0_u64, |sum, order| sum.saturating_add(order.units))
                 .min(wanted);
-            let fill = self
+            let fill = market
                 .fill_plan_at_quote(
                     buyer,
                     Some(place),
@@ -1257,6 +1347,7 @@ impl Market {
             if fill.units == 0 {
                 continue;
             }
+            market.apply_fill_budget(good, &fill);
             destination = Some(place);
             if let Some(remaining) = &mut remaining_budget {
                 *remaining -= fill.coins;
@@ -1286,6 +1377,7 @@ impl Market {
                 let fill = market
                     .fill_plan(buyer, Some(place), good, units, None)
                     .ok()?;
+                market.apply_fill_budget(good, &fill);
                 coins = coins.checked_add(fill.coins)?;
                 for (id, units, _) in fill.fills {
                     market.orders.get_mut(&id)?.units -= units;
@@ -1312,10 +1404,10 @@ impl Market {
         units: Quantity,
     ) -> Option<Coins> {
         let buyer = buyer.into();
-        let available = self.available_units(buyer, good).min(units);
-        let actual = self.purchase_cost(buyer, good, available)?;
-        let unavailable = units - available;
-        actual.checked_add(charge(self.prices.value(good, unavailable)?).ok()?)
+        let fill = self.fill_plan(buyer, None, good, units, None).ok()?;
+        let unavailable = units - fill.units;
+        fill.coins
+            .checked_add(charge(self.prices.value(good, unavailable)?).ok()?)
     }
 
     pub fn purchase_cost(
@@ -1378,7 +1470,11 @@ impl Market {
                 })
                 .then_with(|| a.id.0.cmp(&b.id.0))
         });
-        let mut plan = FillPlan::default();
+        let mut plan = FillPlan {
+            treasury_budget: self.treasury_budget.0,
+            import_carry: self.import_tariff_carry[good as usize],
+            ..FillPlan::default()
+        };
         let mut seller_costs = std::collections::HashMap::<MarketParty, f64>::new();
         for order in orders {
             let remaining = requested - plan.units;
@@ -1394,7 +1490,7 @@ impl Market {
             };
             let mut low = 0;
             let mut high = remaining.min(order.units);
-            if budget.is_none() {
+            if budget.is_none() && order.seller != MarketParty::Caravan {
                 affordable(high)
                     .and_then(|cost| plan.coins.checked_add(cost))
                     .ok_or(SimulationError::WealthOverflow)?;
@@ -1402,7 +1498,15 @@ impl Market {
             }
             while low < high {
                 let middle = low + (high - low).div_ceil(2);
-                if affordable(middle).is_some_and(|cost| cost <= available_coins) {
+                if affordable(middle).is_some_and(|cost| {
+                    let mut carry = plan.import_carry;
+                    cost <= available_coins
+                        && (order.seller != MarketParty::Caravan
+                            || tariff_share(cost, self.policy.import_rate(good), &mut carry)
+                                .ok()
+                                .and_then(|tariff| plan.treasury_budget.checked_add(tariff))
+                                .is_some_and(|balance| balance >= 0))
+                }) {
                     low = middle;
                 } else {
                     high = middle - 1;
@@ -1413,6 +1517,14 @@ impl Market {
             }
             let quoted = low as f64 * order.quoted_price / good.units_per_price_unit() as f64;
             let cost = affordable(low).ok_or(SimulationError::WealthOverflow)?;
+            if order.seller == MarketParty::Caravan {
+                let tariff =
+                    tariff_share(cost, self.policy.import_rate(good), &mut plan.import_carry)?;
+                plan.treasury_budget = plan
+                    .treasury_budget
+                    .checked_add(tariff)
+                    .ok_or(SimulationError::WealthOverflow)?;
+            }
             seller_costs.insert(order.seller, previous + quoted);
             plan.units = plan
                 .units
@@ -1460,7 +1572,11 @@ impl Market {
         price: f64,
     ) -> Result<OrderId, SimulationError> {
         let seller = seller.into();
-        if units == 0 || !price.is_finite() || price < MIN_QUOTED_PRICE {
+        if units == 0
+            || !price.is_finite()
+            || price <= 0.0
+            || (seller != MarketParty::Caravan && price < MIN_QUOTED_PRICE)
+        {
             return Err(SimulationError::InvalidPrices);
         }
         self.orders()
@@ -1577,6 +1693,7 @@ impl Market {
         let (budget, ceiling) = bounds;
         let plan =
             self.fill_plan_at_quote(buyer, Some(place), good, requested, Some(budget), ceiling)?;
+        self.treasury_budget.0 = plan.treasury_budget;
         let mut payments = std::collections::BTreeMap::new();
         for (id, units, coins) in plan.fills {
             let mut order = self.orders.get(&id).unwrap().clone();
@@ -1589,7 +1706,7 @@ impl Market {
             let tariff_coins = if order.seller == MarketParty::Caravan {
                 tariff_share(
                     coins,
-                    self.policy.import_tariff_basis_points,
+                    self.policy.import_rate(good),
                     &mut self.import_tariff_carry[good as usize],
                 )?
             } else {
@@ -1647,7 +1764,9 @@ impl Market {
                     coins,
                     quoted_price: order.quoted_price,
                     tariff_coins,
-                    recipient_coins: coins - tariff_coins,
+                    recipient_coins: coins
+                        .checked_sub(tariff_coins)
+                        .ok_or(SimulationError::WealthOverflow)?,
                 });
                 if buyer != MarketParty::Caravan
                     && !self.order_is_trial(order.id)
@@ -1672,7 +1791,9 @@ impl Market {
                 self.record_trial_sale(
                     order.id,
                     units,
-                    coins - tariff_coins,
+                    coins
+                        .checked_sub(tariff_coins)
+                        .ok_or(SimulationError::WealthOverflow)?,
                     buyer != MarketParty::Caravan && order.seller != MarketParty::Caravan,
                     time_ms,
                 );
@@ -1766,22 +1887,65 @@ impl Market {
                     let mut charged = 0;
                     let mut received: Coins = 0;
                     for mut order in orders {
-                        let units = remaining.min(order.units);
+                        let rate = self.policy.export_rate(good);
+                        let mut low = 0;
+                        let mut high = remaining.min(order.units);
+                        while low < high {
+                            let middle = low + (high - low).div_ceil(2);
+                            let net = charge(
+                                value
+                                    + middle as f64 * order.quoted_price
+                                        / good.units_per_price_unit() as f64,
+                            )?;
+                            let coins = export_payment(
+                                net,
+                                charged,
+                                received,
+                                rate,
+                                self.export_tariff_carry[good as usize],
+                            )?;
+                            let mut carry = self.export_tariff_carry[good as usize];
+                            let tariff = tariff_share(coins, rate, &mut carry)?;
+                            if self
+                                .treasury_budget
+                                .0
+                                .checked_add(tariff)
+                                .is_some_and(|balance| balance >= 0)
+                            {
+                                low = middle;
+                            } else {
+                                high = middle - 1;
+                            }
+                        }
+                        let units = low;
                         if units == 0 {
-                            break;
+                            continue;
                         }
                         value +=
                             units as f64 * order.quoted_price / good.units_per_price_unit() as f64;
-                        let cumulative =
-                            gross_up(charge(value)?, self.policy.export_tariff_basis_points)?;
-                        let coins = cumulative - charged;
-                        charged = cumulative;
+                        let coins = export_payment(
+                            charge(value)?,
+                            charged,
+                            received,
+                            rate,
+                            self.export_tariff_carry[good as usize],
+                        )?;
+                        charged = charged
+                            .checked_add(coins)
+                            .ok_or(SimulationError::WealthOverflow)?;
                         let tariff_coins = tariff_share(
                             coins,
-                            self.policy.export_tariff_basis_points,
+                            self.policy.export_rate(good),
                             &mut self.export_tariff_carry[good as usize],
                         )?;
-                        let recipient_coins = coins - tariff_coins;
+                        self.treasury_budget.0 = self
+                            .treasury_budget
+                            .0
+                            .checked_add(tariff_coins)
+                            .ok_or(SimulationError::WealthOverflow)?;
+                        let recipient_coins = coins
+                            .checked_sub(tariff_coins)
+                            .ok_or(SimulationError::WealthOverflow)?;
                         received = received
                             .checked_add(recipient_coins)
                             .ok_or(SimulationError::WealthOverflow)?;
@@ -2036,24 +2200,42 @@ impl Market {
     }
 }
 
-fn gross_up(net: Coins, rate: u16) -> Result<Coins, SimulationError> {
-    let denominator = 10_000_u128 - u128::from(rate);
-    if denominator == 0 {
+fn gross_up(net: Coins, rate: i64) -> Result<Coins, SimulationError> {
+    let denominator = 10_000_i128 - i128::from(rate);
+    if denominator <= 0 {
         return Err(SimulationError::InvalidTaxRate);
     }
-    let gross = (u128::try_from(net).map_err(|_| SimulationError::InvalidCoins)? * 10_000)
-        .div_ceil(denominator);
-    Coins::try_from(gross).map_err(|_| SimulationError::WealthOverflow)
+    let numerator = i128::from(net) * 10_000;
+    Coins::try_from((numerator + denominator - 1) / denominator)
+        .map_err(|_| SimulationError::WealthOverflow)
 }
 
-// Carry follows the good and direction, so splitting orders cannot discard fractional tax.
-fn tariff_share(gross: Coins, rate: u16, carry: &mut u16) -> Result<Coins, SimulationError> {
-    let numerator = u128::try_from(gross).map_err(|_| SimulationError::InvalidCoins)?
-        * u128::from(rate)
-        + u128::from(*carry);
+fn export_payment(
+    asking: Coins,
+    charged: Coins,
+    received: Coins,
+    rate: i64,
+    carry: i16,
+) -> Result<Coins, SimulationError> {
+    if rate >= 0 {
+        return Ok(gross_up(asking, rate)? - charged);
+    }
+    // Earlier subsidy rounding can already cover part of the next order's asking amount.
+    let needed = asking.saturating_sub(received).max(0);
+    // Below `needed`, coverage requires coins * (10_000 - rate) >= needed * 10_000 + carry.
+    // Paying `needed` itself always covers the ask, even if positive carry delays the subsidy.
+    let numerator = i128::from(needed) * 10_000 + i128::from(carry);
+    let denominator = 10_000 - i128::from(rate);
+    let subsidized = ((numerator + denominator - 1) / denominator).max(0);
+    Ok(needed.min(subsidized as Coins))
+}
+
+// Signed carry preserves fractional taxes and subsidies across split orders and policy changes.
+fn tariff_share(gross: Coins, rate: i64, carry: &mut i16) -> Result<Coins, SimulationError> {
+    let numerator = i128::from(gross) * i128::from(rate) + i128::from(*carry);
     let tariff =
         Coins::try_from(numerator / 10_000).map_err(|_| SimulationError::WealthOverflow)?;
-    *carry = (numerator % 10_000) as u16;
+    *carry = (numerator % 10_000) as i16;
     Ok(tariff)
 }
 
@@ -2066,6 +2248,8 @@ fn charge(cost: f64) -> Result<Coins, SimulationError> {
 
 #[derive(Default)]
 struct FillPlan {
+    treasury_budget: Coins,
+    import_carry: i16,
     units: Quantity,
     coins: Coins,
     fills: Vec<(OrderId, Quantity, Coins)>,
@@ -2122,13 +2306,15 @@ impl Market {
             .import_tariff_carry
             .into_iter()
             .chain(self.export_tariff_carry)
-            .any(|carry| carry >= 10_000)
+            .any(|carry| !(-9_999..=9_999).contains(&carry))
             || self.orders.iter().any(|(id, order)| {
                 *id != order.id
                     || order.units == 0
                     || id.0 >= self.next_order_id
                     || !order.quoted_price.is_finite()
-                    || order.quoted_price < MIN_QUOTED_PRICE
+                    || order.quoted_price <= 0.0
+                    || (order.seller != MarketParty::Caravan
+                        && order.quoted_price < MIN_QUOTED_PRICE)
             })
         {
             return Err(SaveError::InvalidState(
@@ -3084,6 +3270,249 @@ mod tests {
     }
 
     #[test]
+    fn effective_policies_stack_offset_block_and_reprice_existing_imports() {
+        let mut market = Market::default();
+        let good = Good::BreadRoll;
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        market
+            .list_at_quote(MarketParty::Caravan, PLACE, good, 10, 100.0)
+            .unwrap();
+        let mut policy = market.caravan_policy();
+        policy.import_tariff_basis_points = 15_000;
+        policy.export_tariff_basis_points = -5_000;
+        policy.exports[good as usize].import_tariff_basis_points = -17_500;
+        policy.exports[good as usize].export_tariff_basis_points = 2_500;
+        market.set_caravan_policy(policy).unwrap();
+        assert_eq!(
+            market.effective_import_threshold(good),
+            Some(good.import_threshold() / 1.25)
+        );
+        assert_eq!(
+            market.effective_export_threshold(good),
+            Some(good.export_threshold() * 1.25)
+        );
+        assert_eq!(
+            market.orders().next().unwrap().quoted_price,
+            good.import_threshold() / 1.25
+        );
+        policy.exports[good as usize].imports_allowed = false;
+        market.set_caravan_policy(policy).unwrap();
+        assert_eq!(market.available_units(buyer, good), 0);
+        assert_eq!(market.caravan_units(good), 10);
+        assert_eq!(
+            market
+                .purchase(buyer, PLACE, (good, 10), 1000, 0, true)
+                .unwrap()
+                .units,
+            0
+        );
+        policy.exports[good as usize].imports_allowed = true;
+        for rate in [10_000, 15_000] {
+            policy.import_tariff_basis_points = rate;
+            policy.export_tariff_basis_points = rate;
+            policy.exports[good as usize].import_tariff_basis_points = 0;
+            policy.exports[good as usize].export_tariff_basis_points = 0;
+            market.set_caravan_policy(policy).unwrap();
+            assert_eq!(market.effective_import_threshold(good), None);
+            assert_eq!(market.effective_export_threshold(good), None);
+            assert_eq!(market.available_units(buyer, good), 0);
+        }
+    }
+
+    #[test]
+    fn imports_spend_shared_subsidy_budget_in_planning_and_settlement() {
+        let mut market = Market::default();
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let mut policy = market.caravan_policy();
+        policy.import_tariff_basis_points = -2_500;
+        market.set_caravan_policy(policy).unwrap();
+        market.set_treasury_budget(30);
+        for good in [Good::BreadRoll, Good::BerryPie] {
+            market
+                .list_at_quote(MarketParty::Caravan, PLACE, good, 10, 40.0)
+                .unwrap();
+        }
+        let list = ShoppingList::new([(Good::BreadRoll, 10), (Good::BerryPie, 10)]).unwrap();
+        let planned = market
+            .affordable_purchase_list_at(buyer.into(), Some(PLACE), list, 1000)
+            .unwrap();
+        assert_eq!(planned.units(Good::BreadRoll), 3);
+        assert_eq!(planned.units(Good::BerryPie), 0);
+        let purchase = market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 10), 1000, 0, true)
+            .unwrap();
+        assert_eq!((purchase.units, purchase.coins), (3, 120));
+        let trade = market.trades().back().unwrap();
+        assert_eq!((trade.tariff_coins, trade.recipient_coins), (-30, 150));
+        assert_eq!(purchase.coins + 30, trade.recipient_coins);
+        assert_eq!(market.treasury_budget.0, 0);
+        assert_eq!(
+            market
+                .purchase(buyer, PLACE, (Good::BerryPie, 1), 1000, 0, true)
+                .unwrap()
+                .units,
+            0
+        );
+    }
+
+    #[test]
+    fn estimated_purchase_cost_prices_treasury_limited_missing_units_at_reference() {
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        market.prices = market.prices.with_price(Good::BreadRoll, 10.0).unwrap();
+        let mut policy = market.caravan_policy();
+        policy.import_tariff_basis_points = -2500;
+        market.set_caravan_policy(policy).unwrap();
+        market
+            .list_at_quote(MarketParty::Caravan, PLACE, Good::BreadRoll, 10, 4.0)
+            .unwrap();
+        for (budget, filled, expected) in [(0, 0, 100), (3, 3, 82)] {
+            market.set_treasury_budget(budget);
+            let fill = market
+                .fill_plan(buyer.into(), None, Good::BreadRoll, 10, None)
+                .unwrap();
+            assert_eq!(fill.units, filled);
+            assert_eq!(
+                market.estimated_purchase_cost(buyer, Good::BreadRoll, 10),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn exhausted_subsidies_do_not_hide_a_fundable_local_purchase_stop() {
+        use crate::locations::{Location, Map, Position};
+        let map = Map::default();
+        let mut market = Market::default();
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let mut policy = market.caravan_policy();
+        policy.import_tariff_basis_points = -2500;
+        market.set_caravan_policy(policy).unwrap();
+        let imported = map.public_place(Location::Market);
+        let local = map.public_place(Location::Forest);
+        market
+            .list_at_quote(MarketParty::Caravan, imported, Good::BreadRoll, 1, 4.0)
+            .unwrap();
+        market
+            .list_at_quote(seller, local, Good::BreadRoll, 1, 5.0)
+            .unwrap();
+        assert_eq!(
+            market.lowest_purchase_quote(buyer.into(), Good::BreadRoll, &map),
+            Some(5.0)
+        );
+        assert_eq!(
+            market
+                .next_purchase_stop(
+                    buyer.into(),
+                    &map,
+                    Position::default(),
+                    ShoppingList::single(Good::BreadRoll, 1),
+                    Some(10)
+                )
+                .unwrap()
+                .0,
+            local
+        );
+    }
+
+    #[test]
+    fn negative_quarter_import_and_export_preserve_share_of_payment_and_conservation() {
+        let buyer = AgentId(uuid::Uuid::new_v4());
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let mut market = Market::default();
+        let mut policy = market.caravan_policy();
+        policy.import_tariff_basis_points = -2_500;
+        policy.export_tariff_basis_points = -2_500;
+        market.set_caravan_policy(policy).unwrap();
+        market.set_treasury_budget(40);
+        market
+            .list_at_quote(MarketParty::Caravan, PLACE, Good::BreadRoll, 1, 80.0)
+            .unwrap();
+        let purchase = market
+            .purchase(buyer, PLACE, (Good::BreadRoll, 1), 100, 0, true)
+            .unwrap();
+        assert_eq!(purchase.coins, 80);
+        assert_eq!(market.trades().back().unwrap().recipient_coins, 100);
+        // Bulk stock permits an exact 100-coin settlement at an eligible per-kilogram quote.
+        market
+            .list_at_quote(seller, PLACE, Good::Flour, 200_000, 1.0)
+            .unwrap();
+        assert!(market.effective_export_threshold(Good::Flour).unwrap() > 1.0);
+        let payments = market.caravans(PLACE, 0).unwrap();
+        assert_eq!(payments, vec![(seller, 100)]);
+        let export = market.trades().back().unwrap();
+        assert_eq!(
+            (export.coins, export.tariff_coins, export.recipient_coins),
+            (80, -20, 100)
+        );
+        assert_eq!(market.treasury_budget.0, 0);
+        assert_eq!(80 + 80 + 40, 100 + 100);
+    }
+
+    #[test]
+    fn exports_partially_fill_using_one_treasury_across_goods_and_tax_settlement() {
+        let mut market = Market::default();
+        let seller = AgentId(uuid::Uuid::new_v4());
+        let mut policy = market.caravan_policy();
+        policy.export_tariff_basis_points = -2500;
+        market.set_caravan_policy(policy).unwrap();
+        market.set_treasury_budget(6);
+        for good in [Good::BreadRoll, Good::BerryPie] {
+            market.list_at_quote(seller, PLACE, good, 40, 1.0).unwrap();
+        }
+        let payments = market.caravans(PLACE, 0).unwrap();
+        assert_eq!(payments.iter().map(|(_, coins)| *coins).sum::<Coins>(), 33);
+        assert_eq!(market.treasury_budget.0, 0);
+        let trades: Vec<_> = market.trades().iter().cloned().collect();
+        assert_eq!(trades.iter().map(|t| t.tariff_coins).sum::<Coins>(), -6);
+        assert_eq!(trades.iter().map(|t| t.coins).sum::<Coins>(), 27);
+        assert_eq!(trades.iter().map(|t| t.units).sum::<Quantity>(), 33);
+        let mut town = crate::Universe::default();
+        town.town_treasury = 6;
+        town.tax_sales(&trades, 0).unwrap();
+        assert_eq!(town.town_treasury, 0);
+        assert_eq!(27 + 6, payments[0].1);
+        market.caravans(PLACE, DAY_MS).unwrap();
+        assert_eq!(market.treasury_budget.0, 0);
+        assert!(
+            market
+                .trades()
+                .iter()
+                .skip(trades.len())
+                .all(|trade| trade.tariff_coins == 0)
+        );
+    }
+
+    #[test]
+    fn signed_carry_survives_rate_changes_and_fragmented_subsidies() {
+        let mut carry = 0;
+        assert_eq!(tariff_share(1, -3333, &mut carry).unwrap(), 0);
+        assert_eq!(carry, -3333);
+        assert_eq!(tariff_share(1, 3333, &mut carry).unwrap(), 0);
+        assert_eq!(carry, 0);
+        let fragmented: Coins = (0..100)
+            .map(|_| tariff_share(1, -3333, &mut carry).unwrap())
+            .sum();
+        let mut whole_carry = 0;
+        assert_eq!(
+            fragmented,
+            tariff_share(100, -3333, &mut whole_carry).unwrap()
+        );
+        assert_eq!(carry, whole_carry);
+        assert_eq!(fragmented, -33);
+    }
+
+    #[test]
+    fn old_good_policy_defaults_to_imports_enabled_and_zero_rates() {
+        let old: ExportPolicy = ron::from_str("(allowed:false,minimum_reserve:123)").unwrap();
+        assert!(!old.allowed);
+        assert!(old.imports_allowed);
+        assert_eq!(old.import_tariff_basis_points, 0);
+        assert_eq!(old.export_tariff_basis_points, 0);
+    }
+
+    #[test]
     fn tariffs_preserve_asking_receipts_and_carry_by_good_and_direction() {
         let seller = AgentId(uuid::Uuid::from_u128(1));
         let buyer = AgentId(uuid::Uuid::from_u128(2));
@@ -3148,6 +3577,94 @@ mod tests {
         let trade = market.trades().back().unwrap();
         assert_eq!((trade.tariff_coins, trade.recipient_coins), (1, 1));
         assert_eq!(market.export_tariff_carry[Good::Flour as usize], 9998);
+    }
+
+    #[test]
+    fn export_subsidy_payments_are_minimal_and_invariant_under_fragmentation() {
+        for rate in [-25_000, -10_000, -3333, -2500, -1] {
+            for initial_carry in [-9999, -1, 0, 1, 9998] {
+                let mut carry = initial_carry;
+                let mut charged = 0;
+                let mut received = 0;
+                for asking in 1..=40 {
+                    let whole = export_payment(asking, 0, 0, rate, initial_carry).unwrap();
+                    let brute = (0..=asking)
+                        .find(|&coins| {
+                            let mut trial = initial_carry;
+                            coins - tariff_share(coins, rate, &mut trial).unwrap() >= asking
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        whole, brute,
+                        "rate={rate}, carry={initial_carry}, ask={asking}"
+                    );
+                    let coins = export_payment(asking, charged, received, rate, carry).unwrap();
+                    let tariff = tariff_share(coins, rate, &mut carry).unwrap();
+                    charged += coins;
+                    received += coins - tariff;
+                    let mut whole_carry = initial_carry;
+                    let whole_tariff = tariff_share(whole, rate, &mut whole_carry).unwrap();
+                    assert_eq!(
+                        (charged, received, carry),
+                        (whole, whole - whole_tariff, whole_carry)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn export_subsidies_cover_asking_after_positive_carry_with_partial_treasury() {
+        let seller = AgentId(uuid::Uuid::from_u128(1));
+        let mut base = Market::default();
+        base.prices = base.prices.with_price(Good::Flour, 2.0).unwrap();
+        let mut policy = base.caravan_policy();
+        policy.export_tariff_basis_points = 3333;
+        base.set_caravan_policy(policy).unwrap();
+        for _ in 0..3 {
+            base.list_reference(seller, PLACE, Good::Flour, 1).unwrap();
+            base.caravans(PLACE, 0).unwrap();
+        }
+        assert_eq!(base.export_tariff_carry[Good::Flour as usize], 9998);
+        policy.export_tariff_basis_points = -2500;
+        base.set_caravan_policy(policy).unwrap();
+        base.trades.clear();
+        base.period_activity = [GoodActivity::default(); Good::COUNT];
+        for (stock, budget) in [(10_000, 10), (40_000, 0), (40_000, 1), (40_000, 3)] {
+            let mut whole = base.clone();
+            whole.set_treasury_budget(budget);
+            let mut fragmented = whole.clone();
+            whole
+                .list_at_quote(seller, PLACE, Good::Flour, stock, 1.0)
+                .unwrap();
+            for _ in 0..stock / 1000 {
+                fragmented
+                    .list_at_quote(seller, PLACE, Good::Flour, 1000, 1.0)
+                    .unwrap();
+            }
+            let payments = whole.caravans(PLACE, 0).unwrap();
+            assert_eq!(payments, fragmented.caravans(PLACE, 0).unwrap());
+            assert_eq!(
+                whole.current_period().goods,
+                fragmented.current_period().goods
+            );
+            assert_eq!(whole.export_tariff_carry, fragmented.export_tariff_carry);
+            assert_eq!(whole.treasury_budget.0, fragmented.treasury_budget.0);
+            let trade = whole.trades().back().unwrap();
+            assert!(trade.recipient_coins >= charge(trade.units as f64 / 1000.0).unwrap());
+            assert_eq!(trade.coins, trade.recipient_coins + trade.tariff_coins);
+            assert_eq!(budget + trade.tariff_coins, whole.treasury_budget.0);
+            assert!(whole.treasury_budget.0 >= 0);
+            if stock == 10_000 {
+                assert_eq!(
+                    (trade.units, trade.coins, trade.recipient_coins),
+                    (5000, 5, 5)
+                );
+            } else if budget < 3 {
+                assert!(trade.units < stock / 2);
+                assert_eq!(whole.treasury_budget.0, 0);
+            }
+        }
     }
 
     #[test]
