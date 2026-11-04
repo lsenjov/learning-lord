@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 19;
+pub const SAVE_VERSION: u32 = 20;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -281,6 +281,9 @@ impl Universe {
             if *id != household.id
                 || self.agents.contains_key(id)
                 || self.guilds.contains_key(id)
+                || household
+                    .below_zero_since_ms
+                    .is_some_and(|time| time > self.current_time_ms)
                 || household.coins < 0
                 || household.members.is_empty()
                 || household.home.is_some_and(|home| {

@@ -118,7 +118,10 @@ impl Universe {
         before: &HashMap<AgentId, CitizenHistory>,
     ) -> Result<(), SimulationError> {
         for (id, old) in before {
-            let AgentKind::Citizen(citizen) = &self.agents[id].kind;
+            let Some(agent) = self.agents.get(id) else {
+                continue;
+            };
+            let AgentKind::Citizen(citizen) = &agent.kind;
             let Some(household) = citizen.household_id() else {
                 continue;
             };

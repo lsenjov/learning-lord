@@ -28,6 +28,26 @@ impl PlanningRuntime {
         self.histories.clear();
     }
 
+    pub(crate) fn retain_agents(&mut self, world: &crate::Universe) {
+        let removed: Vec<_> = self
+            .pending
+            .keys()
+            .filter(|id| !world.agents().contains_key(*id))
+            .copied()
+            .collect();
+        for id in removed {
+            self.cancel(id);
+        }
+        self.samples
+            .retain(|(id, ..)| world.agents().contains_key(id));
+    }
+
+    pub(crate) fn commit_departures(&mut self, world: &crate::Universe) {
+        self.retain_agents(world);
+        self.histories
+            .retain(|id, _| world.agents().contains_key(id));
+    }
+
     pub fn synchronize(&mut self, world: &crate::Universe) {
         self.abort_advance();
         self.histories
@@ -596,6 +616,33 @@ mod tests {
         );
         assert_eq!(runtime.history(id), Some(&saved));
         runtime.reset();
+        assert!(runtime.history(id).is_none());
+    }
+
+    #[test]
+    fn departure_prunes_pending_work_without_changing_published_telemetry_until_commit() {
+        let source = executing_fixture(
+            &Citizen::with_needs(-50.0, 100.0).unwrap(),
+            vec![CitizenAction::Sleep],
+        )
+        .advance(SLEEP_DURATION_MS - LEAD_MS)
+        .unwrap();
+        let (world, id) = universe(source.clone());
+        let mut runtime = PlanningRuntime::default();
+        runtime.samples.push((id, 0, 12.0, 3.0, 1));
+        runtime.finish_advance(&world, 0);
+        let saved = runtime.history(id).unwrap().clone();
+        runtime.planning_event(&source, 0).unwrap();
+        assert_eq!(runtime.pending.len(), 1);
+        let departed = world
+            .remove_household(world.economic_id(id).unwrap())
+            .unwrap();
+        runtime.retain_agents(&departed);
+        assert!(runtime.pending.is_empty());
+        runtime.abort_advance();
+        assert_eq!(runtime.history(id), Some(&saved));
+        runtime.finish_advance(&world, 0);
+        runtime.commit_departures(&departed);
         assert!(runtime.history(id).is_none());
     }
 

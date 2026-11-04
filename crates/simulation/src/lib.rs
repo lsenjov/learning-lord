@@ -2619,6 +2619,7 @@ impl Universe {
                     name: household_name,
                     home: citizen.home,
                     members: vec![id],
+                    below_zero_since_ms: None,
                     coins: starting_coins,
                     maintenance: maintenance::MaintenanceState::default(),
                 },
@@ -2843,6 +2844,7 @@ impl Universe {
         let result = self.advance_internal(elapsed_ms, Some(&mut *runtime), &mut should_cancel);
         if let Ok(Some(universe)) = &result {
             runtime.finish_advance(self, universe.current_time_ms());
+            runtime.commit_departures(universe);
         }
         if !matches!(result, Ok(Some(_))) {
             runtime.abort_advance();
@@ -3281,7 +3283,10 @@ impl Universe {
                 universe.refresh_workplace_supplies()?;
             }
             for id in ids {
-                let AgentKind::Citizen(citizen) = &universe.agents[&id].kind;
+                let Some(agent) = universe.agents.get(&id) else {
+                    continue;
+                };
+                let AgentKind::Citizen(citizen) = &agent.kind;
                 if citizen.active_action.is_none() {
                     universe.refresh_construction_context()?;
                 }
@@ -3302,11 +3307,12 @@ impl Universe {
                 if universe.start_construction_action(id)? {
                     if let Some(runtime) = runtime.as_deref_mut() {
                         runtime.cancel(id);
+                        runtime.retain_agents(&universe);
                     }
                     universe.refresh_market();
                     continue;
                 }
-                let AgentKind::Citizen(citizen) = &mut universe.agents.get_mut(&id).unwrap().kind;
+                let AgentKind::Citizen(mut citizen) = universe.agents[&id].kind.clone();
                 citizen.market = universe.market.clone();
                 citizen.market.set_time(universe.current_time_ms);
                 citizen.storage = universe.storage.clone();
@@ -3318,11 +3324,19 @@ impl Universe {
                     && let Some(mut execution) = citizen.active_plan.take()
                 {
                     execution.finish_action();
-                    *citizen = if let Some(runtime) = runtime.as_deref_mut() {
-                        let resumed = execution.resume_committed(citizen.clone())?;
-                        if resumed.active_action().is_none() {
+                    citizen = execution.resume_committed(citizen)?;
+                    if citizen.active_action().is_none() {
+                        universe.agents.get_mut(&id).unwrap().kind =
+                            AgentKind::Citizen(citizen.clone());
+                        if universe.sample_household_departure(id)? {
+                            if let Some(runtime) = runtime.as_deref_mut() {
+                                runtime.retain_agents(&universe);
+                            }
+                            continue;
+                        }
+                        citizen = if let Some(runtime) = runtime.as_deref_mut() {
                             let Some(started) = runtime.at_boundary(
-                                &resumed,
+                                &citizen,
                                 &mut execution,
                                 finishing_time,
                                 should_cancel,
@@ -3332,18 +3346,17 @@ impl Universe {
                             };
                             started
                         } else {
-                            resumed
-                        }
-                    } else {
-                        execution.resume(citizen.clone())?
-                    };
+                            execution.resume(citizen)?
+                        };
+                    }
                     citizen.active_plan = Some(execution);
                     universe
                         .citizen_histories
                         .get_mut(&id)
                         .unwrap()
-                        .start_action(citizen)?;
+                        .start_action(&citizen)?;
                 }
+                universe.agents.get_mut(&id).unwrap().kind = AgentKind::Citizen(citizen);
                 let AgentKind::Citizen(before) = &agents_before[&id].kind;
                 let AgentKind::Citizen(after) = &universe.agents[&id].kind;
                 universe.market = after.market.clone();
@@ -3519,6 +3532,10 @@ impl Universe {
             self.refresh_market();
             let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&id).unwrap().kind;
             citizen.abandon_action()?;
+            if self.sample_household_departure(id)? {
+                return Ok(());
+            }
+            let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&id).unwrap().kind;
             *citizen = citizen.start_planning()?;
             self.claim_maintenance(id)?;
         }
@@ -3670,6 +3687,17 @@ impl Universe {
 
     pub fn start_planning(&self, id: AgentId) -> Result<Self, SimulationError> {
         let mut prepared = self.clone();
+        let AgentKind::Citizen(citizen) = &prepared
+            .agents
+            .get(&id)
+            .ok_or(SimulationError::AgentNotFound)?
+            .kind;
+        if citizen.active_action().is_some() || citizen.active_plan().is_some() {
+            return Err(SimulationError::CitizenBusy);
+        }
+        if prepared.sample_household_departure(id)? {
+            return Ok(prepared);
+        }
         prepared.refresh_construction_context()?;
         prepared.refresh_workplace_supplies()?;
         let mut agent = prepared
@@ -3680,7 +3708,7 @@ impl Universe {
         let AgentKind::Citizen(citizen) = &mut agent.kind;
         citizen.refresh_production_targets(true)?;
         let updated = agent.start_planning()?;
-        let mut universe = self.clone();
+        let mut universe = prepared;
         let histories_before = universe.citizen_histories.clone();
         let AgentKind::Citizen(citizen) = &updated.kind;
         universe

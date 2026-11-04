@@ -1823,6 +1823,9 @@ impl Universe {
                 && citizen.active_plan.is_none()
                 && self.construction.released_carpenters.contains(&worker)
             {
+                if self.sample_household_departure(worker)? {
+                    return Ok(true);
+                }
                 let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&worker).unwrap().kind;
                 *citizen = citizen.start_planning()?;
                 self.citizen_histories
@@ -1868,6 +1871,9 @@ impl Universe {
                 .and_then(|plan| plan.plan().goals().first())
                 .is_some_and(|goal| goal.goal != Effect::Production && goal.goal != Effect::Wait)
             {
+                if self.sample_household_departure(worker)? {
+                    return Ok(true);
+                }
                 let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&worker).unwrap().kind;
                 *citizen = candidate;
                 self.citizen_histories
@@ -3440,7 +3446,18 @@ mod tests {
             import_tariff_basis_points: 10_000,
             ..world.caravan_policy()
         };
-        let world = world.with_caravan_policy(policy).unwrap();
+        let mut world = world.with_caravan_policy(policy).unwrap();
+        let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
+        let home = citizen.home.unwrap();
+        let owner = citizen.goods_owner();
+        // Keep the carpenter resident while the missing construction wood tests the deadline.
+        for (good, units) in [
+            (Good::BreadRoll, 1_000_000),
+            (Good::Water, 1_000_000),
+            (Good::FlaxGarment, 100),
+        ] {
+            world = world.with_stored_good(home, owner, good, units).unwrap();
+        }
         let project = world.construction.contracts[&id].project;
         let world = award(world, worker);
         let mut world = world.advance(DEADLINE_MS + BIDDING_MS + HOUR_MS).unwrap();
@@ -4251,6 +4268,46 @@ mod tests {
             removed,
             Universe::from_save_str(&removed.to_save_string().unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn construction_planning_samples_departure_and_recovery() {
+        for released in [false, true] {
+            for recovered in [false, true] {
+                let (world, _, worker, _) = fixture(ConstructionItem::Room(RoomSize::Small), 6_000);
+                let mut world = award(world, worker);
+                if released {
+                    world.construction.contracts.clear();
+                    world.construction.released_carpenters.insert(worker);
+                }
+                world.cancel_maintenance(worker).unwrap();
+                let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&worker).unwrap().kind;
+                citizen.abandon_action().unwrap();
+                citizen.active_plan = None;
+                citizen.hunger = -50.0;
+                citizen.thirst = -50.0;
+                citizen.tiredness = 1.0;
+                citizen.garment_condition = Some(1.0);
+                citizen.discomfort = if recovered { 0.0 } else { 100.0 };
+                assert_eq!(citizen.personal_wellbeing().unwrap() >= 0.0, recovered);
+                let household = world.economic_id(worker).unwrap();
+                world
+                    .households
+                    .get_mut(&household)
+                    .unwrap()
+                    .below_zero_since_ms = Some(0);
+                assert!(world.current_time_ms >= DAY_MS);
+                assert!(world.start_construction_action(worker).unwrap());
+                if recovered {
+                    assert_eq!(world.households[&household].below_zero_since_ms, None);
+                    let AgentKind::Citizen(citizen) = &world.agents[&worker].kind;
+                    assert!(citizen.active_plan.is_some());
+                } else {
+                    assert!(!world.agents.contains_key(&worker));
+                    assert!(!world.households.contains_key(&household));
+                }
+            }
+        }
     }
 
     #[test]
