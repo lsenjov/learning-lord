@@ -11,6 +11,7 @@ pub mod condition;
 pub mod construction;
 pub mod construction_finance;
 pub mod departure;
+mod property_grants;
 pub mod storage;
 pub mod taxation;
 use storage::{GoodsOwner, StockKey, Storage};
@@ -3729,6 +3730,7 @@ impl Universe {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulationError {
+    PropertyGrantRejected(&'static str),
     InvalidInventory,
     InvalidTaxRate,
     InvalidTaxRule,
@@ -3769,6 +3771,7 @@ pub enum SimulationError {
 impl fmt::Display for SimulationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::PropertyGrantRejected(reason) => reason,
             Self::InvalidTaxRate => "tax rates must be between zero and 100 percent",
             Self::InvalidTaxRule => {
                 "tax rules require private locations, valid payers and combined socage at most 100 percent"

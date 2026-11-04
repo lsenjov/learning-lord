@@ -40,6 +40,10 @@ pub enum Command {
 
 #[derive(Clone)]
 pub enum Mutation {
+    GrantProperty {
+        place: learning_lord_simulation::locations::PlaceId,
+        household: learning_lord_simulation::AgentId,
+    },
     RemoveCitizen(learning_lord_simulation::AgentId),
     RemoveHousehold(learning_lord_simulation::AgentId),
     AddCitizen {
@@ -91,6 +95,7 @@ pub enum Mutation {
 impl Mutation {
     fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
         match self {
+            Self::GrantProperty { place, household } => universe.grant_property(place, household),
             Self::RemoveCitizen(id) => universe.remove_citizen(id),
             Self::RemoveHousehold(id) => universe.remove_household(id),
             Self::AddCitizen {
@@ -842,6 +847,83 @@ mod tests {
             mutation_revision: 0,
             generation: 0,
         }
+    }
+
+    #[test]
+    fn property_grant_worker_refreshes_busy_world_and_rejects_stale_commands() {
+        let (world, old) = Universe::default()
+            .with_citizen(
+                "Old",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
+            .unwrap();
+        let account = world.economic_id(old).unwrap();
+        let site = world.households()[&account].home.unwrap();
+        let world = world.remove_household(account).unwrap();
+        let (world, member) = world
+            .with_citizen("New", Citizen::new(0.0).unwrap().with_coins(100).unwrap())
+            .unwrap();
+        let household = world.economic_id(member).unwrap();
+        let mut state = worker_state(world.start_planning(member).unwrap());
+        state.advance(1000);
+        let before = state.universe.clone();
+        state.apply(
+            Command::Mutate {
+                generation: 1,
+                mutation: Mutation::GrantProperty {
+                    place: site,
+                    household,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(state.universe, before);
+        assert_eq!(state.mutation_revision, 0);
+        let (commands, receiver) = mpsc::channel();
+        commands
+            .send(TimedCommand {
+                command: Command::Mutate {
+                    generation: 0,
+                    mutation: Mutation::GrantProperty {
+                        place: site,
+                        household,
+                    },
+                },
+                at: Instant::now(),
+            })
+            .unwrap();
+        let mut deferred = VecDeque::new();
+        assert!(
+            !state.advance_interruptibly(STEP_MS, || poll_cancellation(&receiver, &mut deferred))
+        );
+        assert_eq!(state.universe, before);
+        let command = deferred.pop_front().unwrap();
+        state.apply(command.command, Duration::ZERO);
+        assert!(state.mutation_error.is_none(), "{:?}", state.mutation_error);
+        assert_eq!(state.universe.households()[&household].home, Some(site));
+        assert_eq!(state.universe.households()[&household].coins, 100);
+        assert_eq!(
+            Universe::from_save_str(&state.universe.to_save_string().unwrap()).unwrap(),
+            state.universe
+        );
+        let learning_lord_simulation::AgentKind::Citizen(citizen) =
+            &state.universe.agents()[&member].kind;
+        assert!(citizen.active_plan().is_some());
+        state.advance(1000);
+        assert!(state.error.is_none(), "{:?}", state.error);
+        let before = state.universe.clone();
+        state.apply(
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::GrantProperty {
+                    place: site,
+                    household,
+                },
+            },
+            Duration::ZERO,
+        );
+        assert!(state.mutation_error.is_some());
+        assert_eq!(state.universe, before);
     }
 
     #[test]

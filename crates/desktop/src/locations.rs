@@ -115,6 +115,7 @@ pub struct State {
     field: Option<Field>,
     replace_on_input: bool,
     citizen: Option<AgentId>,
+    grant_household: Option<AgentId>,
     good: Option<Good>,
     quantity: String,
     awaiting_mutation: Option<(u64, bool)>,
@@ -261,6 +262,8 @@ pub(crate) enum ScrollPanel {
 
 #[derive(Component, Clone, Copy)]
 pub(crate) enum Choice {
+    GrantHousehold,
+    Grant,
     Place(PlaceId),
     IndividualPlaces,
     LocationTypes,
@@ -287,22 +290,31 @@ fn button(
     choice: Choice,
     selected: bool,
 ) {
-    parent
-        .spawn((
-            Button,
-            choice,
-            BackgroundColor(if selected { SELECTED } else { PANEL }),
-            Node {
-                padding: UiRect::axes(px(10), px(7)),
-                min_height: px(32),
-                border_radius: BorderRadius::all(px(7)),
-                flex_shrink: 0.0,
-                ..default()
-            },
-        ))
-        .with_children(|parent| {
-            parent.spawn(text(label, 14.0, TEXT));
-        });
+    let mut entity = parent.spawn((
+        Button,
+        choice,
+        BackgroundColor(if selected { SELECTED } else { PANEL }),
+        Node {
+            padding: UiRect::axes(px(10), px(7)),
+            min_height: px(32),
+            border_radius: BorderRadius::all(px(7)),
+            flex_shrink: 0.0,
+            ..default()
+        },
+    ));
+    let tooltip = match choice {
+        Choice::GrantHousehold => Some("Cycle live households with no owned land or buildings."),
+        Choice::Grant => Some(
+            "Grant this town property for free. Existing beds are assigned without construction. Town goods stay town-owned; foreign assets, unfinished construction and busy equipment prevent grants.",
+        ),
+        _ => None,
+    };
+    if let Some(tooltip) = tooltip {
+        entity.insert(crate::tooltip::Tooltip(tooltip.into()));
+    }
+    entity.with_children(|parent| {
+        parent.spawn(text(label, 14.0, TEXT));
+    });
 }
 
 fn row(parent: &mut ChildSpawnerCommands, children: impl FnOnce(&mut ChildSpawnerCommands)) {
@@ -899,10 +911,16 @@ pub fn refresh(
                 }
                 if state.location_type.is_none() && let Some(place) = place {
                 details.spawn(text(&place.name, 23.0, TEXT));
-                let owner = if place.kind.is_town_owned() { crate::navigation::Fragment::text("Town") } else { place.owner.map_or_else(|| crate::navigation::Fragment::text("Public"), |id| crate::navigation::account(universe, id)) };
+                let owner = if !place.kind.is_public() && place.owner.is_none() { crate::navigation::Fragment::text("Town") } else { place.owner.map_or_else(|| crate::navigation::Fragment::text("Public"), |id| crate::navigation::account(universe, id)) };
                 crate::navigation::render(details, &[crate::navigation::Fragment::text("Owner: "), owner], 15.0, MUTED);
                 let default_construction = crate::construction::State::default();
                 let construction = construction.as_deref().unwrap_or(&default_construction);
+                if place.owner.is_none() && !place.kind.is_public() && !place.kind.is_town_owned() {
+                    row(details, |row| {
+                        button(row, format!("Household: {}", state.grant_household.and_then(|id| universe.households().get(&id)).map_or("Select", |household| household.name.as_str())), Choice::GrantHousehold, false);
+                        button(row, "Grant free", Choice::Grant, false);
+                    });
+                }
                 render_hierarchy(details, universe, place, construction);
                 crate::construction::render_error(details, construction);
                 details.spawn(text("LOCAL TRANSFERS", 15.0, MUTED));
@@ -1201,6 +1219,37 @@ pub fn handle(
             state.field = None;
         }
         let mutation = match *choice {
+            Choice::GrantHousehold => {
+                let mut households: Vec<_> = universe
+                    .households()
+                    .values()
+                    .filter(|household| {
+                        !universe.map().places().values().any(|site| {
+                            site.owner == Some(household.id)
+                                || site
+                                    .buildings
+                                    .iter()
+                                    .any(|building| building.owner == Some(household.id))
+                        })
+                    })
+                    .collect();
+                households.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
+                let next = state
+                    .grant_household
+                    .and_then(|id| households.iter().position(|household| household.id == id))
+                    .map_or(0, |index| index + 1);
+                state.grant_household = households
+                    .get(next % households.len().max(1))
+                    .map(|household| household.id);
+                None
+            }
+            Choice::Grant => match state.place.zip(state.grant_household) {
+                Some((place, household)) => Some(Mutation::GrantProperty { place, household }),
+                None => {
+                    state.error = Some("Select a propertyless household.".into());
+                    None
+                }
+            },
             Choice::Place(place) => {
                 if let Some(windows) = windows.as_mut() {
                     windows.open(crate::floating_ui::WindowKind::Locations);
@@ -1958,6 +2007,68 @@ mod tests {
         let entity = app.world_mut().spawn((choice, Interaction::Pressed)).id();
         app.update();
         app.world_mut().despawn(entity);
+    }
+
+    #[test]
+    fn property_grant_controls_select_propertyless_household_and_send_normal_worker_mutation() {
+        let (world, old) = Universe::default()
+            .with_citizen(
+                "Old",
+                learning_lord_simulation::Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap(),
+            )
+            .unwrap();
+        let account = world.economic_id(old).unwrap();
+        let site = world.households()[&account].home.unwrap();
+        let world = world.remove_household(account).unwrap();
+        let (world, member) = world
+            .with_citizen("New", learning_lord_simulation::Citizen::new(0.0).unwrap())
+            .unwrap();
+        let household = world.economic_id(member).unwrap();
+        let mut app = ui_app(
+            world,
+            State {
+                place: Some(site),
+                ..default()
+            },
+        );
+        press(&mut app, Choice::Grant);
+        assert!(
+            app.world()
+                .resource::<State>()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Select")
+        );
+        press(&mut app, Choice::GrantHousehold);
+        assert_eq!(
+            app.world().resource::<State>().grant_household,
+            Some(household)
+        );
+        press(&mut app, Choice::Grant);
+        assert!(app.world().resource::<State>().pending());
+        let worker = app.world().resource::<SimulationWorker>();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let snapshot = worker.snapshot();
+            if snapshot.mutation_revision > 0 {
+                assert!(
+                    snapshot.mutation_error.is_none(),
+                    "{:?}",
+                    snapshot.mutation_error
+                );
+                assert_eq!(
+                    snapshot.universe.map().place(site).unwrap().owner,
+                    Some(household)
+                );
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
     }
 
     #[test]
