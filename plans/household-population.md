@@ -2,7 +2,7 @@
 
 ## Scope
 
-Units 1-4 are complete and inspected by the user. Implement unit 5 next as two reviewed commits (5a and 5b), then hand back. Each unit receives an independent code review, resolution of valid high/medium findings followed by fresh review, appropriate validation, and its own commit. Fix low documentation findings; report other low findings. Keep the UI compact and put explanatory text in tooltips.
+Units 1-5 are complete. Implement unit 6a, free grants of existing town property to a selected propertyless household, then hand back. Each unit receives an independent code review, resolution of valid high/medium findings followed by fresh review, appropriate validation, and its own commit. Fix low documentation findings; report other low findings. Keep the UI compact and put explanatory text in tooltips.
 
 Old saves may be invalidated. Do not add compatibility migration. Stop for discussion if an unexpected complication materially changes behavior or architecture, or a small specification change would significantly simplify implementation.
 
@@ -18,13 +18,15 @@ Old saves may be invalidated. Do not add compatibility migration. Stop for discu
    - Departure accounting policy approved by user: settle accrued taxes and guild fees from available household funds before taking remaining coins. Record unpaid balances as losses in the relevant history and write them off, closing the accounts; do not add archived collectible debt or a future debt-recovery system. Preserve town/creditor-owned goods. Empty guilds remain valid and retain their funds and property. Cancel affected construction using existing accounting rules, preserving completed work, earned payments and unused-fund refunds. For a single departing member, household debts remain with the surviving household and the equal coin share is drawn only from funds available after existing commitments.
 5b. **Automatic household departure.** At each member's actual planning start, sample average personal wellbeing across current household members. Below zero starts or continues one household timer; zero or above clears it. At the first below-zero planning sample at least 24 simulation hours after the start, remove the household using 5a cleanup. Timer state persists across saves. Speculative prediction must not trigger departure or mutate timers. Test sampling boundaries, recovery/zero, shared timer, reload and actual departure integration.
 
+6a. **Free town property grants.** Let the player select eligible existing town property and a live propertyless household, then grant the property for free through the simulation worker. Transfer the site and town-owned buildings/built objects, preserving condition and furnishings. Receiving members can use existing accommodation and suitable workplace equipment. Assign existing usable unassigned beds without building rooms, beds or tools; members without beds remain supported by the existing bedless behavior. Land/workplace ownership alone does not imply a home. Public infrastructure and guild/private-owned assets are not grantable. Do not transfer stored goods belonging to the town or other accounts implicitly. Preserve histories, taxes, active work, construction and save validity; invalidate stale plans/refresh snapshots appropriately. Compact normal town-management UI, not dev-only. Test the departure-to-town-to-new-household cycle, eligibility, ownership, usable sleep/work, bed shortages, live worker mutation and save/load. Sale listings and autonomous buying remain deferred.
+
 ## Validation
 
 Use focused behavioral tests for each simulation change, formatting and relevant compilation checks, and broader existing tests where cross-cutting ownership or building changes warrant them. Check persistence round trips and rejection of old saves. Test new-world household/ownership invariants and mixed-use sleep/work access. Test homeless and bedless citizens, carried food/drink and replenishment, discomfort rates/bounds/partition invariance, live dev creation, and save/load. Record commands and results below as work proceeds.
 
 ## Deferred units
 
-6. Town grants and property listings: free grants, fixed prices, current value, or percentage discount from current value.
+6b. Property sale listings: fixed prices, current value, or percentage discount from current value. Free grants are unit 6a above.
 7. Inns: paid beds and meals for resident citizens; no travellers. Basic homelessness support is brought forward into 4a.
 8. Town site creation and development: town chooses and pays for development before granting or listing property.
 9. Autonomous purchase and development: only propertyless households buy; compare land or developed buildings according to needs and development costs, then build to suit. Land ownership alone does not provide housing.
@@ -121,3 +123,5 @@ Use focused behavioral tests for each simulation change, formatting and relevant
   - Unit 5b review fix: released-carpenter replanning and accepted construction-needs plans now sample household wellbeing at their authoritative transitions. Discarded candidates remain speculative. The live advance branch prunes outstanding background requests for every removed member. Added a regression covering departure and recovery for both active and released carpenters; it passes. Full simulation unit-suite results are in /tmp/learning-lord-5b-final-lib.log pending final recording.
 
   - Final 5b validation: parent and independent reviewer confirmed all 511 simulation library tests pass (6 ignored). Reviewer also confirmed all 24 departure regressions, the desktop automatic departure regression, and diff checks pass. No outstanding review findings. Unit 5 is ready for user inspection; native graphical inspection has not been performed.
+
+- User authorized the recommended next step: unit 6a free grants of existing town property to selected propertyless households. Implementation pending; sale listings are not part of this step.
