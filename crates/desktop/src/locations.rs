@@ -262,6 +262,7 @@ pub(crate) enum ScrollPanel {
 
 #[derive(Component, Clone, Copy)]
 pub(crate) enum Choice {
+    GuestBed(PlaceId, learning_lord_simulation::locations::ObjectId, bool),
     GrantHousehold,
     Grant,
     Place(PlaceId),
@@ -303,6 +304,9 @@ fn button(
         },
     ));
     let tooltip = match choice {
+        Choice::GuestBed(..) => Some(
+            "Offer this existing unassigned bed to paying guests, or keep it private. Assigned resident beds and private supplies are never sold. Payment is upfront for an eight-hour sleep session, without refunds for interruptions. Closing a guest bed ends its booking.",
+        ),
         Choice::GrantHousehold => Some("Cycle live households with no owned land or buildings."),
         Choice::Grant => Some(
             "Grant this town property for free. Existing beds are assigned without construction. Town goods stay town-owned; foreign assets, unfinished construction and busy equipment prevent grants.",
@@ -617,6 +621,45 @@ fn object_row(
     (fragments, tooltip)
 }
 
+fn inn_bed_mutation(
+    universe: &Universe,
+    place: PlaceId,
+    bed: learning_lord_simulation::locations::ObjectId,
+    guest: bool,
+) -> Result<Mutation, learning_lord_simulation::SimulationError> {
+    let map = universe.map();
+    let site = map.place(place)?;
+    let household = site
+        .object_owner(bed)
+        .ok_or(learning_lord_simulation::SimulationError::MissingProperty)?;
+    let mut beds = universe
+        .inns()
+        .get(&place)
+        .map_or_else(Vec::new, |inn| inn.beds.clone());
+    beds.retain(|id| *id != bed);
+    if guest {
+        beds.push(bed);
+    }
+    Ok(Mutation::ConfigureInnBeds {
+        household,
+        place,
+        beds,
+    })
+}
+
+fn render_inn(parent: &mut ChildSpawnerCommands, universe: &Universe, place: &Place) {
+    if let Some(inn) = universe.inns().get(&place.id) {
+        let (paid, available) = inn.occupancy_since(universe.current_time_ms());
+        let occupancy = if available == 0 {
+            "-".into()
+        } else {
+            format!("{:.0}%", paid as f64 / available as f64 * 100.0)
+        };
+        parent.spawn((text(format!("Inn | {} coins / 8h | Occupancy {}", inn.payment().unwrap_or(0), occupancy), 14.0, TEXT), Interaction::None,
+            crate::tooltip::Tooltip("Initial price covers maintenance and innkeeper earnings at 70% occupancy. Each inn adjusts its own price daily using actual paid sleeping time over available guest-bed time in the last three days. Above 80% raises price 5%; below 60% lowers it 5%, down to maintenance cost. Reservations during travel are excluded. Payment is upfront for eight hours, with no refunds for interruptions. Beds close when unusable or without an innkeeper.".into())));
+    }
+}
+
 fn render_object(
     parent: &mut ChildSpawnerCommands,
     universe: &Universe,
@@ -659,7 +702,34 @@ fn render_object(
             crate::tooltip::Tooltip(tooltip),
         ))
         .with_children(|row| {
-            crate::navigation::render(row, &fragments, 14.0, TEXT);
+            if object.kind == (ObjectKind::Bed { resident: None })
+                && place
+                    .object_owner(object.id)
+                    .and_then(|id| universe.households().get(&id))
+                    .is_some_and(|household| {
+                        household.members.iter().any(|id| {
+                            let AgentKind::Citizen(citizen) = &universe.agents()[id].kind;
+                            citizen.starting_role()
+                                == Some(learning_lord_simulation::StartingRole::Innkeeper)
+                        })
+                    })
+            {
+                let guest = universe
+                    .inns()
+                    .get(&place.id)
+                    .is_some_and(|inn| inn.beds.contains(&object.id));
+                self::row(row, |header| {
+                    crate::navigation::render(header, &fragments, 14.0, TEXT);
+                    button(
+                        header,
+                        if guest { "Guest bed" } else { "Private bed" },
+                        Choice::GuestBed(place.id, object.id, !guest),
+                        guest,
+                    );
+                });
+            } else {
+                crate::navigation::render(row, &fragments, 14.0, TEXT);
+            }
             let contents = if object.kind.is_storage() {
                 object_storage_rows(universe, place.id, object.id)
             } else {
@@ -921,6 +991,7 @@ pub fn refresh(
                         button(row, "Grant free", Choice::Grant, false);
                     });
                 }
+                render_inn(details, universe, place);
                 render_hierarchy(details, universe, place, construction);
                 crate::construction::render_error(details, construction);
                 details.spawn(text("LOCAL TRANSFERS", 15.0, MUTED));
@@ -1219,6 +1290,11 @@ pub fn handle(
             state.field = None;
         }
         let mutation = match *choice {
+            Choice::GuestBed(place, bed, guest) => inn_bed_mutation(universe, place, bed, guest)
+                .map_err(|error| {
+                    state.error = Some(error.to_string());
+                })
+                .ok(),
             Choice::GrantHousehold => {
                 let mut households: Vec<_> = universe
                     .households()
@@ -2007,6 +2083,163 @@ mod tests {
         let entity = app.world_mut().spawn((choice, Interaction::Pressed)).id();
         app.update();
         app.world_mut().despawn(entity);
+    }
+
+    fn inn_fixture() -> (
+        Universe,
+        AgentId,
+        PlaceId,
+        learning_lord_simulation::locations::ObjectId,
+    ) {
+        use learning_lord_simulation::{Citizen, StartingRole};
+        let (world, old) = Universe::with_map(learning_lord_simulation::locations::Map::default())
+            .with_citizen(
+                "Old",
+                Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+            )
+            .unwrap();
+        let account = world.economic_id(old).unwrap();
+        let place = world.households()[&account].home.unwrap();
+        let (world, member) = world
+            .with_household_member(account, "Old member", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let world = world
+            .with_member_accommodation(member)
+            .unwrap()
+            .remove_household(account)
+            .unwrap();
+        let (world, host) = world
+            .with_citizen(
+                "Host",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_starting_role(StartingRole::Innkeeper),
+            )
+            .unwrap();
+        let household = world.economic_id(host).unwrap();
+        let world = world.grant_property(place, household).unwrap();
+        let bed = world
+            .map()
+            .place(place)
+            .unwrap()
+            .objects()
+            .find(|object| object.kind == ObjectKind::Bed { resident: None })
+            .unwrap()
+            .id;
+        (world, household, place, bed)
+    }
+
+    #[test]
+    fn normal_guest_bed_controls_mutate_worker_persist_and_reject_stale_generations() {
+        let (world, household, place, bed) = inn_fixture();
+        let mut app = ui_app(
+            world.clone(),
+            State {
+                place: Some(place),
+                ..default()
+            },
+        );
+        app.world_mut().resource_mut::<State>().awaiting_mutation = Some((0, false));
+        press(&mut app, Choice::GuestBed(place, bed, true));
+        assert!(app.world().resource::<State>().pending());
+        assert_eq!(
+            app.world()
+                .resource::<SimulationWorker>()
+                .snapshot()
+                .mutation_revision,
+            0
+        );
+        app.world_mut().resource_mut::<State>().awaiting_mutation = None;
+        press(&mut app, Choice::GuestBed(place, bed, true));
+        assert!(app.world().resource::<State>().pending());
+        press(&mut app, Choice::GuestBed(place, bed, false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let snapshot = loop {
+            let snapshot = app.world().resource::<SimulationWorker>().snapshot();
+            if snapshot.mutation_revision > 0 {
+                break snapshot;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        assert!(
+            snapshot.mutation_error.is_none(),
+            "{:?}",
+            snapshot.mutation_error
+        );
+        assert_eq!(snapshot.universe.inns()[&place].beds, vec![bed]);
+        assert_eq!(snapshot.universe.inns()[&place].household, household);
+        let loaded = Universe::from_save_str(&snapshot.universe.to_save_string().unwrap()).unwrap();
+        assert_eq!(loaded, snapshot.universe);
+        let private = inn_bed_mutation(&loaded, place, bed, false).unwrap();
+        let Mutation::ConfigureInnBeds { beds, .. } = private else {
+            panic!("wrong mutation");
+        };
+        assert!(
+            loaded
+                .configure_inn_beds(household, place, beds)
+                .unwrap()
+                .inns()[&place]
+                .beds
+                .is_empty()
+        );
+        app.world_mut().resource_mut::<DisplaySnapshot>().0 = snapshot;
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        press(&mut app, Choice::GuestBed(place, bed, false));
+        assert!(!app.world().resource::<State>().pending());
+    }
+
+    #[test]
+    fn inn_controls_are_in_normal_object_rows_and_show_price_occupancy_tooltips() {
+        let (world, household, place, bed) = inn_fixture();
+        let world = world
+            .configure_inn_beds(household, place, vec![bed])
+            .unwrap();
+        let mut app = App::new();
+        app.add_systems(Startup, move |mut commands: Commands| {
+            let map = world.map();
+            let site = map.place(place).unwrap();
+            commands.spawn(Node::default()).with_children(|parent| {
+                render_inn(parent, &world, site);
+                for object in site.objects() {
+                    render_object(parent, &world, site, object);
+                }
+            });
+        });
+        app.update();
+        let labels: Vec<_> = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.clone())
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|text| text.contains("coins / 8h | Occupancy"))
+        );
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|text| text.as_str() == "Guest bed")
+                .count(),
+            1
+        );
+        let tooltips: Vec<_> = app
+            .world_mut()
+            .query::<&crate::tooltip::Tooltip>()
+            .iter(app.world())
+            .map(|tooltip| tooltip.0.clone())
+            .collect();
+        assert!(tooltips.iter().any(|text| text.contains("no refunds")));
+        assert!(
+            tooltips
+                .iter()
+                .any(|text| text.contains("Assigned resident beds"))
+        );
     }
 
     #[test]

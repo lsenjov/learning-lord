@@ -73,7 +73,7 @@ impl Inn {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BedOffer {
     pub household: AgentId,
     pub place: PlaceId,
@@ -106,7 +106,40 @@ pub(crate) fn usable_bed(site: &Place, household: AgentId, bed: ObjectId) -> boo
         })
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SleepChoice {
+    Private,
+    Outdoors,
+    Inn(BedOffer),
+}
+
 impl Citizen {
+    pub(crate) fn choose_sleep(&mut self, choice: SleepChoice) -> Result<(), SimulationError> {
+        self.sleep_outdoors = choice == SleepChoice::Outdoors;
+        self.inn_booking = None;
+        self.pending_inn = false;
+        if let SleepChoice::Inn(offer) = choice {
+            if !self.inn_offers.contains(&offer)
+                || self
+                    .coins
+                    .saturating_sub(self.construction_protected)
+                    .max(0)
+                    < offer.payment
+            {
+                return Err(SimulationError::MissingInputs);
+            }
+            self.inn_booking = Some(Booking {
+                household: offer.household,
+                place: offer.place,
+                bed: offer.bed,
+                payment: offer.payment,
+                accepted_at_ms: self.market_time_ms,
+            });
+            self.pending_inn = true;
+        }
+        Ok(())
+    }
+
     pub fn inn_booking(&self) -> Option<Booking> {
         self.inn_booking
     }
@@ -277,8 +310,9 @@ impl Universe {
                         .is_some_and(|object| object.workers.is_empty())
                     && !self.agents.values().any(|agent| {
                         let AgentKind::Citizen(c) = &agent.kind;
-                        c.inn_booking
-                            .is_some_and(|b| b.place == *place && b.bed == *bed)
+                        (c.id != guest || !c.pending_inn)
+                            && c.inn_booking
+                                .is_some_and(|b| b.place == *place && b.bed == *bed)
                     })
                 {
                     offers.push(BedOffer {
@@ -292,6 +326,66 @@ impl Universe {
         }
         offers.sort_by_key(|offer| (offer.payment, offer.place.0, offer.bed.0));
         Ok(offers)
+    }
+
+    fn pay_for_inn(&mut self, guest: AgentId, offer: BedOffer) -> Result<(), SimulationError> {
+        let AgentKind::Citizen(citizen) = &self.agents[&guest].kind;
+        let payer = citizen.economic_id();
+        let commitments = self.construction_commitments(payer, None)?;
+        if self
+            .account_coins(payer)?
+            .saturating_sub(citizen.construction_protected.max(commitments))
+            .max(0)
+            < offer.payment
+        {
+            return Err(SimulationError::MissingInputs);
+        }
+        let balance = self
+            .account_coins(offer.household)?
+            .checked_add(offer.payment)
+            .ok_or(SimulationError::WealthOverflow)?;
+        self.set_account_coins(payer, self.account_coins(payer)? - offer.payment)?;
+        self.set_account_coins(offer.household, balance)?;
+        for (account, receipt) in [(payer, false), (offer.household, true)] {
+            let history = &mut self.household_histories.get_mut(&account).unwrap().current;
+            let total = if receipt {
+                &mut history.inn_receipts
+            } else {
+                &mut history.inn_payments
+            };
+            *total = total
+                .checked_add(offer.payment)
+                .ok_or(SimulationError::WealthOverflow)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn accept_planned_inn(&mut self, guest: AgentId) -> Result<bool, SimulationError> {
+        let AgentKind::Citizen(citizen) = &self.agents[&guest].kind;
+        if !citizen.pending_inn {
+            return Ok(true);
+        }
+        let booking = citizen.inn_booking.ok_or(SimulationError::MissingInputs)?;
+        let offer = BedOffer {
+            household: booking.household,
+            place: booking.place,
+            bed: booking.bed,
+            payment: booking.payment,
+        };
+        let accepted = self.inn_offers(guest)?.contains(&offer)
+            && match self.pay_for_inn(guest, offer) {
+                Ok(()) => true,
+                Err(SimulationError::MissingInputs) => false,
+                Err(error) => return Err(error),
+            };
+        let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&guest).unwrap().kind;
+        citizen.pending_inn = false;
+        if !accepted {
+            citizen.inn_booking = None;
+            citizen.active_action = None;
+            citizen.active_plan = None;
+        }
+        Ok(accepted)
     }
 
     /// Payment is upfront for one eight-hour session and is not refunded.
@@ -312,34 +406,9 @@ impl Universe {
         if !world.inn_offers(guest)?.contains(&offer) {
             return Err(SimulationError::MissingInputs);
         }
-        let payer = citizen.economic_id();
-        let commitments = world.construction_commitments(payer, None)?;
-        if citizen
-            .coins
-            .saturating_sub(citizen.construction_protected.max(commitments))
-            .max(0)
-            < offer.payment
-        {
-            return Err(SimulationError::MissingInputs);
-        }
-        let balance = world
-            .account_coins(offer.household)?
-            .checked_add(offer.payment)
-            .ok_or(SimulationError::WealthOverflow)?;
-        world.set_account_coins(payer, world.account_coins(payer)? - offer.payment)?;
-        world.set_account_coins(offer.household, balance)?;
-        for (account, receipt) in [(payer, false), (offer.household, true)] {
-            let history = &mut world.household_histories.get_mut(&account).unwrap().current;
-            let total = if receipt {
-                &mut history.inn_receipts
-            } else {
-                &mut history.inn_payments
-            };
-            *total = total
-                .checked_add(offer.payment)
-                .ok_or(SimulationError::WealthOverflow)?;
-        }
+        world.pay_for_inn(guest, offer)?;
         let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&guest).unwrap().kind;
+        citizen.sleep_outdoors = false;
         citizen.inn_booking = Some(Booking {
             household: offer.household,
             place: offer.place,
@@ -367,17 +436,30 @@ impl Universe {
             .kind;
         if citizen.inn_booking.is_some() {
             citizen.map = world.map.clone();
+            let autonomous = citizen.active_plan.is_some();
             citizen.abandon_action()?;
+            citizen.inn_replan = autonomous;
             world.map = citizen.map.clone();
         }
         world.refresh_market();
         Ok(world)
     }
 
+    pub(crate) fn resume_inn_planning(&mut self, id: AgentId) -> Result<bool, SimulationError> {
+        let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&id).unwrap().kind;
+        if !citizen.inn_replan {
+            return Ok(false);
+        }
+        citizen.inn_replan = false;
+        *self = self.start_planning(id)?;
+        Ok(true)
+    }
+
     pub(crate) fn resume_inn_sleep(&mut self, id: AgentId) -> Result<(), SimulationError> {
         let AgentKind::Citizen(citizen) = &self.agents[&id].kind;
         if let Some(booking) = citizen.inn_booking
             && citizen.active_action.is_none()
+            && citizen.active_plan.is_none()
             && citizen.position == self.map.position(booking.place)
         {
             *self = self.start_action(id, CitizenAction::Sleep)?;
@@ -414,6 +496,9 @@ impl Universe {
             .filter_map(|(id, agent)| {
                 let AgentKind::Citizen(citizen) = &agent.kind;
                 let booking = citizen.inn_booking?;
+                if citizen.pending_inn {
+                    return None;
+                }
                 let valid = self.inns.get(&booking.place).is_some_and(|inn| {
                     inn.household == booking.household
                         && inn.beds.contains(&booking.bed)
@@ -432,6 +517,7 @@ impl Universe {
                 self.map.release_objects(b.place, [Some(b.bed), None], id);
             }
             citizen.inn_booking = None;
+            citizen.inn_replan = citizen.active_plan.is_some();
             citizen.active_action = None;
             citizen.active_plan = None;
         }
@@ -570,6 +656,20 @@ impl Universe {
 
     pub(crate) fn validate_inns(&self) -> Result<(), crate::persistence::SaveError> {
         let invalid = || crate::persistence::SaveError::InvalidState("invalid inn or booking");
+        if self.agents.values().any(|agent| {
+            let AgentKind::Citizen(c) = &agent.kind;
+            c.pending_inn
+                || (c.inn_replan
+                    && (c.active_action.is_some()
+                        || c.active_plan.is_some()
+                        || c.inn_booking.is_some()))
+                || (c.sleep_outdoors
+                    && (c.inn_booking.is_some()
+                        || c.active_action
+                            .is_none_or(|action| action.action() != CitizenAction::Sleep)))
+        }) {
+            return Err(invalid());
+        }
         for (place, inn) in &self.inns {
             let site = self.map.place(*place).map_err(|_| invalid())?;
             if !self.households.contains_key(&inn.household)
@@ -721,6 +821,382 @@ mod tests {
         let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&guest).unwrap().kind;
         citizen.discomfort = 50.0;
         (world, host, guest, place, beds)
+    }
+
+    fn selection(world: &Universe, guest: AgentId) -> SleepChoice {
+        crate::planning::plan(citizen(world, guest))
+            .unwrap()
+            .sleep_choice
+            .unwrap()
+    }
+
+    fn competing() -> (Universe, AgentId, AgentId, AgentId, PlaceId, PlaceId) {
+        let (world, first, a, _) = host(Universe::with_map(Map::default()), "A", 1);
+        let (world, second, b, _) = host(world, "B", 1);
+        let (mut world, guest) = guest(world, 100000);
+        let position = citizen(&world, guest).position;
+        for place in [a, b] {
+            world.map.places_mut().get_mut(&place).unwrap().position = position;
+        }
+        let price = world.inns[&a]
+            .maintenance_floor
+            .max(world.inns[&b].maintenance_floor)
+            .ceil();
+        for place in [a, b] {
+            world.inns.get_mut(&place).unwrap().session_price = price;
+        }
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
+        c.discomfort = 75.0;
+        world.refresh_market();
+        (world, first, second, guest, a, b)
+    }
+
+    #[test]
+    fn inn_selection_randomizes_equal_offers_without_live_effects_and_replays() {
+        use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
+        let (mut world, _, _, guest, a, b) = competing();
+        let mut counts = [0; 2];
+        for seed in 0..80 {
+            let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
+            c.sleep_rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+            let before = world.clone();
+            let chosen = selection(&world, guest);
+            assert_eq!(selection(&world, guest), chosen);
+            assert_eq!(world, before);
+            let SleepChoice::Inn(offer) = chosen else {
+                panic!("expected inn, got {chosen:?}");
+            };
+            counts[usize::from(offer.place == b)] += 1;
+            assert!(offer.place == a || offer.place == b);
+        }
+        assert!(counts.iter().all(|count| *count > 20), "{counts:?}");
+        let loaded = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+        assert_eq!(selection(&loaded, guest), selection(&world, guest));
+        assert_eq!(
+            loaded.start_planning(guest).unwrap(),
+            world.start_planning(guest).unwrap()
+        );
+    }
+
+    #[test]
+    fn inn_selection_compares_price_distance_full_and_unaffordable_alternatives() {
+        let (mut world, _, _, guest, a, b) = competing();
+        world.inns.get_mut(&a).unwrap().session_price += 20.0;
+        world.refresh_market();
+        assert!(matches!(selection(&world, guest), SleepChoice::Inn(offer) if offer.place == b));
+        world.map.places_mut().get_mut(&b).unwrap().position.x += 100000.0;
+        world.refresh_market();
+        assert!(matches!(selection(&world, guest), SleepChoice::Inn(offer) if offer.place == a));
+        let (world_with_guest, other) = self::guest(world.clone(), 100000);
+        let offer = world_with_guest
+            .inn_offers(other)
+            .unwrap()
+            .into_iter()
+            .find(|offer| offer.place == a)
+            .unwrap();
+        let booked = world_with_guest.book_inn_bed(other, offer).unwrap();
+        assert_eq!(selection(&booked, guest), SleepChoice::Outdoors);
+        let account = citizen(&world, guest).economic_id();
+        world.set_account_coins(account, 0).unwrap();
+        world.refresh_market();
+        assert_eq!(selection(&world, guest), SleepChoice::Outdoors);
+        let housed = world.with_member_accommodation(guest).unwrap();
+        assert_eq!(selection(&housed, guest), SleepChoice::Private);
+    }
+
+    #[test]
+    fn affordable_inns_are_worth_paying_for_only_when_discomfort_benefit_exceeds_price() {
+        let (mut world, _, _, guest, a, b) = competing();
+        for place in [a, b] {
+            world.inns.get_mut(&place).unwrap().session_price = 200.0;
+        }
+        world.refresh_market();
+        assert!(citizen(&world, guest).coins > 200);
+        assert!(matches!(selection(&world, guest), SleepChoice::Inn(_)));
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
+        c.discomfort = 0.0;
+        assert_eq!(selection(&world, guest), SleepChoice::Outdoors);
+    }
+
+    #[test]
+    fn private_bed_can_lose_to_nearby_inn_or_outdoors_when_travel_is_too_long() {
+        let (world, _, _, guest, _, _) = competing();
+        let mut world = world.with_member_accommodation(guest).unwrap();
+        let home = citizen(&world, guest).home.unwrap();
+        world.map.places_mut().get_mut(&home).unwrap().position.x += 100000.0;
+        world.refresh_market();
+        assert!(matches!(selection(&world, guest), SleepChoice::Inn(_)));
+        let account = citizen(&world, guest).economic_id();
+        world.set_account_coins(account, 0).unwrap();
+        world.refresh_market();
+        assert_eq!(selection(&world, guest), SleepChoice::Outdoors);
+    }
+
+    #[test]
+    fn autonomous_bookings_compete_atomically_and_record_both_inns_and_recovery() {
+        let (world, host_a, host_b, first, a, b) = competing();
+        let (mut world, second) = guest(world, 100000);
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&second).unwrap().kind;
+        c.discomfort = 75.0;
+        let world = world
+            .start_planning(first)
+            .unwrap()
+            .start_planning(second)
+            .unwrap();
+        let booked_a = citizen(&world, first).inn_booking.unwrap();
+        let booked_b = citizen(&world, second).inn_booking.unwrap();
+        assert_ne!(booked_a.place, booked_b.place);
+        assert!(world.inn_offers(first).unwrap().is_empty());
+        for id in [first, second] {
+            assert!(!citizen(&world, id).pending_inn);
+        }
+        let paid: Coins = [first, second]
+            .iter()
+            .map(|id| {
+                world.household_histories[&citizen(&world, *id).economic_id()]
+                    .current
+                    .inn_payments
+            })
+            .sum();
+        let receipts: Coins = [host_a, host_b]
+            .iter()
+            .map(|id| {
+                world.household_histories[&citizen(&world, *id).economic_id()]
+                    .current
+                    .inn_receipts
+            })
+            .sum();
+        assert_eq!(paid, receipts);
+        round_trip(&world);
+        let advanced = world.advance(HOUR_MS).unwrap();
+        for id in [first, second] {
+            assert!(citizen(&advanced, id).tiredness < citizen(&world, id).tiredness);
+        }
+        for place in [a, b] {
+            assert_eq!(
+                advanced.inns[&place].occupancy_since(HOUR_MS),
+                (HOUR_MS as u128, HOUR_MS as u128)
+            );
+        }
+        round_trip(&advanced);
+    }
+
+    #[test]
+    fn stale_planned_bookings_recheck_shared_cash_price_closures_and_lost_beds() {
+        let (world, _, first, place, _) = fixture(1);
+        let (mut world, second) = guest(world, 100000);
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&second).unwrap().kind;
+        c.discomfort = 75.0;
+        let stale = citizen(&world, second).start_planning().unwrap();
+        assert!(stale.pending_inn);
+        let mut booked = world.start_planning(first).unwrap();
+        booked.agents.get_mut(&second).unwrap().kind = AgentKind::Citizen(stale.clone());
+        booked.register_action_request(second).unwrap();
+        booked.refresh_market();
+        assert!(citizen(&booked, second).inn_booking.is_none());
+        assert_eq!(
+            booked.household_histories[&citizen(&booked, second).economic_id()]
+                .current
+                .inn_payments,
+            0
+        );
+        round_trip(&booked);
+        for close in [false, true] {
+            let mut changed = world.clone();
+            if close {
+                changed.inns.get_mut(&place).unwrap().beds.clear();
+            } else {
+                changed.inns.get_mut(&place).unwrap().session_price += 1.0;
+            }
+            changed.agents.get_mut(&second).unwrap().kind = AgentKind::Citizen(stale.clone());
+            assert!(!changed.accept_planned_inn(second).unwrap());
+            assert_eq!(
+                changed.household_histories[&citizen(&changed, second).economic_id()]
+                    .current
+                    .inn_payments,
+                0
+            );
+        }
+        let mut changed = world.clone();
+        let payer = citizen(&changed, second).economic_id();
+        changed.set_account_coins(payer, 0).unwrap();
+        changed.agents.get_mut(&second).unwrap().kind = AgentKind::Citizen(stale);
+        assert!(!changed.accept_planned_inn(second).unwrap());
+        assert_eq!(changed.account_coins(payer).unwrap(), 0);
+    }
+
+    #[test]
+    fn autonomous_travel_closure_and_background_execution_resume_without_stale_effects() {
+        let (mut world, host, guest, place, _) = fixture(1);
+        world.map.places_mut().get_mut(&place).unwrap().position.x += 100.0;
+        world.refresh_market();
+        let world = world.start_planning(guest).unwrap();
+        assert!(matches!(
+            citizen(&world, guest).active_action.unwrap().action(),
+            CitizenAction::Travel(_)
+        ));
+        let travel_ms = citizen(&world, guest).active_action.unwrap().remaining_ms();
+        round_trip(&world);
+        let mut runtime = crate::PlanningRuntime::default();
+        let arrived = world
+            .advance_with_planner(&mut runtime, travel_ms, || false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            citizen(&arrived, guest).active_action.unwrap().action(),
+            CitizenAction::Sleep
+        );
+        assert_eq!(
+            arrived.inns[&place]
+                .occupancy_since(arrived.current_time_ms)
+                .0,
+            0
+        );
+        let closed = arrived
+            .configure_inn_beds(citizen(&arrived, host).economic_id(), place, Vec::new())
+            .unwrap();
+        assert!(citizen(&closed, guest).inn_replan);
+        round_trip(&closed);
+        let manual = closed.start_action(guest, CitizenAction::Sleep).unwrap();
+        assert!(!citizen(&manual, guest).inn_replan);
+        round_trip(&manual.advance(HOUR_MS).unwrap());
+        let resumed = closed
+            .advance_with_planner(&mut runtime, HOUR_MS, || false)
+            .unwrap()
+            .unwrap();
+        assert!(citizen(&resumed, guest).inn_booking.is_none());
+        assert!(citizen(&resumed, guest).active_plan.is_some());
+        assert!(!citizen(&resumed, guest).inn_replan);
+        round_trip(&resumed);
+        let before = resumed.clone();
+        assert!(
+            resumed
+                .advance_with_planner(&mut runtime, HOUR_MS, || true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(resumed, before);
+    }
+
+    #[test]
+    fn concurrent_household_sleep_plans_cannot_spend_the_same_cash_twice() {
+        let (world, _, _, first, _, _) = competing();
+        let account = citizen(&world, first).economic_id();
+        let (mut world, second) = world
+            .with_household_member(
+                account,
+                "Sibling",
+                Citizen::with_needs(-50.0, 100.0).unwrap(),
+            )
+            .unwrap();
+        let payment = world.inn_offers(first).unwrap()[0].payment;
+        world.set_account_coins(account, payment).unwrap();
+        world
+            .household_histories
+            .get_mut(&account)
+            .unwrap()
+            .current
+            .opening_coins = payment;
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&second).unwrap().kind;
+        c.discomfort = 75.0;
+        world.refresh_market();
+        let stale = citizen(&world, second).start_planning().unwrap();
+        assert!(stale.pending_inn);
+        let mut world = world.start_planning(first).unwrap();
+        assert!(citizen(&world, first).inn_booking.is_some());
+        world.agents.get_mut(&second).unwrap().kind = AgentKind::Citizen(stale);
+        world.register_action_request(second).unwrap();
+        world.refresh_market();
+        assert_eq!(world.account_coins(account).unwrap(), 0);
+        assert!(citizen(&world, second).inn_booking.is_none());
+        assert_eq!(
+            world.household_histories[&account].current.inn_payments,
+            payment
+        );
+        round_trip(&world);
+    }
+
+    #[test]
+    fn background_sleep_choice_requotes_at_actual_boundary_and_preserves_live_rng() {
+        let (mut world, _, _, guest, a, b) = competing();
+        world.inns.get_mut(&a).unwrap().session_price += 10.0;
+        world.refresh_market();
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
+        *c = crate::planning::executing_fixture(c, vec![CitizenAction::Wait]);
+        let rng = c.sleep_rng.clone();
+        let funds = c.coins;
+        let mut runtime = crate::PlanningRuntime::default();
+        let projected = world
+            .advance_with_planner(&mut runtime, 0, || false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(citizen(&projected, guest).sleep_rng, rng);
+        assert_eq!(citizen(&projected, guest).coins, funds);
+        assert!(citizen(&projected, guest).inn_booking.is_none());
+        let mut changed = projected.clone();
+        changed.inns.get_mut(&b).unwrap().session_price += 100.0;
+        changed.refresh_market();
+        let boundary = changed
+            .advance_with_planner(&mut runtime, crate::ACTION_DURATION_MS, || false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(citizen(&boundary, guest).inn_booking.unwrap().place, a);
+        assert_ne!(citizen(&boundary, guest).sleep_rng, rng);
+        assert_eq!(
+            boundary.household_histories[&citizen(&boundary, guest).economic_id()]
+                .current
+                .inn_payments,
+            boundary.inns[&a].payment().unwrap()
+        );
+        assert_eq!(
+            boundary.household_histories[&boundary.inns[&b].household]
+                .current
+                .inn_receipts,
+            0
+        );
+        round_trip(&boundary);
+    }
+
+    #[test]
+    fn sleep_selection_excludes_protected_construction_cash_and_booking_departure_is_sampled_live()
+    {
+        let (mut world, _, guest, _, _) = fixture(1);
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
+        c.construction_protected = c.coins;
+        assert_eq!(selection(&world, guest), SleepChoice::Outdoors);
+        let before = world.clone();
+        let _ = crate::planning::plan(citizen(&world, guest)).unwrap();
+        assert_eq!(world, before);
+        let account = citizen(&world, guest).economic_id();
+        world
+            .households
+            .get_mut(&account)
+            .unwrap()
+            .below_zero_since_ms = Some(0);
+        world.current_time_ms = DAY_MS;
+        let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
+        c.coins = 0;
+        c.hunger = 1000.0;
+        c.market_time_ms = DAY_MS;
+        let forecast = crate::planning::plan(c).unwrap();
+        assert!(!forecast.actions().is_empty());
+        assert!(world.agents.contains_key(&guest));
+        let departed = world.start_planning(guest).unwrap();
+        assert!(!departed.agents.contains_key(&guest));
+    }
+
+    #[test]
+    fn save_rejects_unaccepted_bookings_and_inconsistent_sleep_restart_state() {
+        let (world, _, guest, _, _) = fixture(1);
+        let mut pending = world.clone();
+        let c = citizen(&pending, guest).start_planning().unwrap();
+        assert!(c.pending_inn);
+        pending.agents.get_mut(&guest).unwrap().kind = AgentKind::Citizen(c);
+        assert!(Universe::from_save_str(&pending.to_save_string().unwrap()).is_err());
+        let mut booked = world.start_planning(guest).unwrap();
+        let AgentKind::Citizen(c) = &mut booked.agents.get_mut(&guest).unwrap().kind;
+        c.inn_replan = true;
+        assert!(Universe::from_save_str(&booked.to_save_string().unwrap()).is_err());
     }
 
     #[test]

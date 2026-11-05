@@ -217,6 +217,7 @@ impl Cooldowns {
 
 #[derive(Clone)]
 pub(super) struct Prediction {
+    pub sleep_choice: Option<crate::inns::SleepChoice>,
     pub citizen: Citizen,
     pub actions: Vec<CitizenAction>,
     pub commercial_actions: Vec<usize>,
@@ -240,6 +241,7 @@ impl Prediction {
         waiting.active_plan = None;
         Self {
             citizen: citizen.clone(),
+            sleep_choice: None,
             waiting,
             actions: Vec::new(),
             commercial_actions: Vec::new(),
@@ -2135,6 +2137,38 @@ fn variants_from(
     }
     if !need_eligible(citizen, goal) {
         return Ok(Vec::new());
+    }
+    if goal == Effect::ReduceTiredness {
+        use crate::inns::SleepChoice;
+        use rand::seq::SliceRandom;
+        let mut choices = vec![SleepChoice::Outdoors];
+        let mut private = citizen.clone();
+        private.sleep_outdoors = false;
+        if private.sleep_place().is_some() {
+            choices.push(SleepChoice::Private);
+        }
+        choices.extend(citizen.inn_offers.iter().copied().map(SleepChoice::Inn));
+        // A cloned stream makes equal alternatives fair without changing live randomness.
+        choices.shuffle(&mut citizen.sleep_rng.clone());
+        let mut variants = Vec::new();
+        for choice in choices {
+            let mut ready = initial.clone();
+            if ready.citizen.choose_sleep(choice).is_err() {
+                continue;
+            }
+            ready.sleep_choice = Some(choice);
+            if let SleepChoice::Inn(offer) = choice {
+                ready.citizen.coins -= offer.payment;
+            }
+            variants.extend(order_variants(
+                &ready,
+                CitizenAction::Sleep,
+                0.0,
+                0,
+                prior_actions,
+            )?);
+        }
+        return Ok(variants);
     }
     if goal == Effect::Wait {
         let mut waited = initial;

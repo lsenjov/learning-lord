@@ -227,6 +227,15 @@ pub(crate) fn render(
             day.closing_coins
         ),
     );
+    if day.inn_receipts != 0 || day.inn_payments != 0 {
+        label(
+            parent,
+            format!(
+                "Inn receipts {} | Inn payments {} coins",
+                day.inn_receipts, day.inn_payments
+            ),
+        );
+    }
     if day.departed_coins != 0 {
         label(
             parent,
@@ -332,6 +341,49 @@ pub(crate) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lodging_cash_is_visible_only_when_present() {
+        let (universe, member) = Universe::default()
+            .with_citizen(
+                "Guest",
+                learning_lord_simulation::Citizen::new(0.0).unwrap(),
+            )
+            .unwrap();
+        let household = universe.economic_id(member).unwrap();
+        let day = universe
+            .household_history(household)
+            .unwrap()
+            .current
+            .clone();
+        for payments in [false, true] {
+            let mut day = day.clone();
+            if payments {
+                day.inn_receipts = 7;
+                day.inn_payments = 3;
+            }
+            let universe = universe.clone();
+            let mut app = App::new();
+            app.add_systems(Startup, move |mut commands: Commands| {
+                commands
+                    .spawn(Node::default())
+                    .with_children(|parent| render(parent, &universe, &day, true));
+            });
+            app.update();
+            let lines: Vec<_> = app
+                .world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .map(|text| text.0.clone())
+                .filter(|text| text.starts_with("Inn receipts"))
+                .collect();
+            if payments {
+                assert_eq!(lines, ["Inn receipts 7 | Inn payments 3 coins"]);
+            } else {
+                assert!(lines.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn past_selection_survives_day_rollover_and_expiration_returns_current() {

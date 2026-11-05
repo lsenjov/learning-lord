@@ -12,7 +12,7 @@ use bevy::{
 };
 use learning_lord_simulation::StartingRole;
 
-const ROLES: [StartingRole; 9] = [
+const ROLES: [StartingRole; 10] = [
     StartingRole::Farmer,
     StartingRole::Miller,
     StartingRole::Woodcutter,
@@ -22,6 +22,7 @@ const ROLES: [StartingRole; 9] = [
     StartingRole::Fisher,
     StartingRole::Brewer,
     StartingRole::Carpenter,
+    StartingRole::Innkeeper,
 ];
 
 #[derive(Resource)]
@@ -449,6 +450,43 @@ mod tests {
             }
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn innkeeper_selector_creates_role_without_free_property_or_equipment() {
+        let mut app = app();
+        press(&mut app, Choice::Toggle);
+        for _ in 0..ROLES.len() - 1 {
+            press(&mut app, Choice::Role);
+        }
+        assert_eq!(
+            ROLES[app.world().resource::<State>().role],
+            StartingRole::Innkeeper
+        );
+        let before = app.world().resource::<DisplaySnapshot>().0.universe.clone();
+        press(&mut app, Choice::Household);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let snapshot = app.world().resource::<SimulationWorker>().snapshot();
+            if snapshot.mutation_revision > 0 {
+                assert!(snapshot.mutation_error.is_none());
+                assert_eq!(snapshot.universe.map(), before.map());
+                assert!(snapshot.universe.inns().is_empty());
+                let added = snapshot
+                    .universe
+                    .agents()
+                    .iter()
+                    .find(|(id, _)| !before.agents().contains_key(*id))
+                    .map(|(_, agent)| agent)
+                    .unwrap();
+                let learning_lord_simulation::AgentKind::Citizen(citizen) = &added.kind;
+                assert_eq!(citizen.starting_role(), Some(StartingRole::Innkeeper));
+                assert!(citizen.home().is_none());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
         }
     }
 

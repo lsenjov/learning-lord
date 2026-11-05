@@ -344,6 +344,11 @@ impl StartingRole {
 pub struct Citizen {
     household: Option<households::HouseholdContext>,
     inn_booking: Option<inns::Booking>,
+    inn_offers: Vec<inns::BedOffer>,
+    pending_inn: bool,
+    inn_replan: bool,
+    sleep_outdoors: bool,
+    sleep_rng: Xoshiro256PlusPlus,
     guilds: HashMap<AgentId, guilds::GuildAccess>,
     workshop_fees: HashMap<AgentId, guilds::WorkshopFeeAccount>,
     maintenance: maintenance::MaintenanceState,
@@ -438,6 +443,11 @@ impl Citizen {
             storage: Storage::default(),
             household: None,
             inn_booking: None,
+            inn_offers: Vec::new(),
+            pending_inn: false,
+            inn_replan: false,
+            sleep_outdoors: false,
+            sleep_rng: rand::make_rng(),
             guilds: HashMap::new(),
             workshop_fees: HashMap::new(),
             maintenance: maintenance::MaintenanceState::default(),
@@ -1479,6 +1489,7 @@ impl Citizen {
             }
         }
         let mut citizen = self.clone();
+        citizen.inn_replan = false;
         if citizen.inn_booking.is_some_and(|b| {
             action != CitizenAction::Sleep && action != CitizenAction::Travel(b.place)
         }) {
@@ -1951,6 +1962,8 @@ impl Citizen {
                 }
                 if active.action == CitizenAction::Sleep {
                     citizen.inn_booking = None;
+                    citizen.pending_inn = false;
+                    citizen.sleep_outdoors = false;
                 }
                 citizen.active_action = None;
             } else {
@@ -3327,6 +3340,12 @@ impl Universe {
                     universe.finish_maintenance(id, goal, finishing_time, true)?;
                     universe.refresh_market();
                 }
+                if universe.resume_inn_planning(id)? {
+                    if let Some(runtime) = runtime.as_deref_mut() {
+                        runtime.cancel(id);
+                    }
+                    continue;
+                }
                 if universe.start_construction_action(id)? {
                     if let Some(runtime) = runtime.as_deref_mut() {
                         runtime.cancel(id);
@@ -3471,6 +3490,14 @@ impl Universe {
                 }
             }
         }
+        let offers: std::collections::HashMap<_, _> = if self.inns.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            self.agents
+                .keys()
+                .map(|id| (*id, self.inn_offers(*id).unwrap_or_default()))
+                .collect()
+        };
         self.market.refresh_affordability(&budgets);
         for (_, agent) in self.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
@@ -3518,6 +3545,7 @@ impl Universe {
                     );
                 }
             }
+            citizen.inn_offers = offers.get(&citizen.id).cloned().unwrap_or_default();
             citizen.map = self.map.clone();
             citizen.market = self.market.clone();
             citizen.storage = self.storage.clone();
@@ -3526,6 +3554,16 @@ impl Universe {
     }
 
     fn register_action_request(&mut self, id: AgentId) -> Result<(), SimulationError> {
+        if !self.accept_planned_inn(id)? {
+            self.refresh_market();
+            let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&id).unwrap().kind;
+            *citizen = citizen.start_planning()?;
+            self.citizen_histories
+                .get_mut(&id)
+                .unwrap()
+                .start_action(citizen)?;
+            return self.register_action_request(id);
+        }
         let obsolete_claim = {
             let AgentKind::Citizen(citizen) = &self
                 .agents
@@ -3731,6 +3769,7 @@ impl Universe {
             .ok_or(SimulationError::AgentNotFound)?
             .clone();
         let AgentKind::Citizen(citizen) = &mut agent.kind;
+        citizen.inn_replan = false;
         citizen.refresh_production_targets(true)?;
         let updated = agent.start_planning()?;
         let mut universe = prepared;

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 pub(crate) const LEAD_MS: u64 = 30 * 60 * 1000;
 
 struct Pending {
+    sleep_offers: Vec<crate::inns::BedOffer>,
+    sleep_place: Option<crate::locations::PlaceId>,
     plan: Plan,
     boundary_ms: u64,
     boundary_action_index: usize,
@@ -122,6 +124,8 @@ impl PlanningRuntime {
         self.pending.insert(
             citizen.id(),
             Pending {
+                sleep_offers: projected.inn_offers.clone(),
+                sleep_place: projected.sleep_place(),
                 plan: execution.plan().clone(),
                 boundary_ms,
                 boundary_action_index,
@@ -147,6 +151,9 @@ impl PlanningRuntime {
         let mut actual = citizen.clone();
         execution.prepare_replan(&mut actual)?;
         let pending = self.pending.remove(&citizen.id());
+        let sleep_changed = pending.as_ref().is_some_and(|pending| {
+            pending.sleep_offers != actual.inn_offers || pending.sleep_place != actual.sleep_place()
+        });
         let mut speculative = pending.as_ref().is_some_and(|pending| {
             pending.boundary_ms == now
                 && pending.boundary_action_index == execution.action_index()
@@ -178,8 +185,11 @@ impl PlanningRuntime {
             if let Some(result) = request.try_result() {
                 request_ms += request.elapsed().as_secs_f64() * 1000.0;
                 requests += 1;
+                // Changed offers require a fresh comparison before committing cash or scarce beds.
                 if let Ok(plan) = result.as_ref()
-                    && (!speculative || ActivePlan::first_action_valid(&actual, plan))
+                    && (!speculative
+                        || ((!plan.chooses_sleep() || !sleep_changed)
+                            && ActivePlan::first_action_valid(&actual, plan)))
                     && let Ok(started) = execution.adopt(actual.clone(), plan.clone())
                 {
                     self.samples
@@ -456,6 +466,8 @@ mod tests {
         runtime.pending.insert(
             citizen.id(),
             Pending {
+                sleep_offers: Vec::new(),
+                sleep_place: citizen.sleep_place(),
                 plan: execution.plan().clone(),
                 boundary_ms: SLEEP_DURATION_MS,
                 boundary_action_index: 1,
@@ -497,6 +509,8 @@ mod tests {
         runtime.pending.insert(
             citizen.id(),
             Pending {
+                sleep_offers: Vec::new(),
+                sleep_place: citizen.sleep_place(),
                 plan: execution.plan().clone(),
                 boundary_ms: ACTION_DURATION_MS,
                 boundary_action_index: 1,
@@ -573,6 +587,8 @@ mod tests {
         runtime.pending.insert(
             id,
             Pending {
+                sleep_offers: Vec::new(),
+                sleep_place: citizen.sleep_place(),
                 plan: source.active_plan().unwrap().plan().clone(),
                 boundary_ms: SLEEP_DURATION_MS,
                 boundary_action_index: 1,

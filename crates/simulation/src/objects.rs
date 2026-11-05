@@ -7,6 +7,8 @@ impl Citizen {
     pub(crate) fn abandon_action(&mut self) -> Result<(), SimulationError> {
         if let Some(active) = self.active_action {
             let Some(site) = active.action().required_place(self) else {
+                self.pending_inn = false;
+                self.sleep_outdoors = false;
                 self.inn_booking = None;
                 self.active_action = None;
                 self.active_plan = None;
@@ -39,6 +41,8 @@ impl Citizen {
             self.map
                 .release_objects(site, active.claimed_objects, self.id);
         }
+        self.pending_inn = false;
+        self.sleep_outdoors = false;
         self.inn_booking = None;
         self.active_action = None;
         self.active_plan = None;
@@ -95,6 +99,9 @@ impl Citizen {
     }
 
     pub(crate) fn sleep_place(&self) -> Option<crate::locations::PlaceId> {
+        if self.sleep_outdoors {
+            return None;
+        }
         if let Some(booking) = self.inn_booking {
             return Some(booking.place);
         }

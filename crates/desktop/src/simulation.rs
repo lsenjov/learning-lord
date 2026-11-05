@@ -40,6 +40,11 @@ pub enum Command {
 
 #[derive(Clone)]
 pub enum Mutation {
+    ConfigureInnBeds {
+        household: learning_lord_simulation::AgentId,
+        place: learning_lord_simulation::locations::PlaceId,
+        beds: Vec<learning_lord_simulation::locations::ObjectId>,
+    },
     GrantProperty {
         place: learning_lord_simulation::locations::PlaceId,
         household: learning_lord_simulation::AgentId,
@@ -95,6 +100,11 @@ pub enum Mutation {
 impl Mutation {
     fn apply(self, universe: &Universe) -> Result<Universe, SimulationError> {
         match self {
+            Self::ConfigureInnBeds {
+                household,
+                place,
+                beds,
+            } => universe.configure_inn_beds(household, place, beds),
             Self::GrantProperty { place, household } => universe.grant_property(place, household),
             Self::RemoveCitizen(id) => universe.remove_citizen(id),
             Self::RemoveHousehold(id) => universe.remove_household(id),
@@ -1438,7 +1448,11 @@ mod tests {
             Universe::with_map(learning_lord_simulation::locations::Map::default())
                 .with_citizen(
                     "Ada",
-                    Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
+                    Citizen::new(0.0)
+                        .unwrap()
+                        .with_furnished_home()
+                        .unwrap()
+                        .with_starting_role(learning_lord_simulation::StartingRole::Innkeeper),
                 )
                 .unwrap();
         let household = universe.economic_id(citizen).unwrap();
@@ -1447,6 +1461,14 @@ mod tests {
             Command::Restart,
             Command::Load(Box::new(Universe::default().advance(4321).unwrap())),
             Command::Shutdown,
+            Command::Mutate {
+                generation: 0,
+                mutation: Mutation::ConfigureInnBeds {
+                    household,
+                    place: universe.households()[&household].home.unwrap(),
+                    beds: Vec::new(),
+                },
+            },
             Command::Mutate {
                 generation: 0,
                 mutation: Mutation::RemoveCitizen(citizen),
@@ -1498,6 +1520,15 @@ mod tests {
                     assert!(!state.pacing.running);
                 }
                 Command::Shutdown => assert_eq!(outcome, None),
+                Command::Mutate {
+                    mutation: Mutation::ConfigureInnBeds { place, .. },
+                    ..
+                } => {
+                    assert_eq!(outcome, Some(true));
+                    assert!(state.mutation_error.is_none());
+                    assert!(state.universe.inns()[&place].beds.is_empty());
+                    assert_eq!(state.universe.current_time_ms(), source.current_time_ms());
+                }
                 Command::Mutate { .. } => {
                     assert_eq!(outcome, Some(true));
                     assert!(state.universe.agents().is_empty());

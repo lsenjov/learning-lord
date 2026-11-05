@@ -1,4 +1,5 @@
 use crate::{Citizen, CitizenAction, SimulationError};
+use rand::RngExt;
 pub mod goals;
 use goals::{Cooldowns, Effect, Prediction};
 mod scheduler;
@@ -157,6 +158,7 @@ pub struct PlanGoal {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Plan {
+    pub(crate) sleep_choice: Option<crate::inns::SleepChoice>,
     actions: Vec<CitizenAction>,
     commercial_actions: Vec<usize>,
     action_durations_ms: Vec<u64>,
@@ -166,6 +168,9 @@ pub struct Plan {
 }
 
 impl Plan {
+    pub(crate) fn chooses_sleep(&self) -> bool {
+        self.sleep_choice.is_some()
+    }
     fn claim_commercial_action(
         &self,
         citizen: &mut Citizen,
@@ -192,6 +197,12 @@ impl Plan {
             .copied()
             .ok_or(SimulationError::PlanningFailed)?;
         let mut candidate = citizen.clone();
+        if index == 0
+            && let Some(choice) = self.sleep_choice
+        {
+            candidate.choose_sleep(choice)?;
+            let _: u64 = candidate.sleep_rng.random();
+        }
         self.claim_commercial_action(&mut candidate, index)?;
         candidate.start_action(action)
     }
@@ -440,7 +451,7 @@ impl ActivePlan {
             return false;
         }
         plan.actions.first().is_some_and(|action| {
-            !replan_check(citizen, *action, 0) && citizen.start_action(*action).is_ok()
+            !replan_check(citizen, *action, 0) && plan.start_action(citizen, 0).is_ok()
         })
     }
 
@@ -842,7 +853,30 @@ fn evaluate_goal(
 impl ActivePlan {
     pub(crate) fn validate_save(&self) -> Result<(), crate::persistence::SaveError> {
         use crate::persistence::SaveError;
-        if self.action_index >= self.plan.actions.len()
+        let invalid_sleep = self.plan.sleep_choice.is_some_and(|choice| {
+            let Some(goal) = self.plan.goals.first() else {
+                return true;
+            };
+            if goal.goal != Effect::ReduceTiredness || goal.actions.start != 0 {
+                return true;
+            }
+            let actions = &self.plan.actions[..goal.actions.end.min(self.plan.actions.len())];
+            match choice {
+                crate::inns::SleepChoice::Outdoors => actions != [CitizenAction::Sleep],
+                crate::inns::SleepChoice::Private => !matches!(
+                    actions,
+                    [CitizenAction::Sleep] | [CitizenAction::Travel(_), CitizenAction::Sleep]
+                ),
+                crate::inns::SleepChoice::Inn(offer) => {
+                    offer.payment < 0
+                        || !(actions == [CitizenAction::Sleep]
+                            || actions
+                                == [CitizenAction::Travel(offer.place), CitizenAction::Sleep])
+                }
+            }
+        });
+        if invalid_sleep
+            || self.action_index >= self.plan.actions.len()
             || self.plan.actions.len() != self.plan.action_durations_ms.len()
             || self.plan.commercial_actions.iter().any(|index| {
                 self.plan.actions.get(*index).is_none_or(|action| {
@@ -868,6 +902,7 @@ fn sequential_reference(citizen: &Citizen) -> Result<Plan, SimulationError> {
 
 fn empty_plan() -> Plan {
     Plan {
+        sleep_choice: None,
         actions: Vec::new(),
         action_durations_ms: Vec::new(),
         commercial_actions: Vec::new(),
@@ -898,6 +933,7 @@ fn retain_best_variant(
     let score = state.average()?;
     if !state.actions.is_empty() && score > best.average_wellbeing {
         *best = Plan {
+            sleep_choice: state.sleep_choice,
             actions: state.actions.clone(),
             action_durations_ms: state.action_durations_ms.clone(),
             commercial_actions: state.commercial_actions.clone(),
@@ -949,6 +985,7 @@ pub(crate) fn executing_fixture(citizen: &Citizen, actions: Vec<CitizenAction>) 
     let mut citizen = citizen.start_action(actions[0]).unwrap();
     citizen.active_plan = Some(ActivePlan {
         plan: Plan {
+            sleep_choice: None,
             action_durations_ms: vec![0; actions.len()],
             commercial_actions: Vec::new(),
             goals: Vec::new(),
@@ -969,6 +1006,7 @@ pub(crate) fn adopt_commercial_fixture(
     commercial_actions: Vec<usize>,
 ) -> Result<Citizen, SimulationError> {
     let plan = Plan {
+        sleep_choice: None,
         action_durations_ms: vec![0; actions.len()],
         commercial_actions,
         goals: vec![PlanGoal {
@@ -991,6 +1029,7 @@ pub(crate) fn resume_commercial_fixture(
 ) -> Result<Citizen, SimulationError> {
     let mut execution = ActivePlan {
         plan: Plan {
+            sleep_choice: None,
             actions: vec![action],
             action_durations_ms: vec![0],
             commercial_actions: vec![0],
@@ -1488,6 +1527,7 @@ mod tests {
         let list = ShoppingList::single(Good::Flour, 100).with_quote_ceilings(ceilings, 100);
         let execution = ActivePlan {
             plan: Plan {
+                sleep_choice: None,
                 actions: vec![CitizenAction::BuyAt { place, list }],
                 commercial_actions: Vec::new(),
                 action_durations_ms: vec![crate::TRADE_DURATION_MS],
@@ -1530,6 +1570,7 @@ mod tests {
         let place = citizen.selling_place();
         let mut execution = ActivePlan {
             plan: Plan {
+                sleep_choice: None,
                 actions: vec![
                     CitizenAction::Travel(place),
                     CitizenAction::BuyAt {
@@ -1616,6 +1657,7 @@ mod tests {
         let mut citizen = citizen.start_action(actions[0]).unwrap();
         citizen.active_plan = Some(ActivePlan {
             plan: Plan {
+                sleep_choice: None,
                 action_durations_ms: vec![0; actions.len()],
                 commercial_actions: Vec::new(),
                 goals: Vec::new(),
@@ -2293,6 +2335,7 @@ mod tests {
             .active_plan
             .unwrap();
         let partial_meal = Plan {
+            sleep_choice: None,
             actions: vec![CitizenAction::Eat],
             action_durations_ms: vec![39_000],
             commercial_actions: Vec::new(),
@@ -2408,6 +2451,7 @@ mod tests {
         let citizen = Citizen::new(0.0).unwrap().with_furnished_home().unwrap();
         let mut active = ActivePlan {
             plan: Plan {
+                sleep_choice: None,
                 actions: vec![CitizenAction::Eat, CitizenAction::Wait],
                 action_durations_ms: vec![0; 2],
                 commercial_actions: Vec::new(),
