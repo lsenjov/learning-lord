@@ -5,7 +5,7 @@ use serde::{
 };
 use std::fmt;
 
-pub const SAVE_VERSION: u32 = 20;
+pub const SAVE_VERSION: u32 = 21;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -175,6 +175,7 @@ impl Universe {
     fn validate_save_sources(&self) -> Result<(), SaveError> {
         self.map.validate_save()?;
         self.validate_departures()?;
+        self.validate_inns()?;
         self.validate_objects()?;
         self.market.validate_save()?;
         self.storage.validate_save()?;

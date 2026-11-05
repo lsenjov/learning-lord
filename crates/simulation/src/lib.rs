@@ -11,6 +11,7 @@ pub mod condition;
 pub mod construction;
 pub mod construction_finance;
 pub mod departure;
+pub mod inns;
 mod property_grants;
 pub mod storage;
 pub mod taxation;
@@ -319,6 +320,7 @@ pub enum StartingRole {
     Fisher,
     Brewer,
     Carpenter,
+    Innkeeper,
 }
 
 impl StartingRole {
@@ -333,6 +335,7 @@ impl StartingRole {
             Self::Fisher => "Fisher",
             Self::Brewer => "Brewer",
             Self::Carpenter => "Carpenter",
+            Self::Innkeeper => "Innkeeper",
         }
     }
 }
@@ -340,6 +343,7 @@ impl StartingRole {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Citizen {
     household: Option<households::HouseholdContext>,
+    inn_booking: Option<inns::Booking>,
     guilds: HashMap<AgentId, guilds::GuildAccess>,
     workshop_fees: HashMap<AgentId, guilds::WorkshopFeeAccount>,
     maintenance: maintenance::MaintenanceState,
@@ -433,6 +437,7 @@ impl Citizen {
             sale_income_basis_points: HashMap::new(),
             storage: Storage::default(),
             household: None,
+            inn_booking: None,
             guilds: HashMap::new(),
             workshop_fees: HashMap::new(),
             maintenance: maintenance::MaintenanceState::default(),
@@ -644,6 +649,9 @@ impl Citizen {
     pub fn with_starting_role(&self, role: StartingRole) -> Self {
         let mut citizen = self.clone();
         citizen.starting_role = Some(role);
+        if role == StartingRole::Innkeeper {
+            return citizen;
+        }
         let skill = match role {
             StartingRole::Farmer => production::Skill::Farming,
             StartingRole::Miller => production::Skill::Milling,
@@ -654,6 +662,7 @@ impl Citizen {
             StartingRole::Fisher => production::Skill::Fishing,
             StartingRole::Brewer => production::Skill::Brewing,
             StartingRole::Carpenter => production::Skill::Carpentry,
+            StartingRole::Innkeeper => unreachable!(),
         };
         citizen.skills[skill as usize] = Some(0);
         citizen
@@ -904,7 +913,7 @@ impl Citizen {
             }
             CitizenAction::Travel(destination) => (self
                 .position
-                .distance(self.accessible_place(destination)?.position)
+                .distance(self.travel_place(destination)?.position)
                 * WALK_MS_PER_METRE)
                 .ceil() as u64,
             CitizenAction::Eat | CitizenAction::Drink => {
@@ -1449,7 +1458,7 @@ impl Citizen {
             return Err(SimulationError::WrongLocation);
         }
         if let CitizenAction::Travel(id) = action {
-            self.accessible_place(id)?;
+            self.travel_place(id)?;
         }
         if let CitizenAction::CollectStored { place, list }
         | CitizenAction::DepositStored { place, list } = action
@@ -1470,6 +1479,11 @@ impl Citizen {
             }
         }
         let mut citizen = self.clone();
+        if citizen.inn_booking.is_some_and(|b| {
+            action != CitizenAction::Sleep && action != CitizenAction::Travel(b.place)
+        }) {
+            citizen.inn_booking = None;
+        }
         let claimed_objects = self.action_objects(action)?;
         let consumption = self.consumption_action(action);
         let ActiveAction {
@@ -1935,6 +1949,9 @@ impl Citizen {
                         .map
                         .release_objects(place, active.claimed_objects, citizen.id);
                 }
+                if active.action == CitizenAction::Sleep {
+                    citizen.inn_booking = None;
+                }
                 citizen.active_action = None;
             } else {
                 citizen.active_action = Some(active);
@@ -2128,6 +2145,7 @@ impl Citizen {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Universe {
     current_time_ms: u64,
+    inns: HashMap<PlaceId, inns::Inn>,
     market: Market,
     map: Map,
     agents: HashMap<AgentId, Agent>,
@@ -2149,6 +2167,7 @@ impl Default for Universe {
     fn default() -> Self {
         Self {
             current_time_ms: 0,
+            inns: HashMap::new(),
             market: Market::default(),
             map: Map::random(),
             agents: HashMap::new(),
@@ -2917,11 +2936,13 @@ impl Universe {
                 .min(planning_boundary)
                 .min(universe.construction_boundary().unwrap_or(u64::MAX))
                 .min(universe.maintenance_boundary());
+            let step = universe.inn_usability_boundary(step);
             let finishing_time = universe.current_time_ms + step;
             let trades_before = universe.market.trades().len();
             let taxes_before = universe.taxation.history.len();
             let histories_before = universe.citizen_histories.clone();
             let agents_before = universe.agents.clone();
+            universe.record_inn_time(step)?;
             let (room_credits, object_credits) = universe.construction_repair_credits(step);
             universe
                 .map
@@ -3197,6 +3218,7 @@ impl Universe {
             universe.refresh_household_history(finishing_time, true)?;
             universe.refresh_guild_history(finishing_time, true);
             universe.current_time_ms = finishing_time;
+            universe.update_inn_prices()?;
             universe.market.set_time(finishing_time);
             for (_, agent) in universe.agents.iter_mut() {
                 let AgentKind::Citizen(citizen) = &mut agent.kind;
@@ -3313,6 +3335,7 @@ impl Universe {
                     universe.refresh_market();
                     continue;
                 }
+                universe.resume_inn_sleep(id)?;
                 let AgentKind::Citizen(mut citizen) = universe.agents[&id].kind.clone();
                 citizen.market = universe.market.clone();
                 citizen.market.set_time(universe.current_time_ms);
@@ -3387,6 +3410,7 @@ impl Universe {
     }
 
     fn refresh_market(&mut self) {
+        self.clean_inns();
         self.market.set_treasury_budget(self.town_treasury);
         let budgets: Vec<_> = self
             .agents

@@ -444,7 +444,10 @@ fn workplace(
     match role {
         StartingRole::Farmer => Some(Location::Field),
         StartingRole::Miller => Some(Location::Mill),
-        StartingRole::Woodcutter | StartingRole::Fisher | StartingRole::Carpenter => None,
+        StartingRole::Woodcutter
+        | StartingRole::Fisher
+        | StartingRole::Carpenter
+        | StartingRole::Innkeeper => None,
         StartingRole::Baker => Some(Location::Bakery),
         StartingRole::Weaver => Some(Location::Weavery),
         StartingRole::Tailor => Some(Location::Tailory),

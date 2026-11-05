@@ -7,6 +7,7 @@ impl Citizen {
     pub(crate) fn abandon_action(&mut self) -> Result<(), SimulationError> {
         if let Some(active) = self.active_action {
             let Some(site) = active.action().required_place(self) else {
+                self.inn_booking = None;
                 self.active_action = None;
                 self.active_plan = None;
                 return Ok(());
@@ -38,6 +39,7 @@ impl Citizen {
             self.map
                 .release_objects(site, active.claimed_objects, self.id);
         }
+        self.inn_booking = None;
         self.active_action = None;
         self.active_plan = None;
         Ok(())
@@ -93,6 +95,9 @@ impl Citizen {
     }
 
     pub(crate) fn sleep_place(&self) -> Option<crate::locations::PlaceId> {
+        if let Some(booking) = self.inn_booking {
+            return Some(booking.place);
+        }
         let home = self.home?;
         let place = self.map.place(home).ok()?;
         place
@@ -114,6 +119,20 @@ impl Citizen {
     ) -> Result<[Option<ObjectId>; 2], SimulationError> {
         if action == CitizenAction::Sleep && self.sleep_place().is_none() {
             return Ok([None; 2]);
+        }
+        if action == CitizenAction::Sleep
+            && let Some(booking) = self.inn_booking
+        {
+            let site = self.map.place(booking.place)?;
+            let object = site
+                .object(booking.bed)
+                .ok_or(SimulationError::MissingProperty)?;
+            if !crate::inns::usable_bed(site, booking.household, booking.bed)
+                || !object.available(self.id)
+            {
+                return Err(SimulationError::MissingInputs);
+            }
+            return Ok([Some(booking.bed), None]);
         }
         let capability = if let Some(recipe) = action.production_recipe() {
             if crate::production::crop_kind(recipe).is_some() {
@@ -307,7 +326,13 @@ impl crate::Universe {
             }
             for (index, id) in active.claimed_objects().enumerate() {
                 let object = site.object(id).ok_or_else(invalid)?;
-                if !object.workers.contains(&worker.id()) || !worker.may_use_object(site, object) {
+                let booked = action == CitizenAction::Sleep
+                    && worker
+                        .inn_booking
+                        .is_some_and(|b| b.place == site.id && b.bed == id);
+                if !object.workers.contains(&worker.id())
+                    || !(booked || worker.may_use_object(site, object))
+                {
                     return Err(invalid());
                 }
                 let matches = if index == 1 {
@@ -322,10 +347,11 @@ impl crate::Universe {
                         && recipe.duration_ms(worker).is_ok()
                         && object.kind.same_capability(ObjectKind::for_recipe(recipe))
                 } else if action == CitizenAction::Sleep {
-                    object.kind
-                        == ObjectKind::Bed {
-                            resident: Some(worker.id()),
-                        }
+                    booked
+                        || object.kind
+                            == ObjectKind::Bed {
+                                resident: Some(worker.id()),
+                            }
                 } else if let Some((_, plot)) = action.crop_plot() {
                     let crop = match object.kind {
                         ObjectKind::CropPlot { crop } => crop,

@@ -49,7 +49,7 @@ pub struct ConstructionFinancing {
     pub can_finance: bool,
 }
 
-fn ceil_coins(value: f64) -> Result<Coins, SimulationError> {
+pub(crate) fn ceil_coins(value: f64) -> Result<Coins, SimulationError> {
     if !value.is_finite() || value < 0.0 || value.ceil() >= i64::MAX as f64 {
         return Err(SimulationError::WealthOverflow);
     }
@@ -57,6 +57,32 @@ fn ceil_coins(value: f64) -> Result<Coins, SimulationError> {
 }
 
 impl Universe {
+    pub(crate) fn expected_earning_hours(&self, member: AgentId) -> f64 {
+        let history: Vec<_> = self
+            .citizen_history(member)
+            .into_iter()
+            .flat_map(|history| history.completed.iter().rev())
+            .filter(|day| day.elapsed_ms == DAY_MS)
+            .take(7)
+            .collect();
+        // Food goals also contain meals: subtraction conservatively excludes
+        // some earning time because existing history cannot separate overlaps.
+        let hours = if history.is_empty() {
+            FALLBACK_EARNING_HOURS
+        } else {
+            history
+                .iter()
+                .map(|day| {
+                    (day.activity.production_ms + day.activity.travel_ms + day.activity.trade_ms)
+                        .saturating_sub(day.food_goal_ms) as f64
+                        / HOUR_MS
+                })
+                .sum::<f64>()
+                / history.len() as f64
+        };
+        hours.clamp(MIN_EARNING_HOURS, 24.0)
+    }
+
     /// Whole-project market estimate, including procurement for every work portion.
     pub fn construction_estimate(
         &self,
@@ -263,9 +289,11 @@ impl Universe {
         let mut consumed = 0.0;
         let mut taxes = 0.0;
         let mut fees = 0.0;
+        let mut inn_payments = 0.0;
         for day in &days {
             taxes += day.taxes_paid as f64;
             fees += day.workshop_fees_paid as f64;
+            inn_payments += day.inn_payments as f64;
         }
         for member in &members {
             let personal_days: Vec<_> = self
@@ -321,35 +349,12 @@ impl Universe {
         let consumption_daily_cost = consumed.max(essential_daily_cost) + clothing_daily_cost;
         let taxes_daily_cost = taxes / divisor;
         let fees_daily_cost = fees / divisor;
-        let recurring_daily_cost = consumption_daily_cost + taxes_daily_cost + fees_daily_cost;
-        let mut earning_hours_per_day = 0.0;
-        for member in &members {
-            let history: Vec<_> = self
-                .citizen_history(*member)
-                .into_iter()
-                .flat_map(|history| history.completed.iter().rev())
-                .filter(|day| day.elapsed_ms == DAY_MS)
-                .take(7)
-                .collect();
-            // Food goals also contain meals: subtraction conservatively excludes
-            // some earning time because existing history cannot separate overlaps.
-            let hours = if history.is_empty() {
-                FALLBACK_EARNING_HOURS
-            } else {
-                history
-                    .iter()
-                    .map(|day| {
-                        (day.activity.production_ms
-                            + day.activity.travel_ms
-                            + day.activity.trade_ms)
-                            .saturating_sub(day.food_goal_ms) as f64
-                            / HOUR_MS
-                    })
-                    .sum::<f64>()
-                    / history.len() as f64
-            };
-            earning_hours_per_day += hours.clamp(MIN_EARNING_HOURS, 24.0);
-        }
+        let recurring_daily_cost =
+            consumption_daily_cost + taxes_daily_cost + fees_daily_cost + inn_payments / divisor;
+        let earning_hours_per_day = members
+            .iter()
+            .map(|member| self.expected_earning_hours(*member))
+            .sum::<f64>();
         let essential_reserve = ceil_coins(essential_daily_cost * RESERVE_DAYS)?;
         let free_cash = cash
             .saturating_sub(commitments)
@@ -835,5 +840,41 @@ mod tests {
         assert!(!delayed.can_finance);
         assert!(delayed.living_cash > short.living_cash);
         assert!(world.carpenter_quote(&budget, &[], f64::NAN, 0.0).is_err());
+    }
+
+    #[test]
+    fn completed_inn_payments_raise_earnings_and_construction_living_cash() {
+        let (world, member, _, _) = family(100_000);
+        let mut world = world
+            .advance(2 * DAY_MS + crate::marketplace::UPDATE_TIME_MS)
+            .unwrap();
+        let account = world.economic_id(member).unwrap();
+        let baseline = world.household_budget(account, 0).unwrap();
+        let history = world.household_histories.get_mut(&account).unwrap();
+        let mut days = 0;
+        for day in history.completed.iter_mut() {
+            if day.end_ms - day.start_ms == DAY_MS {
+                day.inn_payments = if days == 0 { 40 } else { 80 };
+                days += 1;
+            }
+        }
+        assert_eq!(days, 2);
+        history.current.inn_payments = 10_000;
+        let budget = world.household_budget(account, 0).unwrap();
+        assert_eq!(
+            budget.recurring_daily_cost,
+            baseline.recurring_daily_cost + 60.0
+        );
+        assert!(
+            (budget.hourly_earnings_target
+                - baseline.hourly_earnings_target
+                - 60.0 / budget.earning_hours_per_day)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            budget.construction_financing(0, 2.0).unwrap().living_cash,
+            baseline.construction_financing(0, 2.0).unwrap().living_cash + 120
+        );
     }
 }

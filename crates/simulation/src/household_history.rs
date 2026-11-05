@@ -47,6 +47,8 @@ pub struct DailyHouseholdHistory {
     pub departed_coins: Coins,
     pub sales_receipts: Coins,
     pub purchases: Coins,
+    pub inn_receipts: Coins,
+    pub inn_payments: Coins,
     pub taxes_paid: Coins,
     pub workshop_fees_paid: Coins,
     pub construction: crate::construction::ConstructionCash,
@@ -69,6 +71,8 @@ impl DailyHouseholdHistory {
             departed_coins: 0,
             sales_receipts: 0,
             purchases: 0,
+            inn_receipts: 0,
+            inn_payments: 0,
             taxes_paid: 0,
             workshop_fees_paid: 0,
             construction: Default::default(),
@@ -347,6 +351,8 @@ impl Universe {
                         day.closing_coins,
                         day.sales_receipts,
                         day.purchases,
+                        day.inn_receipts,
+                        day.inn_payments,
                         day.taxes_paid,
                         day.workshop_fees_paid,
                         day.construction.escrow_deposited,
@@ -360,6 +366,8 @@ impl Universe {
                         - i128::from(day.departed_coins)
                         + i128::from(day.sales_receipts)
                         - i128::from(day.purchases)
+                        + i128::from(day.inn_receipts)
+                        - i128::from(day.inn_payments)
                         - i128::from(day.taxes_paid)
                         - i128::from(day.workshop_fees_paid)
                         - i128::from(day.construction.escrow_deposited)

@@ -38,7 +38,9 @@ fn producer(
         StartingRole::Tailor => Recipe::MakeClothingBlock,
         StartingRole::Fisher => Recipe::CatchFish,
         StartingRole::Brewer => Recipe::BrewBeer,
-        StartingRole::Carpenter => return universe.with_citizen(name, worker).unwrap(),
+        StartingRole::Carpenter | StartingRole::Innkeeper => {
+            return universe.with_citizen(name, worker).unwrap();
+        }
     };
     let (universe, id) = universe.with_citizen(name, worker).unwrap();
     let universe = if recipe.location().is_public() {
