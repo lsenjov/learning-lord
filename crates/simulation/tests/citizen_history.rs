@@ -43,6 +43,9 @@ fn wellbeing_integral_is_independent_of_advance_chunk_size_and_need_clamps() {
         .with_garment_condition(Some(0.0001))
         .unwrap();
     let (world, id) = world(citizen);
+    let world = world
+        .set_household_living_tier(world.economic_id(id).unwrap(), 2)
+        .unwrap();
     let long = world.advance(2 * 3_600_000).unwrap();
     let mut short = world;
     for _ in 0..120 {

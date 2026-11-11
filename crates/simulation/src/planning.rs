@@ -1221,6 +1221,13 @@ mod tests {
             .unwrap()
             .with_good(Good::Water, 400)
             .unwrap();
+        worker = worker
+            .with_home_good(Good::Fish, 3)
+            .unwrap()
+            .with_home_good(Good::Cabbage, 3)
+            .unwrap()
+            .with_home_good(Good::Beer, 1500)
+            .unwrap();
         worker = worker.with_prices(
             worker
                 .prices()

@@ -1768,6 +1768,11 @@ impl Universe {
                     ..Default::default()
                 },
             )?;
+            if client.account() == Some(account)
+                && let Some(history) = self.household_histories.get_mut(&account)
+            {
+                add_coins(&mut history.current.internal_construction_receipts, payment)?;
+            }
             let contract = self.construction.contracts.get_mut(&id).unwrap();
             contract.escrow -= payment;
             contract.paid = cumulative;

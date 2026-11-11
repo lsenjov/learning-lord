@@ -1152,6 +1152,7 @@ mod tests {
     fn market_snapshot_matches_scalar_prices_and_ownership() {
         let mut citizen = quoted_weaver(10000);
         citizen.household = Some(crate::households::HouseholdContext {
+            living_tier: 5,
             id: crate::AgentId(uuid::Uuid::new_v4()),
             members: vec![citizen.id()],
             allegiance: 1.0,

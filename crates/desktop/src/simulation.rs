@@ -51,6 +51,10 @@ pub enum Mutation {
     },
     RemoveCitizen(learning_lord_simulation::AgentId),
     RemoveHousehold(learning_lord_simulation::AgentId),
+    SetHouseholdLivingTier {
+        household: learning_lord_simulation::AgentId,
+        tier: u8,
+    },
     AddCitizen {
         household: Option<learning_lord_simulation::AgentId>,
         role: learning_lord_simulation::StartingRole,
@@ -108,6 +112,9 @@ impl Mutation {
             Self::GrantProperty { place, household } => universe.grant_property(place, household),
             Self::RemoveCitizen(id) => universe.remove_citizen(id),
             Self::RemoveHousehold(id) => universe.remove_household(id),
+            Self::SetHouseholdLivingTier { household, tier } => {
+                universe.set_household_living_tier(household, tier)
+            }
             Self::AddCitizen {
                 household,
                 role,

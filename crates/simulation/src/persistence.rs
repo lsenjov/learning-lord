@@ -132,7 +132,21 @@ impl Universe {
                 "missing compact construction accounting",
             ));
         }
+        let legacy_living: Vec<_> = universe
+            .households
+            .iter()
+            .filter(|(_, household)| household.living_standard.since_ms == u64::MAX)
+            .map(|(id, _)| *id)
+            .collect();
+        universe.refresh_living_tiers();
         universe.validate_save_sources()?;
+        for household in legacy_living {
+            universe
+                .invalidate_household_living_plans(household)
+                .map_err(|_| {
+                    SaveError::InvalidState("cannot reset legacy living standard plans")
+                })?;
+        }
         // Rebuilding context synchronizes balances; keep saved snapshots for validation.
         let balances: Vec<_> = universe
             .agents
@@ -279,7 +293,18 @@ impl Universe {
     fn validate_households(&self) -> Result<(), SaveError> {
         use crate::marketplace::MarketParty;
         for (id, household) in &self.households {
-            if *id != household.id
+            if !(1..=5).contains(&household.living_standard.tier)
+                || household.living_standard.since_ms > self.current_time_ms
+                || household
+                    .living_standard
+                    .last_check
+                    .as_ref()
+                    .is_some_and(|check| {
+                        check.time_ms > self.current_time_ms
+                            || check.income < 0
+                            || check.expenditure < 0
+                    })
+                || *id != household.id
                 || self.agents.contains_key(id)
                 || self.guilds.contains_key(id)
                 || household
@@ -556,6 +581,8 @@ impl Citizen {
             ]
             .into_iter()
             .all(f64::is_finite)
+            || !self.alcohol.is_finite()
+            || !(0.0..=100.0).contains(&self.alcohol)
             || self.hunger_per_hour < 0.0
             || self.coins < 0
             || self

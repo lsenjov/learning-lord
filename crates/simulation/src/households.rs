@@ -8,6 +8,8 @@ use imbl::HashMap;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Household {
+    #[serde(default)]
+    pub living_standard: crate::living_standards::LivingStandard,
     pub id: AgentId,
     pub name: String,
     pub home: Option<PlaceId>,
@@ -19,6 +21,8 @@ pub struct Household {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct HouseholdContext {
+    #[serde(default = "crate::living_standards::base_tier")]
+    pub living_tier: u8,
     pub id: AgentId,
     pub members: Vec<AgentId>,
     pub allegiance: f64,
@@ -625,7 +629,7 @@ mod tests {
             let household = match &world.agents()[&first].kind {
                 crate::AgentKind::Citizen(citizen) => citizen.household_id().unwrap(),
             };
-            let mut world = world;
+            let mut world = world.set_household_living_tier(household, 2).unwrap();
             let owner = GoodsOwner::Household(household);
             let action = match scenario {
                 0 => {
@@ -1010,9 +1014,12 @@ mod physical_tests {
             first.food_reserve_wellbeing(),
             crate::food_reserve_bonus(100.0)
         );
-        assert_eq!(
-            first.decision_score().unwrap() - first.personal_wellbeing().unwrap(),
-            world.household_wealth(household).unwrap() * crate::WEALTH_WELLBEING_PER_COIN
+        assert!(
+            (first.decision_score().unwrap()
+                - first.personal_wellbeing().unwrap()
+                - world.household_wealth(household).unwrap() * crate::WEALTH_WELLBEING_PER_COIN)
+                .abs()
+                < 1e-10
         );
         assert_eq!(first.decision_score(), second.decision_score());
     }

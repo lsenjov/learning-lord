@@ -1346,6 +1346,9 @@ mod tests {
         );
 
         let (world, id, place) = reserved_worker(Good::FlaxGarment, 2);
+        let world = world
+            .set_household_living_tier(world.economic_id(id).unwrap(), 2)
+            .unwrap();
         let busy = world
             .start_action(id, crate::CitizenAction::EquipClothing)
             .unwrap();

@@ -155,6 +155,9 @@ fn garments_trade_as_whole_items_without_transferring_worn_condition() {
                 .unwrap(),
         )
         .unwrap();
+    let town = town
+        .set_household_living_tier(town.economic_id(seller).unwrap(), 2)
+        .unwrap();
     let listed = town
         .start_action(seller, CitizenAction::List(Good::FlaxGarment, 1))
         .unwrap()

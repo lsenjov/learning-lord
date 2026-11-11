@@ -211,6 +211,9 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
             Citizen::new(0.0).unwrap().with_furnished_home().unwrap(),
         )
         .unwrap();
+    let original = original
+        .set_household_living_tier(original.economic_id(id).unwrap(), 5)
+        .unwrap();
     let learning_lord_simulation::AgentKind::Citizen(ada) = &original.agents()[&id].kind;
     let original = original
         .with_stored_good(

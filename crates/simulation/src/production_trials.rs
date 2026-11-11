@@ -1043,6 +1043,7 @@ mod tests {
         let members = vec![first.id(), second.id()];
         for citizen in [&mut first, &mut second] {
             citizen.household = Some(crate::households::HouseholdContext {
+                living_tier: 5,
                 id: account,
                 members: members.clone(),
                 allegiance: 1.0,
@@ -1628,6 +1629,7 @@ mod depletion_tests {
         let mut worker = owner.clone();
         worker.id = AgentId(uuid::Uuid::new_v4());
         worker.household = Some(crate::households::HouseholdContext {
+            living_tier: 5,
             id: account,
             members: vec![owner.id(), worker.id()],
             allegiance: 1.0,
@@ -1850,6 +1852,7 @@ mod depletion_tests {
         let mut worker = owner.clone();
         worker.id = AgentId(uuid::Uuid::new_v4());
         worker.household = Some(crate::households::HouseholdContext {
+            living_tier: 5,
             id: account,
             members: vec![owner.id(), worker.id()],
             allegiance: 1.0,

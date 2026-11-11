@@ -426,6 +426,12 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
     for (value, rate) in start.diet.into_iter().zip(diet_rates) {
         split(value, value + rate * elapsed as f64, &[0.0, 50.0, 100.0]);
     }
+    let alcohol_rate = start.alcohol_rate(start.active_action);
+    split(
+        start.alcohol,
+        start.alcohol + alcohol_rate * elapsed as f64,
+        &[0.0, 50.0, 100.0],
+    );
     let discomfort_rate = start.discomfort_rate(start.active_action);
     split(
         start.discomfort,
@@ -438,13 +444,21 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
         for ((value, initial), rate) in citizen.diet.iter_mut().zip(start.diet).zip(diet_rates) {
             *value = (initial + rate * elapsed as f64 * fraction).clamp(0.0, 100.0);
         }
+        citizen.alcohol =
+            (start.alcohol + alcohol_rate * elapsed as f64 * fraction).clamp(0.0, 100.0);
         citizen.thirst = start.thirst + (end.thirst - start.thirst) * fraction;
         citizen.hunger = start.hunger + (end.hunger - start.hunger) * fraction;
         citizen.discomfort =
             (start.discomfort + discomfort_rate * elapsed as f64 * fraction).clamp(0.0, 100.0);
         citizen.tiredness = start.tiredness + (end.tiredness - start.tiredness) * fraction;
         citizen.garment_condition = start.garment_condition.map(|value| {
-            (value - elapsed as f64 * fraction / crate::GARMENT_LIFETIME_MS as f64).max(0.0)
+            (value
+                - if start.living_tier() >= 2 {
+                    elapsed as f64 * fraction / crate::GARMENT_LIFETIME_MS as f64
+                } else {
+                    0.0
+                })
+            .max(0.0)
         });
         // Keep interpolation fractional so millisecond rounding cannot bias the daily average.
         let mut value = citizen.personal_wellbeing()?;
@@ -716,6 +730,9 @@ mod tests {
         citizen.garment_condition = Some(1.0);
         let (world, worker) = Universe::with_map(crate::locations::Map::default())
             .with_citizen("Tailor", citizen)
+            .unwrap();
+        let world = world
+            .set_household_living_tier(world.economic_id(worker).unwrap(), 2)
             .unwrap();
         let started = world
             .start_action(worker, CitizenAction::EquipClothing)

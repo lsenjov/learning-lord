@@ -31,6 +31,7 @@ pub mod guilds;
 pub mod history;
 pub mod household_history;
 pub mod households;
+pub mod living_standards;
 pub mod maintenance;
 pub mod persistence;
 pub mod production;
@@ -363,6 +364,8 @@ pub struct Citizen {
     hunger: f64,
     thirst: f64,
     diet: [f64; 4],
+    #[serde(default)]
+    alcohol: f64,
     garment_condition: Option<f64>,
     hunger_per_hour: f64,
     tiredness: f64,
@@ -430,6 +433,7 @@ impl Citizen {
             hunger,
             thirst: 0.0,
             diet: [0.0; 4],
+            alcohol: 0.0,
             garment_condition: None,
             hunger_per_hour,
             tiredness: 0.0,
@@ -793,6 +797,9 @@ impl Citizen {
     }
 
     pub fn clothing_need(&self) -> f64 {
+        if self.living_tier() < 2 {
+            return 0.0;
+        }
         CLOTHING_MAX_PENALTY * (1.0 - self.garment_condition.unwrap_or(0.0))
     }
 
@@ -1270,6 +1277,9 @@ impl Citizen {
     }
 
     pub(crate) fn spare_clothing_target(&self) -> u64 {
+        if self.living_tier() < 2 {
+            return 0;
+        }
         u64::from(self.garment_condition().unwrap_or(0.0) <= 0.2)
             + self
                 .household
@@ -1699,6 +1709,7 @@ impl Citizen {
             + self.food_reserve_wellbeing()
             + self.water_reserve_wellbeing()
             + self.dietary_wellbeing()
+            + self.alcohol_wellbeing()
     }
 
     pub fn personal_wellbeing(&self) -> Result<f64, SimulationError> {
@@ -1875,6 +1886,9 @@ impl Citizen {
                             }
                         }
                         CitizenAction::EquipClothing => {
+                            if citizen.living_tier() < 2 {
+                                return Ok(());
+                            }
                             match citizen.consume_goods(Good::FlaxGarment, 1) {
                                 Ok(()) => citizen.garment_condition = Some(1.0),
                                 Err(SimulationError::MissingInputs) => {
@@ -2108,9 +2122,11 @@ impl Citizen {
         self.discomfort =
             (self.discomfort + self.discomfort_rate(active) * elapsed_ms as f64).clamp(0.0, 100.0);
         self.advance_diet(elapsed_ms, active);
-        self.garment_condition = self.garment_condition.map(|condition| {
-            (condition - elapsed_ms as f64 / GARMENT_LIFETIME_MS as f64).clamp(0.0, 1.0)
-        });
+        if self.living_tier() >= 2 {
+            self.garment_condition = self.garment_condition.map(|condition| {
+                (condition - elapsed_ms as f64 / GARMENT_LIFETIME_MS as f64).clamp(0.0, 1.0)
+            });
+        }
         let elapsed_hours = elapsed_ms as f64 / 3_600_000.0;
         let consumed_fraction = |duration: u64, action: ActiveAction| {
             if duration == 0 {
@@ -2648,6 +2664,9 @@ impl Universe {
             universe.households.insert(
                 account,
                 households::Household {
+                    living_standard: living_standards::LivingStandard::new(
+                        universe.current_time_ms,
+                    ),
                     id: account,
                     name: household_name,
                     home: citizen.home,
@@ -2712,6 +2731,7 @@ impl Universe {
         citizen.coins = family.coins;
         citizen.maintenance = family.maintenance;
         citizen.household = Some(households::HouseholdContext {
+            living_tier: family.living_standard.tier,
             id: account,
             members: family.members.clone(),
             allegiance: 1.0,
@@ -3231,6 +3251,14 @@ impl Universe {
             universe.refresh_household_history(finishing_time, true)?;
             universe.refresh_guild_history(finishing_time, true);
             universe.current_time_ms = finishing_time;
+            let tier_changes = universe.assess_household_living_standards(finishing_time)?;
+            if let Some(runtime) = runtime.as_deref_mut() {
+                for household in tier_changes {
+                    for member in &universe.households[&household].members {
+                        runtime.cancel(*member);
+                    }
+                }
+            }
             universe.update_inn_prices()?;
             universe.market.set_time(finishing_time);
             for (_, agent) in universe.agents.iter_mut() {
@@ -3503,6 +3531,7 @@ impl Universe {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
             if let Some(context) = &mut citizen.household {
                 let household = &self.households[&context.id];
+                context.living_tier = household.living_standard.tier;
                 citizen.coins = household.coins;
                 context.other_carried = [0; Good::COUNT];
                 context.other_consumption_value = 0.0;

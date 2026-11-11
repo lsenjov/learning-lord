@@ -948,6 +948,7 @@ mod transport_tests {
             let other = AgentId(uuid::Uuid::new_v4());
             if shared {
                 citizen.household = Some(crate::households::HouseholdContext {
+                    living_tier: 5,
                     id: citizen.id,
                     members: vec![citizen.id, other],
                     allegiance: 0.0,

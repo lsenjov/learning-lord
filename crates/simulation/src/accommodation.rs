@@ -18,6 +18,7 @@ mod tests {
         let (world, second) = world
             .with_household_member(household, "Second", Citizen::new(0.0).unwrap())
             .unwrap();
+        let world = world.set_household_living_tier(household, 2).unwrap();
         for id in [first, second] {
             assert_eq!(worker(&world, id).spare_clothing_target(), 1);
         }

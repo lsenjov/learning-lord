@@ -615,10 +615,25 @@ fn deliver_reserves(
     )
 }
 
-fn pantry_categories(citizen: &Citizen) -> [f64; 4] {
-    let mut points = [0.0; 4];
+fn provisioning_intake(citizen: &Citizen, good: Good) -> [f64; 5] {
+    let diet = citizen.active_diet_intake(good);
+    [
+        diet[0],
+        diet[1],
+        diet[2],
+        diet[3],
+        if citizen.living_tier() >= 4 && good == Good::Beer {
+            0.05
+        } else {
+            0.0
+        },
+    ]
+}
+
+fn pantry_categories(citizen: &Citizen) -> [f64; 5] {
+    let mut points = [0.0; 5];
     for good in Good::FOOD.into_iter().chain([Good::Beer]) {
-        for (total, per_unit) in points.iter_mut().zip(good.diet_per_unit()) {
+        for (total, per_unit) in points.iter_mut().zip(provisioning_intake(citizen, good)) {
             *total += reserve_units(citizen, good) as f64 * per_unit;
         }
     }
@@ -626,7 +641,19 @@ fn pantry_categories(citizen: &Citizen) -> [f64; 4] {
 }
 
 fn provisioning_needed(citizen: &Citizen) -> bool {
-    citizen.provisioned_food_nutrition() < 100.0 * citizen.supplied_members() as f64
+    let pantry = pantry_categories(citizen);
+    let active = [
+        citizen.living_tier() >= 3,
+        citizen.living_tier() >= 3,
+        citizen.living_tier() >= 3,
+        citizen.living_tier() >= 5,
+        citizen.living_tier() >= 4,
+    ];
+    active
+        .into_iter()
+        .zip(pantry)
+        .any(|(active, points)| active && points < 25.0 * citizen.supplied_members() as f64)
+        || citizen.provisioned_food_nutrition() < 100.0 * citizen.supplied_members() as f64
         || citizen.provisioned_drink_units() < 400 * citizen.supplied_members()
         || reserve_units(citizen, Good::FlaxGarment) < citizen.spare_clothing_target()
 }
@@ -654,7 +681,6 @@ fn basket_cost(citizen: &Citizen, units: &[crate::Quantity; Good::COUNT]) -> Opt
 
 fn provisioning_basket(
     citizen: &Citizen,
-    omitted: usize,
     basic: bool,
 ) -> Result<crate::marketplace::ShoppingList, SimulationError> {
     let members = citizen.supplied_members() as f64;
@@ -671,21 +697,30 @@ fn provisioning_basket(
         loop {
             let missing_food = (food_target - nutrition).max(0.0);
             let missing_drink = (drink_target - drink).max(0.0);
-            let missing = categories.map(|points| (75.0 * members - points).max(0.0));
+            let active = [
+                citizen.living_tier() >= 3,
+                citizen.living_tier() >= 3,
+                citizen.living_tier() >= 3,
+                citizen.living_tier() >= 5,
+                citizen.living_tier() >= 4,
+            ];
+            let missing = std::array::from_fn::<_, 5, _>(|index| {
+                if active[index] {
+                    (75.0 * members - categories[index]).max(0.0)
+                } else {
+                    0.0
+                }
+            });
             if phase == 0 && missing_food == 0.0
                 || phase == 1 && missing_drink == 0.0
-                || phase == 2
-                    && missing
-                        .iter()
-                        .enumerate()
-                        .all(|(index, points)| index == omitted || *points == 0.0)
+                || phase == 2 && missing.iter().all(|points| *points == 0.0)
             {
                 break;
             }
             let old_cost = basket_cost(citizen, &units).unwrap_or(0);
             let mut best: Option<(bool, f64, Good, crate::Quantity)> = None;
             for good in Good::FOOD.into_iter().chain([Good::Water, Good::Beer]) {
-                let diet = good.diet_per_unit();
+                let diet = provisioning_intake(citizen, good);
                 let food = good.nutrition_per_unit().unwrap_or(if good == Good::Beer {
                     0.05
                 } else {
@@ -702,7 +737,6 @@ fn provisioning_basket(
                     _ => diet
                         .into_iter()
                         .enumerate()
-                        .filter(|(index, _)| *index != omitted)
                         .map(|(index, points)| points.min(missing[index]))
                         .sum(),
                 };
@@ -715,7 +749,7 @@ fn provisioning_basket(
                     _ => diet
                         .into_iter()
                         .enumerate()
-                        .filter(|(index, points)| *index != omitted && *points > 0.0)
+                        .filter(|(_, points)| *points > 0.0)
                         .map(|(index, points)| (missing[index] / points).ceil())
                         .fold(0.0, f64::max),
                 } as crate::Quantity;
@@ -730,7 +764,6 @@ fn provisioning_basket(
                     _ => diet
                         .into_iter()
                         .enumerate()
-                        .filter(|(index, _)| *index != omitted)
                         .map(|(index, points)| missing[index].min(points * count as f64))
                         .sum(),
                 };
@@ -767,7 +800,10 @@ fn provisioning_basket(
             if matches!(good, Good::Water | Good::Beer) {
                 drink += count as f64;
             }
-            for (points, per_unit) in categories.iter_mut().zip(good.diet_per_unit()) {
+            for (points, per_unit) in categories
+                .iter_mut()
+                .zip(provisioning_intake(citizen, good))
+            {
                 *points += count as f64 * per_unit;
             }
         }
@@ -857,7 +893,7 @@ fn provision_household(
     }
     let mut state = initial.clone();
     state.blocked_requests = Default::default();
-    let basic = provisioning_basket(&state.citizen, 3, true)?;
+    let basic = provisioning_basket(&state.citizen, true)?;
     state = acquire_provisioning_list(&state, basic, prior_actions)?;
     let basic_drink = 400 * state.citizen.supplied_members();
     if reserve_drink_units(&state.citizen) < basic_drink {
@@ -883,56 +919,18 @@ fn provision_household(
             prior_actions,
         )?;
     }
-    let mut candidates = Vec::new();
-    let mut pending_baskets = Vec::new();
-    for omitted in 0..4 {
-        let list = provisioning_basket(&state.citizen, omitted, false)?;
-        let mut ready = state.clone();
-        ready.blocked_requests =
-            std::rc::Rc::new(std::cell::RefCell::new(*state.blocked_requests.borrow()));
-        if ready.actions.len() > initial.actions.len() {
-            ready.cooldowns.buy = 0;
-        }
-        let acquired = acquire_provisioning_list(&ready, list, prior_actions)?;
-        let units = Good::ALL.map(|good| list.units(good));
-        pending_baskets.push((
-            basket_cost(&state.citizen, &units).unwrap_or(crate::Coins::MAX),
-            omitted,
-            *acquired.blocked_requests.borrow(),
-        ));
-        if let Some(delivered) = deliver_reserves(&acquired, prior_actions)? {
-            let categories = pantry_categories(&delivered.citizen);
-            let members = delivered.citizen.supplied_members() as f64;
-            let covered = categories
-                .into_iter()
-                .enumerate()
-                .filter(|(index, points)| *index != omitted && *points >= 25.0 * members)
-                .count();
-            let diversity: f64 = categories
-                .into_iter()
-                .enumerate()
-                .filter(|(index, _)| *index != omitted)
-                .map(|(_, points)| points.min(75.0 * members))
-                .sum();
-            candidates.push((covered, diversity, omitted, acquired, delivered));
-        }
+    let list = provisioning_basket(&state.citizen, false)?;
+    let mut ready = state.clone();
+    ready.blocked_requests =
+        std::rc::Rc::new(std::cell::RefCell::new(*state.blocked_requests.borrow()));
+    if ready.actions.len() > initial.actions.len() {
+        ready.cooldowns.buy = 0;
     }
-    candidates.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| b.1.total_cmp(&a.1))
-            .then_with(|| b.4.citizen.coins().cmp(&a.4.citizen.coins()))
-            .then_with(|| a.4.elapsed_ms.cmp(&b.4.elapsed_ms))
-            .then_with(|| a.2.cmp(&b.2))
-    });
-    let Some((_, _, _, acquired, food_delivery)) = candidates.into_iter().next() else {
-        pending_baskets.sort_by_key(|(cost, omitted, _)| (*cost, *omitted));
-        let pending = pending_baskets
-            .first()
-            .map_or(*state.blocked_requests.borrow(), |(_, _, request)| *request);
-        record_blocked_purchase(initial, pending)?;
+    let acquired = acquire_provisioning_list(&ready, list, prior_actions)?;
+    let Some(mut delivered) = deliver_reserves(&acquired, prior_actions)? else {
+        record_blocked_purchase(initial, *acquired.blocked_requests.borrow())?;
         return Ok(Vec::new());
     };
-    let mut delivered = food_delivery;
     let missing_spares = acquired
         .citizen
         .spare_clothing_target()
@@ -2119,7 +2117,9 @@ pub(crate) fn need_eligible(citizen: &Citizen, goal: Effect) -> bool {
         Effect::ReduceHunger => citizen.hunger() > 0.0,
         Effect::ReduceThirst => citizen.thirst() > 0.0,
         Effect::ReduceTiredness => citizen.tiredness() > 0.0,
-        Effect::ReduceClothingNeed => citizen.garment_condition().unwrap_or(0.0) <= 0.1,
+        Effect::ReduceClothingNeed => {
+            citizen.living_tier() >= 2 && citizen.garment_condition().unwrap_or(0.0) <= 0.1
+        }
         Effect::ReplenishReserves => provisioning_needed(citizen),
         _ => true,
     }
@@ -2271,6 +2271,15 @@ mod tests {
             .with_home_good(Good::Water, 1200)
             .unwrap()
             .with_garment_condition(Some(0.2))
+            .unwrap();
+        let source = source
+            .with_home_good(Good::Fish, 3)
+            .unwrap()
+            .with_home_good(Good::Cabbage, 3)
+            .unwrap()
+            .with_home_good(Good::Berries, 1000)
+            .unwrap()
+            .with_home_good(Good::Beer, 1500)
             .unwrap();
         assert!(!need_eligible(&source, Effect::ReduceClothingNeed));
         assert!(need_eligible(&source, Effect::ReplenishReserves));
@@ -2475,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_diversity_alone_does_not_trigger_replenishment() {
+    fn missing_active_diversity_records_replenishment_demand() {
         let source = reserve_shopper(1000, &[])
             .with_home_good(Good::BreadRoll, 100)
             .unwrap()
@@ -2485,10 +2494,10 @@ mod tests {
             .unwrap();
         let initial = Prediction::new(&source, Cooldowns::default());
         assert!(provision_household(&initial, 0).unwrap().is_empty());
-        assert_eq!(
-            *initial.blocked_requests.borrow(),
-            crate::marketplace::ShoppingList::default()
-        );
+        let request = *initial.blocked_requests.borrow();
+        assert!(request.units(Good::Fish) > 0);
+        assert!(request.units(Good::Cabbage) > 0);
+        assert!(request.units(Good::Beer) > 0);
     }
 
     #[test]
@@ -2551,7 +2560,7 @@ mod tests {
     }
 
     #[test]
-    fn attainable_three_categories_beat_nominally_cheap_unavailable_food() {
+    fn available_categories_are_bought_and_missing_active_categories_record_demand() {
         let mut source = reserve_shopper(
             1000,
             &[(Good::Cabbage, 20, 2.0), (Good::Berries, 10000, 2.0)],
@@ -2568,7 +2577,7 @@ mod tests {
         assert!(
             supplied.home_units(Good::Berries) as f64 * crate::BERRY_NUTRITION_PER_GRAM >= 75.0
         );
-        assert_eq!(initial.blocked_requests.borrow().units(Good::Fish), 0);
+        assert!(initial.blocked_requests.borrow().units(Good::Fish) > 0);
     }
 
     #[test]
@@ -2659,10 +2668,12 @@ mod tests {
     }
 
     #[test]
-    fn listing_after_provisioning_retains_the_three_category_pantry() {
+    fn listing_after_provisioning_retains_every_active_pantry_category() {
         let mut source = reserve_shopper(
             1000,
             &[
+                (Good::Fish, 20, 2.0),
+                (Good::Beer, 5000, 0.01),
                 (Good::Cabbage, 20, 2.0),
                 (Good::Berries, 10000, 2.0),
                 (Good::FlaxGarment, 1, 1.0),
@@ -2695,6 +2706,7 @@ mod tests {
             .with_good(Good::Water, 5000)
             .unwrap();
         source.household = Some(crate::households::HouseholdContext {
+            living_tier: 5,
             id: source.economic_id(),
             members: vec![source.id, crate::AgentId(uuid::Uuid::new_v4())],
             allegiance: 0.0,
@@ -2727,6 +2739,7 @@ mod tests {
             ],
         );
         source.household = Some(crate::households::HouseholdContext {
+            living_tier: 5,
             id: source.economic_id(),
             members: vec![source.id, crate::AgentId(uuid::Uuid::new_v4())],
             allegiance: 0.0,
@@ -2734,7 +2747,7 @@ mod tests {
             other_consumption_value: 0.0,
             other_clothing_replacements: 0,
         });
-        let list = provisioning_basket(&source, 3, false).unwrap();
+        let list = provisioning_basket(&source, false).unwrap();
         let nutrition: f64 = list
             .items()
             .map(|(good, units)| {
@@ -2758,7 +2771,7 @@ mod tests {
     }
 
     #[test]
-    fn full_monoculture_pantry_still_buys_three_categories_and_excludes_expensive_fourth() {
+    fn full_monoculture_pantry_requests_every_active_category() {
         let source = reserve_shopper(
             1000,
             &[
@@ -2772,19 +2785,16 @@ mod tests {
         .with_home_good(Good::Water, 1200)
         .unwrap();
         assert!(provisioning_needed(&source));
-        let variants =
-            provision_household(&Prediction::new(&source, Cooldowns::default()), 0).unwrap();
-        let supplied = &variants[0].citizen;
-        assert_eq!(supplied.home_units(Good::Fish), 0);
-        assert!(supplied.home_units(Good::Cabbage) >= 3);
-        assert!(
-            supplied.home_units(Good::Berries) as f64 * crate::BERRY_NUTRITION_PER_GRAM >= 75.0
-        );
-        assert_eq!(supplied.home_units(Good::BreadRoll), 100);
+        let list = provisioning_basket(&source, false).unwrap();
+        assert!(list.units(Good::Fish) > 0);
+        assert!(list.units(Good::Cabbage) >= 3);
+        assert!(list.units(Good::Berries) as f64 * crate::BERRY_NUTRITION_PER_GRAM >= 75.0);
+        assert!(list.units(Good::Beer) >= 1500);
+        assert_eq!(list.units(Good::BreadRoll), 0);
     }
 
     #[test]
-    fn stocked_pantry_does_not_shop_for_individual_diet_or_spare() {
+    fn stocked_active_needs_do_not_shop_for_individual_diet_or_spare() {
         let mut source = reserve_shopper(
             10000,
             &[(Good::Fish, 100, 1.0), (Good::FlaxGarment, 10, 1.0)],
@@ -2797,6 +2807,11 @@ mod tests {
         .unwrap()
         .with_home_good(Good::Water, 400)
         .unwrap();
+        source = source
+            .with_home_good(Good::Berries, 1000)
+            .unwrap()
+            .with_home_good(Good::Beer, 1500)
+            .unwrap();
         source.diet = [0.0; 4];
         source.garment_condition = Some(1.0);
         assert!(!provisioning_needed(&source));
@@ -5227,6 +5242,7 @@ mod tests {
         );
         let household = worker.economic_id();
         worker.household = Some(crate::households::HouseholdContext {
+            living_tier: 5,
             id: household,
             members: vec![worker.id()],
             allegiance: 0.0,
@@ -5439,6 +5455,9 @@ mod tests {
             .with_property(id, Recipe::AssembleGarment.location())
             .unwrap()
             .0;
+        let world = world
+            .set_household_living_tier(world.economic_id(id).unwrap(), 2)
+            .unwrap();
         let AgentKind::Citizen(mut citizen) = world.agents()[&id].kind.clone();
         citizen.refresh_production_targets(true).unwrap();
         let variants =
@@ -6336,7 +6355,7 @@ mod tests {
     }
 
     #[test]
-    fn stocked_variety_demand_excludes_unneeded_calories_and_expensive_fourth() {
+    fn stocked_variety_demand_excludes_unneeded_calories_and_includes_all_active_categories() {
         let buyer = reserve_shopper(1000, &[])
             .with_home_good(Good::BreadRoll, 70)
             .unwrap()
@@ -6360,7 +6379,7 @@ mod tests {
         assert_eq!(
             usize::from(request.units(Good::Fish) > 0)
                 + usize::from(request.units(Good::Cabbage) > 0),
-            1
+            2
         );
         assert_eq!(request.units(Good::BreadRoll), 0);
         assert!(request.units(Good::Berries) > 0);

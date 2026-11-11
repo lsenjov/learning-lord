@@ -175,9 +175,71 @@ pub(crate) fn place_link(
         navigation::link(parent, &place.name, Target::Location(id));
     }
 }
+fn living_tier_tooltip(
+    standard: &learning_lord_simulation::living_standards::LivingStandard,
+    now: u64,
+) -> String {
+    use learning_lord_simulation::living_standards::LivingStandardResult;
+    let assessment = standard.last_check.as_ref().map_or_else(
+        || "Last assessment: none".into(),
+        |check| {
+            let result = match check.result {
+                LivingStandardResult::Promoted => "promoted",
+                LivingStandardResult::Demoted => "demoted",
+                LivingStandardResult::Stayed => "unchanged",
+                LivingStandardResult::PromotionCooldown => "promotion cooldown",
+                LivingStandardResult::AwaitingFreshDays => "awaiting seven fresh days",
+            };
+            format!(
+                "Last assessment: {} - {result}",
+                citizens::duration(check.time_ms)
+            )
+        },
+    );
+    let mut tip = format!(
+        "{assessment}\nNext assessment: {}",
+        citizens::duration(standard.next_check_ms(now))
+    );
+    if standard.promotion_allowed_ms > now {
+        tip.push_str(&format!(
+            "\nPromotion allowed: {}",
+            citizens::duration(standard.promotion_allowed_ms)
+        ));
+    }
+    for (index, description) in [
+        "Hunger, thirst, sleep, discomfort",
+        "+ clothing",
+        "+ meat, carbohydrates, fibre",
+        "+ alcohol (ale)",
+        "+ sweets",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let tier = index as u8 + 1;
+        tip.push_str(&format!(
+            "\n{}Tier {tier}: {description}",
+            if standard.tier == tier { "> " } else { "  " }
+        ));
+    }
+    tip
+}
+
 fn details(parent: &mut ChildSpawnerCommands, universe: &Universe, id: AgentId) {
     let household = &universe.households()[&id];
     parent.spawn(text(&household.name, 18.0, TEXT));
+    parent.spawn((
+        text(
+            &format!("Living tier: {}", household.living_standard.tier),
+            14.0,
+            TEXT,
+        ),
+        Interaction::None,
+        crate::tooltip::Tooltip(living_tier_tooltip(
+            &universe.households()[&id].living_standard,
+            universe.current_time_ms(),
+        )),
+    ));
     row(parent, |row| {
         label(row, "Members:");
         for member in &household.members {
@@ -670,7 +732,7 @@ pub(crate) fn refresh(
         .map(|id| {
             let h = &universe.households()[&id];
             format!(
-                "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}",
+                "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}",
                 universe.household_wealth(id),
                 h.members
                     .iter()
@@ -704,7 +766,11 @@ pub(crate) fn refresh(
                     .map(|place| (place.id, &place.name, place.owner, place.kind))
                     .collect::<Vec<_>>(),
                 h.maintenance,
-                universe.workshop_fee_accounts()
+                universe.workshop_fee_accounts(),
+                living_tier_tooltip(
+                    &universe.households()[&id].living_standard,
+                    universe.current_time_ms()
+                )
             )
         })
         .unwrap_or_default();
@@ -877,6 +943,44 @@ pub(crate) fn refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn living_tier_tooltip_marks_current_tier_and_shows_assessment_schedule() {
+        let universe = crate::simulation::new_universe().unwrap();
+        let household = *universe.households().keys().next().unwrap();
+        let tip = living_tier_tooltip(
+            &universe.households()[&household].living_standard,
+            universe.current_time_ms(),
+        );
+        assert!(tip.contains("Last assessment: none"));
+        assert!(tip.contains("Next assessment:"));
+        assert!(tip.contains("> Tier 1: Hunger, thirst, sleep, discomfort"));
+        assert!(!tip.contains("Promotion allowed:"));
+        let universe = universe
+            .set_household_living_tier(household, 4)
+            .unwrap()
+            .set_household_living_tier(household, 3)
+            .unwrap();
+        let tip = living_tier_tooltip(
+            &universe.households()[&household].living_standard,
+            universe.current_time_ms(),
+        );
+        assert!(tip.contains("> Tier 3: + meat, carbohydrates, fibre"));
+        assert!(tip.contains("Promotion allowed:"));
+        assert_eq!(tip.matches("Tier ").count(), 5);
+        let mut standard = universe.households()[&household].living_standard.clone();
+        standard.last_check = Some(
+            learning_lord_simulation::living_standards::LivingStandardCheck {
+                time_ms: 60_000,
+                income: 0,
+                expenditure: 1,
+                result: learning_lord_simulation::living_standards::LivingStandardResult::Demoted,
+            },
+        );
+        assert!(
+            living_tier_tooltip(&standard, 60_000).contains("Last assessment: 00:01:00 - demoted")
+        );
+    }
+
     #[test]
     fn guild_details_keep_owners_separate_and_reset_selection() {
         let worker = crate::simulation::SimulationWorker::spawn(

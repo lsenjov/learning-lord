@@ -46,6 +46,8 @@ pub struct DailyHouseholdHistory {
     pub introduced_coins: Coins,
     pub departed_coins: Coins,
     pub sales_receipts: Coins,
+    #[serde(default)]
+    pub internal_construction_receipts: Coins,
     pub purchases: Coins,
     pub inn_receipts: Coins,
     pub inn_payments: Coins,
@@ -70,6 +72,7 @@ impl DailyHouseholdHistory {
             introduced_coins: 0,
             departed_coins: 0,
             sales_receipts: 0,
+            internal_construction_receipts: 0,
             purchases: 0,
             inn_receipts: 0,
             inn_payments: 0,
@@ -339,7 +342,9 @@ impl Universe {
                 .iter()
                 .chain(std::iter::once(&history.current))
             {
-                if day.start_ms > day.end_ms
+                if day.internal_construction_receipts < 0
+                    || day.internal_construction_receipts > day.construction.payments_received
+                    || day.start_ms > day.end_ms
                     || day.end_ms > now
                     || day.end_ms - day.start_ms > crate::marketplace::DAY_MS
                     || previous_end.is_some_and(|end| end != day.start_ms)

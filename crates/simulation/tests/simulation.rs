@@ -135,6 +135,9 @@ fn personal_wellbeing_reflects_each_snapshot_without_changing_it() {
                 .unwrap(),
         )
         .unwrap();
+    let original = original
+        .set_household_living_tier(original.economic_id(id).unwrap(), 2)
+        .unwrap();
     let snapshot = original.clone();
     let advanced = original.advance(HOUR_MS).unwrap();
 

@@ -69,6 +69,8 @@ pub(crate) enum Choice {
     Household,
     RemoveCitizen,
     RemoveHousehold,
+    LowerLivingTier,
+    RaiseLivingTier,
 }
 
 pub(crate) fn spawn(parent: &mut ChildSpawnerCommands) {
@@ -173,6 +175,41 @@ pub(crate) fn handle(
                 crate::caravan_controls::stop_editing(&mut caravan);
                 state.editing = true;
                 state.replace = true;
+            }
+            Choice::LowerLivingTier | Choice::RaiseLivingTier => {
+                state.editing = false;
+                if locations.pending() || construction.pending() || caravan.pending() {
+                    state.status = "Another change is saving. Try again when it finishes.".into();
+                    continue;
+                }
+                let Some(household) = selected.selected().filter(|id| {
+                    selected.tab() == collectives::Tab::Households
+                        && snapshot.0.universe.households().contains_key(id)
+                }) else {
+                    state.status = "Select a household in Collectives > Households".into();
+                    continue;
+                };
+                let current = snapshot.0.universe.households()[&household]
+                    .living_standard
+                    .tier;
+                let tier = if matches!(choice, Choice::RaiseLivingTier) {
+                    current.saturating_add(1).min(5)
+                } else {
+                    current.saturating_sub(1).max(1)
+                };
+                if tier == current {
+                    continue;
+                }
+                match worker.send(Command::Mutate {
+                    generation: snapshot.0.generation,
+                    mutation: Mutation::SetHouseholdLivingTier { household, tier },
+                }) {
+                    Ok(()) => {
+                        state.pending = Some(snapshot.0.mutation_revision);
+                        state.status = "Saving...".into();
+                    }
+                    Err(error) => state.status = error,
+                }
             }
             Choice::RemoveCitizen | Choice::RemoveHousehold => {
                 state.editing = false;
@@ -309,6 +346,10 @@ pub(crate) fn refresh(
                 button(p, "Remove citizen", Choice::RemoveCitizen, false, "Remove the selected citizen. The final member removes the household.");
                 button(p, "Remove household", Choice::RemoveHousehold, false, "Remove the household selected in Collectives > Households, settling debts and transferring buildings to town.");
             });
+            p.spawn(Node { column_gap: px(4), ..default() }).with_children(|p| {
+                button(p, "Tier -", Choice::LowerLivingTier, false, "Lower the selected household's living tier. Resets assessment eligibility and delays promotion for 14 days.");
+                button(p, "Tier +", Choice::RaiseLivingTier, false, "Raise the selected household's living tier. Resets the seven-day assessment period.");
+            });
             if !state.status.is_empty() { p.spawn(text(&state.status, 13.0, TEXT)); }
         });
     }
@@ -353,7 +394,7 @@ mod tests {
         press(&mut app, Choice::Household);
         assert!(!app.world().resource::<State>().pending());
         press(&mut app, Choice::Toggle);
-        assert_eq!(choice_count(&mut app), 7);
+        assert_eq!(choice_count(&mut app), 9);
         press(&mut app, Choice::Funds);
         assert!(app.world().resource::<State>().editing());
         press(&mut app, Choice::Toggle);
@@ -386,6 +427,62 @@ mod tests {
             assert!(!state.pending());
         }
     }
+    #[test]
+    fn living_tier_controls_require_selection_and_respect_bounds() {
+        let mut app = app();
+        press(&mut app, Choice::Toggle);
+        press(&mut app, Choice::RaiseLivingTier);
+        assert!(
+            app.world()
+                .resource::<State>()
+                .status
+                .contains("Select a household")
+        );
+        assert!(!app.world().resource::<State>().pending());
+        let household = *app
+            .world()
+            .resource::<DisplaySnapshot>()
+            .0
+            .universe
+            .households()
+            .keys()
+            .next()
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<collectives::State>()
+            .select(household);
+        press(&mut app, Choice::LowerLivingTier);
+        assert!(!app.world().resource::<State>().pending());
+        press(&mut app, Choice::RaiseLivingTier);
+        assert!(app.world().resource::<State>().pending());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let snapshot = app.world().resource::<SimulationWorker>().snapshot();
+            if snapshot.mutation_revision > 0 {
+                assert!(snapshot.mutation_error.is_none());
+                assert_eq!(
+                    snapshot.universe.households()[&household]
+                        .living_standard
+                        .tier,
+                    2
+                );
+                let universe = snapshot
+                    .universe
+                    .set_household_living_tier(household, 5)
+                    .unwrap();
+                let mut snapshot = snapshot;
+                snapshot.universe = universe;
+                app.world_mut().resource_mut::<DisplaySnapshot>().0 = snapshot;
+                app.update();
+                press(&mut app, Choice::RaiseLivingTier);
+                assert!(!app.world().resource::<State>().pending());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn funds_keyboard_replaces_then_appends_and_blocks_shortcuts() {
         let mut app = app();
