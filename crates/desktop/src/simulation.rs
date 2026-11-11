@@ -2215,39 +2215,6 @@ mod tests {
     }
 
     #[test]
-    fn automatic_departure_runs_in_worker_and_prunes_published_diagnostics() {
-        let (universe, id) = Universe::default()
-            .with_citizen("Ada", Citizen::new(10_000.0).unwrap())
-            .unwrap();
-        let universe = universe.start_planning(id).unwrap();
-        let mut state = WorkerState {
-            universe,
-            planner: PlanningRuntime::default(),
-            pacing: Pacing::new(NonZeroU32::new(60).unwrap()),
-            error: None,
-            mutation_error: None,
-            mutation_revision: 0,
-            generation: 0,
-        };
-        state.advance(2 * 24 * 3_600_000);
-        assert!(state.error.is_none(), "{:?}", state.error);
-        assert!(state.universe.agents().is_empty());
-        assert!(state.universe.households().is_empty());
-        assert!(state.planner.history(id).is_none());
-        let published = Mutex::new(Snapshot {
-            universe: state.universe.clone(),
-            planning_history: Default::default(),
-            error: None,
-            mutation_error: None,
-            mutation_revision: 0,
-            generation: 0,
-            revision: 0,
-        });
-        state.publish(&published);
-        assert!(published.lock().unwrap().planning_history.is_empty());
-    }
-
-    #[test]
     fn paused_steps_are_exact_and_ignore_speed_while_running_steps_are_rejected() {
         let (universe, id) =
             Universe::with_map(learning_lord_simulation::locations::Map::default())

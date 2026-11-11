@@ -16,7 +16,6 @@ pub struct Household {
     pub members: Vec<AgentId>,
     pub coins: Coins,
     pub maintenance: crate::maintenance::MaintenanceState,
-    pub below_zero_since_ms: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -72,31 +71,6 @@ impl Citizen {
 }
 
 impl Universe {
-    pub(crate) fn sample_household_departure(
-        &mut self,
-        member: AgentId,
-    ) -> Result<bool, SimulationError> {
-        let household = self.economic_id(member)?;
-        let members = &self.households[&household].members;
-        let average = members.iter().try_fold(0.0, |total, id| {
-            self.agents[id]
-                .personal_wellbeing()
-                .map(|value| total + value / members.len() as f64)
-        })?;
-        let state = self.households.get_mut(&household).unwrap();
-        if average >= 0.0 {
-            state.below_zero_since_ms = None;
-        } else if let Some(start) = state.below_zero_since_ms {
-            if self.current_time_ms - start >= crate::marketplace::DAY_MS {
-                *self = self.remove_household(household)?;
-                return Ok(true);
-            }
-        } else {
-            state.below_zero_since_ms = Some(self.current_time_ms);
-        }
-        Ok(false)
-    }
-
     pub fn households(&self) -> &HashMap<AgentId, Household> {
         &self.households
     }
@@ -1028,201 +1002,41 @@ mod physical_tests {
 #[cfg(test)]
 mod departure_tests {
     use super::*;
-    use crate::{CitizenAction, PlanningRuntime, marketplace::DAY_MS};
-    const HOUR: u64 = 3_600_000;
-
-    fn world() -> (Universe, AgentId, AgentId) {
-        let (world, member) = Universe::default()
-            .with_citizen("Ada", Citizen::with_needs(100.0, 0.0).unwrap())
-            .unwrap();
-        let household = world.economic_id(member).unwrap();
-        assert_eq!(world.households[&household].below_zero_since_ms, None);
-        (world, member, household)
-    }
+    use crate::{PlanningRuntime, marketplace::DAY_MS};
 
     #[test]
-    fn departure_samples_only_at_planning_start_and_never_polls_time() {
-        let (world, member, household) = world();
-        let world = world.advance(DAY_MS).unwrap();
-        assert_eq!(world.households[&household].below_zero_since_ms, None);
-        let world = world.start_planning(member).unwrap();
-        assert_eq!(
-            world.households[&household].below_zero_since_ms,
-            Some(DAY_MS)
-        );
-        assert_eq!(
-            world.start_planning(member),
-            Err(SimulationError::CitizenBusy)
-        );
-    }
-
-    #[test]
-    fn departure_shared_average_zero_recovery_and_member_changes() {
-        let (mut world, first, household) = world();
-        let (next, second) = world
-            .with_household_member(household, "B", Citizen::new(0.0).unwrap())
-            .unwrap();
-        world = next;
-        assert!(!world.sample_household_departure(first).unwrap());
-        assert_eq!(world.households[&household].below_zero_since_ms, Some(0));
-        world.current_time_ms = HOUR;
-        assert!(!world.sample_household_departure(second).unwrap());
-        assert_eq!(world.households[&household].below_zero_since_ms, Some(0));
-        for (_, agent) in world.agents.iter_mut() {
-            let AgentKind::Citizen(citizen) = &mut agent.kind;
-            citizen.hunger = 0.0;
-            citizen.garment_condition = Some(1.0);
-            citizen.hunger = citizen.personal_wellbeing().unwrap();
-            assert_eq!(citizen.personal_wellbeing().unwrap(), 0.0);
-        }
-        let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&first).unwrap().kind;
-        citizen.hunger += 1.0;
-        let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&second).unwrap().kind;
-        citizen.hunger -= 1.0;
-        assert!(!world.sample_household_departure(second).unwrap());
-        assert_eq!(world.households[&household].below_zero_since_ms, None);
-        for (_, agent) in world.agents.iter_mut() {
-            let AgentKind::Citizen(citizen) = &mut agent.kind;
-            citizen.hunger -= 2.0;
-        }
-        assert!(!world.sample_household_departure(first).unwrap());
-        assert_eq!(world.households[&household].below_zero_since_ms, None);
-        for (_, agent) in world.agents.iter_mut() {
-            let AgentKind::Citizen(citizen) = &mut agent.kind;
-            citizen.hunger += 4.0;
-        }
-        assert!(!world.sample_household_departure(first).unwrap());
-        assert_eq!(world.households[&household].below_zero_since_ms, Some(HOUR));
-        world = world.remove_citizen(first).unwrap();
-        assert_eq!(world.households[&household].below_zero_since_ms, Some(HOUR));
-        world.current_time_ms = DAY_MS + HOUR - 1;
-        assert!(!world.sample_household_departure(second).unwrap());
-        world.current_time_ms += 1;
-        assert!(world.sample_household_departure(second).unwrap());
-        assert!(world.agents.is_empty());
-    }
-
-    #[test]
-    fn departure_timer_round_trip_and_future_state_rejected() {
-        let (mut world, member, household) = world();
-        world.sample_household_departure(member).unwrap();
-        world = world.advance(HOUR).unwrap();
-        let saved = world.to_save_string().unwrap();
-        let mut restored = Universe::from_save_str(&saved).unwrap();
-        assert_eq!(restored, world);
-        restored
-            .households
-            .get_mut(&household)
-            .unwrap()
-            .below_zero_since_ms = Some(HOUR + 1);
-        assert!(Universe::from_save_str(&restored.to_save_string().unwrap()).is_err());
-        restored = world;
-        restored.current_time_ms = DAY_MS;
-        let restored = restored.start_planning(member).unwrap();
-        assert!(restored.agents.is_empty());
-    }
-
-    #[test]
-    fn departure_different_member_boundaries_start_once_and_predictions_do_not_sample() {
-        let source = crate::planning::executing_fixture(
-            &Citizen::with_needs(1000.0, 100.0).unwrap(),
-            vec![CitizenAction::Sleep],
-        );
-        let (world, first) = Universe::default()
-            .with_citizen("Ada", source.clone())
-            .unwrap();
-        let household = world.economic_id(first).unwrap();
-        let mut second = source.advance(HOUR).unwrap();
-        second.id = AgentId(uuid::Uuid::new_v4());
-        let (mut world, second_id) = world
-            .with_household_member(household, "B", second.clone())
-            .unwrap();
-        let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&second_id).unwrap().kind;
-        citizen.active_action = second.active_action;
-        citizen.active_plan = second.active_plan;
-        let saved = world.clone();
-        let mut runtime = PlanningRuntime::default();
-        let window = world
-            .advance_with_planner(&mut runtime, 7 * HOUR - crate::background::LEAD_MS, || {
-                false
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(world, saved);
-        assert_eq!(window.households[&household].below_zero_since_ms, None);
-        let boundary = window
-            .advance_with_planner(&mut runtime, crate::background::LEAD_MS, || false)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            boundary.households[&household].below_zero_since_ms,
-            Some(7 * HOUR)
-        );
-        let next = boundary
-            .advance_with_planner(&mut runtime, HOUR, || false)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            next.households[&household].below_zero_since_ms,
-            Some(7 * HOUR)
-        );
-    }
-
-    #[test]
-    fn departure_actual_goal_boundary_matches_sync_and_background_and_skips_removed_members() {
+    fn prolonged_negative_wellbeing_preserves_household_across_planning_and_save_load() {
         for background in [false, true] {
-            let source = crate::planning::executing_fixture(
-                &Citizen::with_needs(1000.0, 100.0).unwrap(),
-                vec![CitizenAction::Sleep],
+            let (mut world, member) = Universe::default()
+                .with_citizen("Ada", Citizen::with_needs(10_000.0, 0.0).unwrap())
+                .unwrap();
+            let household = world.economic_id(member).unwrap();
+            let saved = world.to_save_string().unwrap();
+            assert!(saved.contains("living_standard:"));
+            let legacy = saved.replace(
+                "living_standard:",
+                "below_zero_since_ms: Some(0), living_standard:",
             );
-            let (mut world, first) = Universe::starting_at(DAY_MS - crate::SLEEP_DURATION_MS)
-                .with_citizen("Ada", source.clone())
-                .unwrap();
-            let household = world.economic_id(first).unwrap();
-            let mut source = source;
-            source.id = AgentId(uuid::Uuid::new_v4());
-            let (next, second) = world
-                .with_household_member(household, "B", source.clone())
-                .unwrap();
-            world = next;
-            let AgentKind::Citizen(citizen) = &mut world.agents.get_mut(&second).unwrap().kind;
-            citizen.active_action = source.active_action;
-            citizen.active_plan = source.active_plan;
-            world
-                .households
-                .get_mut(&household)
-                .unwrap()
-                .below_zero_since_ms = Some(0);
+            world = Universe::from_save_str(&legacy).unwrap();
+            world = world.start_planning(member).unwrap();
             let mut runtime = PlanningRuntime::default();
-            let window = world
-                .advance_with_planner(
-                    &mut runtime,
-                    crate::SLEEP_DURATION_MS - crate::background::LEAD_MS,
-                    || false,
-                )
-                .unwrap()
-                .unwrap();
-            assert_eq!(window.households[&household].below_zero_since_ms, Some(0));
-            assert_eq!(world.households[&household].below_zero_since_ms, Some(0));
-            let result = if background {
-                window
-                    .advance_with_planner(&mut runtime, crate::background::LEAD_MS, || false)
-                    .unwrap()
-                    .unwrap()
-            } else {
-                window.advance(crate::background::LEAD_MS).unwrap()
-            };
-            assert_eq!(result.current_time_ms(), DAY_MS);
-            assert!(result.agents.is_empty());
-            assert!(result.households.is_empty());
-            if background {
-                assert!(runtime.history(first).is_none());
-                assert!(runtime.history(second).is_none());
+            for _ in 0..3 {
+                world = if background {
+                    world
+                        .advance_with_planner(&mut runtime, DAY_MS, || false)
+                        .unwrap()
+                        .unwrap()
+                } else {
+                    world.advance(DAY_MS).unwrap()
+                };
+                assert!(world.agents[&member].personal_wellbeing().unwrap() < 0.0);
+                assert_eq!(world.households[&household].members, vec![member]);
+                let restored = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+                assert_eq!(restored, world);
+                world = restored;
             }
-            assert_eq!(
-                Universe::from_save_str(&result.to_save_string().unwrap()).unwrap(),
-                result
-            );
+            let AgentKind::Citizen(citizen) = &world.agents[&member].kind;
+            assert!(citizen.active_plan.is_some());
         }
     }
 }

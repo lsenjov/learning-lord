@@ -1202,8 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_selection_excludes_protected_construction_cash_and_booking_departure_is_sampled_live()
-    {
+    fn sleep_selection_excludes_protected_construction_cash_and_preserves_unhappy_guest() {
         let (mut world, _, guest, _, _) = fixture(1);
         let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
         c.construction_protected = c.coins;
@@ -1212,11 +1211,6 @@ mod tests {
         let _ = crate::planning::plan(citizen(&world, guest)).unwrap();
         assert_eq!(world, before);
         let account = citizen(&world, guest).economic_id();
-        world
-            .households
-            .get_mut(&account)
-            .unwrap()
-            .below_zero_since_ms = Some(0);
         world.current_time_ms = DAY_MS;
         let AgentKind::Citizen(c) = &mut world.agents.get_mut(&guest).unwrap().kind;
         c.coins = 0;
@@ -1225,8 +1219,9 @@ mod tests {
         let forecast = crate::planning::plan(c).unwrap();
         assert!(!forecast.actions().is_empty());
         assert!(world.agents.contains_key(&guest));
-        let departed = world.start_planning(guest).unwrap();
-        assert!(!departed.agents.contains_key(&guest));
+        let planned = world.start_planning(guest).unwrap();
+        assert!(planned.agents.contains_key(&guest));
+        assert!(planned.households().contains_key(&account));
     }
 
     #[test]

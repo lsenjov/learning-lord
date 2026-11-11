@@ -430,11 +430,6 @@ mod tests {
     fn automatic_tier_changes_and_legacy_migration_resume_activity() {
         let (mut world, member, household) = autonomous_citizen();
         append_days(&mut world, household, 7, 110, 100);
-        world
-            .households
-            .get_mut(&household)
-            .unwrap()
-            .below_zero_since_ms = None;
         let changed = world
             .assess_household_living_standards(world.current_time_ms)
             .unwrap();
