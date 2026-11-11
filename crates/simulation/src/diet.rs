@@ -1,6 +1,6 @@
 use crate::{ActiveAction, Citizen, marketplace::Good};
 
-pub const DIET_DECAY_PER_DAY: f64 = 50.0;
+pub const DIET_DECAY_PER_DAY: f64 = 25.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DietCategory {
@@ -23,8 +23,16 @@ impl DietCategory {
     }
 }
 
+pub const DIET_THRESHOLDS: [f64; 7] = [-100.0, -75.0, -50.0, -25.0, 0.0, 50.0, 100.0];
+pub const ALCOHOL_DECAY_PER_DAY: f64 = 50.0;
+
 pub fn category_bonus(value: f64) -> f64 {
-    0.10 * value.clamp(0.0, 50.0) + 0.04 * (value.clamp(0.0, 100.0) - 50.0).max(0.0)
+    let deficit = (-value).clamp(0.0, 100.0);
+    let penalty = 0.2 * deficit.min(25.0)
+        + 0.3 * (deficit - 25.0).clamp(0.0, 25.0)
+        + 0.4 * (deficit - 50.0).clamp(0.0, 25.0)
+        + 0.5 * (deficit - 75.0).clamp(0.0, 25.0);
+    0.10 * value.clamp(0.0, 50.0) + 0.04 * (value.clamp(0.0, 100.0) - 50.0).max(0.0) - penalty
 }
 
 impl Good {
@@ -41,11 +49,11 @@ impl Good {
     }
 }
 
-fn diet_integral(start: f64, rate: f64, duration: u64) -> (f64, f64) {
+fn diet_integral(start: f64, rate: f64, duration: u64, minimum: f64) -> (f64, f64) {
     let duration = duration as f64;
     let mut boundaries = vec![0.0, duration];
     if rate != 0.0 {
-        for threshold in [0.0, 50.0, 100.0] {
+        for threshold in DIET_THRESHOLDS {
             let time = (threshold - start) / rate;
             if time > 0.0 && time < duration {
                 boundaries.push(time);
@@ -56,12 +64,12 @@ fn diet_integral(start: f64, rate: f64, duration: u64) -> (f64, f64) {
     let integral = boundaries
         .windows(2)
         .map(|pair| {
-            let from = category_bonus(start + rate * pair[0]);
-            let to = category_bonus(start + rate * pair[1]);
+            let from = category_bonus((start + rate * pair[0]).max(minimum));
+            let to = category_bonus((start + rate * pair[1]).max(minimum));
             (from + to) * 0.5 * (pair[1] - pair[0])
         })
         .sum();
-    (integral, (start + rate * duration).clamp(0.0, 100.0))
+    (integral, (start + rate * duration).clamp(minimum, 100.0))
 }
 
 #[derive(Default)]
@@ -71,6 +79,16 @@ pub(crate) struct FoodForecast {
 }
 
 impl Citizen {
+    pub(crate) fn diet_floors(&self) -> [f64; 4] {
+        DietCategory::ALL.map(|category| {
+            if self.diet_category_active(category) {
+                -100.0
+            } else {
+                0.0
+            }
+        })
+    }
+
     pub fn diet(&self, category: DietCategory) -> f64 {
         self.diet[category as usize]
     }
@@ -109,7 +127,6 @@ impl Citizen {
     }
 
     pub(crate) fn advance_diet(&mut self, elapsed_ms: u64, active: Option<ActiveAction>) {
-        let decay = DIET_DECAY_PER_DAY / crate::marketplace::DAY_MS as f64;
         let mut elapsed = 0;
         while elapsed < elapsed_ms {
             let current = active.map(|mut action| {
@@ -125,15 +142,13 @@ impl Citizen {
             let alcohol_rate = self.alcohol_rate(current);
             self.alcohol = (self.alcohol + alcohol_rate * step as f64).clamp(0.0, 100.0);
             let rates = self.diet_rates(current);
-            for (value, rate) in self.diet.iter_mut().zip(rates) {
-                *value = (*value + rate * step as f64).clamp(0.0, 100.0);
+            let floors = self.diet_floors();
+            for ((value, rate), floor) in self.diet.iter_mut().zip(rates).zip(floors) {
+                *value = (*value + rate * step as f64).clamp(floor, 100.0);
             }
             elapsed += step;
             if current.is_some_and(|a| step == a.remaining_ms) && elapsed < elapsed_ms {
-                self.alcohol = (self.alcohol - decay * (elapsed_ms - elapsed) as f64).max(0.0);
-                for value in &mut self.diet {
-                    *value = (*value - decay * (elapsed_ms - elapsed) as f64).max(0.0);
-                }
+                self.advance_diet(elapsed_ms - elapsed, None);
                 break;
             }
         }
@@ -255,10 +270,16 @@ impl Citizen {
             .into_iter()
             .enumerate()
             .filter(|(index, _)| self.diet_category_active(DietCategory::ALL[*index]))
-            .map(|(_, value)| diet_integral(value, -decay, horizon).0)
+            .map(|(_, value)| diet_integral(value, -decay, horizon, -100.0).0)
             .sum::<f64>()
             + if self.living_tier() >= 4 {
-                diet_integral(self.alcohol, -decay, horizon).0
+                diet_integral(
+                    self.alcohol,
+                    -ALCOHOL_DECAY_PER_DAY / crate::marketplace::DAY_MS as f64,
+                    horizon,
+                    0.0,
+                )
+                .0
             } else {
                 0.0
             };
@@ -337,7 +358,7 @@ impl Citizen {
                 break;
             }
             let (alcohol_integral, alcohol_end) =
-                diet_integral(self.alcohol, self.alcohol_rate(active), step);
+                diet_integral(self.alcohol, self.alcohol_rate(active), step, 0.0);
             self.alcohol = alcohol_end;
             if self.living_tier() >= 4 {
                 benefit += alcohol_integral;
@@ -345,8 +366,9 @@ impl Citizen {
             let rates = self.diet_rates(active);
             let active_categories =
                 DietCategory::ALL.map(|category| self.diet_category_active(category));
+            let floors = self.diet_floors();
             for (index, (value, rate)) in self.diet.iter_mut().zip(rates).enumerate() {
-                let (integral, end) = diet_integral(*value, rate, step);
+                let (integral, end) = diet_integral(*value, rate, step, floors[index]);
                 if active_categories[index] {
                     benefit += integral;
                 }
@@ -562,6 +584,94 @@ mod tests {
 
     fn close(left: f64, right: f64) {
         assert!((left - right).abs() < 1e-9, "{left} != {right}");
+    }
+
+    #[test]
+    fn alcohol_keeps_its_existing_decay_floor_and_positive_bonus() {
+        let mut citizen = Citizen::new(-100.0).unwrap().with_furnished_home().unwrap();
+        let mut baseline = citizen.clone();
+        citizen.alcohol = 100.0;
+        let mut forecast = citizen.clone();
+        let mut cost = 0.0;
+        let alcohol_integral = forecast.forecast_consumption_interval(3 * DAY_MS, None, &mut cost)
+            - baseline.forecast_consumption_interval(3 * DAY_MS, None, &mut cost);
+        close(alcohol_integral / DAY_MS as f64, 8.5);
+        close(forecast.alcohol(), 0.0);
+        let day = citizen.advance(DAY_MS).unwrap();
+        close(day.alcohol(), 50.0);
+        close(day.alcohol_wellbeing(), 5.0);
+        close(day.advance(2 * DAY_MS).unwrap().alcohol(), 0.0);
+    }
+
+    #[test]
+    fn forecast_intervals_are_partition_independent_across_deficits_and_clamps() {
+        for initial in [-100.0, -80.0, -55.0, -30.0, -5.0, 0.0, 60.0, 100.0] {
+            let mut whole = Citizen::new(-100.0).unwrap().with_furnished_home().unwrap();
+            whole.diet = [initial; 4];
+            let mut split = whole.clone();
+            let mut whole_cost = 0.0;
+            let mut split_cost = 0.0;
+            let duration = 5 * DAY_MS;
+            let integrated = whole.forecast_consumption_interval(duration, None, &mut whole_cost);
+            if initial == 0.0 {
+                close(integrated / DAY_MS as f64, -370.0);
+            }
+            let partial = split.forecast_consumption_interval(DAY_MS / 3, None, &mut split_cost)
+                + split.forecast_consumption_interval(duration - DAY_MS / 3, None, &mut split_cost);
+            close(integrated / DAY_MS as f64, partial / DAY_MS as f64);
+            for (a, b) in whole.diet.into_iter().zip(split.diet) {
+                close(a, b);
+            }
+            close(whole.alcohol, split.alcohol);
+        }
+    }
+
+    #[test]
+    fn deficit_penalties_and_integrals_cover_every_segment() {
+        for (value, penalty) in [
+            (0.0, 0.0),
+            (-25.0, -5.0),
+            (-50.0, -12.5),
+            (-75.0, -22.5),
+            (-100.0, -35.0),
+        ] {
+            close(category_bonus(value), penalty);
+            assert!(
+                (category_bonus(value - 0.000001) - category_bonus(value + 0.000001)).abs()
+                    < 0.000001
+            );
+        }
+        for rate in [-200.0 / DAY_MS as f64, 200.0 / DAY_MS as f64] {
+            let start = if rate < 0.0 { 100.0 } else { -100.0 };
+            let (whole, end) = diet_integral(start, rate, 2 * DAY_MS, -100.0);
+            let (first, mid) = diet_integral(start, rate, DAY_MS / 3, -100.0);
+            let (rest, split_end) = diet_integral(mid, rate, 2 * DAY_MS - DAY_MS / 3, -100.0);
+            close(end, split_end);
+            close(whole / DAY_MS as f64, (first + rest) / DAY_MS as f64);
+        }
+    }
+
+    #[test]
+    fn neglected_sweets_change_the_selected_meal() {
+        let mut source = Citizen::new(80.0).unwrap().with_furnished_home().unwrap();
+        for (good, units) in [
+            (Good::Fish, 3),
+            (Good::Cabbage, 3),
+            (Good::BerryPie, 3),
+            (Good::Berries, 93),
+        ] {
+            source = source.with_home_good(good, units).unwrap();
+        }
+        source.diet = [0.0, 0.0, 0.0, -100.0];
+        let chosen = source
+            .start_action(CitizenAction::Eat)
+            .unwrap()
+            .active_action
+            .unwrap();
+        assert!(
+            chosen.meal_units[Good::BerryPie as usize] > 0
+                || chosen.meal_units[Good::Berries as usize] > 0
+        );
     }
 
     #[test]
@@ -812,8 +922,8 @@ mod tests {
         }
         citizen.diet = [100.0, 75.0, 50.0, 25.0];
         let next = citizen.advance(DAY_MS).unwrap();
-        assert_eq!(next.diet, [50.0, 25.0, 0.0, 0.0]);
-        assert_eq!(next.advance(3 * DAY_MS).unwrap().diet, [0.0; 4]);
+        assert_eq!(next.diet, [75.0, 50.0, 25.0, 0.0]);
+        assert_eq!(next.advance(8 * DAY_MS).unwrap().diet, [-100.0; 4]);
     }
 
     #[test]
@@ -840,8 +950,8 @@ mod tests {
                 let index = category as usize;
                 let intake = good.diet_per_unit()[index] * units as f64;
                 let decay = DIET_DECAY_PER_DAY * duration as f64 / DAY_MS as f64;
-                close(half.diet(category), ((intake - decay) / 2.0).max(0.0));
-                close(complete.diet(category), (intake - decay).max(0.0));
+                close(half.diet(category), ((intake - decay) / 2.0).max(-100.0));
+                close(complete.diet(category), (intake - decay).max(-100.0));
                 close(
                     half.advance(duration - duration / 2)
                         .unwrap()
@@ -1041,6 +1151,8 @@ mod tests {
         close(empty.food_forecast(6).benefit, 0.0);
         let taxed = {
             let mut citizen = source.clone();
+            citizen.set_inventory_units(Good::BreadRoll, 100);
+            citizen = citizen.with_home_good(Good::BreadRoll, 0).unwrap();
             citizen.tax_reserved.insert(Good::BreadRoll, 100);
             citizen
         };
@@ -1051,12 +1163,12 @@ mod tests {
     fn forecast_integration_observes_decay_bonus_thresholds_and_caps() {
         let day = crate::marketplace::DAY_MS;
         let rate = DIET_DECAY_PER_DAY / day as f64;
-        let (integral, end) = diet_integral(100.0, -rate, 3 * day);
-        close(end, 0.0);
-        close(integral / day as f64, 8.5);
-        let (integral, end) = diet_integral(90.0, rate, day);
+        let (integral, end) = diet_integral(100.0, -rate, 3 * day, -100.0);
+        close(end, 25.0);
+        close(integral / day as f64, 15.75);
+        let (integral, end) = diet_integral(90.0, rate, day, -100.0);
         close(end, 100.0);
-        close(integral / day as f64, 6.96);
+        close(integral / day as f64, 6.92);
     }
 
     #[test]
@@ -1162,7 +1274,7 @@ mod tests {
         }
         close(
             whole.diet(DietCategory::Sweets),
-            100.0 - 50.0 * 59_000.0 / DAY_MS as f64,
+            100.0 - DIET_DECAY_PER_DAY * 59_000.0 / DAY_MS as f64,
         );
     }
 }

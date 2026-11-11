@@ -6507,6 +6507,12 @@ mod tests {
             .with_furnished_home()
             .unwrap()
             .with_prices(crate::marketplace::Prices::new(100.0).unwrap());
+        let mut citizen = citizen;
+        let (world, id) = crate::Universe::default()
+            .with_citizen("Forager", citizen.clone())
+            .unwrap();
+        let crate::AgentKind::Citizen(household_member) = &world.agents()[&id].kind;
+        citizen.household = household_member.household.clone();
         let gathered = Prediction::new(&citizen, Cooldowns::default())
             .perform(CitizenAction::Produce(crate::production::Recipe::Forage), 0)
             .unwrap()

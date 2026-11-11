@@ -277,11 +277,12 @@ fn universe_action_branches_preserve_the_clock_source_and_other_agents() {
     assert_eq!(eat_other.position(), wait_other.position());
     assert_close(
         eaten.agents()[&id].personal_wellbeing().unwrap(),
-        -20.0 - 2.0 * 100.0 / 24.0 * 31.0 / 60.0 + 0.1 * (50.0 - 50.0 * 30.0 / (24.0 * 60.0)),
+        -20.0 - 2.0 * 100.0 / 24.0 * 31.0 / 60.0 + 0.1 * (50.0 - 25.0 * 31.0 / (24.0 * 60.0))
+            - 3.0 * 0.2 * 25.0 * 31.0 / (24.0 * 60.0),
     );
     assert_close(
         waited.agents()[&id].personal_wellbeing().unwrap(),
-        -20.0 + 5.0 - 3.0 * 100.0 / 24.0 * 31.0 / 60.0,
+        -20.0 + 5.0 - 3.0 * 100.0 / 24.0 * 31.0 / 60.0 - 4.0 * 0.2 * 25.0 * 31.0 / (24.0 * 60.0),
     );
     assert_eq!(eating, eating_snapshot);
     assert_eq!(original, snapshot);

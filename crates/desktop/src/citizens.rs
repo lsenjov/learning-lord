@@ -207,7 +207,7 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
                     });
                 }
                 for category in learning_lord_simulation::diet::DietCategory::ALL {
-                    needs.spawn((text("", 14.0, TEXT), DietLabel(category), Interaction::None, crate::tooltip::Tooltip("Each diet category decays 50/day; +5 wellbeing at 50 and +7 at 100.".into())));
+                    needs.spawn((text("", 14.0, TEXT), DietLabel(category), Interaction::None, crate::tooltip::Tooltip("Each diet category decays 25/day; +5 wellbeing at 50 and +7 at 100; deficits cost up to 35 wellbeing at -100.".into())));
                     needs.spawn((Node { width: percent(100), height: px(5), flex_shrink: 0.0, ..default() },
                         BackgroundColor(Color::srgb(0.04, 0.06, 0.08))))
                     .with_children(|bar| { bar.spawn((Node { height: percent(100), ..default() },
@@ -719,9 +719,13 @@ pub fn refresh_diet(
             |citizen| {
                 let value = citizen.diet(label.0);
                 format!(
-                    "{}: {value:.1}/100 | +{:.2} wellbeing",
+                    "{}: {value:.1}/100 | {:+.2} wellbeing",
                     label.0.name(),
-                    learning_lord_simulation::diet::category_bonus(value)
+                    if citizen.diet_category_active(label.0) {
+                        learning_lord_simulation::diet::category_bonus(value)
+                    } else {
+                        0.0
+                    }
                 )
             },
         );
@@ -742,7 +746,8 @@ pub fn refresh_diet(
                 SELECTED
             };
         }
-        let width = percent(citizen.map_or(0.0, |citizen| citizen.diet(fill.0) as f32));
+        let width =
+            percent(citizen.map_or(0.0, |citizen| citizen.diet(fill.0).clamp(0.0, 100.0) as f32));
         if node.width != width {
             node.width = width;
         }
@@ -1400,7 +1405,7 @@ pub(crate) fn readout(universe: &Universe, selected: Option<AgentId>) -> String 
             rows.push(format!("{}: {:.1}", need.name(), need.value(citizen)));
         }
         rows.push(format!(
-            "Diet wellbeing: +{:.2}",
+            "Diet wellbeing: {:+.2}",
             citizen.dietary_wellbeing()
         ));
         if let Some(goal) = citizen
@@ -1866,6 +1871,13 @@ mod tests {
             )
             .unwrap();
         let AgentKind::Citizen(eater) = &universe.agents()[&eater_id].kind;
+        let household = eater.household_id().unwrap();
+        let universe = universe.set_household_living_tier(household, 5).unwrap();
+        let AgentKind::Citizen(empty) = &universe.agents()[&empty_id].kind;
+        let universe = universe
+            .set_household_living_tier(empty.household_id().unwrap(), 5)
+            .unwrap();
+        let AgentKind::Citizen(eater) = &universe.agents()[&eater_id].kind;
         let universe = universe
             .deposit_goods(
                 eater_id,
@@ -1902,16 +1914,16 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().get::<Text>(label).unwrap().0,
-            "Meat: 49.7/100 | +4.97 wellbeing"
+            "Meat: 49.9/100 | +4.99 wellbeing"
         );
         let width = app.world().get::<Node>(fill).unwrap().width;
-        assert!(matches!(width, Val::Percent(value) if (value - 49.71065).abs() < 0.001));
+        assert!(matches!(width, Val::Percent(value) if (value - 49.85532).abs() < 0.001));
         app.world_mut().resource_mut::<Selection>().0 = Some(empty_id);
         app.update();
         assert_eq!(app.world().get::<Node>(fill).unwrap().width, percent(0));
         assert_eq!(
             app.world().get::<Text>(label).unwrap().0,
-            "Meat: 0.0/100 | +0.00 wellbeing"
+            "Meat: -0.1/100 | -0.03 wellbeing"
         );
     }
 

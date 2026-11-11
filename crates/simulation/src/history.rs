@@ -424,7 +424,11 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
     }
     let diet_rates = start.diet_rates(start.active_action);
     for (value, rate) in start.diet.into_iter().zip(diet_rates) {
-        split(value, value + rate * elapsed as f64, &[0.0, 50.0, 100.0]);
+        split(
+            value,
+            value + rate * elapsed as f64,
+            &crate::diet::DIET_THRESHOLDS,
+        );
     }
     let alcohol_rate = start.alcohol_rate(start.active_action);
     split(
@@ -441,8 +445,14 @@ fn wellbeing_average(start: &Citizen, end: &Citizen, elapsed: u64) -> Result<f64
     fractions.sort_by(f64::total_cmp);
     let wellbeing = |fraction: f64| -> Result<f64, SimulationError> {
         let mut citizen = start.clone();
-        for ((value, initial), rate) in citizen.diet.iter_mut().zip(start.diet).zip(diet_rates) {
-            *value = (initial + rate * elapsed as f64 * fraction).clamp(0.0, 100.0);
+        for (((value, initial), rate), floor) in citizen
+            .diet
+            .iter_mut()
+            .zip(start.diet)
+            .zip(diet_rates)
+            .zip(start.diet_floors())
+        {
+            *value = (initial + rate * elapsed as f64 * fraction).clamp(floor, 100.0);
         }
         citizen.alcohol =
             (start.alcohol + alcohol_rate * elapsed as f64 * fraction).clamp(0.0, 100.0);
@@ -660,9 +670,35 @@ mod tests {
     }
 
     #[test]
+    fn deficit_history_is_partition_independent_across_all_thresholds() {
+        let day = crate::marketplace::DAY_MS;
+        let mut start = Citizen::new(-100.0).unwrap().with_furnished_home().unwrap();
+        start.diet = [100.0, 20.0, -40.0, -90.0];
+        let duration = 9 * day;
+        let first_duration = 7 * day / 3;
+        let middle = start.advance(first_duration).unwrap();
+        let end = middle.advance(duration - first_duration).unwrap();
+        let whole = wellbeing_average(&start, &end, duration).unwrap();
+        let split = (wellbeing_average(&start, &middle, first_duration).unwrap()
+            * first_duration as f64
+            + wellbeing_average(&middle, &end, duration - first_duration).unwrap()
+                * (duration - first_duration) as f64)
+            / duration as f64;
+        assert!((whole - split).abs() < 1e-9, "{whole} != {split}");
+    }
+
+    #[test]
     fn diet_history_integrates_decay_clamps_and_bonus_thresholds_exactly() {
         use crate::marketplace::DAY_MS;
-        for (initial, expected) in [(25.0, 0.625), (75.0, 4.625), (100.0, 6.0)] {
+        for (initial, expected) in [
+            (25.0, 3.75),
+            (75.0, 8.0),
+            (100.0, 9.0),
+            (-25.0, -6.25),
+            (-50.0, -15.0),
+            (-75.0, -26.25),
+            (-100.0, -32.5),
+        ] {
             let baseline = Citizen::new(-100.0).unwrap().with_furnished_home().unwrap();
             let mut dietary = baseline.clone();
             dietary.diet[0] = initial;

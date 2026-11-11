@@ -15,18 +15,25 @@ fn assert_close(actual: f64, expected: f64) {
     assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
 }
 
+fn without_active_diet(citizen: Citizen) -> Citizen {
+    let (world, id) = Universe::with_map(citizen.map())
+        .with_citizen("Planner", citizen)
+        .unwrap();
+    let AgentKind::Citizen(citizen) = &world.agents()[&id].kind;
+    citizen.clone()
+}
+
 fn score_actions(original: &Citizen, actions: &[CitizenAction]) -> f64 {
     let mut predicted = original.clone();
     let mut waiting = original.clone();
     let mut contribution = 0.0;
     let mut elapsed = 0;
     for &action in actions {
-        let before =
-            predicted.personal_wellbeing().unwrap() - waiting.personal_wellbeing().unwrap();
+        let before = predicted.decision_score().unwrap() - waiting.decision_score().unwrap();
         let duration = predicted.action_duration_ms(action).unwrap();
         predicted = predict_action(&predicted, action);
         waiting = waiting.advance(duration).unwrap();
-        let after = predicted.personal_wellbeing().unwrap() - waiting.personal_wellbeing().unwrap();
+        let after = predicted.decision_score().unwrap() - waiting.decision_score().unwrap();
         contribution += (before + after) * 0.5 * duration as f64;
         elapsed += duration;
     }
@@ -66,6 +73,7 @@ fn goal_planning_scores_action_endpoints_and_preserves_the_source() {
                 berries,
             )
             .unwrap();
+        let original = without_active_diet(original);
         let snapshot = original.clone();
         let chosen = plan(&original).unwrap();
         assert_close(
@@ -90,6 +98,7 @@ fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
         .unwrap()
         .with_furnished_home()
         .unwrap();
+    let starving = without_active_diet(starving);
     let chosen = plan(&starving).unwrap();
     assert_close(
         score_actions(&starving, chosen.actions()),
@@ -108,6 +117,7 @@ fn scoring_weights_action_endpoint_averages_and_rewards_wealth() {
         .unwrap()
         .with_home_good(learning_lord_simulation::marketplace::Good::Water, 1200)
         .unwrap();
+    let satiated = without_active_diet(satiated);
     let chosen = plan(&satiated).unwrap();
     assert_close(
         score_actions(&satiated, chosen.actions()),
@@ -141,6 +151,7 @@ fn execution_keeps_its_plan_for_two_hours_then_replans() {
         .unwrap()
         .with_home_good(learning_lord_simulation::marketplace::Good::Berries, 233)
         .unwrap();
+    let original = without_active_diet(original);
     let mut executing = original.start_planning().unwrap();
     let initial_plan = executing.active_plan().unwrap().plan().clone();
     let mut manual = original.clone();

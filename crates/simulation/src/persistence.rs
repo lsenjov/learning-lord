@@ -588,7 +588,7 @@ impl Citizen {
             || self
                 .diet
                 .into_iter()
-                .any(|value| !value.is_finite() || !(0.0..=100.0).contains(&value))
+                .any(|value| !value.is_finite() || !(-100.0..=100.0).contains(&value))
             || self
                 .garment_condition
                 .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
@@ -733,6 +733,39 @@ mod tests {
         let loaded = Universe::from_save_str(&encoded).unwrap();
         assert_eq!(&loaded, world);
         loaded
+    }
+
+    #[test]
+    fn diet_save_bounds_and_negative_round_trip() {
+        let (mut world, id) = Universe::default()
+            .with_citizen("Diet", Citizen::new(0.0).unwrap())
+            .unwrap();
+        let AgentKind::Citizen(source) = &world.agents[&id].kind;
+        let household = source.household_id().unwrap();
+        world = world.set_household_living_tier(household, 5).unwrap();
+        let AgentKind::Citizen(source) = &mut world.agents.get_mut(&id).unwrap().kind;
+        source.diet = [-100.0, -75.0, -50.0, -25.0];
+        round_trip(&world);
+        for tier in [2, 5] {
+            let valid = world.set_household_living_tier(household, tier).unwrap();
+            for value in [-101.0, 101.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
+                let mut invalid = valid.clone();
+                let AgentKind::Citizen(source) = &mut invalid.agents.get_mut(&id).unwrap().kind;
+                source.diet[0] = value;
+                assert!(Universe::from_save_str(&invalid.to_save_string().unwrap()).is_err());
+                let encoded = valid.to_save_string().unwrap();
+                let replacement = format!("diet: ({value},");
+                let start = encoded.find("diet: (").unwrap();
+                let first_comma = encoded[start..].find(',').unwrap() + start;
+                let encoded = format!(
+                    "{}{}{}",
+                    &encoded[..start],
+                    replacement,
+                    &encoded[first_comma + 1..]
+                );
+                assert!(Universe::from_save_str(&encoded).is_err());
+            }
+        }
     }
 
     #[test]

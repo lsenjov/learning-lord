@@ -3458,6 +3458,10 @@ mod tests {
         // Keep the carpenter resident while the missing construction wood tests the deadline.
         for (good, units) in [
             (Good::BreadRoll, 1_000_000),
+            (Good::Fish, 1_000_000),
+            (Good::Cabbage, 1_000_000),
+            (Good::Berries, 1_000_000),
+            (Good::Beer, 1_000_000),
             (Good::Water, 1_000_000),
             (Good::FlaxGarment, 100),
         ] {
@@ -3547,7 +3551,15 @@ mod tests {
             world.construction,
             Universe::from_save_str(&saved).unwrap().construction
         );
-        let worker_history = world.citizen_history(worker).unwrap();
+        let worker_history = world
+            .citizen_history(worker)
+            .or_else(|| {
+                world
+                    .departed_citizens()
+                    .get(&worker)
+                    .map(|citizen| &citizen.history)
+            })
+            .unwrap();
         let sleeping = worker_history
             .completed
             .iter()

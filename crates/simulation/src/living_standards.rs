@@ -90,7 +90,7 @@ impl Citizen {
         }
     }
     pub(crate) fn alcohol_rate(&self, active: Option<crate::ActiveAction>) -> f64 {
-        let mut rate = -crate::diet::DIET_DECAY_PER_DAY / DAY_MS as f64;
+        let mut rate = -crate::diet::ALCOHOL_DECAY_PER_DAY / DAY_MS as f64;
         if let Some(action) = active
             && self.living_tier() >= 4
             && action.drink_good == crate::marketplace::Good::Beer
@@ -269,6 +269,12 @@ impl Universe {
                     context.living_tier = household.living_standard.tier;
                 }
             }
+            let floors = citizen.diet_floors();
+            for (value, floor) in citizen.diet.iter_mut().zip(floors) {
+                if value.is_finite() && (-100.0..=100.0).contains(value) {
+                    *value = value.max(floor);
+                }
+            }
         }
     }
 }
@@ -306,6 +312,42 @@ mod tests {
     fn citizen(world: &Universe, id: AgentId) -> &Citizen {
         let AgentKind::Citizen(citizen) = &world.agents[&id].kind;
         citizen
+    }
+
+    #[test]
+    fn inactive_diets_preserve_positive_values_without_inheriting_deficits() {
+        let (mut world, member, household) = household_citizen();
+        world = world.set_household_living_tier(household, 5).unwrap();
+        let AgentKind::Citizen(source) = &mut world.agents.get_mut(&member).unwrap().kind;
+        source.diet = [-80.0, 75.0, -25.0, -100.0];
+        let world = world.set_household_living_tier(household, 2).unwrap();
+        assert_eq!(citizen(&world, member).diet, [0.0, 75.0, 0.0, 0.0]);
+        let advanced = world.advance(DAY_MS).unwrap();
+        assert!(
+            citizen(&advanced, member)
+                .diet
+                .into_iter()
+                .zip([0.0, 50.0, 0.0, 0.0])
+                .all(|(a, b)| (a - b).abs() < 1e-9)
+        );
+        assert_eq!(citizen(&advanced, member).dietary_wellbeing(), 0.0);
+        let active = advanced.set_household_living_tier(household, 5).unwrap();
+        assert!(
+            citizen(&active, member)
+                .diet
+                .into_iter()
+                .zip([0.0, 50.0, 0.0, 0.0])
+                .all(|(a, b)| (a - b).abs() < 1e-9)
+        );
+        assert!((citizen(&active, member).dietary_wellbeing() - 5.0).abs() < 1e-9);
+        let after = active.advance(DAY_MS).unwrap();
+        assert!(
+            citizen(&after, member)
+                .diet
+                .into_iter()
+                .zip([-25.0, 25.0, -25.0, -25.0])
+                .all(|(a, b)| (a - b).abs() < 1e-9)
+        );
     }
 
     #[test]
