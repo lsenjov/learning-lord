@@ -286,18 +286,23 @@ struct Scale {
     extent: f64,
 }
 impl Scale {
-    fn new(days: &[Day]) -> Self {
+    fn new(days: &[Day], thresholds: [Option<f64>; 2]) -> Self {
         let price_max = days
             .iter()
             .flat_map(|day| [day.price, day.reference])
+            .chain(thresholds.into_iter().flatten())
             .fold(1.0, f64::max);
         let low = days
             .iter()
-            .flat_map(|day| [day.price / price_max, day.reference / price_max])
+            .flat_map(|day| [day.price, day.reference])
+            .chain(thresholds.into_iter().flatten())
+            .map(|price| price / price_max)
             .fold(1.0, f64::min);
         let high = days
             .iter()
-            .flat_map(|day| [day.price / price_max, day.reference / price_max])
+            .flat_map(|day| [day.price, day.reference])
+            .chain(thresholds.into_iter().flatten())
+            .map(|price| price / price_max)
             .fold(0.0, f64::max);
         let quantity_max = days
             .iter()
@@ -337,6 +342,32 @@ impl Scale {
             180.0 - ((price / self.price_max - self.low) / (self.high - self.low)) as f32 * 80.0
         }
     }
+    fn guides(&self, days: &[Day], thresholds: [Option<f64>; 2]) -> Vec<f64> {
+        let current = days
+            .last()
+            .map_or(self.low * self.price_max, |day| day.price);
+        let historical_low = days
+            .iter()
+            .flat_map(|day| [day.price, day.reference])
+            .reduce(f64::min)
+            .unwrap_or(0.0);
+        let historical_high = days
+            .iter()
+            .flat_map(|day| [day.price, day.reference])
+            .reduce(f64::max)
+            .unwrap_or(0.0);
+        let mut guides = Vec::new();
+        for price in [
+            thresholds[0].unwrap_or(historical_low),
+            current,
+            thresholds[1].unwrap_or(historical_high),
+        ] {
+            if !guides.contains(&price) {
+                guides.push(price);
+            }
+        }
+        guides
+    }
     fn quantity(&self, units: f64) -> f32 {
         ((units / self.quantity_max) / self.extent) as f32 * 80.0
     }
@@ -347,6 +378,7 @@ pub struct ChartDisplay {
     days: Vec<Day>,
     labour: Option<Vec<LabourDay>>,
     good: Option<Good>,
+    thresholds: [Option<f64>; 2],
     pinned: Option<u64>,
     generation: u64,
 }
@@ -355,22 +387,19 @@ pub(super) struct Plot;
 #[derive(Component)]
 pub(super) struct Axis;
 #[derive(Component)]
-pub(super) struct GoodsDescription;
-#[derive(Component)]
-pub(super) struct Legend;
+pub(super) struct Heading;
 #[derive(Component)]
 pub(super) struct Detail;
 #[derive(Component, Default)]
 pub(super) struct DayTable(Vec<[String; 5]>);
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
-    parent.spawn(text(
-        "MARKET HISTORY  |  recent 30 market days",
-        14.0,
-        MUTED,
+    parent.spawn((
+        text("MARKET HISTORY  |  recent 30 market days", 14.0, MUTED),
+        Interaction::default(),
+        crate::tooltip::Tooltip(String::new()),
+        Heading,
     ));
-    parent.spawn((text("Blue: accepted local quote VWAP (dashed: carried; grey: initial reference) | Grey line: reference estimate\nGreen below wick: exports | Red above wick: import deliveries\nBody: red caravan purchases / grey local trades / green exports\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day", 13.0, MUTED), Node::default(), GoodsDescription));
-    let _legend = parent.spawn((text("", 13.0, TEXT), Legend));
     parent
         .spawn(Node {
             width: percent(100),
@@ -506,8 +535,7 @@ pub fn refresh(
     mut cached: ResMut<ChartDisplay>,
     plots: Query<(Entity, Ref<Plot>)>,
     axes: Query<Entity, With<Axis>>,
-    mut legends: Query<&mut Text, With<Legend>>,
-    mut descriptions: Query<&mut Node, With<GoodsDescription>>,
+    mut headings: Query<&mut crate::tooltip::Tooltip, With<Heading>>,
 ) {
     let added = plots.iter().any(|(_, plot)| plot.is_added());
     if plots.is_empty() || (!snapshot.is_changed() && !selection.is_changed() && !added) {
@@ -517,14 +545,16 @@ pub fn refresh(
         cached.generation = snapshot.0.generation;
         cached.pinned = None;
     }
-    for mut description in &mut descriptions {
-        description.display = if selection.carpentry {
-            Display::None
-        } else {
-            Display::Flex
-        };
-    }
     let good = selection.good();
+    let thresholds = if selection.carpentry {
+        [None, None]
+    } else {
+        let market = snapshot.0.universe.market();
+        [
+            market.effective_export_threshold(good),
+            market.effective_import_threshold(good),
+        ]
+    };
     let mut values = days(&snapshot.0.universe, good);
     let labour = selection.carpentry.then(|| {
         let started = snapshot.0.universe.construction().labour_started_ms;
@@ -542,6 +572,7 @@ pub fn refresh(
     }
     let same_geometry = cached.labour == labour
         && cached.good == Some(good)
+        && cached.thresholds == thresholds
         && cached.days.len() == values.len()
         && cached.days.iter().zip(&values).all(|(old, new)| {
             old.start == new.start
@@ -559,13 +590,13 @@ pub fn refresh(
         }
         return;
     }
-    let scale = Scale::new(&values);
-    for mut legend in &mut legends {
-        legend.0 = if labour.is_some() {
+    let scale = Scale::new(&values, thresholds);
+    for mut heading in &mut headings {
+        heading.0 = if labour.is_some() {
             String::new()
         } else {
             format!(
-                "Quantity size key at left: {}  |  one linear scale across these days",
+                "Blue: accepted local quote VWAP (dashed: carried; grey: initial reference) | Grey line: reference estimate\nGreen below wick: exports | Red above wick: import deliveries\nBody: red caravan purchases / grey local trades / green exports\nAmber upper wick: unmet demand | Purple lower wick: unsold stock | Cyan outline: current partial day\nQuantity size key at left: {}  |  one linear scale across these days",
                 chart_quantity_label(good, scale.quantity_max)
             )
         };
@@ -583,6 +614,7 @@ pub fn refresh(
             &mut commands,
             good,
             &values,
+            thresholds,
             &axes.iter().collect::<Vec<_>>(),
             &plots.iter().map(|(entity, _)| entity).collect::<Vec<_>>(),
         );
@@ -590,6 +622,7 @@ pub fn refresh(
     cached.days = values;
     cached.labour = labour;
     cached.good = Some(good);
+    cached.thresholds = thresholds;
 }
 
 fn chart_quantity_label(good: Good, units: f64) -> String {
@@ -860,10 +893,12 @@ fn draw_chart(
     commands: &mut Commands,
     good: Good,
     values: &[Day],
+    thresholds: [Option<f64>; 2],
     axes: &[Entity],
     plots: &[Entity],
 ) {
-    let scale = Scale::new(values);
+    let scale = Scale::new(values, thresholds);
+    let guides = scale.guides(values, thresholds);
     for entity in axes {
         commands
             .entity(*entity)
@@ -891,28 +926,14 @@ fn draw_chart(
                     218.0,
                     BODY,
                 );
-                if scale.high == scale.low {
+                for price in &guides {
                     label(
                         axis,
-                        format!("{:.3}", scale.price_max * scale.low),
+                        format!("{price:.3}"),
                         0.0,
-                        HEIGHT / 2.0 - 7.0,
+                        scale.y(*price) - 7.0,
                         PRICE,
                     );
-                } else {
-                    for (value, y) in [
-                        (scale.high, 100.0),
-                        ((scale.high + scale.low) / 2.0, 140.0),
-                        (scale.low, 180.0),
-                    ] {
-                        label(
-                            axis,
-                            format!("{:.3}", value * scale.price_max),
-                            0.0,
-                            y - 7.0,
-                            PRICE,
-                        );
-                    }
                 }
             });
     }
@@ -926,8 +947,15 @@ fn draw_chart(
                     return;
                 }
                 let slot = 100.0 / values.len() as f32;
-                for y in [100.0, 140.0, 180.0] {
-                    rect(plot, 0.0, y, 100.0, 1.0, Color::srgb(0.16, 0.20, 0.23));
+                for price in &guides {
+                    rect(
+                        plot,
+                        0.0,
+                        scale.y(*price),
+                        100.0,
+                        1.0,
+                        Color::srgb(0.16, 0.20, 0.23),
+                    );
                 }
                 for (index, day) in values.iter().enumerate() {
                     let left = index as f32 * slot;
@@ -1416,7 +1444,7 @@ mod tests {
             listed_units: u64::MAX,
             ..default()
         };
-        let scale = Scale::new(&values);
+        let scale = Scale::new(&values, [None, None]);
         assert_eq!(scale.y(f64::MAX), HEIGHT / 2.0);
         assert!(scale.quantity(u64::MAX as f64).is_finite());
         assert_eq!(
@@ -1425,7 +1453,78 @@ mod tests {
         );
         assert!(scale.quantity(u64::MAX as f64) * 1.5 <= 80.0);
         assert_eq!(scale.quantity(0.0), 0.0);
-        assert!(Scale::new(&[]).y(0.0).is_finite());
+        assert!(Scale::new(&[], [None, None]).y(0.0).is_finite());
+    }
+
+    #[test]
+    fn price_scale_covers_history_and_tariff_thresholds_with_actual_guides() {
+        let mut values = days(&Universe::default(), Good::BreadRoll);
+        values[0].price = 4.0;
+        values[0].reference = 2.0;
+        let thresholds = [Some(1.0), Some(8.0)];
+        let scale = Scale::new(&values, thresholds);
+        assert_eq!(scale.y(1.0), 180.0);
+        assert_eq!(scale.y(8.0), 100.0);
+        assert_eq!(scale.guides(&values, thresholds), vec![1.0, 4.0, 8.0]);
+        assert!(scale.y(4.0) > 140.0);
+        values[0].reference = 12.0;
+        let scale = Scale::new(&values, thresholds);
+        assert_eq!(scale.y(12.0), 100.0);
+        assert!(scale.y(8.0) > 100.0);
+        assert_eq!(scale.guides(&values, [None, Some(8.0)]), vec![4.0, 8.0]);
+        assert_eq!(
+            scale.guides(&values, [Some(1.0), None]),
+            vec![1.0, 4.0, 12.0]
+        );
+        values[0].reference = 4.0;
+        let scale = Scale::new(&values, [None, None]);
+        assert_eq!(scale.guides(&values, [None, None]), vec![4.0]);
+        assert_eq!(scale.y(4.0), HEIGHT / 2.0);
+    }
+
+    #[test]
+    fn policy_only_changes_rebuild_chart_and_heading_has_the_legend() {
+        let mut app = selection_app();
+        app.world_mut().resource_mut::<market::Selection>().good = Some(Good::BreadRoll);
+        app.update();
+        let good = app.world().resource::<market::Selection>().good();
+        let original_days = app.world().resource::<ChartDisplay>().days.clone();
+        let old_children = app
+            .world_mut()
+            .query_filtered::<&Children, With<Axis>>()
+            .single(app.world())
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        let universe = &app.world().resource::<DisplaySnapshot>().0.universe;
+        let mut policy = universe.caravan_policy();
+        policy.export_tariff_basis_points = 2500;
+        policy.import_tariff_basis_points = 5000;
+        let universe = universe.with_caravan_policy(policy).unwrap();
+        let expected = [
+            universe.market().effective_export_threshold(good),
+            universe.market().effective_import_threshold(good),
+        ];
+        app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = universe;
+        app.update();
+        let chart = app.world().resource::<ChartDisplay>();
+        assert_eq!(chart.days, original_days);
+        assert_eq!(chart.thresholds, expected);
+        let new_children = app
+            .world_mut()
+            .query_filtered::<&Children, With<Axis>>()
+            .single(app.world())
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        assert_ne!(old_children, new_children);
+        let tooltip = app
+            .world_mut()
+            .query_filtered::<&crate::tooltip::Tooltip, With<Heading>>()
+            .single(app.world())
+            .unwrap();
+        assert!(tooltip.0.contains("Blue: accepted local quote VWAP"));
+        assert!(tooltip.0.contains("one linear scale across these days"));
     }
 
     fn selection_app() -> App {
