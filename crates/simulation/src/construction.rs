@@ -1065,6 +1065,7 @@ impl Universe {
         id: AgentId,
         contract: &ConstructionContract,
         sealed_price: Option<Coins>,
+        markup_percentage: u32,
     ) -> Result<Option<ConstructionQuote>, SimulationError> {
         let AgentKind::Citizen(worker) = &self.agents[&id].kind;
         let Some(practice) = worker.skill_practice_ms(Skill::Carpentry) else {
@@ -1144,7 +1145,7 @@ impl Universe {
                 hours,
                 procurement_hours,
             )?
-            .payment
+            .payment_with_markup(markup_percentage)?
             .max(1)
         };
         if price > contract.maximum_offer {
@@ -1234,18 +1235,29 @@ impl Universe {
                                     .stages[self.construction.contracts[&id].stage]
                                     .remaining_base_ms(),
                             ) <= CAPACITY_BASE_MS
-                            && let Some(quote) = self.construction_quote(
+                            && let Some(_) = self.construction_quote(
                                 *worker,
                                 &self.construction.contracts[&id],
                                 None,
+                                100,
                             )?
                         {
-                            self.construction
-                                .contracts
-                                .get_mut(&id)
-                                .unwrap()
-                                .quotes
-                                .push(quote);
+                            let mut rng = self.construction.rng.clone();
+                            let percentage = rng.random_range(111..=120);
+                            if let Some(quote) = self.construction_quote(
+                                *worker,
+                                &self.construction.contracts[&id],
+                                None,
+                                percentage,
+                            )? {
+                                self.construction.rng = rng;
+                                self.construction
+                                    .contracts
+                                    .get_mut(&id)
+                                    .unwrap()
+                                    .quotes
+                                    .push(quote);
+                            }
                         }
                     }
                 } else {
@@ -1263,7 +1275,7 @@ impl Universe {
         let mut valid = Vec::new();
         for quote in &snapshot.quotes {
             if let Some(current) =
-                self.construction_quote(quote.carpenter, &snapshot, Some(quote.price))?
+                self.construction_quote(quote.carpenter, &snapshot, Some(quote.price), 100)?
             {
                 valid.push(current);
             }
@@ -3594,6 +3606,74 @@ mod tests {
     }
 
     #[test]
+    fn submitted_markup_draws_once_and_survives_rechecks_and_save_load() {
+        let (mut world, _, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        world
+            .construction
+            .contracts
+            .get_mut(&id)
+            .unwrap()
+            .quotes
+            .clear();
+        world
+            .construction
+            .contracts
+            .get_mut(&id)
+            .unwrap()
+            .next_quote_ms = world.current_time_ms;
+        let mut expected_rng = world.construction.rng.clone();
+        let percentage = expected_rng.random_range(111..=120);
+        let snapshot = world.construction.contracts[&id].clone();
+        let expected = world
+            .construction_quote(worker, &snapshot, None, percentage)
+            .unwrap()
+            .unwrap();
+        let unchanged_rng = world.construction.rng.clone();
+        assert!(
+            world
+                .construction_estimate(
+                    worker,
+                    world.construction.projects[&snapshot.project].place,
+                    HOUR_MS,
+                    100
+                )
+                .is_ok()
+        );
+        assert_eq!(world.construction.rng, unchanged_rng);
+        let mut unaffordable = world.clone();
+        unaffordable
+            .construction
+            .contracts
+            .get_mut(&id)
+            .unwrap()
+            .maximum_offer = expected.price - 1;
+        unaffordable.process_construction().unwrap();
+        assert!(unaffordable.construction.contracts[&id].quotes.is_empty());
+        assert_eq!(unaffordable.construction.rng, unchanged_rng);
+        world.process_construction().unwrap();
+        assert_eq!(world.construction.rng, expected_rng);
+        assert_eq!(
+            world.construction.contracts[&id].quotes,
+            vec![expected.clone()]
+        );
+        let mut world = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+        let snapshot = world.construction.contracts[&id].clone();
+        assert_eq!(
+            world
+                .construction_quote(worker, &snapshot, Some(expected.price), 120)
+                .unwrap()
+                .unwrap()
+                .price,
+            expected.price
+        );
+        world.process_construction().unwrap();
+        assert_eq!(world.construction.rng, expected_rng);
+        world.current_time_ms = snapshot.bidding_ends_ms;
+        world.award_construction(id).unwrap();
+        assert_eq!(world.construction.contracts[&id].price, expected.price);
+    }
+
+    #[test]
     fn award_keeps_sealed_price_and_rechecks_exact_client_reserve() {
         let (mut world, client, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
         let price = world.construction.contracts[&id].quotes[0].price;
@@ -3776,10 +3856,10 @@ mod tests {
             .with_good(Good::Water, 100_000)
             .unwrap();
         let (world, second) = world.with_citizen("Second carpenter", worker).unwrap();
-        let world = world.advance(HOUR_MS).unwrap();
-        let quotes = &world.construction.contracts[&id].quotes;
+        let mut world = world.advance(HOUR_MS).unwrap();
+        let quotes = &mut world.construction.contracts.get_mut(&id).unwrap().quotes;
         assert_eq!(quotes.len(), 2);
-        assert_eq!(quotes[0].price, quotes[1].price);
+        quotes[1].price = quotes[0].price;
         let large = world.advance(BIDDING_MS - HOUR_MS).unwrap();
         let mut split = world;
         for _ in 0..46 {
@@ -3821,7 +3901,7 @@ mod tests {
         };
         let mut world = world;
         let financing = world
-            .construction_quote(first, &cancelled, None)
+            .construction_quote(first, &cancelled, None, 100)
             .unwrap()
             .unwrap()
             .financing;
@@ -4060,7 +4140,7 @@ mod tests {
         world.current_time_ms = world.construction.contracts[&second_id].bidding_ends_ms;
         let snapshot = world.construction.contracts[&second_id].clone();
         let quote = world
-            .construction_quote(second, &snapshot, None)
+            .construction_quote(second, &snapshot, None, 100)
             .unwrap()
             .unwrap();
         world

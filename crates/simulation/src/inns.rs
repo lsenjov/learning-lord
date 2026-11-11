@@ -1825,6 +1825,24 @@ mod tests {
     }
 
     #[test]
+    fn inn_costs_exclude_reserve_shortfalls_and_preserve_saved_prices() {
+        let (mut world, host, _, place, beds) = fixture(1);
+        let family = citizen(&world, host).economic_id();
+        world.set_account_coins(family, 100_000).unwrap();
+        let funded = world.inn_costs(family, place, &beds).unwrap();
+        world.set_account_coins(family, 0).unwrap();
+        let budget = world.household_budget(family, 0).unwrap();
+        assert!(budget.essential_reserve > budget.cash);
+        let depleted = world.inn_costs(family, place, &beds).unwrap();
+        close(depleted.earnings_daily, funded.earnings_daily);
+        close(depleted.starting_price, funded.starting_price);
+        close(depleted.maintenance_floor, funded.maintenance_floor);
+        world.inns.get_mut(&place).unwrap().session_price = 123.25;
+        let loaded = Universe::from_save_str(&world.to_save_string().unwrap()).unwrap();
+        close(loaded.inns[&place].session_price, 123.25);
+    }
+
+    #[test]
     fn innkeeper_earnings_target_excludes_other_household_earners() {
         let (world, host, _, place, beds) = fixture(1);
         let family = citizen(&world, host).economic_id();

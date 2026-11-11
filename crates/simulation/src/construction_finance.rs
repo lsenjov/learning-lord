@@ -7,7 +7,6 @@ use crate::{
 };
 
 pub const RESERVE_DAYS: f64 = 7.0;
-pub const REPLENISHMENT_DAYS: f64 = 7.0;
 pub const FALLBACK_EARNING_HOURS: f64 = 8.0;
 pub const MIN_EARNING_HOURS: f64 = 1.0;
 const HOUR_MS: f64 = 3_600_000.0;
@@ -26,7 +25,6 @@ pub struct HouseholdBudget {
     pub recurring_daily_cost: f64,
     pub essential_reserve: Coins,
     pub earning_hours_per_day: f64,
-    pub replenishment_daily_cost: f64,
     pub hourly_earnings_target: f64,
     pub maximum_offer: Coins,
 }
@@ -360,10 +358,7 @@ impl Universe {
             .saturating_sub(commitments)
             .saturating_sub(liabilities)
             .max(0);
-        let replenishment_daily_cost =
-            essential_reserve.saturating_sub(free_cash).max(0) as f64 / REPLENISHMENT_DAYS;
-        let hourly_earnings_target =
-            (recurring_daily_cost + replenishment_daily_cost) / earning_hours_per_day;
+        let hourly_earnings_target = recurring_daily_cost / earning_hours_per_day;
         let maximum_offer = free_cash.saturating_sub(essential_reserve).max(0);
         Ok(HouseholdBudget {
             account,
@@ -378,7 +373,6 @@ impl Universe {
             recurring_daily_cost,
             essential_reserve,
             earning_hours_per_day,
-            replenishment_daily_cost,
             hourly_earnings_target,
             maximum_offer,
         })
@@ -413,6 +407,12 @@ impl Universe {
             labour_value,
             payment,
         })
+    }
+}
+
+impl CarpenterQuote {
+    pub(crate) fn payment_with_markup(&self, percentage: u32) -> Result<Coins, SimulationError> {
+        ceil_coins((self.material_value + self.labour_value) * f64::from(percentage) / 100.0)
     }
 }
 
@@ -632,7 +632,10 @@ mod tests {
         assert_eq!(budget.maximum_offer, 0);
         assert!(budget.hourly_earnings_target.is_finite());
         assert!(budget.earning_hours_per_day >= 2.0);
-        assert!(budget.replenishment_daily_cost > 0.0);
+        assert_eq!(
+            budget.hourly_earnings_target,
+            budget.recurring_daily_cost / budget.earning_hours_per_day
+        );
         assert!(budget.consumption_daily_cost >= budget.essential_daily_cost);
         let home = world.households[&account].home.unwrap();
         let world = world
@@ -820,6 +823,39 @@ mod tests {
         );
         let financing = budget.construction_financing(0, 0.0).unwrap();
         assert_eq!(financing.available_cash, 99_400);
+    }
+
+    #[test]
+    fn carpenter_markup_rounds_the_final_cost_at_both_endpoints() {
+        let quote = CarpenterQuote {
+            material_value: 10.25,
+            procurement_hours: 0.0,
+            construction_hours: 1.0,
+            labour_value: 10.25,
+            payment: 21,
+        };
+        assert_eq!(quote.payment_with_markup(111).unwrap(), 23);
+        assert_eq!(quote.payment_with_markup(120).unwrap(), 25);
+    }
+
+    #[test]
+    fn carpenter_cost_excludes_reserve_shortfall_without_relaxing_financing() {
+        let (mut world, first, _, account) = family(100_000);
+        let funded = world.household_budget(first, 0).unwrap();
+        world.set_account_coins(account, 0).unwrap();
+        let depleted = world.household_budget(first, 0).unwrap();
+        assert!(depleted.essential_reserve > depleted.cash);
+        assert_eq!(
+            depleted.hourly_earnings_target,
+            funded.hourly_earnings_target
+        );
+        assert_eq!(
+            world.carpenter_quote(&depleted, &[], 20.0, 2.0).unwrap(),
+            world.carpenter_quote(&funded, &[], 20.0, 2.0).unwrap()
+        );
+        assert_eq!(depleted.maximum_offer, 0);
+        assert!(!depleted.construction_financing(1, 1.0).unwrap().can_finance);
+        assert!(funded.construction_financing(1, 1.0).unwrap().can_finance);
     }
 
     #[test]
