@@ -1026,6 +1026,50 @@ mod tests {
     }
 
     #[test]
+    fn tier_change_during_inn_travel_resumes_planning_after_sleep() {
+        let (mut world, _, guest, place, _) = fixture(1);
+        world.map.places_mut().get_mut(&place).unwrap().position.x += 100.0;
+        world.refresh_market();
+        let world = world.start_planning(guest).unwrap();
+        assert!(matches!(
+            citizen(&world, guest).active_action.unwrap().action(),
+            CitizenAction::Travel(_)
+        ));
+        let household = citizen(&world, guest).economic_id();
+        let changed = world.set_household_living_tier(household, 2).unwrap();
+        assert!(citizen(&changed, guest).living_replan);
+        let travel_ms = citizen(&changed, guest)
+            .active_action
+            .unwrap()
+            .remaining_ms();
+        let mut runtime = crate::PlanningRuntime::default();
+        let sleeping = changed
+            .advance_with_planner(&mut runtime, travel_ms, || false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            citizen(&sleeping, guest).active_action.unwrap().action(),
+            CitizenAction::Sleep
+        );
+        assert!(citizen(&sleeping, guest).living_replan);
+        round_trip(&sleeping);
+        let sleep_ms = citizen(&sleeping, guest)
+            .active_action
+            .unwrap()
+            .remaining_ms();
+        let tiredness = citizen(&sleeping, guest).tiredness();
+        let awake = sleeping
+            .advance_with_planner(&mut runtime, sleep_ms, || false)
+            .unwrap()
+            .unwrap();
+        assert!(citizen(&awake, guest).tiredness() < tiredness);
+        assert!(!citizen(&awake, guest).living_replan);
+        assert!(citizen(&awake, guest).active_plan.is_some());
+        assert!(citizen(&awake, guest).active_action.is_some());
+        round_trip(&awake);
+    }
+
+    #[test]
     fn autonomous_travel_closure_and_background_execution_resume_without_stale_effects() {
         let (mut world, host, guest, place, _) = fixture(1);
         world.map.places_mut().get_mut(&place).unwrap().position.x += 100.0;

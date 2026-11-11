@@ -27,3 +27,11 @@ Construction payments between members of the same household are excluded from op
 - Final desktop tier controls and tooltip tests: 2 passed.
 
 A cancelled plan's market demand can remain until the next planning refresh. This is a minor existing request-refresh limitation; tier changes cancel pending purchases immediately.
+
+## Follow-up: resume autonomous activity after tier invalidation
+
+Tier invalidation discarded the active plan, which was also the only signal for continued autonomous activity. Preserve that intent with a saved deferred restart flag. Cancel purchases and equipping as before, allow other active actions to finish, and restart through the normal world planning entry point after refreshed shared context is available. Leave intentionally unplanned citizens idle. Older saves default the new flag to false; already stranded citizens cannot be distinguished from intentionally idle citizens using their saved state.
+
+Implement and validate as one coherent step, obtain independent review, resolve valid findings, then commit. Regression coverage exercises actual activity after manual and automatic changes, legacy migration, safe action completion, cancelled clothing, save round trips, asynchronous advancement, and deliberately idle citizens.
+
+Follow-up validation: the full simulation library, integration, and doc test run passed with 746 passed and 7 ignored. Focused tests also cover household consumption counted once, cancellation without an idle scheduling delay, independence from advance chunk size, and inn travel continuing through sleep before autonomous planning resumes. Independent review findings about accounting, restart timing, and inn continuation were resolved; the final fresh review reported no findings. A read-only probe against the latest save reconstructed Soren's planning intent in memory, changed tier during travel, and confirmed travel completed into Drink and then Eat with thirst falling. The original save remains unchanged.

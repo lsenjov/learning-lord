@@ -348,6 +348,8 @@ pub struct Citizen {
     inn_offers: Vec<inns::BedOffer>,
     pending_inn: bool,
     inn_replan: bool,
+    #[serde(default)]
+    living_replan: bool,
     sleep_outdoors: bool,
     sleep_rng: Xoshiro256PlusPlus,
     guilds: HashMap<AgentId, guilds::GuildAccess>,
@@ -450,6 +452,7 @@ impl Citizen {
             inn_offers: Vec::new(),
             pending_inn: false,
             inn_replan: false,
+            living_replan: false,
             sleep_outdoors: false,
             sleep_rng: rand::make_rng(),
             guilds: HashMap::new(),
@@ -2932,6 +2935,9 @@ impl Universe {
         }
         universe.process_construction()?;
         universe.commission_repairs()?;
+        if elapsed_ms > 0 {
+            universe.resume_living_planning(runtime.as_deref_mut())?;
+        }
         while universe.current_time_ms < end {
             if should_cancel() {
                 return Ok(None);
@@ -3450,6 +3456,7 @@ impl Universe {
                 }
             }
             universe.record_household_contributions(&histories_before)?;
+            universe.resume_living_planning(runtime.as_deref_mut())?;
         }
         universe.refresh_household_history(universe.current_time_ms, false)?;
         universe.refresh_guild_history(universe.current_time_ms, false);
@@ -3799,6 +3806,7 @@ impl Universe {
             .clone();
         let AgentKind::Citizen(citizen) = &mut agent.kind;
         citizen.inn_replan = false;
+        citizen.living_replan = false;
         citizen.refresh_production_targets(true)?;
         let updated = agent.start_planning()?;
         let mut universe = prepared;

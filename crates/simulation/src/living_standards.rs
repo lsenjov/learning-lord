@@ -128,6 +128,7 @@ impl Universe {
         for member in members {
             self.cancel_maintenance(member)?;
             let AgentKind::Citizen(citizen) = &mut self.agents.get_mut(&member).unwrap().kind;
+            citizen.living_replan |= citizen.active_plan.is_some();
             citizen.active_plan = None;
             if citizen.active_action.is_some_and(|action| {
                 matches!(
@@ -139,6 +140,35 @@ impl Universe {
                 )
             }) {
                 citizen.abandon_action()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resume_living_planning(
+        &mut self,
+        mut runtime: Option<&mut crate::PlanningRuntime>,
+    ) -> Result<(), SimulationError> {
+        let mut ids: Vec<_> = self
+            .agents
+            .iter()
+            .filter_map(|(id, agent)| {
+                let AgentKind::Citizen(citizen) = &agent.kind;
+                (citizen.living_replan && citizen.active_action.is_none()).then_some(*id)
+            })
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        for id in ids {
+            let Some(agent) = self.agents.get(&id) else {
+                continue;
+            };
+            let AgentKind::Citizen(citizen) = &agent.kind;
+            if citizen.living_replan && citizen.active_action.is_none() {
+                *self = self.start_planning(id)?;
+                if let Some(runtime) = runtime.as_deref_mut() {
+                    runtime.cancel(id);
+                    runtime.retain_agents(self);
+                }
             }
         }
         Ok(())
@@ -257,6 +287,155 @@ mod tests {
             .unwrap();
         let household = world.economic_id(member).unwrap();
         (world, member, household)
+    }
+
+    fn autonomous_citizen() -> (Universe, AgentId, AgentId) {
+        let citizen = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_thirst(100.0)
+            .unwrap()
+            .with_good(Good::Water, 2_000)
+            .unwrap();
+        let (world, member) = Universe::default().with_citizen("Ada", citizen).unwrap();
+        let household = world.economic_id(member).unwrap();
+        (world.start_planning(member).unwrap(), member, household)
+    }
+
+    fn citizen(world: &Universe, id: AgentId) -> &Citizen {
+        let AgentKind::Citizen(citizen) = &world.agents[&id].kind;
+        citizen
+    }
+
+    #[test]
+    fn tier_change_finishes_safe_action_then_resumes_autonomous_activity() {
+        let (world, member, household) = autonomous_citizen();
+        let action = citizen(&world, member).active_action.unwrap();
+        assert_eq!(action.action(), crate::CitizenAction::Drink);
+        let thirst = citizen(&world, member).thirst();
+        let changed = world.set_household_living_tier(household, 2).unwrap();
+        assert_eq!(citizen(&changed, member).active_action, Some(action));
+        assert!(citizen(&changed, member).living_replan);
+        let loaded = Universe::from_save_str(&changed.to_save_string().unwrap()).unwrap();
+        let mut runtime = crate::PlanningRuntime::default();
+        let mid = loaded
+            .advance_with_planner(&mut runtime, action.remaining_ms() - 1, || false)
+            .unwrap()
+            .unwrap();
+        assert!(citizen(&mid, member).living_replan);
+        assert!(citizen(&mid, member).active_plan.is_none());
+        let resumed = mid
+            .advance_with_planner(&mut runtime, 1, || false)
+            .unwrap()
+            .unwrap();
+        assert!(citizen(&resumed, member).thirst() < thirst);
+        assert!(!citizen(&resumed, member).living_replan);
+        assert!(citizen(&resumed, member).active_plan.is_some());
+        assert!(citizen(&resumed, member).active_action.is_some());
+        assert_eq!(
+            resumed.household_histories[&household].current.consumed,
+            resumed.citizen_histories[&member].current.consumed,
+        );
+        Universe::from_save_str(&resumed.to_save_string().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cancelled_clothing_action_restarts_without_consuming_garment() {
+        let c = Citizen::with_needs(-50.0, -100.0)
+            .unwrap()
+            .with_furnished_home()
+            .unwrap()
+            .with_thirst(-100.0)
+            .unwrap()
+            .with_good(Good::FlaxGarment, 1)
+            .unwrap()
+            .with_good(Good::Water, 2_000)
+            .unwrap();
+        let (world, member) = Universe::default().with_citizen("Ada", c).unwrap();
+        let household = world.economic_id(member).unwrap();
+        let world = world
+            .set_household_living_tier(household, 2)
+            .unwrap()
+            .start_planning(member)
+            .unwrap();
+        assert_eq!(
+            citizen(&world, member).active_action.unwrap().action(),
+            crate::CitizenAction::EquipClothing
+        );
+        let changed = world.set_household_living_tier(household, 1).unwrap();
+        assert!(citizen(&changed, member).active_action.is_none());
+        assert!(citizen(&changed, member).living_replan);
+        let loaded = Universe::from_save_str(&changed.to_save_string().unwrap()).unwrap();
+        let whole = loaded.advance(crate::ACTION_DURATION_MS).unwrap();
+        let resumed = loaded.advance(1).unwrap();
+        let split = resumed.advance(crate::ACTION_DURATION_MS - 1).unwrap();
+        assert_eq!(
+            whole.citizen_histories[&member].current.activity,
+            split.citizen_histories[&member].current.activity,
+        );
+        assert_eq!(whole.citizen_histories[&member].current.activity.idle_ms, 0);
+        assert_eq!(citizen(&resumed, member).units(Good::FlaxGarment), 1);
+        assert!(citizen(&resumed, member).garment_condition.is_none());
+        assert!(citizen(&resumed, member).active_plan.is_some());
+        assert!(citizen(&resumed, member).active_action.is_some());
+        let active = citizen(&resumed, member).active_action.unwrap();
+        let continued = resumed.advance(active.remaining_ms()).unwrap();
+        assert!(citizen(&continued, member).active_plan.is_some());
+    }
+
+    #[test]
+    fn automatic_tier_changes_and_legacy_migration_resume_activity() {
+        let (mut world, member, household) = autonomous_citizen();
+        append_days(&mut world, household, 7, 110, 100);
+        world
+            .households
+            .get_mut(&household)
+            .unwrap()
+            .below_zero_since_ms = None;
+        let changed = world
+            .assess_household_living_standards(world.current_time_ms)
+            .unwrap();
+        assert_eq!(changed, vec![household]);
+        assert!(citizen(&world, member).living_replan);
+        let duration = citizen(&world, member)
+            .active_action
+            .unwrap()
+            .remaining_ms();
+        let resumed = world.advance(duration).unwrap();
+        assert!(citizen(&resumed, member).active_plan.is_some());
+        assert!(citizen(&resumed, member).thirst() < citizen(&world, member).thirst());
+
+        let (mut legacy, member, household) = autonomous_citizen();
+        legacy
+            .households
+            .get_mut(&household)
+            .unwrap()
+            .living_standard
+            .since_ms = u64::MAX;
+        let saved = legacy
+            .to_save_string()
+            .unwrap()
+            .replace("living_replan: false,", "");
+        let loaded = Universe::from_save_str(&saved).unwrap();
+        assert!(citizen(&loaded, member).living_replan);
+        let duration = citizen(&loaded, member)
+            .active_action
+            .unwrap()
+            .remaining_ms();
+        let resumed = loaded.advance(duration).unwrap();
+        assert!(citizen(&resumed, member).active_plan.is_some());
+        assert!(citizen(&resumed, member).thirst() < citizen(&loaded, member).thirst());
+    }
+
+    #[test]
+    fn tier_changes_leave_deliberately_unplanned_citizens_idle() {
+        let (world, member, household) = household_citizen();
+        let changed = world.set_household_living_tier(household, 2).unwrap();
+        let advanced = changed.advance(crate::ACTION_DURATION_MS).unwrap();
+        assert!(!citizen(&advanced, member).living_replan);
+        assert!(citizen(&advanced, member).active_plan.is_none());
+        assert!(citizen(&advanced, member).active_action.is_none());
     }
 
     #[test]
