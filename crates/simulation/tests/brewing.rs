@@ -327,19 +327,30 @@ fn preparation_plans_keep_fermentation_unattended_and_sync_the_map() {
         Some(Batch::Preparing)
     );
     let plan = worker.active_plan().unwrap().plan();
-    assert!(
+    assert_eq!(
         plan.actions()
             .iter()
             .filter(|action| action.production_recipe() == Some(Recipe::BrewBeer))
-            .count()
-            >= 2
+            .count(),
+        1
     );
     assert!(
         plan.action_durations_ms()
             .iter()
             .all(|duration| *duration < FERMENTATION_MS)
     );
-    let advanced = started.advance(2 * PREPARATION_MS).unwrap();
+    let advanced = started.advance(PREPARATION_MS).unwrap();
+    assert_eq!(
+        advanced
+            .map()
+            .place(site)
+            .unwrap()
+            .batches()
+            .iter()
+            .flatten()
+            .count(),
+        1
+    );
     assert!(
         advanced
             .map()
@@ -348,8 +359,7 @@ fn preparation_plans_keep_fermentation_unattended_and_sync_the_map() {
             .batches()
             .iter()
             .flatten()
-            .count()
-            >= 2
+            .all(|batch| matches!(batch, Batch::Fermenting { .. }))
     );
     assert_eq!(
         Universe::from_save_str(&advanced.to_save_string().unwrap()).unwrap(),
@@ -357,7 +367,7 @@ fn preparation_plans_keep_fermentation_unattended_and_sync_the_map() {
     );
 }
 #[test]
-fn independent_brewers_preserve_each_others_slots_when_plans_resume() {
+fn independent_brewers_preserve_each_others_slots_when_plans_replan() {
     let (world, first, first_site) = brewer_batches(2);
     let mut worker = Citizen::new(0.0)
         .unwrap()
@@ -384,8 +394,14 @@ fn independent_brewers_preserve_each_others_slots_when_plans_resume() {
     let map = world.map();
     for site in [first_site, second_site] {
         let place = map.place(site).unwrap();
-        assert_eq!(place.batches().iter().flatten().count(), 2);
-        assert!(place.batches().contains(&Some(Batch::Preparing)));
+        assert_eq!(place.batches().iter().flatten().count(), 1);
+        assert!(
+            place
+                .batches()
+                .iter()
+                .flatten()
+                .all(|batch| matches!(batch, Batch::Fermenting { .. }))
+        );
     }
     assert_eq!(
         Universe::from_save_str(&world.to_save_string().unwrap()).unwrap(),
