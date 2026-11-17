@@ -183,6 +183,9 @@ impl Universe {
                 .market
                 .restore_treasury_context(universe.town_treasury);
         }
+        universe
+            .construction
+            .record_carpentry_rate(universe.current_time_ms);
         Ok(universe)
     }
 

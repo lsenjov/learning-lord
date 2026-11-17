@@ -11,7 +11,7 @@ use bevy::{
 use learning_lord_simulation::{
     Universe,
     locations::PlaceId,
-    marketplace::{Good, MarketParty},
+    marketplace::{DAY_MS, Good, MarketParty},
     production::Recipe,
 };
 
@@ -34,6 +34,14 @@ pub struct Selection {
 }
 
 impl Selection {
+    pub(super) fn chart_window(&self) -> WindowKind {
+        if self.carpentry {
+            WindowKind::Carpentry
+        } else {
+            WindowKind::Good(self.good())
+        }
+    }
+
     pub(super) fn good(&self) -> Good {
         self.good.unwrap_or(Good::Berries)
     }
@@ -43,13 +51,16 @@ impl Selection {
 pub enum Choice {
     Good(Good),
     Tab(Tab),
-    #[cfg(test)]
     Carpentry,
 }
 
 #[derive(Component)]
 pub enum Readout {
-    Price(Good),
+    GoodPrice(Good),
+    Margin(Good),
+    GoodChange(Good),
+    CarpentryPrice,
+    CarpentryChange,
     PriceNow,
     Unfulfilled,
 }
@@ -98,6 +109,32 @@ pub(crate) fn spawn_entity(parent: &mut ChildSpawnerCommands, good: Good) {
     );
 }
 
+pub(crate) fn spawn_carpentry(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            GoodSelection(Selection {
+                carpentry: true,
+                ..default()
+            }),
+            crate::market_history::GoodChart::default(),
+            Node {
+                width: percent(100),
+                min_height: px(0),
+                padding: UiRect::all(px(16)),
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Column,
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition::default(),
+            RelativeCursorPosition::default(),
+            BackgroundColor(PANEL),
+        ))
+        .with_children(|content| {
+            crate::market_history::spawn(content, "CARPENTRY HISTORY  |  recent 30 market days");
+        });
+}
+
 #[derive(Component)]
 pub(crate) struct GoodSelection(pub(crate) Selection);
 
@@ -130,45 +167,6 @@ fn spawn_market(parent: &mut ChildSpawnerCommands, selection: impl Bundle, page:
             },
         ))
         .with_children(|row| {
-            if !matches!(page, Page::Good(_)) {
-                row.spawn((
-                    Node {
-                        width: px(240),
-                        flex_shrink: 0.0,
-                        min_height: px(0),
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(8),
-                        overflow: Overflow::scroll_y(),
-                        ..default()
-                    },
-                    ScrollPosition::default(),
-                    RelativeCursorPosition::default(),
-                ))
-                .with_children(|list| {
-                    list.spawn(text("GOODS  |  current prices", 14.0, MUTED));
-                    for good in Good::ALL {
-                        list.spawn((
-                            Button,
-                            Choice::Good(good),
-                            BackgroundColor(PANEL),
-                            Node {
-                                width: percent(100),
-                                flex_direction: FlexDirection::Column,
-                                align_items: AlignItems::FlexStart,
-                                padding: UiRect::all(px(12)),
-                                row_gap: px(3),
-                                flex_shrink: 0.0,
-                                border_radius: BorderRadius::all(px(8)),
-                                ..default()
-                            },
-                        ))
-                        .with_children(|button| {
-                            button.spawn(text(good.name(), 16.0, TEXT));
-                            button.spawn((text("", 13.0, MUTED), Readout::Price(good)));
-                        });
-                    }
-                });
-            }
             row.spawn((
                 Node {
                     flex_basis: px(0),
@@ -197,7 +195,7 @@ fn spawn_market(parent: &mut ChildSpawnerCommands, selection: impl Bundle, page:
                             (
                                 Tab::Overview,
                                 if page == Page::Market {
-                                    "Carpentry"
+                                    "Goods and services"
                                 } else {
                                     "Overview"
                                 },
@@ -236,7 +234,11 @@ fn spawn_market(parent: &mut ChildSpawnerCommands, selection: impl Bundle, page:
                                 width: percent(100),
                                 min_width: px(0),
                                 flex_direction: FlexDirection::Column,
-                                row_gap: px(12),
+                                row_gap: if page == Page::Market && tab == Tab::Overview {
+                                    px(0)
+                                } else {
+                                    px(12)
+                                },
                                 min_height: px(0),
                                 flex_grow: 1.0,
                                 flex_basis: px(0),
@@ -246,7 +248,9 @@ fn spawn_market(parent: &mut ChildSpawnerCommands, selection: impl Bundle, page:
                         ))
                         .with_children(|content| match tab {
                             Tab::Overview => {
-                                if page != Page::Market {
+                                if page == Page::Market {
+                                    spawn_goods_and_services(content);
+                                } else {
                                     content.spawn((text("", 16.0, TEXT), Readout::PriceNow));
                                     content.spawn((
                                         Node {
@@ -256,15 +260,11 @@ fn spawn_market(parent: &mut ChildSpawnerCommands, selection: impl Bundle, page:
                                         },
                                         RecipeRows,
                                     ));
+                                    crate::market_history::spawn(
+                                        content,
+                                        "MARKET HISTORY  |  recent 30 market days",
+                                    );
                                 }
-                                crate::market_history::spawn(
-                                    content,
-                                    if page == Page::Market {
-                                        "CARPENTRY HISTORY  |  recent 30 market days"
-                                    } else {
-                                        "MARKET HISTORY  |  recent 30 market days"
-                                    },
-                                );
                             }
                             Tab::Listings => {
                                 content.spawn(text("CURRENT BUY REQUESTS  |  live", 14.0, MUTED));
@@ -301,6 +301,60 @@ fn spawn_market(parent: &mut ChildSpawnerCommands, selection: impl Bundle, page:
         });
 }
 
+fn market_row() -> Node {
+    Node {
+        display: Display::Grid,
+        width: percent(100),
+        flex_shrink: 0.0,
+        align_items: AlignItems::Center,
+        grid_template_columns: vec![
+            GridTrack::flex(1.4),
+            GridTrack::flex(1.5),
+            GridTrack::flex(0.8),
+            GridTrack::flex(0.8),
+        ],
+        column_gap: px(8),
+        padding: UiRect::axes(px(8), px(4)),
+        ..default()
+    }
+}
+
+fn spawn_goods_and_services(parent: &mut ChildSpawnerCommands) {
+    parent.spawn(market_row()).with_children(|row| {
+        for heading in ["Good or service", "Price", "Margin", "7-day change"] {
+            row.spawn(text(heading, 13.0, MUTED));
+        }
+    });
+    for good in Good::ALL {
+        parent
+            .spawn((
+                Button,
+                Choice::Good(good),
+                BackgroundColor(PANEL),
+                market_row(),
+            ))
+            .with_children(|row| {
+                row.spawn(text(good.name(), 14.0, TEXT));
+                row.spawn((text("", 13.0, TEXT), Readout::GoodPrice(good)));
+                row.spawn((text("", 13.0, TEXT), Readout::Margin(good)));
+                row.spawn((text("", 13.0, TEXT), Readout::GoodChange(good)));
+            });
+    }
+    parent
+        .spawn((
+            Button,
+            Choice::Carpentry,
+            BackgroundColor(PANEL),
+            market_row(),
+        ))
+        .with_children(|row| {
+            row.spawn(text("Carpentry", 14.0, TEXT));
+            row.spawn((text("", 13.0, TEXT), Readout::CarpentryPrice));
+            row.spawn(text("-", 13.0, TEXT));
+            row.spawn((text("", 13.0, TEXT), Readout::CarpentryChange));
+        });
+}
+
 pub fn handle_selection(
     shortcuts: crate::KeyboardShortcuts,
     buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
@@ -312,13 +366,10 @@ pub fn handle_selection(
     parents: Query<&ChildOf>,
 ) {
     let workspace = windows.is_some();
-    if workspace && !selection.carpentry {
-        selection.carpentry = true;
-    }
     for (entity, interaction, choice) in &buttons {
         if *interaction == Interaction::Pressed {
             focus.set(entity, FocusCause::Pressed);
-            match *choice {
+            let kind = match *choice {
                 Choice::Tab(tab) => {
                     let mut pane =
                         pane_owner(entity, &parents, |ancestor| panes.contains(ancestor))
@@ -331,30 +382,27 @@ pub fn handle_selection(
                     if !workspace && tab != Tab::Overview {
                         selection.carpentry = false;
                     }
-                }
-                #[cfg(test)]
-                Choice::Carpentry => {
-                    selection.carpentry = true;
-                    selection.tab = Tab::Overview;
+                    continue;
                 }
                 Choice::Good(good) => {
-                    if !workspace {
-                        selection.carpentry = false;
-                    }
-                    if let Some(windows) = windows.as_mut() {
-                        if let Some(source) = parents
-                            .iter_ancestors(entity)
-                            .find_map(|root| roots.get(root).ok())
-                        {
-                            windows.link(source.0, WindowKind::Good(good));
-                        } else {
-                            windows.open(WindowKind::Good(good));
-                        }
-                    }
-                    if selection.good() != good {
-                        selection.good = Some(good);
-                    }
+                    selection.carpentry = false;
+                    selection.good = Some(good);
+                    WindowKind::Good(good)
                 }
+                Choice::Carpentry => {
+                    selection.carpentry = true;
+                    if !workspace {
+                        selection.tab = Tab::Overview;
+                    }
+                    WindowKind::Carpentry
+                }
+            };
+            if let Some(windows) = windows.as_mut() {
+                let source = parents
+                    .iter_ancestors(entity)
+                    .find_map(|root| roots.get(root).ok())
+                    .map(|source| source.0);
+                windows.open_link(source, kind);
             }
         }
     }
@@ -372,31 +420,36 @@ pub fn handle_selection(
             windows.open(kind);
         }
     }
-    let current = if let Some(windows) = windows.as_ref() {
-        match windows.focused() {
-            WindowKind::Good(good) if windows.is_open(WindowKind::Market) => Some(good),
-            WindowKind::Market => Some(selection.good()),
-            _ => None,
-        }
-    } else {
-        None
+    let Some(windows) = windows.as_mut() else {
+        return;
     };
-    if let Some(current) = current {
-        let index = current as usize;
-        let next = if shortcuts.keyboard.just_pressed(KeyCode::ArrowDown) {
-            Good::ALL[(index + 1) % Good::COUNT]
-        } else if shortcuts.keyboard.just_pressed(KeyCode::ArrowUp) {
-            Good::ALL[(index + Good::COUNT - 1) % Good::COUNT]
-        } else {
-            return;
-        };
-        selection.good = Some(next);
-        if let Some(windows) = windows.as_mut() {
-            windows.link(WindowKind::Market, WindowKind::Good(next));
-        } else {
-            selection.carpentry = false;
-        }
+    if !windows.is_open(WindowKind::Market) {
+        return;
     }
+    let current = match windows.focused() {
+        WindowKind::Market => selection.chart_window(),
+        focused => focused,
+    };
+    let index = match current {
+        WindowKind::Good(good) => good as usize,
+        WindowKind::Carpentry => Good::COUNT,
+        _ => return,
+    };
+    let count = Good::COUNT + 1;
+    let next = if shortcuts.keyboard.just_pressed(KeyCode::ArrowDown) {
+        (index + 1) % count
+    } else if shortcuts.keyboard.just_pressed(KeyCode::ArrowUp) {
+        (index + count - 1) % count
+    } else {
+        return;
+    };
+    if let Some(&good) = Good::ALL.get(next) {
+        selection.good = Some(good);
+        selection.carpentry = false;
+    } else {
+        selection.carpentry = true;
+    }
+    windows.link(WindowKind::Market, selection.chart_window());
 }
 
 fn seller_orders(universe: &Universe, good: Good) -> Vec<SellerOrders> {
@@ -474,24 +527,72 @@ fn raw_material_margin(universe: &Universe, recipe: Recipe) -> Option<f64> {
     (output > 0.0).then_some((output - materials) / output * 100.0)
 }
 
-pub(crate) fn material_margins(universe: &Universe, good: Good, detail: bool) -> String {
-    let rows: Vec<_> = Recipe::ALL
+fn recipe_margins(universe: &Universe, good: Good) -> impl Iterator<Item = (Recipe, f64)> + '_ {
+    Recipe::ALL
         .into_iter()
-        .filter(|recipe| recipe.outputs().iter().any(|&(output, _)| output == good))
-        .filter_map(|recipe| {
-            raw_material_margin(universe, recipe)
-                .map(|margin| format!("{}: {margin:.1}%", recipe.name()))
+        .filter(move |recipe| recipe.outputs().iter().any(|&(output, _)| output == good))
+        .filter_map(move |recipe| {
+            raw_material_margin(universe, recipe).map(|margin| (recipe, margin))
         })
+}
+
+fn material_margins(universe: &Universe, good: Good) -> String {
+    let rows: Vec<_> = recipe_margins(universe, good)
+        .map(|(recipe, margin)| format!("{}: {margin:.1}%", recipe.name()))
         .collect();
     if rows.is_empty() {
         return String::new();
     }
-    let prefix = if detail {
-        "RAW MATERIAL MARGIN\n"
-    } else {
-        "Raw material margin\n"
+    format!("RAW MATERIAL MARGIN\n{}", rows.join("\n"))
+}
+
+fn margin_range(universe: &Universe, good: Good) -> String {
+    let mut margins = recipe_margins(universe, good).map(|(_, margin)| margin.round() + 0.0);
+    let Some(first) = margins.next() else {
+        return "-".into();
     };
-    format!("{prefix}{}", rows.join("\n"))
+    let (min, max) = margins.fold((first, first), |(min, max), margin| {
+        (min.min(margin), max.max(margin))
+    });
+    if min == max {
+        format!("{min:.0}%")
+    } else {
+        format!("{min:.0}% to {max:.0}%")
+    }
+}
+
+fn weekly_change(current: Option<f64>, previous: Option<f64>) -> String {
+    let (Some(current), Some(previous)) = (current, previous.filter(|price| *price > 0.0)) else {
+        return "-".into();
+    };
+    let change = ((current / previous - 1.0) * 100.0).round();
+    if change == 0.0 {
+        "0%".into()
+    } else {
+        format!("{change:+.0}%")
+    }
+}
+
+fn good_weekly_change(universe: &Universe, good: Good) -> String {
+    let current = universe.prices().price(good);
+    let previous = universe
+        .current_time_ms()
+        .checked_sub(7 * DAY_MS)
+        .and_then(|time| {
+            let market = universe.market();
+            let (_, created) = market.initial_period();
+            if time < created {
+                return None;
+            }
+            market
+                .history()
+                .iter()
+                .rev()
+                .take_while(|entry| entry.end_ms > time)
+                .filter(|entry| entry.good == good)
+                .fold(current, |_, entry| Some(entry.price_before))
+        });
+    weekly_change(current, previous)
 }
 
 fn order_label(good: Good, units: u64, price: f64) -> String {
@@ -612,8 +713,7 @@ pub fn refresh_choices(
             .map(|pane| &pane.0)
             .unwrap_or(&selection);
         let selected = match *choice {
-            Choice::Good(good) => selection.good == Some(good),
-            #[cfg(test)]
+            Choice::Good(good) => !selection.carpentry && selection.good == Some(good),
             Choice::Carpentry => selection.carpentry,
             Choice::Tab(tab) => selection.tab == tab,
         };
@@ -689,38 +789,44 @@ pub fn refresh(
         if !snapshot.is_changed() && !readout.is_added() && !restored {
             continue;
         }
-        let good = match *readout {
-            Readout::Price(good) => good,
-            _ => {
+        let next = match *readout {
+            Readout::GoodPrice(good) => format!(
+                "{:.3} coins/{}",
+                universe.prices().price(good).unwrap(),
+                good.price_unit_name()
+            ),
+            Readout::Margin(good) => margin_range(universe, good),
+            Readout::GoodChange(good) => good_weekly_change(universe, good),
+            Readout::CarpentryPrice => universe
+                .construction()
+                .carpentry_rate()
+                .map_or_else(|| "-".into(), |rate| format!("{rate:.3} coins/actual hour")),
+            Readout::CarpentryChange => {
+                let construction = universe.construction();
+                let previous = universe
+                    .current_time_ms()
+                    .checked_sub(7 * DAY_MS)
+                    .and_then(|time| construction.carpentry_rate_at(time));
+                weekly_change(construction.carpentry_rate(), previous)
+            }
+            Readout::PriceNow | Readout::Unfulfilled => {
                 let Some((_, selection, _)) = owner(entity).and_then(|owner| panes.get(owner).ok())
                 else {
                     continue;
                 };
-                selection.0.good()
-            }
-        };
-        let next = match *readout {
-            Readout::Price(_) => {
-                let price = format!(
-                    "{:.3} coins/{}",
-                    universe.prices().price(good).unwrap(),
-                    good.price_unit_name()
-                );
-                let margins = material_margins(universe, good, false);
-                if margins.is_empty() {
-                    price
-                } else {
-                    format!("{price}\n{margins}")
+                let good = selection.0.good();
+                match *readout {
+                    Readout::PriceNow => price_details(universe, good),
+                    _ => format!(
+                        "Affordable unfulfilled demand: {}",
+                        crate::quantity_label(
+                            good,
+                            universe.market().current_period().goods[good as usize]
+                                .affordable_demand_units
+                        )
+                    ),
                 }
             }
-            Readout::PriceNow => price_details(universe, good),
-            Readout::Unfulfilled => format!(
-                "Affordable unfulfilled demand: {}",
-                crate::quantity_label(
-                    good,
-                    universe.market().current_period().goods[good as usize].affordable_demand_units
-                )
-            ),
         };
         value.set_if_neq(Text(next));
     }
@@ -781,7 +887,7 @@ fn refresh_rows(
             })
         })
         .collect();
-    let row_key = (buyer_key, material_margins(universe, good, true));
+    let row_key = (buyer_key, material_margins(universe, good));
     if cache.rows.as_ref() != Some(&row_key) || added {
         for entity in buyers {
             commands
@@ -1024,6 +1130,185 @@ mod tests {
     };
 
     #[test]
+    fn carpentry_row_opens_its_chart_beside_the_market_table() {
+        use crate::market_history::{self, Detail, Plot};
+
+        let mut app = app();
+        app.init_resource::<market_history::ChartDisplay>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(
+                Update,
+                (market_history::refresh, market_history::hover).chain(),
+            );
+        press_in(&mut app, WindowKind::Market, Choice::Carpentry);
+        assert_eq!(
+            app.world().resource::<Windows>().visible(),
+            [Some(WindowKind::Market), Some(WindowKind::Carpentry)]
+        );
+        let world = app.world_mut();
+        let market = root(world, WindowKind::Market);
+        let carpentry = root(world, WindowKind::Carpentry);
+        let mut entities = Vec::new();
+        descendants(world, world.get::<Children>(market).unwrap(), &mut entities);
+        assert!(entities.iter().any(|&entity| {
+            matches!(world.get::<TabPanel>(entity), Some(TabPanel(Tab::Overview)))
+                && world.get::<Node>(entity).unwrap().display == Display::Flex
+        }));
+        assert!(entities.iter().any(|&entity| {
+            matches!(world.get::<Readout>(entity), Some(Readout::CarpentryPrice))
+                && world.get::<Text>(entity).unwrap().0 == "-"
+        }));
+        entities.clear();
+        descendants(
+            world,
+            world.get::<Children>(carpentry).unwrap(),
+            &mut entities,
+        );
+        let plot = *entities
+            .iter()
+            .find(|&&entity| world.get::<Plot>(entity).is_some())
+            .unwrap();
+        let readout = *entities
+            .iter()
+            .find(|&&entity| world.get::<Detail>(entity).is_some())
+            .unwrap();
+        let mut cursor = world.get_mut::<RelativeCursorPosition>(plot).unwrap();
+        cursor.normalized = Some(Vec2::new(-0.49, 0.0));
+        cursor.cursor_over = true;
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        let world = app.world_mut();
+        *world.get_mut::<RelativeCursorPosition>(plot).unwrap() = RelativeCursorPosition::default();
+        world.resource_mut::<ButtonInput<MouseButton>>().reset_all();
+        app.update();
+        let pinned = app.world().get::<Text>(readout).unwrap().0.clone();
+        assert!(pinned.starts_with("PINNED"));
+        assert!(pinned.contains("Actual work:"));
+
+        press_in(
+            &mut app,
+            WindowKind::Market,
+            Choice::Tab(Tab::CaravanPolicy),
+        );
+        press_in(&mut app, WindowKind::Market, Choice::Tab(Tab::Overview));
+        press_in(&mut app, WindowKind::Market, Choice::Good(Good::BreadRoll));
+        assert_eq!(
+            app.world().resource::<Windows>().visible(),
+            [
+                Some(WindowKind::Market),
+                Some(WindowKind::Good(Good::BreadRoll))
+            ]
+        );
+        let world = app.world_mut();
+        let bread = root(world, WindowKind::Good(Good::BreadRoll));
+        entities.clear();
+        descendants(world, world.get::<Children>(bread).unwrap(), &mut entities);
+        let bread_detail = entities
+            .iter()
+            .find(|&&entity| world.get::<Detail>(entity).is_some())
+            .unwrap();
+        assert!(
+            !world
+                .get::<Text>(*bread_detail)
+                .unwrap()
+                .0
+                .starts_with("PINNED")
+        );
+        press_in(&mut app, WindowKind::Market, Choice::Carpentry);
+        assert_eq!(app.world().get::<Text>(readout).unwrap().0, pinned);
+    }
+
+    #[test]
+    fn market_keyboard_wraps_through_carpentry_from_both_panes() {
+        let mut app = app();
+        app.world_mut()
+            .resource_mut::<Windows>()
+            .open(WindowKind::Market);
+        app.update();
+        for (key, expected) in [
+            (KeyCode::ArrowUp, WindowKind::Carpentry),
+            (
+                KeyCode::ArrowUp,
+                WindowKind::Good(Good::ALL[Good::COUNT - 1]),
+            ),
+            (KeyCode::ArrowDown, WindowKind::Carpentry),
+            (KeyCode::ArrowDown, WindowKind::Good(Good::ALL[0])),
+        ] {
+            let mut keyboard = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keyboard.reset_all();
+            keyboard.press(key);
+            app.update();
+            let windows = app.world().resource::<Windows>();
+            assert_eq!(
+                windows.visible(),
+                [Some(WindowKind::Market), Some(expected)]
+            );
+            assert_eq!(windows.focused(), expected);
+        }
+    }
+
+    #[test]
+    fn market_table_uses_whole_margins_and_a_seven_day_reference_price() {
+        use learning_lord_simulation::marketplace::ShoppingList;
+
+        let prices = Prices::default()
+            .with_price(Good::Wheat, 120.0)
+            .unwrap()
+            .with_price(Good::Flour, 100.0)
+            .unwrap()
+            .with_price(Good::Water, 100.0)
+            .unwrap();
+        let universe = Universe::with_map(Map::default()).with_prices(prices);
+        assert_eq!(good_weekly_change(&universe, Good::Berries), "-");
+        assert_eq!(margin_range(&universe, Good::Wheat), "-");
+        assert_eq!(margin_range(&universe, Good::Flour), "-50%");
+
+        let idle = universe.advance(7 * DAY_MS).unwrap();
+        assert!(idle.market().history().is_empty());
+        assert_eq!(good_weekly_change(&idle, Good::Water), "0%");
+
+        let (universe, buyer) = universe
+            .with_citizen(
+                "Buyer",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(1000)
+                    .unwrap(),
+            )
+            .unwrap();
+        let universe = universe
+            .advance(2 * DAY_MS)
+            .unwrap()
+            .with_purchase_request(buyer, ShoppingList::single(Good::Water, 100))
+            .unwrap()
+            .advance(5 * DAY_MS)
+            .unwrap()
+            .with_prices(prices.with_price(Good::Water, 125.0).unwrap());
+        assert!(
+            universe
+                .market()
+                .history()
+                .iter()
+                .any(|entry| entry.good == Good::Water)
+        );
+        assert!(
+            universe
+                .market()
+                .history()
+                .iter()
+                .all(|entry| entry.start_ms > 0)
+        );
+        assert_eq!(good_weekly_change(&universe, Good::Water), "+25%");
+        assert_eq!(weekly_change(Some(3.0), Some(0.0)), "-");
+        assert_eq!(weekly_change(Some(3.0), Some(3.0)), "0%");
+        assert_eq!(weekly_change(Some(3.0), Some(4.0)), "-25%");
+    }
+
+    #[test]
     fn good_tabs_and_live_readouts_belong_to_each_pane() {
         let mut app = app();
         app.world_mut().resource_mut::<Windows>().link(
@@ -1216,8 +1501,8 @@ mod tests {
             Some(50.0)
         );
         assert_eq!(raw_material_margin(&universe, Recipe::GrowWheat), None);
-        assert!(material_margins(&universe, Good::Wheat, true).is_empty());
-        assert!(material_margins(&universe, Good::Flour, true).contains("Mill flour: 50.0%"));
+        assert!(material_margins(&universe, Good::Wheat).is_empty());
+        assert!(material_margins(&universe, Good::Flour).contains("Mill flour: 50.0%"));
         let universe = universe.with_prices(prices.with_price(Good::Wheat, 120.0).unwrap());
         assert_eq!(
             raw_material_margin(&universe, Recipe::MillFlour),
@@ -1593,6 +1878,7 @@ mod tests {
             .find(|&entity| match (choice, world.get::<Choice>(entity)) {
                 (Choice::Good(a), Some(Choice::Good(b))) => a == *b,
                 (Choice::Tab(a), Some(Choice::Tab(b))) => a == *b,
+                (Choice::Carpentry, Some(Choice::Carpentry)) => true,
                 _ => false,
             })
             .unwrap();

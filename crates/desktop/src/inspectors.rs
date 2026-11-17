@@ -33,6 +33,7 @@ impl WindowKind {
             Self::Market => "Market",
             Self::Saves => "Load universe",
             Self::Good(good) => good.name(),
+            Self::Carpentry => "Carpentry",
             Self::Citizen(id) => universe
                 .agents()
                 .get(&id)
@@ -167,6 +168,7 @@ pub fn open_windows(
                 }
                 WindowKind::Location(id) => locations::spawn_entity(parent, id),
                 WindowKind::Good(good) => market::spawn_entity(parent, good),
+                WindowKind::Carpentry => market::spawn_carpentry(parent),
             },
         );
         windows.register(kind, entity);

@@ -316,6 +316,10 @@ pub struct Construction {
     #[serde(default)]
     pub labour_started_ms: Option<u64>,
     #[serde(default)]
+    retained_carpentry_rate: Option<f64>,
+    #[serde(default)]
+    carpentry_rate_changes: Vec<(u64, Option<f64>)>,
+    #[serde(default)]
     pub released_carpenters: std::collections::HashSet<AgentId>,
     pub(crate) rng: Xoshiro256PlusPlus,
 }
@@ -329,6 +333,8 @@ impl Default for Construction {
             next_queue_position: 0,
             labour_days: vec![CarpenterDay::default()],
             labour_started_ms: Some(0),
+            retained_carpentry_rate: None,
+            carpentry_rate_changes: Vec::new(),
             released_carpenters: Default::default(),
             rng: rand::make_rng(),
         }
@@ -336,6 +342,45 @@ impl Default for Construction {
 }
 
 impl Construction {
+    pub fn carpentry_rate(&self) -> Option<f64> {
+        self.labour_days
+            .iter()
+            .filter_map(|day| day.price().map(|price| (day.start_ms, price)))
+            .max_by_key(|&(start, _)| start)
+            .map(|(_, price)| price)
+            .or(self.retained_carpentry_rate)
+    }
+
+    pub fn carpentry_rate_at(&self, time_ms: u64) -> Option<f64> {
+        let index = self
+            .carpentry_rate_changes
+            .partition_point(|&(time, _)| time <= time_ms);
+        self.carpentry_rate_changes[..index]
+            .last()
+            .and_then(|&(_, rate)| rate)
+    }
+
+    pub(crate) fn record_carpentry_rate(&mut self, now: u64) {
+        let rate = self.carpentry_rate();
+        let changes = &mut self.carpentry_rate_changes;
+        if changes.last().and_then(|&(_, rate)| rate) != rate {
+            if let Some((time, previous)) = changes.last_mut()
+                && *time == now
+            {
+                *previous = rate;
+            } else {
+                changes.push((now, rate));
+            }
+        }
+
+        // Keep the last rate at or before the weekly cutoff so spans of inactivity still compare.
+        let cutoff = now.saturating_sub(7 * DAY_MS);
+        let anchor = changes
+            .partition_point(|&(time, _)| time <= cutoff)
+            .saturating_sub(1);
+        changes.drain(..anchor);
+    }
+
     pub(crate) fn starting_at(time_ms: u64) -> Self {
         Self {
             labour_started_ms: Some(time_ms),
@@ -474,6 +519,17 @@ impl Universe {
             .retain(|_, project| !project.completed);
         let today = labour_day(self.current_time_ms);
         let cutoff = today.saturating_sub(365 * DAY_MS);
+        if let Some(rate) = self
+            .construction
+            .labour_days
+            .iter()
+            .filter(|day| day.start_ms < cutoff)
+            .filter_map(|day| day.price().map(|rate| (day.start_ms, rate)))
+            .max_by_key(|&(start, _)| start)
+            .map(|(_, rate)| rate)
+        {
+            self.construction.retained_carpentry_rate = Some(rate);
+        }
         self.construction
             .labour_days
             .retain(|day| day.start_ms >= cutoff);
@@ -509,6 +565,8 @@ impl Universe {
         self.construction
             .labour_days
             .sort_by_key(|day| day.start_ms);
+        self.construction
+            .record_carpentry_rate(self.current_time_ms);
     }
 
     pub fn construction(&self) -> &Construction {
@@ -2393,6 +2451,19 @@ impl Universe {
         {
             return Err(invalid());
         }
+        let invalid_rate = |rate: f64| !rate.is_finite() || rate < 0.0;
+        let changes = &self.construction.carpentry_rate_changes;
+        if self
+            .construction
+            .retained_carpentry_rate
+            .is_some_and(invalid_rate)
+            || changes
+                .iter()
+                .any(|&(time, rate)| time > now || rate.is_some_and(invalid_rate))
+            || changes.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(invalid());
+        }
         let mut day_starts = HashSet::new();
         for day in &self.construction.labour_days {
             let pending = self
@@ -3639,6 +3710,62 @@ mod tests {
         assert!((worked[1].labour_coins - expected * 3.0 / 4.0).abs() < 1e-9);
         assert!((worked[0].price().unwrap() - expected / 2.0).abs() < 1e-9);
         assert!((worked[1].price().unwrap() - expected / 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn carpentry_rate_history_uses_settlement_time_and_survives_idle_days() {
+        let (mut world, _, worker, id) = fixture(ConstructionItem::FishCrate, 1_000);
+        world.construction.labour_days[0].actual_ms = HOUR_MS;
+        world.construction.labour_days[0].labour_coins = 20.0;
+        world.compact_construction();
+
+        let work = crate::marketplace::UPDATE_TIME_MS + DAY_MS;
+        world.record_construction_work(id, work, HOUR_MS);
+        world.current_time_ms = work + HOUR_MS;
+        world.compact_construction();
+        assert_eq!(world.construction.carpentry_rate(), Some(20.0));
+
+        let settlement = work + 2 * DAY_MS;
+        let contract = world.construction.contracts.get_mut(&id).unwrap();
+        contract.carpenter = Some(worker);
+        contract.quotes[0].material_value = Some(10.0);
+        contract.status = ContractStatus::Completed;
+        contract.paid = 40;
+        contract.ended_base_ms = Some(HOUR_MS);
+        world.current_time_ms = settlement;
+        world.compact_construction();
+        assert_eq!(
+            world.construction.carpentry_rate_at(settlement - 1),
+            Some(20.0)
+        );
+        assert_eq!(world.construction.carpentry_rate_at(settlement), Some(30.0));
+
+        world.current_time_ms = settlement + 7 * DAY_MS - 1;
+        world.compact_construction();
+        assert_eq!(
+            world
+                .construction
+                .carpentry_rate_at(world.current_time_ms - 7 * DAY_MS),
+            Some(20.0)
+        );
+
+        world.current_time_ms = settlement + 500 * DAY_MS;
+        world.compact_construction();
+        assert!(
+            world
+                .construction
+                .labour_days
+                .iter()
+                .all(|day| day.actual_ms == 0)
+        );
+        assert_eq!(world.construction.carpentry_rate_changes.len(), 1);
+        assert_eq!(world.construction.carpentry_rate(), Some(30.0));
+        assert_eq!(
+            world
+                .construction
+                .carpentry_rate_at(world.current_time_ms - 7 * DAY_MS),
+            Some(30.0)
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub enum WindowKind {
     Guild(AgentId),
     Location(PlaceId),
     Good(Good),
+    Carpentry,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

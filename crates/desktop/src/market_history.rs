@@ -554,10 +554,9 @@ pub fn refresh(
     let visible = |kind| windows.as_ref().is_none_or(|windows| windows.is_open(kind));
     let restored = |kind| windows.is_some() && !previous.contains(&Some(kind));
     let owner = |entity| market::pane_owner(entity, &parents, |ancestor| panes.contains(ancestor));
-    if visible(WindowKind::Market)
+    if windows.is_none()
         && (snapshot.is_changed()
             || selection.is_changed()
-            || restored(WindowKind::Market)
             || plots
                 .iter()
                 .any(|(entity, plot)| owner(entity).is_none() && plot.is_added()))
@@ -585,7 +584,7 @@ pub fn refresh(
         );
     }
     for (entity, selection, mut cached) in &mut panes {
-        let kind = WindowKind::Good(selection.0.good());
+        let kind = selection.0.chart_window();
         if !visible(kind) || (!snapshot.is_changed() && !selection.is_changed() && !restored(kind))
         {
             continue;
@@ -881,10 +880,7 @@ pub fn hover(
     let overview = |entity| {
         market::pane_owner(entity, &parents, |ancestor| panes.contains(ancestor)).is_none()
     };
-    if windows
-        .as_ref()
-        .is_none_or(|windows| windows.is_open(WindowKind::Market))
-    {
+    if windows.is_none() {
         hover_pane(
             &mut commands,
             &selection,
@@ -901,7 +897,7 @@ pub fn hover(
         );
     }
     for (entity, selection, mut cached) in &mut panes {
-        let kind = WindowKind::Good(selection.0.good());
+        let kind = selection.0.chart_window();
         if windows
             .as_ref()
             .is_some_and(|windows| !windows.is_open(kind))
