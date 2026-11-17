@@ -274,6 +274,7 @@ impl Universe {
                         scheduling: false,
                         latest_outcome: None,
                         awarded: false,
+                        queue_position: None,
                     },
                 );
                 id

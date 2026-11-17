@@ -60,13 +60,16 @@ pub enum Mutation {
         role: learning_lord_simulation::StartingRole,
         funds: learning_lord_simulation::Coins,
     },
-    RequestConstruction {
+    QueueConstruction {
         client: learning_lord_simulation::AgentId,
         place: learning_lord_simulation::locations::PlaceId,
         building: learning_lord_simulation::locations::BuildingId,
         room: Option<learning_lord_simulation::locations::RoomId>,
         item: learning_lord_simulation::construction::ConstructionItem,
-        maximum_offer: learning_lord_simulation::Coins,
+    },
+    AbandonConstruction {
+        client: learning_lord_simulation::AgentId,
+        project: learning_lord_simulation::construction::ProjectId,
     },
     ContinueConstruction {
         client: learning_lord_simulation::AgentId,
@@ -133,16 +136,18 @@ impl Mutation {
                 }
                 .and_then(|(world, id)| world.start_planning(id))
             }
-            Self::RequestConstruction {
+            Self::QueueConstruction {
                 client,
                 place,
                 building,
                 room,
                 item,
-                maximum_offer,
             } => universe
-                .request_construction(client, place, building, room, item, maximum_offer)
+                .queue_construction(client, place, building, room, item)
                 .map(|(world, _)| world),
+            Self::AbandonConstruction { client, project } => {
+                universe.abandon_construction(client, project)
+            }
             Self::ContinueConstruction {
                 client,
                 project,

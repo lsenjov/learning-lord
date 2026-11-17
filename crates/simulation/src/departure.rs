@@ -239,6 +239,9 @@ impl Universe {
                     }
                 }
             }
+            world.construction.projects.retain(|_, project| {
+                project.client != ConstructionClient::Account(household) || !project.is_queued()
+            });
             for (_, project) in world.construction.projects.iter_mut() {
                 if project.client == ConstructionClient::Account(household) {
                     project.client = ConstructionClient::Town;

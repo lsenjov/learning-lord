@@ -314,11 +314,18 @@ impl Universe {
 
     pub(crate) fn validate_tax_rule(&self, id: TaxRuleId) -> Result<(), SimulationError> {
         // Retained projects can be resumed, so tax edits must leave their outputs legal.
+        // An object order can refer to a room that still only exists in the queue.
         let mut projected = self.clone();
-        for project in self.construction.projects.values() {
-            if !project.completed && project.repair.is_none() {
-                projected.map.install_construction(project)?;
-            }
+        let (rooms, objects): (Vec<_>, Vec<_>) = self
+            .construction
+            .projects
+            .values()
+            .filter(|project| !project.completed && project.repair.is_none())
+            .partition(|project| {
+                matches!(project.item, crate::construction::ConstructionItem::Room(_))
+            });
+        for project in rooms.into_iter().chain(objects) {
+            projected.map.install_construction(project)?;
         }
         projected.validate_installed_tax_rule(id)
     }

@@ -170,6 +170,16 @@ impl Universe {
         }
         for id in workshops {
             let place = self.map.place(*id)?;
+            if self.construction.projects.values().any(|project| {
+                !project.completed
+                    && project.place == *id
+                    && project
+                        .client
+                        .account()
+                        .is_some_and(|account| Some(account) == place.owner)
+            }) {
+                return Err(SimulationError::CitizenBusy);
+            }
             if self
                 .households
                 .values()

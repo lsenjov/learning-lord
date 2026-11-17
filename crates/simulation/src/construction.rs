@@ -183,8 +183,14 @@ pub struct ConstructionProject {
     pub latest_outcome: Option<(u64, ContractStatus)>,
     #[serde(default)]
     pub awarded: bool,
+    #[serde(default)]
+    pub queue_position: Option<u64>,
 }
 impl ConstructionProject {
+    pub fn is_queued(&self) -> bool {
+        self.queue_position.is_some()
+    }
+
     pub fn remaining_base_ms(&self) -> u64 {
         self.total_base_ms - self.completed_base_ms
     }
@@ -304,6 +310,8 @@ pub struct Construction {
     #[serde(default)]
     pub next_sequence: Option<u64>,
     #[serde(default)]
+    next_queue_position: u64,
+    #[serde(default)]
     pub labour_days: Vec<CarpenterDay>,
     #[serde(default)]
     pub labour_started_ms: Option<u64>,
@@ -318,6 +326,7 @@ impl Default for Construction {
             contracts: HashMap::new(),
             payments: Vec::new(),
             next_sequence: Some(0),
+            next_queue_position: 0,
             labour_days: vec![CarpenterDay::default()],
             labour_started_ms: Some(0),
             released_carpenters: Default::default(),
@@ -347,6 +356,13 @@ fn add_coins(to: &mut Coins, amount: Coins) -> Result<(), SimulationError> {
         .checked_add(amount)
         .ok_or(SimulationError::WealthOverflow)?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ConstructionPlacement {
+    New,
+    Queue,
+    Existing(ProjectId),
 }
 
 impl Universe {
@@ -568,22 +584,75 @@ impl Universe {
     }
 
     pub fn construction_reserved_area(&self, place: PlaceId, room: Option<RoomId>) -> u32 {
+        self.construction_reserved_area_except(place, room, None)
+    }
+
+    pub(crate) fn validate_reserved_construction_plot(
+        &self,
+        place: PlaceId,
+    ) -> Result<(), SimulationError> {
+        if self.construction_reserved_area(place, None) > self.map.place(place)?.available_area_m2()
+        {
+            return Err(SimulationError::MissingProperty);
+        }
+        Ok(())
+    }
+
+    fn construction_reserved_area_except(
+        &self,
+        place: PlaceId,
+        room: Option<RoomId>,
+        exclude: Option<ProjectId>,
+    ) -> u32 {
         self.construction
             .projects
             .values()
             .filter(|project| {
-                !project.completed
-                    && project.repair.is_none()
+                Some(project.id) != exclude
                     && project.place == place
                     && project.room == room
-                    && (project.completed_base_ms > 0
-                        || project.installed_wood > 0
-                        || self.construction.contracts.values().any(|contract| {
-                            contract.project == project.id && contract.status.open()
-                        }))
+                    && self.construction_reserves_area(project)
             })
             .map(|project| project.item.area_m2())
             .sum()
+    }
+
+    fn construction_reserves_area(&self, project: &ConstructionProject) -> bool {
+        !project.completed
+            && project.repair.is_none()
+            && (project.is_queued()
+                || project.completed_base_ms > 0
+                || project.installed_wood > 0
+                || self
+                    .construction
+                    .contracts
+                    .values()
+                    .any(|contract| contract.project == project.id && contract.status.open())
+                || matches!(project.output, ConstructionOutput::Room(room)
+                if self.construction.projects.values().any(|child| {
+                    child.is_queued() && child.room == Some(room)
+                })))
+    }
+
+    fn unbuilt_room(
+        &self,
+        client: ConstructionClient,
+        place: PlaceId,
+        building: BuildingId,
+        room: RoomId,
+    ) -> Option<(&ConstructionProject, RoomSize)> {
+        self.construction.projects.values().find_map(|project| {
+            let ConstructionItem::Room(size) = project.item else {
+                return None;
+            };
+            (!project.completed
+                && project.repair.is_none()
+                && project.client == client
+                && project.place == place
+                && project.building == Some(building)
+                && project.output == ConstructionOutput::Room(room))
+            .then_some((project, size))
+        })
     }
 
     pub fn validate_construction_destination(
@@ -594,6 +663,53 @@ impl Universe {
         room: Option<RoomId>,
         item: ConstructionItem,
     ) -> Result<(), SimulationError> {
+        self.validate_construction_site(
+            client,
+            place,
+            building,
+            room,
+            item,
+            ConstructionPlacement::New,
+        )?;
+        self.validate_construction_taxes(place, item, None)
+    }
+
+    pub fn validate_queued_construction_destination(
+        &self,
+        client: AgentId,
+        place: PlaceId,
+        building: BuildingId,
+        room: Option<RoomId>,
+        item: ConstructionItem,
+    ) -> Result<(), SimulationError> {
+        let account = self.economic_id(client)?;
+        if !self.households.contains_key(&account) {
+            return Err(SimulationError::PrivateProperty);
+        }
+        self.validate_construction_site(
+            account,
+            place,
+            building,
+            room,
+            item,
+            ConstructionPlacement::Queue,
+        )?;
+        self.validate_construction_taxes(place, item, None)
+    }
+
+    fn validate_construction_site(
+        &self,
+        client: AgentId,
+        place: PlaceId,
+        building: BuildingId,
+        room: Option<RoomId>,
+        item: ConstructionItem,
+        placement: ConstructionPlacement,
+    ) -> Result<(), SimulationError> {
+        let exclude = match placement {
+            ConstructionPlacement::Existing(id) => Some(id),
+            _ => None,
+        };
         let account = self.economic_id(client)?;
         let site = self.map.place(place)?;
         let building = site
@@ -621,30 +737,63 @@ impl Universe {
                     return Err(SimulationError::PrivateProperty);
                 }
                 if item.area_m2()
-                    > site
-                        .available_area_m2()
-                        .saturating_sub(self.construction_reserved_area(place, None))
+                    > site.available_area_m2().saturating_sub(
+                        self.construction_reserved_area_except(place, None, exclude),
+                    )
                 {
                     return Err(SimulationError::MissingProperty);
                 }
             }
             _ => {
-                let room = building
-                    .rooms
-                    .iter()
-                    .find(|candidate| Some(candidate.id) == room)
-                    .ok_or(SimulationError::MissingProperty)?;
+                let room_id = room.ok_or(SimulationError::MissingProperty)?;
+                let available = if let Some(room) = building.rooms.iter().find(|r| r.id == room_id)
+                {
+                    room.available_area_m2()
+                } else {
+                    let (parent, size) = matches!(placement, ConstructionPlacement::Queue)
+                        .then(|| {
+                            self.unbuilt_room(
+                                ConstructionClient::Account(account),
+                                place,
+                                building.id,
+                                room_id,
+                            )
+                        })
+                        .flatten()
+                        .ok_or(SimulationError::MissingProperty)?;
+                    self.validate_construction_site(
+                        account,
+                        place,
+                        building.id,
+                        None,
+                        parent.item,
+                        ConstructionPlacement::Existing(parent.id),
+                    )?;
+                    size.area_m2()
+                };
                 if item.area_m2()
-                    > room
-                        .available_area_m2()
-                        .saturating_sub(self.construction_reserved_area(place, Some(room.id)))
+                    > available.saturating_sub(
+                        self.construction_reserved_area_except(place, room, exclude),
+                    )
                 {
                     return Err(SimulationError::MissingProperty);
                 }
             }
         }
+        Ok(())
+    }
+
+    fn validate_construction_taxes(
+        &self,
+        place: PlaceId,
+        item: ConstructionItem,
+        exclude: Option<ProjectId>,
+    ) -> Result<(), SimulationError> {
         if let Some(kind) = item.object_kind() {
             let mut projected = self.clone();
+            if let Some(id) = exclude {
+                projected.construction.projects.remove(&id);
+            }
             projected
                 .map
                 .places_mut()
@@ -671,6 +820,7 @@ impl Universe {
         let account = self.economic_id(client)?;
         if let Some(project) = self.construction.projects.values().find(|project| {
             !project.completed
+                && !project.is_queued()
                 && project.repair.is_none()
                 && project.completed_base_ms == 0
                 && project.installed_wood == 0
@@ -693,9 +843,52 @@ impl Universe {
         }
         self.validate_construction_destination(client, place, building, room, item)?;
         let mut world = self.clone();
-        let client = world.economic_id(client)?;
+        let id = world.create_construction_project(account, place, building, room, item);
+        let contract = world.post_construction(id, maximum_offer)?;
+        Ok((world, contract))
+    }
+
+    pub fn queue_construction(
+        &self,
+        client: AgentId,
+        place: PlaceId,
+        building: BuildingId,
+        room: Option<RoomId>,
+        item: ConstructionItem,
+    ) -> Result<(Self, ProjectId), SimulationError> {
+        self.validate_queued_construction_destination(client, place, building, room, item)?;
+        let mut world = self.clone();
+        let id = world.create_construction_project(
+            self.economic_id(client)?,
+            place,
+            building,
+            room,
+            item,
+        );
+        let position = world.construction.next_queue_position;
+        world.construction.next_queue_position = position
+            .checked_add(1)
+            .ok_or(SimulationError::InvalidQuantity)?;
+        world
+            .construction
+            .projects
+            .get_mut(&id)
+            .unwrap()
+            .queue_position = Some(position);
+        world.process_construction()?;
+        Ok((world, id))
+    }
+
+    fn create_construction_project(
+        &mut self,
+        client: AgentId,
+        place: PlaceId,
+        building: BuildingId,
+        room: Option<RoomId>,
+        item: ConstructionItem,
+    ) -> ProjectId {
         let id = ProjectId(Uuid::new_v4());
-        world.construction.projects.insert(
+        self.construction.projects.insert(
             id,
             ConstructionProject {
                 id,
@@ -733,6 +926,7 @@ impl Universe {
                 scheduling: false,
                 latest_outcome: None,
                 awarded: false,
+                queue_position: None,
                 output: if matches!(item, ConstructionItem::Room(_)) {
                     ConstructionOutput::Room(RoomId(Uuid::new_v4()))
                 } else {
@@ -740,8 +934,7 @@ impl Universe {
                 },
             },
         );
-        let contract = world.post_construction(id, maximum_offer)?;
-        Ok((world, contract))
+        id
     }
 
     pub fn validate_construction_continuation(
@@ -764,6 +957,7 @@ impl Universe {
             return Err(SimulationError::PrivateProperty);
         }
         if site.completed
+            || site.is_queued()
             || site.repair.is_some()
             || self
                 .construction
@@ -773,20 +967,15 @@ impl Universe {
         {
             return Err(SimulationError::CitizenBusy);
         }
-        let mut available = self.clone();
-        available.construction.projects.remove(&project);
-        available
-            .construction
-            .contracts
-            .retain(|_, contract| contract.project != project);
-        available.validate_construction_destination(
+        self.validate_construction_site(
             client,
             site.place,
             site.building.ok_or(SimulationError::MissingProperty)?,
             site.room,
             site.item,
+            ConstructionPlacement::Existing(project),
         )?;
-        Ok(())
+        self.validate_construction_taxes(site.place, site.item, Some(project))
     }
 
     pub fn continue_construction(
@@ -813,6 +1002,18 @@ impl Universe {
         project: ProjectId,
         maximum_offer: Coins,
     ) -> Result<ContractId, SimulationError> {
+        let id = self.fund_construction(project, maximum_offer)?;
+        self.process_construction()?;
+        self.refresh_market();
+        self.refresh_household_history(self.current_time_ms, false)?;
+        Ok(id)
+    }
+
+    fn fund_construction(
+        &mut self,
+        project: ProjectId,
+        maximum_offer: Coins,
+    ) -> Result<ContractId, SimulationError> {
         let client = match self.construction.projects[&project].client {
             ConstructionClient::Account(id) => ConstructionClient::Account(self.economic_id(id)?),
             ConstructionClient::Town => ConstructionClient::Town,
@@ -833,6 +1034,7 @@ impl Universe {
         )?;
         let site = self.construction.projects.get_mut(&project).unwrap();
         site.client = client;
+        site.queue_position = None;
         site.escrow = maximum_offer;
         site.funding_offer = maximum_offer;
         site.funding_base_ms = site.remaining_base_ms();
@@ -856,11 +1058,7 @@ impl Universe {
             .iter()
             .position(|stage| stage.remaining_base_ms() > 0)
             .unwrap();
-        let id = self.post_construction_stage(project, stage)?;
-        self.process_construction()?;
-        self.refresh_market();
-        self.refresh_household_history(self.current_time_ms, false)?;
-        Ok(id)
+        self.post_construction_stage(project, stage)
     }
 
     fn post_construction_stage(
@@ -962,10 +1160,46 @@ impl Universe {
         }
         let mut world = self.clone();
         world.close_construction(id, ContractStatus::Cancelled)?;
-        world.compact_construction();
-        world.refresh_construction_context()?;
+        world.process_construction()?;
         world.refresh_market();
         world.refresh_household_history(world.current_time_ms, false)?;
+        Ok(world)
+    }
+
+    pub fn abandon_construction(
+        &self,
+        client: AgentId,
+        id: ProjectId,
+    ) -> Result<Self, SimulationError> {
+        let project = self
+            .construction
+            .projects
+            .get(&id)
+            .ok_or(SimulationError::MissingProperty)?;
+        if project.client != ConstructionClient::Account(self.economic_id(client)?)
+            || project.repair.is_some()
+        {
+            return Err(SimulationError::PrivateProperty);
+        }
+        if project.completed
+            || self
+                .construction
+                .contracts
+                .values()
+                .any(|contract| contract.project == id && contract.status.open())
+        {
+            return Err(SimulationError::CitizenBusy);
+        }
+
+        let mut world = self.clone();
+        world.compact_construction();
+        world.construction.projects.remove(&id);
+        if let ConstructionOutput::Room(room) = project.output {
+            world
+                .construction
+                .projects
+                .retain(|_, child| !(child.is_queued() && child.room == Some(room)));
+        }
         Ok(world)
     }
 
@@ -1198,6 +1432,81 @@ impl Universe {
 
     pub(crate) fn process_construction(&mut self) -> Result<(), SimulationError> {
         self.compact_construction();
+        self.process_construction_contracts()?;
+        self.compact_construction();
+        let posted = self.dispatch_construction_queue()?;
+        if posted {
+            self.process_construction_contracts()?;
+        }
+        self.refresh_construction_context()?;
+        if posted {
+            self.refresh_market();
+            self.refresh_household_history(self.current_time_ms, false)?;
+        }
+        Ok(())
+    }
+
+    fn dispatch_construction_queue(&mut self) -> Result<bool, SimulationError> {
+        let mut queued: Vec<_> = self
+            .construction
+            .projects
+            .values()
+            .filter_map(|project| Some((project.queue_position?, project.id)))
+            .collect();
+        queued.sort_unstable_by_key(|&(position, _)| position);
+        let mut posted = false;
+        let mut exhausted = std::collections::HashSet::new();
+        for (_, id) in queued {
+            let project = &self.construction.projects[&id];
+            let (Some(client), Some(building)) = (project.client.account(), project.building)
+            else {
+                continue;
+            };
+            if exhausted.contains(&client) {
+                continue;
+            }
+            match self.validate_construction_site(
+                client,
+                project.place,
+                building,
+                project.room,
+                project.item,
+                ConstructionPlacement::Existing(id),
+            ) {
+                Ok(()) => {}
+                Err(
+                    SimulationError::MissingProperty
+                    | SimulationError::PlaceNotFound
+                    | SimulationError::PrivateProperty
+                    | SimulationError::AgentNotFound,
+                ) => continue,
+                Err(error) => return Err(error),
+            }
+            let budget = self.construction_budget(client)?.maximum_offer;
+            if budget <= 0 {
+                exhausted.insert(client);
+                continue;
+            }
+            let offer = self
+                .construction_estimate(
+                    client,
+                    project.place,
+                    project.remaining_base_ms(),
+                    project.missing_wood(),
+                )?
+                .min(budget);
+            if offer > 0 {
+                self.fund_construction(id, offer)?;
+                posted = true;
+            }
+            if offer == budget {
+                exhausted.insert(client);
+            }
+        }
+        Ok(posted)
+    }
+
+    fn process_construction_contracts(&mut self) -> Result<(), SimulationError> {
         let mut contracts: Vec<_> = self.construction.contracts.keys().copied().collect();
         contracts.sort_by_key(|id| (self.construction.contracts[id].posted_ms, id.0));
         let mut workers: Vec<_> = self.agents.keys().copied().collect();
@@ -1265,8 +1574,7 @@ impl Universe {
                 }
             }
         }
-        self.compact_construction();
-        self.refresh_construction_context()
+        Ok(())
     }
 
     fn award_construction(&mut self, id: ContractId) -> Result<(), SimulationError> {
@@ -2060,6 +2368,7 @@ impl Universe {
 
         let mut outputs = HashSet::new();
         let mut sequences = HashSet::new();
+        let mut queue_positions = HashSet::new();
         let mut stage_ids = HashSet::new();
         let mut repair_targets = HashSet::new();
         let existing_outputs: HashSet<_> = self
@@ -2165,6 +2474,24 @@ impl Universe {
                         .contracts
                         .values()
                         .any(|contract| contract.project == *id))
+            {
+                return Err(invalid());
+            }
+            if let Some(position) = project.queue_position
+                && (position >= self.construction.next_queue_position
+                    || !queue_positions.insert(position)
+                    || project
+                        .client
+                        .account()
+                        .is_none_or(|id| !self.households.contains_key(&id))
+                    || project.repair.is_some()
+                    || project.awarded
+                    || project.latest_outcome.is_some()
+                    || project.completed_base_ms != 0
+                    || project.installed_wood != 0
+                    || project.scheduling
+                    || project.funding_offer != 0
+                    || project.funding_base_ms != 0)
             {
                 return Err(invalid());
             }
@@ -2294,11 +2621,19 @@ impl Universe {
                     if !outputs.insert(output.0) {
                         return Err(invalid());
                     }
-                    let room = building
-                        .rooms
-                        .iter()
-                        .find(|room| Some(room.id) == project.room)
-                        .ok_or_else(invalid)?;
+                    let room_id = project.room.ok_or_else(invalid)?;
+                    let Some(room) = building.rooms.iter().find(|room| room.id == room_id) else {
+                        let (_, size) = self
+                            .unbuilt_room(project.client, project.place, building.id, room_id)
+                            .ok_or_else(invalid)?;
+                        if !project.is_queued()
+                            || self.construction_reserved_area(project.place, Some(room_id))
+                                > size.area_m2()
+                        {
+                            return Err(invalid());
+                        }
+                        continue;
+                    };
                     let object = room.objects.iter().find(|object| object.id == *output);
                     // Bed assignment and fermentation batches can change after installation.
                     if object.is_some() != project.completed
@@ -2320,7 +2655,8 @@ impl Universe {
                 .get(&contract.project)
                 .ok_or_else(invalid)?;
             let stage = project.stages.get(contract.stage).ok_or_else(invalid)?;
-            if (self.construction.next_sequence.is_some() && !contract.status.open())
+            if project.is_queued()
+                || (self.construction.next_sequence.is_some() && !contract.status.open())
                 || !sequences.insert(contract.sequence)
                 || contract.sequence
                     >= self
@@ -2506,9 +2842,8 @@ impl Universe {
             }
         }
         for (id, place) in self.map.places() {
-            if self.construction_reserved_area(*id, None) > place.available_area_m2() {
-                return Err(invalid());
-            }
+            self.validate_reserved_construction_plot(*id)
+                .map_err(|_| invalid())?;
             for room in place.buildings.iter().flat_map(|building| &building.rooms) {
                 if self.construction_reserved_area(*id, Some(room.id)) > room.available_area_m2() {
                     return Err(invalid());
@@ -2640,6 +2975,256 @@ mod tests {
             .request_construction(client, place, building.id, room, item, 100_000)
             .unwrap();
         (world, client, worker, contract)
+    }
+
+    fn queue_fixture(coins: Coins) -> (Universe, AgentId, PlaceId, BuildingId, RoomId) {
+        let (world, client) = Universe::default()
+            .with_citizen(
+                "Client",
+                Citizen::new(0.0)
+                    .unwrap()
+                    .with_furnished_home()
+                    .unwrap()
+                    .with_coins(coins)
+                    .unwrap(),
+            )
+            .unwrap();
+        let AgentKind::Citizen(owner) = &world.agents[&client].kind;
+        let place = owner.home.unwrap();
+        let building = &world.map.place(place).unwrap().buildings[0];
+        let (building, room) = (building.id, building.rooms[0].id);
+        (world, client, place, building, room)
+    }
+
+    #[test]
+    fn unfunded_queue_round_trips_and_reserves_area_for_distinct_orders() {
+        let (world, client, place, building, _) = queue_fixture(0);
+        let item = ConstructionItem::Room(RoomSize::Small);
+        let (world, first) = world
+            .queue_construction(client, place, building, None, item)
+            .unwrap();
+        let (world, second) = world
+            .queue_construction(client, place, building, None, item)
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            world.construction_reserved_area(place, None),
+            2 * item.area_m2()
+        );
+        assert!(world.construction.contracts.is_empty());
+        assert_eq!(world.construction_budget(client).unwrap().cash, 0);
+
+        let saved = world.to_save_string().unwrap();
+        let world = Universe::from_save_str(&saved).unwrap();
+        assert_eq!(world.construction.projects[&first].queue_position, Some(0));
+        assert_eq!(world.construction.projects[&second].queue_position, Some(1));
+        let world = world.abandon_construction(client, first).unwrap();
+        assert_eq!(
+            world.construction_reserved_area(place, None),
+            item.area_m2()
+        );
+        assert!(world.construction.projects[&second].is_queued());
+    }
+
+    #[test]
+    fn dispatch_skips_unbuilt_rooms_and_retains_child_priority() {
+        let (world, client, place, building, room) = queue_fixture(0);
+        let item = ConstructionItem::Room(RoomSize::Small);
+        let object = ConstructionItem::FishCrate;
+        let (world, parent) = world
+            .queue_construction(client, place, building, None, item)
+            .unwrap();
+        let ConstructionOutput::Room(future_room) = world.construction.projects[&parent].output
+        else {
+            panic!("expected room output");
+        };
+        let (world, child) = world
+            .queue_construction(client, place, building, Some(future_room), object)
+            .unwrap();
+        assert!(matches!(
+            world.queue_construction(
+                client,
+                place,
+                building,
+                Some(future_room),
+                ConstructionItem::Millstone,
+            ),
+            Err(SimulationError::MissingProperty)
+        ));
+        let (world, later) = world
+            .queue_construction(client, place, building, Some(room), object)
+            .unwrap();
+        let account = world.economic_id(client).unwrap();
+        let (mut world, _) = world
+            .with_household_member(
+                account,
+                "Second",
+                Citizen::new(0.0).unwrap().with_coins(1_000_000).unwrap(),
+            )
+            .unwrap();
+        world.process_construction().unwrap();
+
+        let sequence = |world: &Universe, id| {
+            world
+                .construction
+                .contracts
+                .values()
+                .find(|contract| contract.project == id)
+                .unwrap()
+                .sequence
+        };
+        assert!(sequence(&world, parent) < sequence(&world, later));
+        assert!(world.construction.projects[&child].is_queued());
+
+        let contract = world
+            .construction
+            .contracts
+            .values()
+            .find(|contract| contract.project == parent)
+            .unwrap()
+            .id;
+        let mut world = world.cancel_construction(client, contract).unwrap();
+        assert_eq!(
+            world.construction_reserved_area(place, None),
+            item.area_m2()
+        );
+        assert!(world.construction.projects[&child].is_queued());
+        let saved = world.to_save_string().unwrap();
+        world = Universe::from_save_str(&saved).unwrap();
+        let abandoned = world.abandon_construction(client, parent).unwrap();
+        assert!(!abandoned.construction.projects.contains_key(&child));
+        assert_eq!(abandoned.construction_reserved_area(place, None), 0);
+
+        world.set_account_coins(account, 0).unwrap();
+        let (mut world, newest) = world
+            .queue_construction(client, place, building, None, item)
+            .unwrap();
+        assert!(world.construction.projects[&newest].is_queued());
+        world.finish_construction(parent).unwrap();
+        world.set_account_coins(account, 1_000_000).unwrap();
+        world.process_construction().unwrap();
+        assert!(sequence(&world, child) < sequence(&world, newest));
+        assert_eq!(world.construction.projects[&child].room, Some(future_room));
+    }
+
+    #[test]
+    fn cancelling_a_tender_funds_next_waiting_order_and_failed_order_stays_paused() {
+        let (world, client, place, building, _) = queue_fixture(0);
+        let item = ConstructionItem::Room(RoomSize::Small);
+        let account = world.economic_id(client).unwrap();
+        let mut world = world;
+        let reserve = world
+            .construction_budget(account)
+            .unwrap()
+            .essential_reserve;
+        world.set_account_coins(account, reserve + 1).unwrap();
+        let (world, first) = world
+            .queue_construction(client, place, building, None, item)
+            .unwrap();
+        let (world, second) = world
+            .queue_construction(client, place, building, None, item)
+            .unwrap();
+        let contract = world.construction.contracts.values().next().unwrap();
+        assert_eq!(contract.project, first);
+        assert!(world.construction.projects[&second].is_queued());
+        let world = world.cancel_construction(client, contract.id).unwrap();
+        let contract = world.construction.contracts.values().next().unwrap();
+        assert_eq!(contract.project, second);
+        assert_eq!(world.construction.contracts.len(), 1);
+
+        let deadline = contract.bidding_ends_ms;
+        let mut world = world;
+        world.current_time_ms = deadline;
+        world.process_construction().unwrap();
+        assert!(world.construction.contracts.is_empty());
+        assert_eq!(
+            world.construction.projects[&second]
+                .latest_outcome
+                .unwrap()
+                .1,
+            ContractStatus::NoBids
+        );
+        assert!(!world.construction.projects[&second].is_queued());
+        world.process_construction().unwrap();
+        assert!(world.construction.contracts.is_empty());
+    }
+
+    #[test]
+    fn departing_household_removes_unfunded_orders() {
+        let (world, client, place, building, _) = queue_fixture(0);
+        let item = ConstructionItem::Room(RoomSize::Small);
+        let (world, project) = world
+            .queue_construction(client, place, building, None, item)
+            .unwrap();
+        let world = world
+            .remove_household(world.economic_id(client).unwrap())
+            .unwrap();
+        assert!(!world.construction.projects.contains_key(&project));
+        assert_eq!(world.construction_reserved_area(place, None), 0);
+        assert!(world.advance(0).is_ok());
+    }
+
+    #[test]
+    fn direct_furnishing_preserves_reserved_plot_space() {
+        let (world, client, place, building, _) = queue_fixture(0);
+        let account = world.economic_id(client).unwrap();
+        let (mut world, second) = world
+            .with_household_member(account, "Second", Citizen::new(0.0).unwrap())
+            .unwrap();
+        assert!(world.with_member_accommodation(second).is_ok());
+        assert!(
+            world
+                .with_household_workplace(client, crate::locations::Location::Mill)
+                .is_ok()
+        );
+
+        let spaces = world.map.place(place).unwrap().available_area_m2();
+        for _ in 0..spaces / RoomSize::Small.area_m2() {
+            world = world
+                .queue_construction(
+                    client,
+                    place,
+                    building,
+                    None,
+                    ConstructionItem::Room(RoomSize::Small),
+                )
+                .unwrap()
+                .0;
+        }
+        assert!(matches!(
+            world.with_member_accommodation(second),
+            Err(SimulationError::MissingProperty)
+        ));
+        assert!(matches!(
+            world.with_household_workplace(client, crate::locations::Location::Mill),
+            Err(SimulationError::MissingProperty)
+        ));
+        assert!(world.with_member_accommodation(client).is_ok());
+    }
+
+    #[test]
+    fn queued_workshop_order_blocks_guild_transfer() {
+        let (world, client, _, _, _) = queue_fixture(0);
+        let (world, place) = world
+            .with_property(client, crate::locations::Location::Mill)
+            .unwrap();
+        assert!(world.with_guild("Millers", &[client], &[place], 0).is_ok());
+        let building = world.map.place(place).unwrap().buildings[0].id;
+        let (world, order) = world
+            .queue_construction(
+                client,
+                place,
+                building,
+                None,
+                ConstructionItem::Room(RoomSize::Small),
+            )
+            .unwrap();
+        assert!(matches!(
+            world.with_guild("Millers", &[client], &[place], 0),
+            Err(SimulationError::CitizenBusy)
+        ));
+        let world = world.abandon_construction(client, order).unwrap();
+        assert!(world.with_guild("Millers", &[client], &[place], 0).is_ok());
     }
 
     fn bread_socage(points: u16) -> crate::taxation::TaxKind {

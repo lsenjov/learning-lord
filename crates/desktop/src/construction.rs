@@ -3,8 +3,8 @@ use bevy::prelude::*;
 use learning_lord_simulation::{
     AgentId, Universe,
     construction::{
-        ConstructionClient, ConstructionItem, ConstructionProject, ContractId, ContractStatus,
-        HOUR_MS, ProjectId,
+        ConstructionClient, ConstructionItem, ConstructionOutput, ConstructionProject, ContractId,
+        ContractStatus, HOUR_MS, ProjectId,
     },
     locations::{Building, BuildingId, Place, PlaceId, RoomId, RoomSize},
 };
@@ -28,9 +28,10 @@ pub(crate) struct State {
 #[derive(Component, Clone, Copy)]
 pub(crate) enum Choice {
     Toggle(Destination),
-    Request(Destination, ConstructionItem),
+    Queue(Destination, ConstructionItem),
     Continue(ProjectId),
     Cancel(ContractId),
+    Abandon(ProjectId),
 }
 
 fn button(
@@ -107,38 +108,10 @@ fn unavailable(
     destination: Destination,
     item: ConstructionItem,
 ) -> Option<String> {
-    let budget = match budget(universe, destination.owner) {
-        Ok(budget) => budget,
-        Err(error) => return Some(error),
-    };
-    if budget.maximum_offer <= 0 {
-        return Some(
-            "No cash available above commitments and the seven-day essential reserve".into(),
-        );
+    if let Err(error) = budget(universe, destination.owner) {
+        return Some(error);
     }
-    let offer = match universe.construction_tender_offer(
-        destination.owner,
-        destination.place,
-        item.base_hours() * HOUR_MS,
-        item.wood(),
-    ) {
-        Ok(offer) => offer,
-        Err(error) => return Some(error.to_string()),
-    };
-    if universe.construction().projects.values().any(|project| {
-        project.repair.is_none()
-            && !project.completed
-            && project.client == ConstructionClient::Account(budget.account)
-            && project.place == destination.place
-            && project.building == Some(destination.building)
-            && project.room == destination.room
-            && project.item == item
-            && latest_status(universe, project) == Some(ContractStatus::NoBids)
-            && offer <= project.funding_offer
-    }) {
-        return Some("Reposting after no bids requires a higher available budget".into());
-    }
-    if let Err(error) = universe.validate_construction_destination(
+    if let Err(error) = universe.validate_queued_construction_destination(
         destination.owner,
         destination.place,
         destination.building,
@@ -146,7 +119,9 @@ fn unavailable(
         item,
     ) {
         return Some(match error {
-            learning_lord_simulation::SimulationError::PrivateProperty => {
+            learning_lord_simulation::SimulationError::PrivateProperty
+                if matches!(item, ConstructionItem::Room(_)) =>
+            {
                 "Room expansion requires ownership of both building and plot".into()
             }
             learning_lord_simulation::SimulationError::MissingProperty => {
@@ -175,8 +150,17 @@ pub(crate) fn render_choices(
         room,
         owner,
     };
+    render_destination_choices(parent, universe, destination, state);
+}
+
+fn render_destination_choices(
+    parent: &mut ChildSpawnerCommands,
+    universe: &Universe,
+    destination: Destination,
+    state: &State,
+) {
     let selected = state.expanded == Some(destination);
-    let label = if room.is_some() {
+    let label = if destination.room.is_some() {
         "Add object"
     } else {
         "Add room"
@@ -215,6 +199,15 @@ pub(crate) fn render_menu(
         room,
         owner,
     };
+    render_destination_menu(parent, universe, destination, state);
+}
+
+fn render_destination_menu(
+    parent: &mut ChildSpawnerCommands,
+    universe: &Universe,
+    destination: Destination,
+    state: &State,
+) {
     if state.expanded != Some(destination) {
         return;
     }
@@ -227,7 +220,7 @@ pub(crate) fn render_menu(
             ..default()
         })
         .with_children(|menu| {
-            let items = if room.is_some() {
+            let items = if destination.room.is_some() {
                 ConstructionItem::OBJECTS.to_vec()
             } else {
                 [RoomSize::Small, RoomSize::Medium, RoomSize::Large]
@@ -236,12 +229,12 @@ pub(crate) fn render_menu(
             };
             for item in items {
                 let tooltip = format!(
-                    "{} m2 | {} base labour hours | {} g wood\nTender offer: {} coins\n{}",
+                    "{} m2 | {} base labour hours | {} g wood\nEstimated cost: {} coins\n{}",
                     item.area_m2(),
                     item.base_hours(),
                     item.wood(),
                     universe
-                        .construction_tender_offer(
+                        .construction_estimate(
                             destination.owner,
                             destination.place,
                             item.base_hours() * HOUR_MS,
@@ -253,7 +246,7 @@ pub(crate) fn render_menu(
                 button(
                     menu,
                     format!("{} | {} m2", item.name(), item.area_m2()),
-                    Choice::Request(destination, item),
+                    Choice::Queue(destination, item),
                     state
                         .pending
                         .map(|_| "Waiting for construction request".into())
@@ -319,6 +312,9 @@ fn continuation_reason(universe: &Universe, project: &ConstructionProject) -> Op
 }
 
 fn project_status(universe: &Universe, project: &ConstructionProject) -> String {
+    if project.is_queued() {
+        return "Pending".into();
+    }
     let contracts: Vec<_> = universe
         .construction()
         .contracts
@@ -347,6 +343,7 @@ fn project_status(universe: &Universe, project: &ConstructionProject) -> String 
         (0, 0) => match latest_status(universe, project) {
             Some(ContractStatus::NoBids) => "No bids".into(),
             Some(ContractStatus::Cancelled) => "Cancelled".into(),
+            Some(ContractStatus::Failed) => "Failed".into(),
             _ => "Unfinished".into(),
         },
         (_, 0) => format!("{active} {working}"),
@@ -414,7 +411,7 @@ pub(crate) fn render_projects(
                 && !project.completed
         })
         .collect();
-    projects.sort_by_key(|project| project.id.0);
+    projects.sort_by_key(|project| (project.queue_position, project.id.0));
     for project in projects {
         let mut open_contracts: Vec<_> = universe
             .construction()
@@ -424,6 +421,23 @@ pub(crate) fn render_projects(
             .collect();
         open_contracts.sort_by_key(|contract| (contract.stage, contract.sequence));
         let status = project_status(universe, project);
+        let queued = project.is_queued();
+        let future_room = match (
+            project.repair,
+            &project.output,
+            building,
+            project.client.account(),
+        ) {
+            (None, ConstructionOutput::Room(room), Some(building), Some(owner)) => {
+                Some(Destination {
+                    place,
+                    building,
+                    room: Some(*room),
+                    owner,
+                })
+            }
+            _ => None,
+        };
         let mut tooltip = format!(
             "Progress: {:.1}/{} base labour hours\nInstalled wood: {}/{} g\nMissing wood: {} g\n{}",
             project.completed_base_ms as f64 / HOUR_MS as f64,
@@ -495,15 +509,15 @@ pub(crate) fn render_projects(
                 crate::tooltip::Tooltip(tooltip.clone()),
             ))
             .with_children(|row| {
-                let percent = project.completed_base_ms.saturating_mul(100) / project.total_base_ms;
-                row.spawn(text(
-                    format!(
-                        "{} | {status} | {percent}%",
-                        project_label(universe, project)
-                    ),
-                    13.0,
-                    MUTED,
-                ));
+                let name = project_label(universe, project);
+                let label = if queued {
+                    format!("{name} | {status}")
+                } else {
+                    let percent =
+                        project.completed_base_ms.saturating_mul(100) / project.total_base_ms;
+                    format!("{name} | {status} | {percent}%")
+                };
+                row.spawn(text(label, 13.0, MUTED));
                 for contract in open_contracts.iter().copied().filter(|contract| {
                     project.repair.is_none() && contract.status == ContractStatus::Bidding
                 }) {
@@ -520,19 +534,53 @@ pub(crate) fn render_projects(
                     );
                 }
                 if open_contracts.is_empty() && project.repair.is_none() {
+                    let waiting = state
+                        .pending
+                        .map(|_| "Waiting for construction request".to_string());
+                    if !queued {
+                        button(
+                            row,
+                            "Continue",
+                            Choice::Continue(project.id),
+                            waiting
+                                .clone()
+                                .or_else(|| continuation_reason(universe, project)),
+                            tooltip,
+                            false,
+                        );
+                    }
+                    let tip = match (future_room.is_some(), queued) {
+                        (true, _) => "Remove this room order and cancel its pending objects",
+                        (false, true) => "Remove this order from the construction queue",
+                        (false, false) => "Remove this unfinished object order",
+                    };
                     button(
                         row,
-                        "Continue",
-                        Choice::Continue(project.id),
-                        state
-                            .pending
-                            .map(|_| "Waiting for construction request".into())
-                            .or_else(|| continuation_reason(universe, project)),
-                        tooltip,
+                        if queued { "Cancel" } else { "Abandon" },
+                        Choice::Abandon(project.id),
+                        waiting,
+                        tip.into(),
                         false,
                     );
                 }
+                if let Some(destination) = future_room {
+                    render_destination_choices(row, universe, destination, state);
+                }
             });
+        if let Some(destination) = future_room {
+            parent
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(2),
+                    margin: UiRect::left(px(12)),
+                    flex_shrink: 0.0,
+                    ..default()
+                })
+                .with_children(|objects| {
+                    render_destination_menu(objects, universe, destination, state);
+                    render_projects(objects, universe, place, building, destination.room, state);
+                });
+        }
     }
 }
 
@@ -592,26 +640,17 @@ pub(crate) fn handle(
                 state.expanded = (state.expanded != Some(destination)).then_some(destination);
                 continue;
             }
-            Choice::Request(destination, item) => {
+            Choice::Queue(destination, item) => {
                 if let Some(reason) = unavailable(universe, destination, item) {
                     state.error = Some(reason);
                     continue;
                 }
-                let maximum_offer = universe
-                    .construction_tender_offer(
-                        destination.owner,
-                        destination.place,
-                        item.base_hours() * HOUR_MS,
-                        item.wood(),
-                    )
-                    .unwrap();
-                crate::simulation::Mutation::RequestConstruction {
+                crate::simulation::Mutation::QueueConstruction {
                     client: destination.owner,
                     place: destination.place,
                     building: destination.building,
                     room: destination.room,
                     item,
-                    maximum_offer,
                 }
             }
             Choice::Continue(project_id) => {
@@ -637,6 +676,18 @@ pub(crate) fn handle(
                     client,
                     project: project_id,
                     maximum_offer,
+                }
+            }
+            Choice::Abandon(project_id) => {
+                let Some(project) = universe.construction().projects.get(&project_id) else {
+                    continue;
+                };
+                let Some(client) = project.client.account() else {
+                    continue;
+                };
+                crate::simulation::Mutation::AbandonConstruction {
+                    client,
+                    project: project_id,
                 }
             }
             Choice::Cancel(contract_id) => {
@@ -810,50 +861,66 @@ mod tests {
     }
 
     #[test]
-    fn request_and_cancel_use_the_snapshot_mutation_channel() {
-        let (world, destination) = fixture(1_000_000);
-        let maximum = world
-            .construction_tender_offer(
-                destination.owner,
-                destination.place,
-                ConstructionItem::FishCrate.base_hours() * HOUR_MS,
-                ConstructionItem::FishCrate.wood(),
-            )
-            .unwrap();
+    fn queue_and_abandon_use_the_snapshot_mutation_channel() {
+        let (world, destination) = fixture(0);
         let mut app = app(world);
+        let building = Destination {
+            room: None,
+            ..destination
+        };
         press(
             &mut app,
-            Choice::Request(destination, ConstructionItem::FishCrate),
+            Choice::Queue(building, ConstructionItem::Room(RoomSize::Small)),
         );
         assert!(app.world().resource::<State>().pending());
         await_request(&mut app);
         let snapshot = &app.world().resource::<DisplaySnapshot>().0;
         assert!(snapshot.mutation_error.is_none());
-        let contract = snapshot
-            .universe
-            .construction()
-            .contracts
-            .values()
-            .next()
-            .unwrap();
-        assert_eq!(contract.maximum_offer, maximum);
-        let id = contract.id;
-        let project = contract.project;
-        press(&mut app, Choice::Cancel(id));
-        await_request(&mut app);
-        let construction = app
-            .world()
-            .resource::<DisplaySnapshot>()
-            .0
-            .universe
-            .construction();
-        assert!(!construction.contracts.contains_key(&id));
-        assert_eq!(
-            construction.projects[&project]
-                .latest_outcome
-                .map(|(_, status)| status),
-            Some(ContractStatus::Cancelled)
+        let construction = snapshot.universe.construction();
+        assert!(construction.contracts.is_empty());
+        let project = construction.projects.values().next().unwrap();
+        assert!(project.is_queued());
+        let project_id = project.id;
+        let ConstructionOutput::Room(room) = project.output else {
+            panic!("Expected a room order");
+        };
+        let future_room = Destination {
+            room: Some(room),
+            ..building
+        };
+        press(
+            &mut app,
+            Choice::Queue(future_room, ConstructionItem::FishCrate),
         );
+        await_request(&mut app);
+        let snapshot = &app.world().resource::<DisplaySnapshot>().0;
+        assert!(snapshot.mutation_error.is_none());
+        let construction = snapshot.universe.construction();
+        assert!(construction.contracts.is_empty());
+        assert_eq!(construction.projects.len(), 2);
+        let child = construction
+            .projects
+            .values()
+            .find(|project| project.room == Some(room))
+            .unwrap();
+        assert_eq!(child.item, ConstructionItem::FishCrate);
+        assert!(child.is_queued());
+        let child_id = child.id;
+        press(&mut app, Choice::Abandon(child_id));
+        await_request(&mut app);
+        let snapshot = &app.world().resource::<DisplaySnapshot>().0;
+        assert!(snapshot.mutation_error.is_none());
+        assert_eq!(snapshot.universe.construction().projects.len(), 1);
+        press(
+            &mut app,
+            Choice::Queue(future_room, ConstructionItem::FishCrate),
+        );
+        await_request(&mut app);
+        press(&mut app, Choice::Abandon(project_id));
+        await_request(&mut app);
+        let snapshot = &app.world().resource::<DisplaySnapshot>().0;
+        assert!(snapshot.mutation_error.is_none());
+        assert!(snapshot.universe.construction().projects.is_empty());
     }
 
     #[test]
@@ -913,7 +980,7 @@ mod tests {
             .generation = 1;
         press(
             &mut app,
-            Choice::Request(destination, ConstructionItem::FishCrate),
+            Choice::Queue(destination, ConstructionItem::FishCrate),
         );
         assert!(!app.world().resource::<State>().pending());
         assert!(
@@ -951,14 +1018,8 @@ mod tests {
     }
 
     #[test]
-    fn choices_respect_cash_and_occupied_room_area() {
+    fn choices_allow_orders_without_cash_and_respect_occupied_room_area() {
         let (world, destination) = fixture(0);
-        assert!(
-            unavailable(&world, destination, ConstructionItem::FishCrate)
-                .unwrap()
-                .contains("reserve")
-        );
-        let (world, destination) = fixture(1_000_000);
         assert!(unavailable(&world, destination, ConstructionItem::FishCrate).is_none());
         assert_eq!(
             unavailable(&world, destination, ConstructionItem::Millstone).as_deref(),

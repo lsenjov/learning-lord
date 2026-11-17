@@ -2660,6 +2660,7 @@ impl Universe {
             let household_name = household_name.unwrap();
             if let Some(home) = citizen.home {
                 universe.map.assign_bedroom(home, id, &[account])?;
+                universe.validate_reserved_construction_plot(home)?;
                 universe.map = universe
                     .map
                     .with_place_name(home, format!("{household_name}'s home"))?;
@@ -2805,6 +2806,7 @@ impl Universe {
             home
         };
         universe.map.assign_bedroom(home, member, &[account])?;
+        universe.validate_reserved_construction_plot(home)?;
         for (_, agent) in universe.agents.iter_mut() {
             let AgentKind::Citizen(citizen) = &mut agent.kind;
             if citizen.household_id() == Some(account) {
@@ -2840,6 +2842,7 @@ impl Universe {
         let home = household.home.ok_or(SimulationError::MissingProperty)?;
         let mut universe = self.clone();
         universe.map = self.map.add_home_workshop(home, owner, kind)?;
+        universe.validate_reserved_construction_plot(home)?;
         for id in universe.taxation.rules.keys() {
             universe.validate_tax_rule(*id)?;
         }
