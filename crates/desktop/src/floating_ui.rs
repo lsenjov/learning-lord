@@ -195,12 +195,7 @@ impl Windows {
 
     fn apply(&mut self, action: Action) {
         match action {
-            Action::Close(kind) => {
-                if self.left == Some(kind) && self.right.is_some() {
-                    std::mem::swap(&mut self.left, &mut self.right);
-                }
-                self.remove_active(kind, false);
-            }
+            Action::Close(kind) => self.remove_active(kind, false),
             Action::Minimize(kind) => self.remove_active(kind, true),
             Action::RestoreManual(kind) => self.open(kind),
             Action::RestoreDisplaced(kind) => {
@@ -868,32 +863,32 @@ mod tests {
     }
 
     #[test]
-    fn closing_left_promotes_right_and_restores_latest_displaced_to_right() {
-        let mut windows = Windows::default();
-        windows.open(WindowKind::Citizens);
-        windows.link(WindowKind::Citizens, WindowKind::Market);
-        windows.link(WindowKind::Citizens, WindowKind::Locations);
-        windows.link(WindowKind::Citizens, WindowKind::Collectives);
+    fn close_and_minimize_restore_the_latest_displaced_pane_into_the_vacated_slot() {
+        use WindowKind::{Citizens, Collectives, Locations, Market};
+        for (kind, expected) in [
+            (Citizens, [Some(Locations), Some(Collectives)]),
+            (Collectives, [Some(Citizens), Some(Locations)]),
+        ] {
+            for action in [Action::Close(kind), Action::Minimize(kind)] {
+                let mut windows = Windows::default();
+                windows.open(Citizens);
+                windows.link(Citizens, Market);
+                windows.link(Citizens, Locations);
+                windows.link(Citizens, Collectives);
 
-        windows.apply(Action::Close(WindowKind::Citizens));
-        assert_eq!(
-            windows.visible(),
-            [Some(WindowKind::Collectives), Some(WindowKind::Locations)]
-        );
-        assert_eq!(windows.requested_focus, Some(WindowKind::Collectives));
-        assert_eq!(
-            windows.displaced().collect::<Vec<_>>(),
-            [WindowKind::Market]
-        );
+                windows.apply(action);
 
-        windows.apply(Action::Clear);
-        windows.apply(Action::Close(WindowKind::Collectives));
-        assert_eq!(windows.visible(), [Some(WindowKind::Locations), None]);
-        windows.open(WindowKind::Market);
-        assert_eq!(
-            windows.visible(),
-            [Some(WindowKind::Market), Some(WindowKind::Locations)]
-        );
+                assert_eq!(windows.visible(), expected);
+                assert_eq!(windows.displaced().collect::<Vec<_>>(), [Market]);
+                assert_eq!(
+                    windows.manual().next(),
+                    match action {
+                        Action::Minimize(kind) => Some(kind),
+                        _ => None,
+                    }
+                );
+            }
+        }
     }
 
     #[test]
