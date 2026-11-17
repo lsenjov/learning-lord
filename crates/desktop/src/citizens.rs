@@ -2,6 +2,7 @@ mod roster;
 
 use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, text};
 use bevy::{
+    ecs::system::SystemParam,
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
     ui::RelativeCursorPosition,
@@ -16,14 +17,59 @@ pub struct Selection(pub Option<AgentId>);
 #[derive(Resource, Default)]
 pub struct RosterState {
     generation: u64,
-    pub(crate) detail: bool,
     view: roster::View,
 }
 
-#[derive(Resource, Default)]
-pub struct PlanDisplay {
-    selected: Option<AgentId>,
-    rows: Vec<PlanRow>,
+#[derive(Component)]
+pub struct Detail {
+    pub(crate) citizen: AgentId,
+    pub(crate) history: crate::citizen_history::Selection,
+    pub(crate) skills: bool,
+    pub(crate) visible: bool,
+}
+
+impl Detail {
+    pub(crate) fn new(citizen: AgentId) -> Self {
+        Self {
+            citizen,
+            history: Default::default(),
+            skills: false,
+            visible: true,
+        }
+    }
+}
+
+#[derive(SystemParam)]
+pub(crate) struct Details<'w, 's> {
+    parents: Query<'w, 's, &'static ChildOf>,
+    details: Query<'w, 's, Ref<'static, Detail>>,
+}
+
+impl Details<'_, '_> {
+    pub(crate) fn get(&self, entity: Entity) -> Option<Ref<'_, Detail>> {
+        self.parents
+            .iter_ancestors(entity)
+            .find_map(|id| self.details.get(id).ok())
+    }
+}
+
+pub(crate) fn sync_visibility(
+    windows: Res<crate::floating_ui::Windows>,
+    mut panes: Query<&mut Detail>,
+) {
+    for mut pane in &mut panes {
+        let visible = windows.is_open(crate::floating_ui::WindowKind::Citizen(pane.citizen));
+        if pane.visible != visible {
+            pane.visible = visible;
+        }
+    }
+}
+
+fn citizen_at(universe: &Universe, id: AgentId) -> Option<&Citizen> {
+    universe.agents().get(&id).map(|agent| {
+        let AgentKind::Citizen(citizen) = &agent.kind;
+        citizen
+    })
 }
 
 #[derive(Component)]
@@ -31,15 +77,9 @@ pub struct Card(roster::Target);
 #[derive(Component)]
 pub struct Summary(usize, usize);
 #[derive(Component)]
-pub struct Screen(pub bool);
-#[derive(Component)]
-pub(crate) struct Back;
-#[derive(Component)]
 pub(crate) struct SkillsToggle;
 #[derive(Component)]
 pub(crate) struct SkillsLabel;
-#[derive(Resource, Default)]
-pub struct SkillsExpanded(bool);
 #[derive(Component)]
 struct RosterContent(Vec<roster::Target>);
 #[derive(Clone, Copy)]
@@ -81,8 +121,8 @@ pub struct DietFill(learning_lord_simulation::diet::DietCategory);
 pub struct NeedLabel(Need);
 #[derive(Component)]
 pub struct NeedFill(Need);
-#[derive(Component)]
-pub struct PlanContent;
+#[derive(Component, Default)]
+pub struct PlanContent(Vec<PlanRow>);
 #[derive(Component)]
 pub struct DetailScroll;
 
@@ -126,7 +166,6 @@ const COLUMNS: [(&str, f32); 5] = [
 pub fn spawn_roster(parent: &mut ChildSpawnerCommands, _count: usize) {
     parent
         .spawn((
-            Screen(false),
             Node {
                 width: percent(100),
                 min_width: px(0),
@@ -172,21 +211,22 @@ pub fn spawn_roster(parent: &mut ChildSpawnerCommands, _count: usize) {
         });
 }
 
-pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
+pub fn spawn_details(parent: &mut ChildSpawnerCommands, citizen: AgentId) {
     use crate::citizen_history::{View, ViewPanel};
-    parent.spawn((Screen(true), Visibility::Hidden, Node {
-        display: Display::None, width: percent(100), flex_grow: 1.0, min_height: px(0),
+    parent.spawn((Detail::new(citizen), Node { width: percent(100), min_width: px(0), flex_grow: 1.0, min_height: px(0),
         flex_direction: FlexDirection::Column, row_gap: px(6), ..default()
     })).with_children(|detail| {
-        detail.spawn(Node { align_items: AlignItems::Center, column_gap: px(10), flex_shrink: 0.0, ..default() })
+        detail.spawn((
+            Node { width: percent(100), min_width: px(0), flex_shrink: 0.0, overflow: Overflow::scroll_x(), ..default() },
+            ScrollPosition::default(),
+            RelativeCursorPosition::default(),
+        ))
             .with_children(|header| {
-                header.spawn((Button, Back, Node { padding: UiRect::axes(px(7), px(4)), ..default() }, BackgroundColor(PANEL)))
-                    .with_children(|button| { button.spawn(text("< Citizens", 14.0, TEXT)); });
                 header.spawn(LinkedReadout::bundle(Section::Header));
             });
         crate::citizen_history::spawn_tabs(detail);
         detail.spawn((Node {
-            flex_grow: 1.0, min_height: px(0), padding: UiRect::axes(px(6), px(4)),
+            flex_grow: 1.0, min_width: px(0), min_height: px(0), padding: UiRect::axes(px(6), px(4)),
             flex_direction: FlexDirection::Column, overflow: Overflow::scroll(), ..default()
         }, ScrollPosition::default(), RelativeCursorPosition::default(), DetailScroll))
         .with_children(|body| {
@@ -224,7 +264,7 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
                     panel.spawn(LinkedReadout::bundle(Section::Planning));
                     panel.spawn((text("Active plan (i)", 14.0, MUTED), Interaction::None,
                         crate::tooltip::Tooltip("Durations are planning estimates. Later goals are forecasts after replanning.".into())));
-                    panel.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_shrink: 0.0, ..default() }, PlanContent));
+                    panel.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_shrink: 0.0, ..default() }, PlanContent::default()));
                     panel.spawn((Button, SkillsToggle, Node { padding: UiRect::vertical(px(4)), ..default() }))
                         .with_children(|button| { button.spawn((text("Skills [+]", 14.0, TEXT), SkillsLabel)); });
                     panel.spawn(LinkedReadout::bundle(Section::Skills));
@@ -235,25 +275,6 @@ pub fn spawn_details(parent: &mut ChildSpawnerCommands) {
     });
 }
 
-pub fn refresh_screens(
-    state: Res<RosterState>,
-    mut screens: Query<(&Screen, &mut Node, &mut Visibility)>,
-) {
-    for (screen, mut node, mut visibility) in &mut screens {
-        let visible = screen.0 == state.detail;
-        node.display = if visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        *visibility = if visible {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-    }
-}
-
 pub fn handle_selection(
     (snapshot, mut selection, mut page): (
         Res<DisplaySnapshot>,
@@ -261,17 +282,15 @@ pub fn handle_selection(
         ResMut<RosterState>,
     ),
     cards: Query<(&Interaction, &Card), Changed<Interaction>>,
-    back: Query<&Interaction, (With<Back>, Changed<Interaction>)>,
-    toggles: Query<&Interaction, (With<SkillsToggle>, Changed<Interaction>)>,
-    (mut skills, controls): (Option<ResMut<SkillsExpanded>>, roster::Controls),
+    controls: roster::Controls,
     shortcuts: crate::KeyboardShortcuts,
     mut windows: Option<ResMut<crate::floating_ui::Windows>>,
 ) {
+    use crate::floating_ui::WindowKind;
     let agents = sorted_agents(&snapshot.0.universe);
     if page.generation != snapshot.0.generation {
         page.generation = snapshot.0.generation;
         selection.0 = agents.first().map(|(id, _)| *id);
-        page.detail = false;
         page.view = roster::View::default();
     }
     if selection
@@ -283,22 +302,10 @@ pub fn handle_selection(
             selection.0 = next;
         }
     }
-    for interaction in &back {
-        if *interaction == Interaction::Pressed {
-            page.detail = false;
-        }
-    }
-    for interaction in &toggles {
-        if *interaction == Interaction::Pressed
-            && let Some(skills) = skills.as_mut()
-        {
-            skills.0 = !skills.0;
-        }
-    }
     let menu_was_open = page.view.menu;
     let mut control_pressed = false;
     for (interaction, control) in &controls.choices {
-        if page.detail || *interaction != Interaction::Pressed {
+        if *interaction != Interaction::Pressed {
             continue;
         }
         control_pressed = true;
@@ -324,7 +331,7 @@ pub fn handle_selection(
         }
     }
     for (interaction, card) in &cards {
-        if control_pressed || page.detail || *interaction != Interaction::Pressed {
+        if control_pressed || *interaction != Interaction::Pressed {
             continue;
         }
         match &card.0 {
@@ -335,9 +342,8 @@ pub fn handle_selection(
             }
             roster::Target::Citizen(id) if snapshot.0.universe.agents().contains_key(id) => {
                 selection.0 = Some(*id);
-                page.detail = true;
                 if let Some(windows) = windows.as_mut() {
-                    windows.open(crate::floating_ui::WindowKind::Citizens);
+                    windows.link(WindowKind::Citizens, WindowKind::Citizen(*id));
                 }
             }
             _ => {}
@@ -359,9 +365,8 @@ pub fn handle_selection(
             if selection.0 != next {
                 selection.0 = next;
             }
-            page.detail = next.is_some();
-            if let (Some(_), Some(windows)) = (next, windows.as_mut()) {
-                windows.open(crate::floating_ui::WindowKind::Citizens);
+            if let (Some(id), Some(windows)) = (next, windows.as_mut()) {
+                windows.link(WindowKind::Citizens, WindowKind::Citizen(id));
             }
         }
     }
@@ -619,24 +624,33 @@ pub fn refresh_cards(
     (snapshot, selection, state): (Res<DisplaySnapshot>, Res<Selection>, Res<RosterState>),
     mut summaries: roster::SummaryTexts,
     mut labels: roster::NeedTexts,
-    mut fills: Query<(&NeedFill, &mut Node, &mut BackgroundColor), Without<Card>>,
+    mut fills: Query<(Entity, &NeedFill, &mut Node, &mut BackgroundColor), Without<Card>>,
     mut cards: Query<(&Card, &Interaction, &mut BackgroundColor), Without<NeedFill>>,
     mut roster: roster::Queries,
+    details: Details,
+    windows: Option<Res<crate::floating_ui::Windows>>,
+    mut roster_visible: Local<bool>,
 ) {
     let universe = &snapshot.0.universe;
-    roster.refresh(
-        &mut commands,
-        universe,
-        &state.view,
-        &mut summaries,
-        snapshot.is_changed() || state.is_changed(),
-    );
-    let citizen = selected_agent(universe, selection.0).map(|agent| {
-        let AgentKind::Citizen(citizen) = &agent.kind;
-        citizen
-    });
-    for (label, mut value, mut color) in &mut labels {
-        let Some(citizen) = citizen else {
+    let show_roster = windows
+        .as_ref()
+        .is_none_or(|w| w.is_open(crate::floating_ui::WindowKind::Citizens));
+    if show_roster {
+        roster.refresh(
+            &mut commands,
+            universe,
+            &state.view,
+            &mut summaries,
+            snapshot.is_changed() || state.is_changed() || !*roster_visible,
+        );
+    }
+    *roster_visible = show_roster;
+    for (entity, label, mut value, mut color) in &mut labels {
+        let Some(citizen) = details
+            .get(entity)
+            .filter(|detail| detail.visible)
+            .and_then(|detail| citizen_at(universe, detail.citizen))
+        else {
             continue;
         };
         let need = label.0;
@@ -672,8 +686,12 @@ pub fn refresh_cards(
         }
         color.0 = if contribution == 0.0 { MUTED } else { TEXT };
     }
-    for (fill, mut node, mut color) in &mut fills {
-        let Some(citizen) = citizen else {
+    for (entity, fill, mut node, mut color) in &mut fills {
+        let Some(citizen) = details
+            .get(entity)
+            .filter(|detail| detail.visible)
+            .and_then(|detail| citizen_at(universe, detail.citizen))
+        else {
             continue;
         };
         let value = fill.0.value(citizen);
@@ -692,6 +710,9 @@ pub fn refresh_cards(
             Color::srgb(0.88, 0.65, 0.23)
         };
     }
+    if !show_roster {
+        return;
+    }
     for (card, interaction, mut color) in &mut cards {
         color.0 = if *interaction == Interaction::Hovered {
             Color::srgb(0.16, 0.23, 0.26)
@@ -705,15 +726,16 @@ pub fn refresh_cards(
 
 pub fn refresh_diet(
     snapshot: Res<DisplaySnapshot>,
-    selection: Res<Selection>,
-    mut labels: Query<(&DietLabel, &mut Text, &mut TextColor)>,
-    mut fills: Query<(&DietFill, &mut Node, Option<&mut BackgroundColor>)>,
+    details: Details,
+    mut labels: Query<(Entity, &DietLabel, &mut Text, &mut TextColor)>,
+    mut fills: Query<(Entity, &DietFill, &mut Node, Option<&mut BackgroundColor>)>,
 ) {
-    let citizen = selected_agent(&snapshot.0.universe, selection.0).map(|agent| {
-        let AgentKind::Citizen(citizen) = &agent.kind;
-        citizen
-    });
-    for (label, mut text, mut color) in &mut labels {
+    let universe = &snapshot.0.universe;
+    for (entity, label, mut text, mut color) in &mut labels {
+        let Some(detail) = details.get(entity).filter(|detail| detail.visible) else {
+            continue;
+        };
+        let citizen = citizen_at(universe, detail.citizen);
         let next = citizen.map_or_else(
             || "No citizen".into(),
             |citizen| {
@@ -738,7 +760,11 @@ pub fn refresh_diet(
             TEXT
         };
     }
-    for (fill, mut node, color) in &mut fills {
+    for (entity, fill, mut node, color) in &mut fills {
+        let Some(detail) = details.get(entity).filter(|detail| detail.visible) else {
+            continue;
+        };
+        let citizen = citizen_at(universe, detail.citizen);
         if let Some(mut color) = color {
             color.0 = if citizen.is_none_or(|citizen| citizen.diet(fill.0) == 0.0) {
                 MUTED
@@ -757,25 +783,18 @@ pub fn refresh_diet(
 pub fn refresh_plan(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
-    selection: Res<Selection>,
-    mut cached: ResMut<PlanDisplay>,
-    content: Query<Entity, With<PlanContent>>,
-    mut scroll: Query<&mut ScrollPosition, With<DetailScroll>>,
+    details: Details,
+    mut content: Query<(Entity, &mut PlanContent)>,
 ) {
-    if content.is_empty() {
-        return;
-    }
-    let rows = selected_agent(&snapshot.0.universe, selection.0).map_or_else(Vec::new, |agent| {
-        let AgentKind::Citizen(citizen) = &agent.kind;
-        plan_rows(&snapshot.0.universe, citizen.id(), citizen)
-    });
-    if cached.selected != selection.0 {
-        for mut position in &mut scroll {
-            position.0 = Vec2::ZERO;
-        }
-    }
-    if rows != cached.rows || cached.selected != selection.0 {
-        for entity in &content {
+    let universe = &snapshot.0.universe;
+    for (entity, mut cache) in &mut content {
+        let Some(detail) = details.get(entity).filter(|detail| detail.visible) else {
+            continue;
+        };
+        let rows = citizen_at(universe, detail.citizen).map_or_else(Vec::new, |citizen| {
+            plan_rows(universe, citizen.id(), citizen)
+        });
+        if rows != cache.0 {
             commands
                 .entity(entity)
                 .despawn_children()
@@ -790,9 +809,8 @@ pub fn refresh_plan(
                         crate::navigation::render(parent, &row.fragments, size, color);
                     }
                 });
+            cache.0 = rows;
         }
-        cached.rows = rows;
-        cached.selected = selection.0;
     }
 }
 
@@ -1007,7 +1025,11 @@ fn section_rows(
 ) -> Vec<ReadoutRow> {
     use crate::navigation::{self, Fragment as F, Target};
     use learning_lord_simulation::{marketplace::Good, production::Skill};
-    let Some(agent) = selected_agent(universe, selected) else {
+    let agent = match selected {
+        Some(id) => universe.agents().get(&id),
+        None => selected_agent(universe, None),
+    };
+    let Some(agent) = agent else {
         return vec![ReadoutRow::text("No citizens")];
     };
     let AgentKind::Citizen(citizen) = &agent.kind;
@@ -1252,32 +1274,32 @@ impl LinkedReadout {
 pub(crate) fn refresh_linked(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
-    selection: Res<Selection>,
-    skills: Option<Res<SkillsExpanded>>,
+    details: Details,
     panels: Query<(Entity, Ref<LinkedReadout>)>,
-    mut skills_labels: Query<&mut Text, With<SkillsLabel>>,
+    mut skills_labels: Query<(Entity, &mut Text), With<SkillsLabel>>,
 ) {
-    let expanded = skills.as_ref().is_some_and(|skills| skills.0);
-    for mut label in &mut skills_labels {
+    for (entity, mut label) in &mut skills_labels {
+        let Some(detail) = details.get(entity).filter(|detail| detail.visible) else {
+            continue;
+        };
+        let expanded = detail.skills;
         let next = if expanded { "Skills [-]" } else { "Skills [+]" };
         if label.0 != next {
             label.0 = next.into();
         }
     }
-    if panels.is_empty()
-        || !snapshot.is_changed()
-            && !selection.is_changed()
-            && !skills.as_ref().is_some_and(|skills| skills.is_changed())
-            && panels.iter().all(|(_, panel)| !panel.is_added())
-    {
-        return;
-    }
     for (entity, panel) in &panels {
+        let Some(detail) = details.get(entity).filter(|detail| detail.visible) else {
+            continue;
+        };
+        if !snapshot.is_changed() && !detail.is_changed() && !panel.is_added() {
+            continue;
+        }
         let rows = section_rows(
             &snapshot.0.universe,
-            selection.0,
+            Some(detail.citizen),
             panel.section,
-            skills.as_ref().is_some_and(|skills| skills.0),
+            detail.skills,
         );
         if rows == panel.rows {
             continue;
@@ -1370,6 +1392,7 @@ pub(crate) fn location_fragments(citizen: &Citizen) -> Vec<crate::navigation::Fr
 
 #[cfg(test)]
 pub(crate) fn readout(universe: &Universe, selected: Option<AgentId>) -> String {
+    let selected = selected.filter(|id| universe.agents().contains_key(id));
     let mut rows = [
         Section::Header,
         Section::Needs,
@@ -1724,12 +1747,16 @@ mod tests {
     }
 
     #[test]
-    fn table_is_default_row_opens_details_and_return_preserves_selection_and_tabs() {
+    fn roster_stays_interactive_and_detail_tabs_are_independent() {
         let universe = simulation::new_universe().unwrap();
         let ids = sorted_agents(&universe)
             .iter()
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
+        let second = ids[1];
+        use crate::floating_ui::{WindowKind, Windows};
+        let mut windows = Windows::default();
+        windows.open(WindowKind::Citizens);
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
@@ -1740,16 +1767,16 @@ mod tests {
             generation: 0,
             revision: 0,
         }))
+        .insert_resource(windows)
         .init_resource::<Selection>()
         .init_resource::<RosterState>()
-        .init_resource::<SkillsExpanded>()
-        .init_resource::<crate::citizen_history::Selection>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<bevy::input_focus::InputFocus>()
         .add_systems(Startup, move |mut commands: Commands| {
             commands.spawn(Node::default()).with_children(|parent| {
                 spawn_roster(parent, ids.len());
-                spawn_details(parent);
+                spawn_details(parent, ids[0]);
+                spawn_details(parent, ids[1]);
             });
         })
         .add_systems(
@@ -1758,31 +1785,32 @@ mod tests {
                 handle_selection,
                 crate::citizen_history::handle_selection,
                 refresh_cards,
-                refresh_screens,
                 crate::citizen_history::refresh,
+                refresh_linked,
             )
                 .chain(),
         );
         app.world_mut().resource_mut::<RosterState>().view.grouping = roster::Grouping::None;
         app.update();
-        assert!(!app.world().resource::<RosterState>().detail);
         let tabs = app
             .world_mut()
             .query::<&crate::citizen_history::ViewPanel>()
             .iter(app.world())
             .count();
-        assert_eq!(tabs, 4);
+        assert_eq!(tabs, 8);
         let row = app
             .world_mut()
             .query::<(Entity, &Card)>()
             .iter(app.world())
-            .find(|(_, card)| matches!(card.0, roster::Target::Citizen(id) if id == sorted_agents(&app.world().resource::<DisplaySnapshot>().0.universe)[1].0))
+            .find(|(_, card)| matches!(card.0, roster::Target::Citizen(id) if id == second))
             .unwrap()
             .0;
         app.world_mut().entity_mut(row).insert(Interaction::Pressed);
         app.update();
-        let selected = app.world().resource::<Selection>().0;
-        assert!(app.world().resource::<RosterState>().detail);
+        assert_eq!(app.world().resource::<Selection>().0, Some(second));
+        let windows = app.world().resource::<Windows>();
+        assert!(windows.is_open(WindowKind::Citizens));
+        assert!(windows.is_open(WindowKind::Citizen(second)));
         let tab = app
             .world_mut()
             .query::<(Entity, &crate::citizen_history::Choice)>()
@@ -1795,36 +1823,66 @@ mod tests {
             })
             .unwrap()
             .0;
+        let world = app.world_mut();
+        let pane = std::iter::successors(Some(tab), |entity| {
+            world.get::<ChildOf>(*entity).map(ChildOf::parent)
+        })
+        .find(|entity| world.get::<Detail>(*entity).is_some())
+        .unwrap();
+        let scrolls = world
+            .query_filtered::<(Entity, &ChildOf), With<DetailScroll>>()
+            .iter(world)
+            .map(|(entity, parent)| (entity, parent.parent()))
+            .collect::<Vec<_>>();
+        for (entity, _) in &scrolls {
+            world.get_mut::<ScrollPosition>(*entity).unwrap().0 = Vec2::ONE;
+        }
         app.world_mut().entity_mut(row).insert(Interaction::None);
         app.world_mut().entity_mut(tab).insert(Interaction::Pressed);
         app.update();
-        assert!(
-            app.world_mut()
-                .query::<(&crate::citizen_history::ViewPanel, &Node)>()
-                .iter(app.world())
-                .all(|(panel, node)| (node.display == Display::Flex)
-                    == (panel.0 == crate::citizen_history::View::Belongings))
-        );
-        let back = app
-            .world_mut()
-            .query_filtered::<Entity, With<Back>>()
-            .single(app.world())
+        let world = app.world_mut();
+        for (entity, parent) in scrolls {
+            let expected = if parent == pane {
+                Vec2::ZERO
+            } else {
+                Vec2::ONE
+            };
+            assert_eq!(world.get::<ScrollPosition>(entity).unwrap().0, expected);
+        }
+        let visible = world
+            .query::<(&crate::citizen_history::ViewPanel, &Node)>()
+            .iter(world)
+            .filter_map(|(panel, node)| (node.display == Display::Flex).then_some(panel.0))
+            .collect::<Vec<_>>();
+        assert_eq!(visible.len(), 2);
+        assert!(visible.contains(&crate::citizen_history::View::Belongings));
+        assert!(visible.contains(&crate::citizen_history::View::Needs));
+        let skills_toggle = world
+            .query_filtered::<Entity, With<SkillsToggle>>()
+            .iter(world)
+            .next()
             .unwrap();
-        app.world_mut()
-            .entity_mut(back)
-            .insert(Interaction::Pressed);
+        world.entity_mut(skills_toggle).insert(Interaction::Pressed);
         app.update();
-        assert!(!app.world().resource::<RosterState>().detail);
-        assert_eq!(app.world().resource::<Selection>().0, selected);
+        let world = app.world_mut();
+        let skills_labels = world
+            .query_filtered::<&Text, With<SkillsLabel>>()
+            .iter(world)
+            .map(|label| label.0.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(skills_labels.len(), 2);
+        assert!(skills_labels.contains(&"Skills [+]"));
+        assert!(skills_labels.contains(&"Skills [-]"));
         let populated = app.world().resource::<DisplaySnapshot>().0.universe.clone();
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe =
             Universe::with_map(Map::default());
         app.update();
         assert!(
             app.world_mut()
-                .query::<&Text>()
+                .query::<(&Text, &ChildOf)>()
                 .iter(app.world())
-                .any(|text| text.0 == "No citizens")
+                .any(|(text, parent)| text.0 == "No citizens"
+                    && app.world().get::<RosterContent>(parent.parent()).is_some())
         );
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = populated;
         app.update();
@@ -1853,7 +1911,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_diet_bars_follow_consumption_and_selection() {
+    fn each_detail_shows_its_own_diet() {
         use learning_lord_simulation::diet::DietCategory;
         let eater = Citizen::new(50.0)
             .unwrap()
@@ -1901,28 +1959,36 @@ mod tests {
             generation: 0,
             revision: 0,
         }))
-        .insert_resource(Selection(Some(eater_id)))
         .add_systems(Update, refresh_diet);
-        let label = app
-            .world_mut()
-            .spawn((DietLabel(DietCategory::Meat), Text::new("")))
-            .id();
-        let fill = app
-            .world_mut()
-            .spawn((DietFill(DietCategory::Meat), Node::default()))
-            .id();
+        let mut panels = Vec::new();
+        for id in [eater_id, empty_id] {
+            let pane = app.world_mut().spawn(Detail::new(id)).id();
+            let label = app
+                .world_mut()
+                .spawn((DietLabel(DietCategory::Meat), Text::new(""), ChildOf(pane)))
+                .id();
+            let fill = app
+                .world_mut()
+                .spawn((DietFill(DietCategory::Meat), Node::default(), ChildOf(pane)))
+                .id();
+            panels.push((label, fill));
+        }
         app.update();
+        let [(eater_label, eater_fill), (empty_label, empty_fill)] = panels[..] else {
+            unreachable!();
+        };
         assert_eq!(
-            app.world().get::<Text>(label).unwrap().0,
+            app.world().get::<Text>(eater_label).unwrap().0,
             "Meat: 49.9/100 | +4.99 wellbeing"
         );
-        let width = app.world().get::<Node>(fill).unwrap().width;
+        let width = app.world().get::<Node>(eater_fill).unwrap().width;
         assert!(matches!(width, Val::Percent(value) if (value - 49.85532).abs() < 0.001));
-        app.world_mut().resource_mut::<Selection>().0 = Some(empty_id);
-        app.update();
-        assert_eq!(app.world().get::<Node>(fill).unwrap().width, percent(0));
         assert_eq!(
-            app.world().get::<Text>(label).unwrap().0,
+            app.world().get::<Node>(empty_fill).unwrap().width,
+            percent(0)
+        );
+        assert_eq!(
+            app.world().get::<Text>(empty_label).unwrap().0,
             "Meat: -0.1/100 | -0.03 wellbeing"
         );
     }
@@ -2084,7 +2150,6 @@ mod tests {
             .spawn((Card(roster::Target::Citizen(ids[0])), Interaction::None))
             .id();
         for id in &ids {
-            app.world_mut().resource_mut::<RosterState>().detail = false;
             app.world_mut()
                 .entity_mut(card)
                 .insert((Card(roster::Target::Citizen(*id)), Interaction::Pressed));
@@ -2161,7 +2226,6 @@ mod tests {
             .press(KeyCode::Digit2);
         app.update();
         let selected = app.world().resource::<Selection>().0.unwrap();
-        assert!(app.world().resource::<RosterState>().detail);
         assert_eq!(
             app.world()
                 .resource::<DisplaySnapshot>()

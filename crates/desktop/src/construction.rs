@@ -1,4 +1,8 @@
-use crate::{DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, market, text};
+use crate::{
+    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT,
+    floating_ui::{FloatingWindow, WindowKind, Windows},
+    text,
+};
 use bevy::prelude::*;
 use learning_lord_simulation::{
     AgentId, Universe,
@@ -19,8 +23,14 @@ pub(crate) struct Destination {
 
 #[derive(Resource, Default)]
 pub(crate) struct State {
-    expanded: Option<Destination>,
+    overview: PaneState,
+    panes: std::collections::HashMap<PlaceId, PaneState>,
     generation: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct PaneState {
+    expanded: Option<Destination>,
     pending: Option<u64>,
     error: Option<String>,
 }
@@ -139,7 +149,7 @@ pub(crate) fn render_choices(
     place: &Place,
     building: &Building,
     room: Option<RoomId>,
-    state: &State,
+    state: &PaneState,
 ) {
     let Some(owner) = building.owner else {
         return;
@@ -157,7 +167,7 @@ fn render_destination_choices(
     parent: &mut ChildSpawnerCommands,
     universe: &Universe,
     destination: Destination,
-    state: &State,
+    state: &PaneState,
 ) {
     let selected = state.expanded == Some(destination);
     let label = if destination.room.is_some() {
@@ -188,7 +198,7 @@ pub(crate) fn render_menu(
     place: &Place,
     building: &Building,
     room: Option<RoomId>,
-    state: &State,
+    state: &PaneState,
 ) {
     let Some(owner) = building.owner else {
         return;
@@ -206,7 +216,7 @@ fn render_destination_menu(
     parent: &mut ChildSpawnerCommands,
     universe: &Universe,
     destination: Destination,
-    state: &State,
+    state: &PaneState,
 ) {
     if state.expanded != Some(destination) {
         return;
@@ -398,7 +408,7 @@ pub(crate) fn render_projects(
     place: PlaceId,
     building: Option<BuildingId>,
     room: Option<RoomId>,
-    state: &State,
+    state: &PaneState,
 ) {
     let mut projects: Vec<_> = universe
         .construction()
@@ -586,7 +596,29 @@ pub(crate) fn render_projects(
 
 impl State {
     pub(crate) fn pending(&self) -> bool {
-        self.pending.is_some()
+        self.overview.pending.is_some() || self.panes.values().any(|pane| pane.pending.is_some())
+    }
+
+    pub(crate) fn pane(&self, place: Option<PlaceId>) -> Option<&PaneState> {
+        match place {
+            Some(place) => self.panes.get(&place),
+            None => Some(&self.overview),
+        }
+    }
+}
+
+impl PaneState {
+    fn resolve_mutation(&mut self, snapshot: &DisplaySnapshot) -> bool {
+        if self
+            .pending
+            .is_some_and(|revision| snapshot.0.mutation_revision > revision)
+        {
+            self.pending = None;
+            self.error.clone_from(&snapshot.0.mutation_error);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -597,11 +629,13 @@ pub(crate) fn handle(
         Res<DisplaySnapshot>,
         Res<crate::simulation::SimulationWorker>,
     ),
-    selection: Res<market::Selection>,
-    buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
+    buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
     controls: Option<Res<crate::Controls>>,
     dev: Option<Res<crate::dev_controls::State>>,
     caravan: Option<Res<crate::caravan_controls::State>>,
+    roots: Query<&FloatingWindow>,
+    windows: Option<Res<Windows>>,
+    parents: Query<&ChildOf>,
 ) {
     if state.generation != snapshot.0.generation {
         *state = State {
@@ -611,16 +645,21 @@ pub(crate) fn handle(
         locations.invalidate();
         return;
     }
-    if state
-        .pending
-        .is_some_and(|revision| snapshot.0.mutation_revision > revision)
-    {
-        state.pending = None;
-        state.error.clone_from(&snapshot.0.mutation_error);
+    let mut resolved = state.overview.resolve_mutation(&snapshot);
+    for pane in state.panes.values_mut() {
+        resolved |= pane.resolve_mutation(&snapshot);
+    }
+    if resolved {
         locations.invalidate();
     }
-    if selection.view != market::View::Locations
-        || dev.is_some_and(|state| state.pending())
+    state.panes.retain(|place, pane| {
+        pane.pending.is_some()
+            || (snapshot.0.universe.map().place(*place).is_ok()
+                && windows
+                    .as_ref()
+                    .is_none_or(|windows| windows.tracked(WindowKind::Location(*place))))
+    });
+    if dev.is_some_and(|state| state.pending())
         || state.pending()
         || locations.pending()
         || caravan.is_some_and(|state| state.pending())
@@ -629,10 +668,20 @@ pub(crate) fn handle(
         return;
     }
     let universe = &snapshot.0.universe;
-    for (interaction, choice) in &buttons {
+    for (entity, interaction, choice) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
+        let source = parents
+            .iter_ancestors(entity)
+            .find_map(|ancestor| roots.get(ancestor).ok())
+            .map(|root| root.0);
+        let state = match source {
+            Some(WindowKind::Location(place)) => state.panes.entry(place).or_default(),
+            Some(WindowKind::Locations) => &mut state.overview,
+            None if windows.is_none() => &mut state.overview,
+            _ => continue,
+        };
         state.error = None;
         locations.invalidate();
         let mutation = match *choice {
@@ -723,7 +772,7 @@ pub(crate) fn handle(
     }
 }
 
-pub(crate) fn render_error(parent: &mut ChildSpawnerCommands, state: &State) {
+pub(crate) fn render_error(parent: &mut ChildSpawnerCommands, state: &PaneState) {
     if let Some(error) = &state.error {
         parent.spawn(text(error, 13.0, MUTED));
     }
@@ -782,9 +831,7 @@ mod tests {
             .insert_resource(worker)
             .init_resource::<State>()
             .init_resource::<crate::locations::State>()
-            .init_resource::<market::Selection>()
             .add_systems(Update, handle);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         app
     }
 
@@ -1060,7 +1107,7 @@ mod tests {
                     &place,
                     &place.buildings[0],
                     destination.room,
-                    &State {
+                    &PaneState {
                         expanded: Some(destination),
                         ..default()
                     },

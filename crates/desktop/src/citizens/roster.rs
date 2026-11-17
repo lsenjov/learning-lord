@@ -544,6 +544,7 @@ pub(crate) type NeedTexts<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static NeedLabel,
         &'static mut Text,
         &'static mut TextColor,
@@ -1054,10 +1055,7 @@ mod tests {
                 .spawn(Node::default())
                 .with_children(|parent| spawn_roster(parent, 3));
         })
-        .add_systems(
-            Update,
-            (handle_selection, refresh_cards, refresh_screens).chain(),
-        );
+        .add_systems(Update, (handle_selection, refresh_cards).chain());
         app.update();
         app
     }
@@ -1167,13 +1165,8 @@ mod tests {
             })
             .unwrap();
         press(&mut app, entity);
-        assert!(app.world().resource::<RosterState>().detail);
         assert_eq!(app.world().resource::<Selection>().0, Some(id));
-        // Hidden roster controls cannot change the view while inspecting a citizen.
         let collapse = control(&mut app, |choice| matches!(choice, Choice::CollapseAll));
-        press(&mut app, collapse);
-        assert_eq!(app.world().resource::<RosterState>().view.open.len(), 2);
-        app.world_mut().resource_mut::<RosterState>().detail = false;
         press(&mut app, collapse);
         assert!(app.world().resource::<RosterState>().view.open.is_empty());
         assert_eq!(cards(&mut app).len(), 2);
@@ -1187,14 +1180,12 @@ mod tests {
             .find(|(_, target)| matches!(target, Target::Citizen(_)))
             .unwrap();
         press(&mut app, independent.0);
-        assert!(app.world().resource::<RosterState>().detail);
         app.world_mut()
             .resource_mut::<DisplaySnapshot>()
             .0
             .generation += 1;
         app.update();
         let state = app.world().resource::<RosterState>();
-        assert!(!state.detail);
         assert_eq!(state.view.grouping, Grouping::Profession);
         assert_eq!(state.view.sort, Sort::Name);
         assert!(!state.view.descending);
@@ -1204,7 +1195,11 @@ mod tests {
 
     #[test]
     fn rendered_citizen_identity_survives_a_snapshot_that_reorders_wealth() {
+        use crate::floating_ui::{WindowKind, Windows};
         let mut app = app();
+        let mut windows = Windows::default();
+        windows.open(WindowKind::Citizens);
+        app.insert_resource(windows);
         let menu = control(&mut app, |choice| matches!(choice, Choice::Group));
         press(&mut app, menu);
         let none = control(&mut app, |choice| {
@@ -1253,9 +1248,8 @@ mod tests {
             .insert(Interaction::Pressed);
         app.update();
         assert_eq!(app.world().resource::<Selection>().0, Some(clicked));
-        assert!(app.world().resource::<RosterState>().detail);
-        // Replacing the universe cannot open an inspector for a stale rendered ID.
-        app.world_mut().resource_mut::<RosterState>().detail = false;
+        let panes = app.world().resource::<Windows>().visible();
+        assert!(panes.contains(&Some(WindowKind::Citizen(clicked))));
         let stale = cards(&mut app)[0].0;
         let replacement = household_world();
         app.world_mut().resource_mut::<DisplaySnapshot>().0.universe = replacement.clone();
@@ -1263,7 +1257,7 @@ mod tests {
             .entity_mut(stale)
             .insert(Interaction::Pressed);
         app.update();
-        assert!(!app.world().resource::<RosterState>().detail);
+        assert_eq!(app.world().resource::<Windows>().visible(), panes);
         assert!(
             app.world()
                 .resource::<Selection>()

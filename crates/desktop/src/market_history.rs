@@ -1,4 +1,8 @@
-use crate::{DisplaySnapshot, MUTED, TEXT, format_clock, market, text};
+use crate::{
+    DisplaySnapshot, MUTED, TEXT,
+    floating_ui::{WindowKind, Windows},
+    format_clock, market, text,
+};
 use bevy::{prelude::*, ui::RelativeCursorPosition};
 use learning_lord_simulation::{
     Universe,
@@ -382,6 +386,8 @@ pub struct ChartDisplay {
     pinned: Option<u64>,
     generation: u64,
 }
+#[derive(Component, Default)]
+pub(crate) struct GoodChart(ChartDisplay);
 #[derive(Component)]
 pub(super) struct Plot;
 #[derive(Component)]
@@ -393,9 +399,9 @@ pub(super) struct Detail;
 #[derive(Component, Default)]
 pub(super) struct DayTable(Vec<[String; 5]>);
 
-pub fn spawn(parent: &mut ChildSpawnerCommands) {
+pub fn spawn(parent: &mut ChildSpawnerCommands, heading: &str) {
     parent.spawn((
-        text("MARKET HISTORY  |  recent 30 market days", 14.0, MUTED),
+        text(heading, 14.0, MUTED),
         Interaction::default(),
         crate::tooltip::Tooltip(String::new()),
         Heading,
@@ -535,10 +541,93 @@ pub fn refresh(
     mut cached: ResMut<ChartDisplay>,
     plots: Query<(Entity, Ref<Plot>)>,
     axes: Query<Entity, With<Axis>>,
-    mut headings: Query<&mut crate::tooltip::Tooltip, With<Heading>>,
+    mut headings: Query<(Entity, &mut crate::tooltip::Tooltip), With<Heading>>,
+    mut panes: Query<(Entity, Ref<market::GoodSelection>, &mut GoodChart)>,
+    parents: Query<&ChildOf>,
+    windows: Option<Res<Windows>>,
+    mut last_visible: Local<[Option<WindowKind>; 2]>,
 ) {
-    let added = plots.iter().any(|(_, plot)| plot.is_added());
-    if plots.is_empty() || (!snapshot.is_changed() && !selection.is_changed() && !added) {
+    let previous = *last_visible;
+    if let Some(windows) = &windows {
+        *last_visible = windows.visible();
+    }
+    let visible = |kind| windows.as_ref().is_none_or(|windows| windows.is_open(kind));
+    let restored = |kind| windows.is_some() && !previous.contains(&Some(kind));
+    let owner = |entity| market::pane_owner(entity, &parents, |ancestor| panes.contains(ancestor));
+    if visible(WindowKind::Market)
+        && (snapshot.is_changed()
+            || selection.is_changed()
+            || restored(WindowKind::Market)
+            || plots
+                .iter()
+                .any(|(entity, plot)| owner(entity).is_none() && plot.is_added()))
+    {
+        let overview_added = plots
+            .iter()
+            .any(|(entity, plot)| plot.is_added() && owner(entity).is_none());
+        refresh_pane(
+            &mut commands,
+            &snapshot,
+            &selection,
+            &mut cached,
+            overview_added,
+            plots
+                .iter()
+                .map(|(entity, _)| entity)
+                .filter(|&entity| owner(entity).is_none())
+                .collect(),
+            axes.iter()
+                .filter(|&entity| owner(entity).is_none())
+                .collect(),
+            headings
+                .iter_mut()
+                .filter_map(|(entity, heading)| owner(entity).is_none().then_some(heading)),
+        );
+    }
+    for (entity, selection, mut cached) in &mut panes {
+        let kind = WindowKind::Good(selection.0.good());
+        if !visible(kind) || (!snapshot.is_changed() && !selection.is_changed() && !restored(kind))
+        {
+            continue;
+        }
+        let belongs = |child| {
+            parents
+                .iter_ancestors(child)
+                .any(|ancestor| ancestor == entity)
+        };
+        let added = plots
+            .iter()
+            .any(|(child, plot)| belongs(child) && plot.is_added());
+        refresh_pane(
+            &mut commands,
+            &snapshot,
+            &selection.0,
+            &mut cached.0,
+            added,
+            plots
+                .iter()
+                .map(|(child, _)| child)
+                .filter(|&child| belongs(child))
+                .collect(),
+            axes.iter().filter(|&child| belongs(child)).collect(),
+            headings
+                .iter_mut()
+                .filter_map(|(child, heading)| belongs(child).then_some(heading)),
+        );
+    }
+}
+
+fn refresh_pane<'a>(
+    commands: &mut Commands,
+    snapshot: &DisplaySnapshot,
+    selection: &market::Selection,
+    cached: &mut ChartDisplay,
+    added: bool,
+    plots: Vec<Entity>,
+    axes: Vec<Entity>,
+    headings: impl Iterator<Item = Mut<'a, crate::tooltip::Tooltip>>,
+) {
+    if plots.is_empty() {
         return;
     }
     if cached.generation != snapshot.0.generation {
@@ -591,7 +680,7 @@ pub fn refresh(
         return;
     }
     let scale = Scale::new(&values, thresholds);
-    for mut heading in &mut headings {
+    for mut heading in headings {
         heading.0 = if labour.is_some() {
             String::new()
         } else {
@@ -602,22 +691,9 @@ pub fn refresh(
         };
     }
     if let Some(labour) = &labour {
-        draw_labour_chart(
-            &mut commands,
-            &values,
-            labour,
-            &axes.iter().collect::<Vec<_>>(),
-            &plots.iter().map(|(entity, _)| entity).collect::<Vec<_>>(),
-        );
+        draw_labour_chart(commands, &values, labour, &axes, &plots);
     } else {
-        draw_chart(
-            &mut commands,
-            good,
-            &values,
-            thresholds,
-            &axes.iter().collect::<Vec<_>>(),
-            &plots.iter().map(|(entity, _)| entity).collect::<Vec<_>>(),
-        );
+        draw_chart(commands, good, &values, thresholds, &axes, &plots);
     }
     cached.days = values;
     cached.labour = labour;
@@ -788,24 +864,91 @@ pub fn hover(
     mut tables: Query<(Entity, &mut DayTable)>,
     selection: Res<market::Selection>,
     mut cached: ResMut<ChartDisplay>,
-    plots: Query<&RelativeCursorPosition, With<Plot>>,
-    mut readouts: Query<&mut Text, With<Detail>>,
+    plots: Query<(Entity, &RelativeCursorPosition), With<Plot>>,
+    mut readouts: Query<(Entity, &mut Text), With<Detail>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     capture: Option<Res<crate::floating_ui::InputCapture>>,
+    mut panes: Query<(Entity, &market::GoodSelection, &mut GoodChart)>,
+    parents: Query<&ChildOf>,
+    windows: Option<Res<Windows>>,
 ) {
-    let hovered = plots.iter().find_map(|cursor| {
+    let clicked = mouse.is_some_and(|mouse| mouse.just_pressed(MouseButton::Left));
+    let allowed = |kind| {
+        capture
+            .as_ref()
+            .is_none_or(|capture| capture.hovered == Some(kind))
+    };
+    let overview = |entity| {
+        market::pane_owner(entity, &parents, |ancestor| panes.contains(ancestor)).is_none()
+    };
+    if windows
+        .as_ref()
+        .is_none_or(|windows| windows.is_open(WindowKind::Market))
+    {
+        hover_pane(
+            &mut commands,
+            &selection,
+            &mut cached,
+            clicked,
+            allowed(WindowKind::Market),
+            plots
+                .iter()
+                .filter_map(|(entity, cursor)| overview(entity).then_some(cursor)),
+            tables.iter_mut().filter(|(entity, _)| overview(*entity)),
+            readouts
+                .iter_mut()
+                .filter_map(|(entity, value)| overview(entity).then_some(value)),
+        );
+    }
+    for (entity, selection, mut cached) in &mut panes {
+        let kind = WindowKind::Good(selection.0.good());
+        if windows
+            .as_ref()
+            .is_some_and(|windows| !windows.is_open(kind))
+        {
+            continue;
+        }
+        let belongs = |child| {
+            parents
+                .iter_ancestors(child)
+                .any(|ancestor| ancestor == entity)
+        };
+        hover_pane(
+            &mut commands,
+            &selection.0,
+            &mut cached.0,
+            clicked,
+            allowed(kind),
+            plots
+                .iter()
+                .filter_map(|(child, cursor)| belongs(child).then_some(cursor)),
+            tables.iter_mut().filter(|(child, _)| belongs(*child)),
+            readouts
+                .iter_mut()
+                .filter_map(|(child, value)| belongs(child).then_some(value)),
+        );
+    }
+}
+
+fn hover_pane<'a>(
+    commands: &mut Commands,
+    selection: &market::Selection,
+    cached: &mut ChartDisplay,
+    clicked: bool,
+    allowed: bool,
+    mut plots: impl Iterator<Item = &'a RelativeCursorPosition>,
+    tables: impl Iterator<Item = (Entity, Mut<'a, DayTable>)>,
+    readouts: impl Iterator<Item = Mut<'a, Text>>,
+) {
+    let hovered = plots.find_map(|cursor| {
         hover_index(
             cursor.normalized,
-            cursor.cursor_over
-                && selection.tab == market::Tab::Overview
-                && capture.as_ref().is_none_or(|capture| {
-                    capture.hovered == Some(crate::floating_ui::WindowKind::Market)
-                }),
+            cursor.cursor_over && selection.tab == market::Tab::Overview && allowed,
             cached.days.len(),
         )
     });
     if let Some(index) = hovered
-        && mouse.is_some_and(|mouse| mouse.just_pressed(MouseButton::Left))
+        && clicked
     {
         let start = cached.days[index].start;
         if cached.pinned != Some(start) {
@@ -848,7 +991,7 @@ pub fn hover(
         .filter(|_| cached.labour.is_none())
         .map(|index| day_table(selection.good(), cached.days[index].activity))
         .unwrap_or_default();
-    for (entity, mut table) in &mut tables {
+    for (entity, mut table) in tables {
         if table.0 != rows {
             table.0.clone_from(&rows);
             commands
@@ -882,7 +1025,7 @@ pub fn hover(
                 });
         }
     }
-    for mut text in &mut readouts {
+    for mut text in readouts {
         if text.0 != value {
             text.0.clone_from(&value);
         }
@@ -1546,7 +1689,9 @@ mod tests {
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<bevy::input_focus::InputFocus>()
         .add_systems(Startup, |mut commands: Commands| {
-            commands.spawn(Node::default()).with_children(spawn);
+            commands
+                .spawn(Node::default())
+                .with_children(|parent| spawn(parent, "Market history"));
         })
         .add_systems(Update, (market::handle_selection, refresh, hover).chain());
         app.update();
@@ -1709,12 +1854,13 @@ mod tests {
         .init_resource::<market::Selection>()
         .init_resource::<ChartDisplay>()
         .add_systems(Startup, |mut commands: Commands| {
-            commands.spawn(Node::default()).with_children(spawn);
+            commands
+                .spawn(Node::default())
+                .with_children(|parent| spawn(parent, "Market history"));
         })
         .add_systems(Update, (refresh, hover).chain());
         app.update();
         assert_eq!(app.world().resource::<ChartDisplay>().days.len(), 1);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Market;
         app.update();
         assert_eq!(app.world().resource::<ChartDisplay>().days.len(), 1);
         let entities: Vec<Entity> = app

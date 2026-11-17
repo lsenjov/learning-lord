@@ -11,6 +11,7 @@ use std::{
 pub struct Saves {
     pub directory: PathBuf,
     pub status: String,
+    pub startup_failed: bool,
     files: Vec<PathBuf>,
 }
 
@@ -19,6 +20,7 @@ impl Default for Saves {
         Self {
             directory: PathBuf::from("saves"),
             status: String::new(),
+            startup_failed: false,
             files: Vec::new(),
         }
     }
@@ -145,6 +147,10 @@ pub(crate) struct FileList;
 pub(crate) struct LoadFile(PathBuf);
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
+    parent.spawn((
+        crate::text("", 13.0, crate::MUTED),
+        crate::Readout::PersistenceStatus,
+    ));
     parent.spawn((
         Node {
             flex_direction: FlexDirection::Column,
@@ -354,6 +360,7 @@ mod tests {
             .insert_resource(Saves {
                 directory: directory.clone(),
                 status: String::new(),
+                startup_failed: false,
                 files: vec![path.clone()],
             })
             .add_systems(Update, (refresh_window, handle_load).chain());

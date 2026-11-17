@@ -1,5 +1,6 @@
 use crate::{
-    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, market,
+    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT,
+    floating_ui::{FloatingWindow, WindowKind, Windows},
     simulation::{Command, Mutation, SimulationWorker},
     text,
 };
@@ -107,6 +108,13 @@ pub(crate) enum Field {
 
 #[derive(Resource, Default)]
 pub struct State {
+    overview: PaneState,
+    panes: std::collections::HashMap<PlaceId, PaneState>,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct PaneState {
     place: Option<PlaceId>,
     location_type: Option<Location>,
     draft: Option<Draft>,
@@ -119,24 +127,19 @@ pub struct State {
     good: Option<Good>,
     quantity: String,
     awaiting_mutation: Option<(u64, bool)>,
-    generation: u64,
     error: Option<String>,
     dirty: bool,
     revision: Option<u64>,
 }
 
 impl State {
-    pub(crate) fn selected_place(&self) -> Option<PlaceId> {
-        if self.location_type.is_none() {
-            self.place
-        } else {
-            None
-        }
-    }
     #[cfg(test)]
     pub fn pending_fixture() -> Self {
         Self {
-            awaiting_mutation: Some((0, false)),
+            overview: PaneState {
+                awaiting_mutation: Some((0, false)),
+                ..default()
+            },
             ..default()
         }
     }
@@ -144,23 +147,36 @@ impl State {
     #[cfg(test)]
     pub fn focused_fixture() -> Self {
         Self {
-            draft: Some(Draft::default()),
-            field: Some(Field::Name),
+            overview: PaneState {
+                draft: Some(Draft::default()),
+                field: Some(Field::Name),
+                ..default()
+            },
             ..default()
         }
     }
 
     pub(crate) fn invalidate(&mut self) {
-        self.dirty = true;
+        self.overview.dirty = true;
+        for pane in self.panes.values_mut() {
+            pane.dirty = true;
+        }
     }
 
     pub fn pending(&self) -> bool {
-        self.awaiting_mutation.is_some()
+        self.overview.awaiting_mutation.is_some()
+            || self
+                .panes
+                .values()
+                .any(|pane| pane.awaiting_mutation.is_some())
     }
 
     pub fn editing(&self) -> bool {
-        self.field.is_some()
+        self.overview.field.is_some() || self.panes.values().any(|pane| pane.field.is_some())
     }
+}
+
+impl PaneState {
     fn value_mut(&mut self, field: Field) -> Option<&mut String> {
         match field {
             Field::Quantity => Some(&mut self.quantity),
@@ -200,7 +216,7 @@ fn type_name(location: Location) -> String {
     format!("All {plural}")
 }
 
-impl State {
+impl PaneState {
     fn scope(&self) -> Option<TaxScope> {
         self.location_type
             .map(TaxScope::LocationType)
@@ -333,7 +349,13 @@ fn row(parent: &mut ChildSpawnerCommands, children: impl FnOnce(&mut ChildSpawne
         .with_children(children);
 }
 
-fn field(parent: &mut ChildSpawnerCommands, label: &str, value: &str, id: Field, state: &State) {
+fn field(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    value: &str,
+    id: Field,
+    state: &PaneState,
+) {
     button(
         parent,
         format!(
@@ -346,30 +368,32 @@ fn field(parent: &mut ChildSpawnerCommands, label: &str, value: &str, id: Field,
     );
 }
 
+#[derive(Component)]
+pub(crate) struct EntityDetails(PlaceId);
+
+#[derive(Component)]
+pub(crate) struct Overview;
+
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
-    parent
-        .spawn((
-            market::ViewPanel(market::View::Locations),
-            Visibility::Hidden,
-            Node {
-                display: Display::None,
-                width: percent(100),
-                flex_grow: 1.0,
-                min_height: px(0),
-                ..default()
-            },
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Content,
-                Node {
-                    width: percent(100),
-                    min_height: px(0),
-                    column_gap: px(14),
-                    ..default()
-                },
-            ));
-        });
+    spawn_content(parent, Overview);
+}
+
+pub(crate) fn spawn_entity(parent: &mut ChildSpawnerCommands, place: PlaceId) {
+    spawn_content(parent, EntityDetails(place));
+}
+
+fn spawn_content(parent: &mut ChildSpawnerCommands, details: impl Bundle) {
+    parent.spawn((
+        Content,
+        details,
+        Node {
+            width: percent(100),
+            flex_grow: 1.0,
+            min_height: px(0),
+            column_gap: px(14),
+            ..default()
+        },
+    ));
 }
 
 pub(crate) fn name(universe: &Universe, id: AgentId) -> String {
@@ -756,7 +780,7 @@ fn render_hierarchy(
     parent: &mut ChildSpawnerCommands,
     universe: &Universe,
     place: &Place,
-    construction: &crate::construction::State,
+    construction: &crate::construction::PaneState,
 ) {
     use crate::navigation::Fragment as F;
     if place.buildings.is_empty() && place.outdoor_objects.is_empty() {
@@ -901,23 +925,105 @@ fn render_hierarchy(
 pub fn refresh(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
-    mut state: ResMut<State>,
-    roots: Query<Entity, With<Content>>,
-    panels: Query<(&ScrollPanel, &ScrollPosition)>,
+    mut overview: ResMut<State>,
+    roots: Query<
+        (
+            Entity,
+            Option<&EntityDetails>,
+            Has<Overview>,
+            Option<&Children>,
+        ),
+        With<Content>,
+    >,
+    panels: Query<(Entity, &ScrollPanel, &ScrollPosition)>,
+    parents: Query<&ChildOf>,
     construction: Option<Res<crate::construction::State>>,
+    windows: Option<Res<Windows>>,
 ) {
-    if state.generation != snapshot.0.generation {
-        *state = State {
-            generation: snapshot.0.generation,
+    reset_generation(&mut overview, snapshot.0.generation);
+    resolve_mutation(&mut overview.overview, &snapshot);
+    for pane in overview.panes.values_mut() {
+        resolve_mutation(pane, &snapshot);
+    }
+    overview.panes.retain(|place, pane| {
+        pane.awaiting_mutation.is_some()
+            || (snapshot.0.universe.map().place(*place).is_ok()
+                && windows
+                    .as_ref()
+                    .is_none_or(|windows| windows.tracked(WindowKind::Location(*place))))
+    });
+    let default_construction = crate::construction::PaneState::default();
+    for (root, details, overview_page, children) in &roots {
+        let place = details.map(|details| details.0);
+        let kind = place.map_or(WindowKind::Locations, WindowKind::Location);
+        if windows
+            .as_ref()
+            .is_some_and(|windows| !windows.is_open(kind))
+        {
+            continue;
+        }
+        let state = pane_state(&mut overview, place);
+        if !state.dirty && state.revision == Some(snapshot.0.revision) && children.is_some() {
+            continue;
+        }
+        let mut offsets = [Vec2::ZERO; 2];
+        for (entity, panel, scroll) in &panels {
+            if parents
+                .iter_ancestors(entity)
+                .any(|ancestor| ancestor == root)
+            {
+                offsets[match panel {
+                    ScrollPanel::List => 0,
+                    ScrollPanel::Details => 1,
+                }] = scroll.0;
+            }
+        }
+        refresh_pane(
+            &mut commands,
+            &snapshot,
+            root,
+            state,
+            place.is_none(),
+            !overview_page,
+            offsets,
+            construction
+                .as_deref()
+                .and_then(|state| state.pane(place))
+                .unwrap_or(&default_construction),
+        );
+    }
+}
+
+fn pane_state(state: &mut State, place: Option<PlaceId>) -> &mut PaneState {
+    if let Some(place) = place {
+        state.panes.entry(place).or_insert_with(|| PaneState {
+            place: Some(place),
             dirty: true,
             ..default()
-        };
+        })
+    } else {
+        &mut state.overview
     }
+}
+
+fn reset_generation(state: &mut State, generation: u64) -> bool {
+    if state.generation == generation {
+        return false;
+    }
+    *state = State {
+        generation,
+        ..default()
+    };
+    true
+}
+
+fn resolve_mutation(state: &mut PaneState, snapshot: &DisplaySnapshot) {
     if state
         .awaiting_mutation
         .is_some_and(|(revision, _)| snapshot.0.mutation_revision > revision)
     {
         let (_, saved) = state.awaiting_mutation.take().unwrap();
+        state.error.clone_from(&snapshot.0.mutation_error);
         let scope = state.pending_scope.take().or_else(|| state.scope());
         if saved && snapshot.0.mutation_error.is_none() {
             if scope == state.scope() {
@@ -929,9 +1035,18 @@ pub fn refresh(
         }
         state.dirty = true;
     }
-    if !state.dirty && state.revision == Some(snapshot.0.revision) {
-        return;
-    }
+}
+
+fn refresh_pane(
+    commands: &mut Commands,
+    snapshot: &DisplaySnapshot,
+    root: Entity,
+    state: &mut PaneState,
+    show_list: bool,
+    show_individual: bool,
+    [list_scroll, details_scroll]: [Vec2; 2],
+    construction: &crate::construction::PaneState,
+) {
     let universe = &snapshot.0.universe;
     let map = universe.map();
     let mut places: Vec<_> = map.places().values().collect();
@@ -940,27 +1055,25 @@ pub fn refresh(
         state.place = places.first().map(|place| place.id);
     }
     let place = state.place.and_then(|id| map.place(id).ok());
-    if state.location_type.is_none() && place.is_none() {
+    if !show_list && state.location_type.is_none() && place.is_none() {
+        commands
+            .entity(root)
+            .despawn_children()
+            .with_children(|parent| {
+                parent.spawn(text("No location available", 14.0, MUTED));
+            });
+        state.dirty = false;
+        state.revision = Some(snapshot.0.revision);
         return;
     }
     let citizens = citizen_ids(universe);
-    if state.citizen.is_none() {
+    if state.citizen.is_none_or(|id| !citizens.contains(&id)) {
         state.citizen = citizens.first().copied();
-    }
-    let Some(root) = roots.iter().next() else {
-        return;
-    };
-    let mut list_scroll = Vec2::ZERO;
-    let mut details_scroll = Vec2::ZERO;
-    for (panel, scroll) in &panels {
-        match panel {
-            ScrollPanel::List => list_scroll = scroll.0,
-            ScrollPanel::Details => details_scroll = scroll.0,
-        }
     }
     commands.entity(root).despawn_children();
     commands.entity(root).with_children(|parent| {
-        parent.spawn((Node { width: px(250), flex_shrink: 0.0, min_height: px(0), flex_direction: FlexDirection::Column, row_gap: px(7), overflow: Overflow::scroll_y(), ..default() }, ScrollPanel::List, ScrollPosition(list_scroll), RelativeCursorPosition::default()))
+        if show_list {
+        parent.spawn((Node { width: if show_individual || state.location_type.is_some() { px(250) } else { percent(100) }, flex_shrink: 0.0, min_height: px(0), flex_direction: FlexDirection::Column, row_gap: px(7), overflow: Overflow::scroll_y(), ..default() }, ScrollPanel::List, ScrollPosition(list_scroll), RelativeCursorPosition::default()))
             .with_children(|list| {
                 row(list, |row| {
                     button(row, "Individual places", Choice::IndividualPlaces, state.location_type.is_none());
@@ -970,9 +1083,13 @@ pub fn refresh(
                 if state.location_type.is_some() {
                     for kind in PRIVATE_TYPES { button(list, type_name(kind), Choice::LocationType(kind), state.location_type == Some(kind)); }
                 } else {
-                for place in &places { button(list, format!("{}\n{}", place.name, place_owner(universe, place)), Choice::Place(place.id), state.place == Some(place.id)); }
+                for place in &places { button(list, format!("{}\n{}", place.name, place_owner(universe, place)), Choice::Place(place.id), show_individual && state.place == Some(place.id)); }
                 }
             });
+        }
+        if state.location_type.is_none() && (!show_individual || place.is_none()) {
+            return;
+        }
         parent.spawn((Node { flex_basis: px(0), flex_grow: 1.0, min_width: px(0), min_height: px(0), padding: UiRect::all(px(16)), flex_direction: FlexDirection::Column, row_gap: px(12), overflow: Overflow::scroll_y(), border_radius: BorderRadius::all(px(12)), ..default() }, BackgroundColor(PANEL), ScrollPanel::Details, ScrollPosition(details_scroll), RelativeCursorPosition::default()))
             .with_children(|details| {
                 if let Some(location) = state.location_type {
@@ -983,8 +1100,6 @@ pub fn refresh(
                 details.spawn(text(&place.name, 23.0, TEXT));
                 let owner = if !place.kind.is_public() && place.owner.is_none() { crate::navigation::Fragment::text("Town") } else { place.owner.map_or_else(|| crate::navigation::Fragment::text("Public"), |id| crate::navigation::account(universe, id)) };
                 crate::navigation::render(details, &[crate::navigation::Fragment::text("Owner: "), owner], 15.0, MUTED);
-                let default_construction = crate::construction::State::default();
-                let construction = construction.as_deref().unwrap_or(&default_construction);
                 if place.owner.is_none() && !place.kind.is_public() && !place.kind.is_town_owned() {
                     row(details, |row| {
                         button(row, format!("Household: {}", state.grant_household.and_then(|id| universe.households().get(&id)).map_or("Select", |household| household.name.as_str())), Choice::GrantHousehold, false);
@@ -1036,7 +1151,7 @@ pub fn refresh(
                 } else {
                     details.spawn(text("Public and town locations have no location taxes.", 15.0, TEXT));
                 }
-                if let Some(error) = state.error.as_ref().or(snapshot.0.mutation_error.as_ref()) { details.spawn(text(error, 14.0, Color::srgb(1.0, 0.55, 0.48))); }
+                if let Some(error) = state.error.as_ref() { details.spawn(text(error, 14.0, Color::srgb(1.0, 0.55, 0.48))); }
                 details.spawn(text("TREASURY & COLLECTIONS", 15.0, MUTED));
                 for row in treasury_rows(universe) { crate::navigation::render(details, &row, 14.0, TEXT); }
             });
@@ -1045,7 +1160,12 @@ pub fn refresh(
     state.revision = Some(snapshot.0.revision);
 }
 
-fn editor(parent: &mut ChildSpawnerCommands, draft: &Draft, state: &State, universe: &Universe) {
+fn editor(
+    parent: &mut ChildSpawnerCommands,
+    draft: &Draft,
+    state: &PaneState,
+    universe: &Universe,
+) {
     parent.spawn(text(
         if draft.id.is_some() {
             "EDIT RULE"
@@ -1246,9 +1366,9 @@ fn tax_kind(draft: &Draft, goods: &[Good]) -> Result<TaxKind, String> {
 }
 
 pub fn handle(
-    mut state: ResMut<State>,
+    mut overview: ResMut<State>,
     (snapshot, worker): (Res<DisplaySnapshot>, Res<SimulationWorker>),
-    buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
+    buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
     mut keys: MessageReader<KeyboardInput>,
     (caravan, construction): (
         Option<Res<crate::caravan_controls::State>>,
@@ -1256,34 +1376,57 @@ pub fn handle(
     ),
     controls: Option<Res<crate::Controls>>,
     dev: Option<Res<crate::dev_controls::State>>,
-    mut windows: Option<ResMut<crate::floating_ui::Windows>>,
+    mut windows: Option<ResMut<Windows>>,
+    roots: Query<&FloatingWindow>,
+    parents: Query<&ChildOf>,
 ) {
-    if state.generation != snapshot.0.generation {
-        *state = State {
-            generation: snapshot.0.generation,
-            dirty: true,
-            ..default()
-        };
+    if reset_generation(&mut overview, snapshot.0.generation) {
         keys.clear();
         return;
     }
     if controls.is_some_and(|controls| controls.restart_pending) {
-        state.field = None;
+        stop_editing(&mut overview);
         keys.clear();
         return;
     }
-    if state.awaiting_mutation.is_some() {
-        keys.clear();
-        return;
-    }
+    let another_pending = dev.as_ref().is_some_and(|editor| editor.pending())
+        || caravan.as_ref().is_some_and(|editor| editor.pending())
+        || construction.as_ref().is_some_and(|editor| editor.pending());
     let universe = &snapshot.0.universe;
-    for (interaction, choice) in &buttons {
-        if state.awaiting_mutation.is_some() {
-            break;
-        }
+    for (entity, interaction, choice) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
+        let source = parents
+            .iter_ancestors(entity)
+            .find_map(|ancestor| roots.get(ancestor).ok())
+            .map(|root| root.0);
+        let place = source.and_then(|kind| match kind {
+            WindowKind::Location(place) => Some(place),
+            _ => None,
+        });
+        if let Choice::Place(place) = *choice
+            && let Some(windows) = windows.as_mut()
+        {
+            windows.open_link(source, WindowKind::Location(place));
+            continue;
+        }
+        if let Some(place) = place {
+            if let Choice::LocationType(kind) = *choice {
+                overview
+                    .overview
+                    .select_scope(Some(TaxScope::LocationType(kind)));
+                if let Some(windows) = windows.as_mut() {
+                    windows.link(WindowKind::Location(place), WindowKind::Locations);
+                }
+                continue;
+            }
+        }
+        if overview.pending() {
+            break;
+        }
+        focus_place(&mut overview, place);
+        let state = pane_state(&mut overview, place);
         state.dirty = true;
         state.error = None;
         if !matches!(choice, Choice::Field(_)) {
@@ -1327,9 +1470,6 @@ pub fn handle(
                 }
             },
             Choice::Place(place) => {
-                if let Some(windows) = windows.as_mut() {
-                    windows.open(crate::floating_ui::WindowKind::Locations);
-                }
                 state.select_place(place);
                 None
             }
@@ -1509,10 +1649,7 @@ pub fn handle(
             },
         };
         if let Some(mutation) = mutation {
-            if dev.as_ref().is_some_and(|editor| editor.pending())
-                || caravan.as_ref().is_some_and(|editor| editor.pending())
-                || construction.as_ref().is_some_and(|editor| editor.pending())
-            {
+            if another_pending {
                 state.error = Some("Another change is saving. Try again when it finishes.".into());
                 continue;
             }
@@ -1529,6 +1666,22 @@ pub fn handle(
             }
         }
     }
+    if overview.pending() {
+        keys.clear();
+        return;
+    }
+    let state = if overview.overview.field.is_some() {
+        &mut overview.overview
+    } else if let Some(pane) = overview
+        .panes
+        .values_mut()
+        .find(|pane| pane.field.is_some())
+    {
+        pane
+    } else {
+        keys.clear();
+        return;
+    };
     for key in keys.read() {
         if key.state != ButtonState::Pressed {
             continue;
@@ -1590,15 +1743,25 @@ pub fn handle(
     }
 }
 
-pub(crate) fn select_place(state: &mut State, place: PlaceId) {
-    state.place = Some(place);
-    state.location_type = None;
-    state.draft = None;
-    state.field = None;
-    state.dirty = true;
+pub(crate) fn stop_editing(state: &mut State) {
+    stop_field(&mut state.overview);
+    for pane in state.panes.values_mut() {
+        stop_field(pane);
+    }
 }
 
-pub(crate) fn stop_editing(state: &mut State) {
+pub(crate) fn focus_place(state: &mut State, place: Option<PlaceId>) {
+    if place.is_some() {
+        stop_field(&mut state.overview);
+    }
+    for (&other, pane) in &mut state.panes {
+        if Some(other) != place {
+            stop_field(pane);
+        }
+    }
+}
+
+fn stop_field(state: &mut PaneState) {
     if state.field.take().is_some() {
         state.dirty = true;
     }
@@ -1893,7 +2056,7 @@ mod tests {
     fn switching_scopes_preserves_drafts_and_clears_focus() {
         let universe = Universe::default();
         let place = *universe.map().places().keys().next().unwrap();
-        let mut state = State::default();
+        let mut state = PaneState::default();
         state.select_place(place);
         state.draft = Some(Draft {
             name: "Place draft".into(),
@@ -1901,7 +2064,7 @@ mod tests {
         });
         state.field = Some(Field::Name);
         state.select_scope(Some(TaxScope::LocationType(Location::Field)));
-        assert!(!state.editing());
+        assert!(state.field.is_none());
         assert!(state.draft.is_none());
         state.draft = Some(Draft {
             name: "Type draft".into(),
@@ -1922,7 +2085,7 @@ mod tests {
         let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
         let mut snapshot = worker.snapshot();
         snapshot.mutation_revision = 1;
-        let mut state = State::default();
+        let mut state = PaneState::default();
         state.select_place(place);
         state.draft = Some(Draft {
             name: "Saved".into(),
@@ -1937,10 +2100,14 @@ mod tests {
         });
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(snapshot))
-            .insert_resource(state)
+            .insert_resource(State {
+                overview: state,
+                ..default()
+            })
             .add_systems(Update, refresh);
         app.update();
         let mut state = app.world_mut().resource_mut::<State>();
+        let state = &mut state.overview;
         assert_eq!(state.draft.as_ref().unwrap().name, "Unsaved");
         state.select_place(place);
         assert!(state.draft.is_none());
@@ -2066,16 +2233,74 @@ mod tests {
         assert!(plot_readout(1, Some(crop), 96 * HOUR_MS).contains("Dead | Expected 0 g"));
     }
 
+    #[test]
+    fn two_location_panes_keep_transfer_fields_independent() {
+        use crate::floating_ui::{FloatingWindow, WindowKind::Location as PlacePane};
+        let universe = crate::simulation::new_universe().unwrap();
+        let [first, second]: [PlaceId; 2] = universe
+            .map()
+            .places()
+            .keys()
+            .copied()
+            .take(2)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let mut app = ui_app(universe, State::default());
+        app.init_resource::<Windows>().add_systems(
+            Update,
+            (crate::inspectors::open_windows, refresh)
+                .chain()
+                .after(handle),
+        );
+        let mut windows = app.world_mut().resource_mut::<Windows>();
+        windows.open(PlacePane(first));
+        windows.link(PlacePane(first), PlacePane(second));
+        app.update();
+
+        fn field_button(world: &mut World, place: PlaceId) -> Entity {
+            world
+                .query::<(Entity, &Choice)>()
+                .iter(world)
+                .find(|(entity, choice)| {
+                    if !matches!(choice, Choice::Field(Field::Quantity)) {
+                        return false;
+                    }
+                    let mut entity = *entity;
+                    while let Some(parent) = world.get::<ChildOf>(entity) {
+                        entity = parent.parent();
+                        if let Some(root) = world.get::<FloatingWindow>(entity) {
+                            return root.0 == PlacePane(place);
+                        }
+                    }
+                    false
+                })
+                .unwrap()
+                .0
+        }
+
+        for (place, input) in [(first, "125"), (second, "23")] {
+            let field = field_button(app.world_mut(), place);
+            app.world_mut()
+                .entity_mut(field)
+                .insert(Interaction::Pressed);
+            type_text(&mut app, input);
+        }
+        let state = app.world().resource::<State>();
+        assert_eq!(state.panes[&first].quantity, "125");
+        assert!(state.panes[&first].field.is_none());
+        assert_eq!(state.panes[&second].quantity, "23");
+        assert!(state.panes[&second].field == Some(Field::Quantity));
+    }
+
     fn ui_app(universe: Universe, state: State) -> App {
         let worker = SimulationWorker::spawn(universe, 60.try_into().unwrap());
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
             .insert_resource(state)
-            .init_resource::<market::Selection>()
             .add_message::<KeyboardInput>()
             .add_systems(Update, handle);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         app
     }
 
@@ -2135,11 +2360,17 @@ mod tests {
         let mut app = ui_app(
             world.clone(),
             State {
-                place: Some(place),
+                overview: PaneState {
+                    place: Some(place),
+                    ..default()
+                },
                 ..default()
             },
         );
-        app.world_mut().resource_mut::<State>().awaiting_mutation = Some((0, false));
+        app.world_mut()
+            .resource_mut::<State>()
+            .overview
+            .awaiting_mutation = Some((0, false));
         press(&mut app, Choice::GuestBed(place, bed, true));
         assert!(app.world().resource::<State>().pending());
         assert_eq!(
@@ -2149,7 +2380,10 @@ mod tests {
                 .mutation_revision,
             0
         );
-        app.world_mut().resource_mut::<State>().awaiting_mutation = None;
+        app.world_mut()
+            .resource_mut::<State>()
+            .overview
+            .awaiting_mutation = None;
         press(&mut app, Choice::GuestBed(place, bed, true));
         assert!(app.world().resource::<State>().pending());
         press(&mut app, Choice::GuestBed(place, bed, false));
@@ -2263,7 +2497,10 @@ mod tests {
         let mut app = ui_app(
             world,
             State {
-                place: Some(site),
+                overview: PaneState {
+                    place: Some(site),
+                    ..default()
+                },
                 ..default()
             },
         );
@@ -2271,6 +2508,7 @@ mod tests {
         assert!(
             app.world()
                 .resource::<State>()
+                .overview
                 .error
                 .as_ref()
                 .unwrap()
@@ -2278,7 +2516,7 @@ mod tests {
         );
         press(&mut app, Choice::GrantHousehold);
         assert_eq!(
-            app.world().resource::<State>().grant_household,
+            app.world().resource::<State>().overview.grant_household,
             Some(household)
         );
         press(&mut app, Choice::Grant);
@@ -2309,29 +2547,51 @@ mod tests {
         let mut app = ui_app(
             Universe::default(),
             State {
-                location_type: Some(Location::Field),
+                overview: PaneState {
+                    location_type: Some(Location::Field),
+                    ..default()
+                },
                 ..default()
             },
         );
         press(&mut app, Choice::New);
         assert_eq!(
-            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            app.world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap()
+                .name,
             "All fields Flat fee"
         );
         press(&mut app, Choice::Kind(Kind::Income));
         assert_eq!(
-            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            app.world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap()
+                .name,
             "All fields Income"
         );
         {
             let mut state = app.world_mut().resource_mut::<State>();
+            let state = &mut state.overview;
             let draft = state.draft.as_mut().unwrap();
             draft.name = "Custom charge".into();
             draft.automatic_name = false;
         }
         press(&mut app, Choice::Kind(Kind::Asset));
         assert_eq!(
-            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            app.world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap()
+                .name,
             "Custom charge"
         );
     }
@@ -2351,12 +2611,21 @@ mod tests {
         let mut app = ui_app(
             universe,
             State {
-                location_type: Some(Location::Field),
+                overview: PaneState {
+                    location_type: Some(Location::Field),
+                    ..default()
+                },
                 ..default()
             },
         );
         press(&mut app, Choice::Edit(id));
-        let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+        let draft = app
+            .world()
+            .resource::<State>()
+            .overview
+            .draft
+            .as_ref()
+            .unwrap();
         assert_eq!(
             tax_kind(draft, &Good::ALL).unwrap(),
             TaxKind::FlatFee {
@@ -2366,7 +2635,13 @@ mod tests {
         );
         press(&mut app, Choice::Kind(Kind::Income));
         assert_eq!(
-            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            app.world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap()
+                .name,
             "Original"
         );
         assert!(WEEKLY_TAX_TIME.contains("Sunday at 04:00"));
@@ -2392,7 +2667,10 @@ mod tests {
             let mut app = ui_app(
                 universe,
                 State {
-                    location_type: Some(Location::Field),
+                    overview: PaneState {
+                        location_type: Some(Location::Field),
+                        ..default()
+                    },
                     ..default()
                 },
             );
@@ -2400,11 +2678,18 @@ mod tests {
             press(&mut app, Choice::Kind(Kind::FlatFee));
             app.world_mut()
                 .resource_mut::<State>()
+                .overview
                 .draft
                 .as_mut()
                 .unwrap()
                 .coins = "1".into();
-            let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+            let draft = app
+                .world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap();
             assert_eq!(
                 tax_kind(draft, &Good::ALL).unwrap(),
                 TaxKind::FlatFee {
@@ -2453,12 +2738,13 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(State {
-                place: Some(place),
+                overview: PaneState {
+                    place: Some(place),
+                    ..default()
+                },
                 ..default()
             })
-            .init_resource::<market::Selection>()
             .add_systems(Update, refresh);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         app.world_mut().spawn((Content, Node::default()));
         app.update();
         let labels: Vec<_> = app
@@ -2504,9 +2790,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .init_resource::<State>()
-            .init_resource::<market::Selection>()
             .add_systems(Update, refresh);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         app.world_mut().spawn((Content, Node::default()));
         app.update();
         for (panel, mut scroll) in app
@@ -2519,7 +2803,7 @@ mod tests {
                 ScrollPanel::Details => 456.0,
             };
         }
-        app.world_mut().resource_mut::<State>().dirty = true;
+        app.world_mut().resource_mut::<State>().overview.dirty = true;
         app.world_mut().resource_mut::<DisplaySnapshot>().0.revision += 1;
         app.update();
         for (panel, scroll) in app
@@ -2543,18 +2827,19 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
-            .init_resource::<market::Selection>()
             .insert_resource(State {
-                awaiting_mutation: Some((0, false)),
-                draft: Some(Draft {
-                    name: "Keep this".into(),
+                overview: PaneState {
+                    awaiting_mutation: Some((0, false)),
+                    draft: Some(Draft {
+                        name: "Keep this".into(),
+                        ..default()
+                    }),
                     ..default()
-                }),
+                },
                 ..default()
             })
             .add_message::<KeyboardInput>()
             .add_systems(Update, handle);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         app.world_mut().spawn((Choice::Save, Interaction::Pressed));
         app.update();
         assert_eq!(
@@ -2564,7 +2849,7 @@ mod tests {
                 .mutation_revision,
             0
         );
-        assert!(app.world().resource::<State>().draft.is_some());
+        assert!(app.world().resource::<State>().overview.draft.is_some());
     }
 
     fn type_key(app: &mut App, logical_key: Key) {
@@ -2592,13 +2877,16 @@ mod tests {
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
             .insert_resource(State {
-                draft: Some(Draft {
-                    coins: "100".into(),
-                    all_rate: "0.00".into(),
-                    rates: vec![(Good::Wheat, "20.00".into())],
+                overview: PaneState {
+                    draft: Some(Draft {
+                        coins: "100".into(),
+                        all_rate: "0.00".into(),
+                        rates: vec![(Good::Wheat, "20.00".into())],
+                        ..default()
+                    }),
+                    quantity: "100".into(),
                     ..default()
-                }),
-                quantity: "100".into(),
+                },
                 ..default()
             })
             .add_message::<KeyboardInput>()
@@ -2614,6 +2902,7 @@ mod tests {
             assert_eq!(
                 app.world_mut()
                     .resource_mut::<State>()
+                    .overview
                     .value_mut(field)
                     .unwrap(),
                 original
@@ -2625,6 +2914,7 @@ mod tests {
             assert_eq!(
                 app.world_mut()
                     .resource_mut::<State>()
+                    .overview
                     .value_mut(field)
                     .unwrap(),
                 original
@@ -2635,6 +2925,7 @@ mod tests {
             assert_eq!(
                 app.world_mut()
                     .resource_mut::<State>()
+                    .overview
                     .value_mut(field)
                     .unwrap(),
                 "20"
@@ -2643,6 +2934,7 @@ mod tests {
             assert_eq!(
                 app.world_mut()
                     .resource_mut::<State>()
+                    .overview
                     .value_mut(field)
                     .unwrap(),
                 "2"
@@ -2653,6 +2945,7 @@ mod tests {
             assert_eq!(
                 app.world_mut()
                     .resource_mut::<State>()
+                    .overview
                     .value_mut(field)
                     .unwrap(),
                 ""
@@ -2662,6 +2955,7 @@ mod tests {
             assert_eq!(
                 app.world_mut()
                     .resource_mut::<State>()
+                    .overview
                     .value_mut(field)
                     .unwrap(),
                 "2"
@@ -2674,6 +2968,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<State>()
+                .overview
                 .draft
                 .as_ref()
                 .unwrap()
@@ -2683,12 +2978,13 @@ mod tests {
         press_numeric_field(&mut app, Field::Quantity);
         type_text(&mut app, ".");
         type_text(&mut app, "7");
-        assert_eq!(app.world().resource::<State>().quantity, "7");
+        assert_eq!(app.world().resource::<State>().overview.quantity, "7");
         press_numeric_field(&mut app, Field::AllRate);
         type_text(&mut app, "3");
         assert_eq!(
             app.world()
                 .resource::<State>()
+                .overview
                 .draft
                 .as_ref()
                 .unwrap()
@@ -2699,7 +2995,13 @@ mod tests {
         type_text(&mut app, "Tax");
         type_text(&mut app, " name");
         assert_eq!(
-            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            app.world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap()
+                .name,
             "Tax name"
         );
     }
@@ -2719,11 +3021,9 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
-            .init_resource::<market::Selection>()
             .insert_resource(State::focused_fixture())
             .add_message::<KeyboardInput>()
             .add_systems(Update, handle);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         for logical_key in [
             Key::Character("Harvest".into()),
             Key::Space,
@@ -2742,7 +3042,13 @@ mod tests {
         }
         app.update();
         assert_eq!(
-            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            app.world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap()
+                .name,
             "Harvest fee"
         );
     }
@@ -2753,18 +3059,19 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
-            .init_resource::<market::Selection>()
             .insert_resource(State {
-                draft: Some(Draft {
-                    kind: Kind::Asset,
-                    all_rate: "5".into(),
+                overview: PaneState {
+                    draft: Some(Draft {
+                        kind: Kind::Asset,
+                        all_rate: "5".into(),
+                        ..default()
+                    }),
                     ..default()
-                }),
+                },
                 ..default()
             })
             .add_message::<KeyboardInput>()
             .add_systems(Update, handle);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         let button = app
             .world_mut()
             .spawn((Choice::Good(Good::Wheat), Interaction::Pressed))
@@ -2773,6 +3080,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<State>()
+                .overview
                 .draft
                 .as_ref()
                 .unwrap()
@@ -2783,7 +3091,13 @@ mod tests {
         app.update();
         *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Pressed;
         app.update();
-        let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+        let draft = app
+            .world()
+            .resource::<State>()
+            .overview
+            .draft
+            .as_ref()
+            .unwrap();
         assert!(draft.rates.is_empty());
         assert_eq!(draft.all_rate, "5");
     }
@@ -2804,23 +3118,30 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
-            .init_resource::<market::Selection>()
             .insert_resource(State {
-                place: Some(place),
-                draft: Some(Draft {
-                    kind: Kind::Asset,
-                    rates: vec![(Good::Wheat, "5".into()), (Good::Berries, "10".into())],
+                overview: PaneState {
+                    place: Some(place),
+                    draft: Some(Draft {
+                        kind: Kind::Asset,
+                        rates: vec![(Good::Wheat, "5".into()), (Good::Berries, "10".into())],
+                        ..default()
+                    }),
                     ..default()
-                }),
+                },
                 ..default()
             })
             .add_message::<KeyboardInput>()
             .add_systems(Update, handle);
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Locations;
         app.world_mut()
             .spawn((Choice::Kind(Kind::Socage), Interaction::Pressed));
         app.update();
-        let draft = app.world().resource::<State>().draft.as_ref().unwrap();
+        let draft = app
+            .world()
+            .resource::<State>()
+            .overview
+            .draft
+            .as_ref()
+            .unwrap();
         assert!(draft.kind == Kind::Socage);
         assert_eq!(draft.rates, vec![(Good::Wheat, "5".into())]);
     }
@@ -3164,19 +3485,27 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(snapshot))
             .insert_resource(State {
-                draft: Some(Draft {
-                    name: "Keep this".into(),
+                overview: PaneState {
+                    draft: Some(Draft {
+                        name: "Keep this".into(),
+                        ..default()
+                    }),
+                    awaiting_mutation: Some((0, true)),
+                    field: Some(Field::Name),
                     ..default()
-                }),
-                awaiting_mutation: Some((0, true)),
-                field: Some(Field::Name),
+                },
                 ..default()
             })
-            .init_resource::<market::Selection>()
             .add_systems(Update, refresh);
         app.update();
         assert_eq!(
-            app.world().resource::<State>().draft.as_ref().unwrap().name,
+            app.world()
+                .resource::<State>()
+                .overview
+                .draft
+                .as_ref()
+                .unwrap()
+                .name,
             "Keep this"
         );
         assert!(app.world().resource::<State>().editing());
@@ -3185,7 +3514,7 @@ mod tests {
             .0
             .generation = 1;
         app.update();
-        assert!(app.world().resource::<State>().draft.is_none());
+        assert!(app.world().resource::<State>().overview.draft.is_none());
         assert!(!app.world().resource::<State>().editing());
     }
     #[test]
@@ -3304,7 +3633,7 @@ mod tests {
                         parent,
                         &world,
                         place,
-                        &crate::construction::State::default(),
+                        &crate::construction::PaneState::default(),
                     );
                 }
             });

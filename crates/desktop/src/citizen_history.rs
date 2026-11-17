@@ -3,7 +3,7 @@ use bevy::{
     input_focus::{FocusCause, InputFocus},
     prelude::*,
 };
-use learning_lord_simulation::AgentId;
+use learning_lord_simulation::marketplace::Good;
 
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum View {
@@ -14,11 +14,10 @@ pub enum View {
     History,
 }
 
-#[derive(Resource, Default)]
+#[derive(Default)]
 pub struct Selection {
     view: View,
     day: Option<u64>,
-    citizen: Option<AgentId>,
     generation: u64,
 }
 
@@ -33,8 +32,8 @@ pub enum Choice {
 #[derive(Component)]
 pub struct HistoryText;
 
-#[derive(Component)]
-pub struct HistoryGoods;
+#[derive(Component, Default)]
+pub struct HistoryGoods(Option<Vec<(Good, String)>>);
 
 fn button(choice: Choice) -> impl Bundle {
     (
@@ -55,6 +54,8 @@ pub fn spawn_tabs(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn(Node {
             column_gap: px(8),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             flex_shrink: 0.0,
             ..default()
         })
@@ -120,7 +121,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                     flex_shrink: 0.0,
                     ..default()
                 },
-                HistoryGoods,
+                HistoryGoods::default(),
             ));
         });
 }
@@ -146,52 +147,79 @@ pub(crate) fn navigate(selected: Option<u64>, starts: &[u64], previous: bool) ->
 
 pub fn handle_selection(
     snapshot: Res<DisplaySnapshot>,
-    citizen: Res<citizens::Selection>,
-    mut selection: ResMut<Selection>,
-    buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
+    mut panes: Query<(Entity, &mut citizens::Detail)>,
+    parents: Query<&ChildOf>,
+    children: Query<&Children>,
+    buttons: Query<
+        (Entity, &Interaction, Option<&Choice>),
+        (
+            Changed<Interaction>,
+            Or<(With<Choice>, With<citizens::SkillsToggle>)>,
+        ),
+    >,
     mut focus: ResMut<InputFocus>,
     mut scroll: Query<&mut ScrollPosition, With<citizens::DetailScroll>>,
 ) {
-    let mut reset_scroll = false;
-    if selection.generation != snapshot.0.generation || selection.citizen != citizen.0 {
-        selection.day = None;
-        selection.citizen = citizen.0;
-        selection.generation = snapshot.0.generation;
-        reset_scroll = true;
+    let mut reset_scroll = |pane| {
+        if let Ok(children) = children.get(pane) {
+            for child in children.iter() {
+                if let Ok(mut position) = scroll.get_mut(child) {
+                    position.0 = Vec2::ZERO;
+                }
+            }
+        }
+    };
+    for (pane, mut detail) in &mut panes {
+        if detail.history.generation != snapshot.0.generation {
+            detail.history.day = None;
+            detail.history.generation = snapshot.0.generation;
+            reset_scroll(pane);
+        }
     }
-    let starts = citizen
-        .0
-        .and_then(|id| snapshot.0.universe.citizen_history(id))
-        .map_or_else(Vec::new, |history| {
-            history
-                .completed
-                .iter()
-                .chain(std::iter::once(&history.current))
-                .map(|day| day.start_ms)
-                .collect::<Vec<_>>()
-        });
     for (entity, interaction, choice) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
+        let Some(pane) = parents
+            .iter_ancestors(entity)
+            .find(|id| panes.contains(*id))
+        else {
+            continue;
+        };
+        let (_, mut detail) = panes.get_mut(pane).expect("ancestor has detail");
+        let Some(choice) = choice else {
+            detail.skills = !detail.skills;
+            continue;
+        };
         focus.set(entity, FocusCause::Pressed);
         match choice {
-            Choice::View(view) => selection.view = *view,
-            Choice::Previous => selection.day = navigate(selection.day, &starts, true),
-            Choice::Next => selection.day = navigate(selection.day, &starts, false),
+            Choice::View(view) => detail.history.view = *view,
+            Choice::Previous | Choice::Next => {
+                let starts = snapshot
+                    .0
+                    .universe
+                    .citizen_history(detail.citizen)
+                    .map_or_else(Vec::new, |history| {
+                        history
+                            .completed
+                            .iter()
+                            .chain(std::iter::once(&history.current))
+                            .map(|day| day.start_ms)
+                            .collect()
+                    });
+                detail.history.day = navigate(
+                    detail.history.day,
+                    &starts,
+                    matches!(choice, Choice::Previous),
+                );
+            }
         }
-        reset_scroll = true;
-    }
-    if reset_scroll {
-        for mut position in &mut scroll {
-            position.0 = Vec2::ZERO;
-        }
+        reset_scroll(pane);
     }
 }
 
 #[cfg(test)]
 fn goods_label(day: &learning_lord_simulation::history::DailyCitizenHistory) -> String {
-    use learning_lord_simulation::marketplace::Good;
     let mut rows = Vec::new();
     for good in Good::ALL {
         let i = good as usize;
@@ -275,132 +303,144 @@ fn day_label_with_goods(
 }
 
 pub fn refresh(
-    (snapshot, citizen, selection): (
-        Res<DisplaySnapshot>,
-        Res<citizens::Selection>,
-        Res<Selection>,
-    ),
-    mut panels: Query<(Ref<ViewPanel>, &mut Node, &mut Visibility)>,
+    snapshot: Res<DisplaySnapshot>,
+    panes: Query<(Entity, Ref<citizens::Detail>)>,
+    children: Query<&Children>,
+    mut panels: Query<(&ViewPanel, &mut Node, &mut Visibility)>,
     mut buttons: Query<(&Choice, Ref<Interaction>, &mut BackgroundColor)>,
     mut readouts: Query<&mut Text, With<HistoryText>>,
     mut commands: Commands,
-    goods_panels: Query<(Entity, Ref<HistoryGoods>)>,
-    mut goods_cache: Local<Option<Vec<(learning_lord_simulation::marketplace::Good, String)>>>,
+    mut goods_panels: Query<&mut HistoryGoods>,
 ) {
-    if !snapshot.is_changed()
-        && !citizen.is_changed()
-        && !selection.is_changed()
-        && !panels.iter().any(|(panel, _, _)| panel.is_added())
-        && !goods_panels.iter().any(|(_, panel)| panel.is_added())
-        && !buttons
-            .iter()
-            .any(|(_, interaction, _)| interaction.is_changed())
-    {
-        return;
-    }
-    for (panel, mut node, mut visibility) in &mut panels {
-        let visible = panel.0 == selection.view;
-        let display = if visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        if node.display != display {
-            node.display = display;
+    for (pane, detail) in &panes {
+        if !detail.visible {
+            continue;
         }
-        let next = if visible {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *visibility != next {
-            *visibility = next;
-        }
-    }
-    let history = citizen
-        .0
-        .and_then(|id| snapshot.0.universe.citizen_history(id));
-    let days = history.map_or_else(Vec::new, |history| {
-        history
-            .completed
-            .iter()
-            .chain(std::iter::once(&history.current))
-            .collect::<Vec<_>>()
-    });
-    let starts = days.iter().map(|day| day.start_ms).collect::<Vec<_>>();
-    let index = selected_day(selection.day, &starts);
-    for (choice, interaction, mut color) in &mut buttons {
-        let selected = matches!(choice, Choice::View(view) if *view == selection.view);
-        let disabled = match choice {
-            Choice::Previous => index.is_none_or(|index| index == 0),
-            Choice::Next => index.is_none_or(|index| index + 1 == days.len()),
-            _ => false,
-        };
-        let next = if selected {
-            SELECTED
-        } else if disabled {
-            Color::srgb(0.08, 0.10, 0.12)
-        } else if *interaction == Interaction::Hovered {
-            Color::srgb(0.16, 0.23, 0.26)
-        } else {
-            PANEL
-        };
-        if color.0 != next {
-            color.0 = next;
-        }
-    }
-    if selection.view != View::History {
-        return;
-    }
-    let mut value = index.map_or_else(
-        || "No citizen history available.".into(),
-        |index| day_label_with_goods(days[index], index + 1 == days.len(), ""),
-    );
-    if let Some(index) = index {
-        let start = days[index].start_ms;
-        let planning = citizen
-            .0
-            .and_then(|id| snapshot.0.planning_history.get(&id))
-            .and_then(|history| {
-                history
-                    .completed
-                    .iter()
-                    .chain(std::iter::once(&history.current))
-                    .find(|day| day.start_ms == start)
-            });
-        let (request, wait, requests) = planning.map_or((0.0, 0.0, 0), |day| {
-            (day.request_ms, day.wait_ms, day.requests)
-        });
-        value.push_str(&format!("\n\nBACKGROUND PLANNING · REAL WALL TIME\nRequest queue + work {:.3} s  |  {} requests\nBlocked at action boundary {:.3} s", request / 1000.0, requests, wait / 1000.0));
-    }
-    use learning_lord_simulation::marketplace::Good;
-    let goods = index.map_or_else(Vec::new, |index| {
-        let day = days[index];
-        Good::ALL
-            .into_iter()
-            .filter_map(|good| {
-                let i = good as usize;
-                let units = [day.produced[i], day.bought[i], day.sold[i], day.consumed[i]];
-                units.iter().any(|units| *units != 0).then(|| {
-                    (
-                        good,
-                        format!(
-                            "produced {} · bought {} · sold {} · consumed {}",
-                            crate::quantity_label(good, units[0]),
-                            crate::quantity_label(good, units[1]),
-                            crate::quantity_label(good, units[2]),
-                            crate::quantity_label(good, units[3])
-                        ),
-                    )
-                })
+        let selection = &detail.history;
+        let citizen = detail.citizen;
+        let descendants = || children.iter_descendants(pane);
+        if !snapshot.is_changed()
+            && !detail.is_changed()
+            && !descendants().any(|entity| {
+                buttons
+                    .get(entity)
+                    .is_ok_and(|(_, interaction, _)| interaction.is_changed())
             })
-            .collect::<Vec<_>>()
-    });
-    if goods_cache.as_ref() != Some(&goods)
-        || goods_panels.iter().any(|(_, panel)| panel.is_added())
-    {
-        for (entity, _) in &goods_panels {
-            commands.entity(entity).despawn_children().with_children(|panel| {
+        {
+            continue;
+        }
+        for entity in descendants() {
+            let Ok((panel, mut node, mut visibility)) = panels.get_mut(entity) else {
+                continue;
+            };
+            let visible = panel.0 == selection.view;
+            let display = if visible {
+                Display::Flex
+            } else {
+                Display::None
+            };
+            if node.display != display {
+                node.display = display;
+            }
+            let next = if visible {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *visibility != next {
+                *visibility = next;
+            }
+        }
+        let history = snapshot.0.universe.citizen_history(citizen);
+        let days = history.map_or_else(Vec::new, |history| {
+            history
+                .completed
+                .iter()
+                .chain(std::iter::once(&history.current))
+                .collect::<Vec<_>>()
+        });
+        let starts = days.iter().map(|day| day.start_ms).collect::<Vec<_>>();
+        let index = selected_day(selection.day, &starts);
+        for entity in descendants() {
+            let Ok((choice, interaction, mut color)) = buttons.get_mut(entity) else {
+                continue;
+            };
+            let selected = matches!(choice, Choice::View(view) if *view == selection.view);
+            let disabled = match choice {
+                Choice::Previous => index.is_none_or(|index| index == 0),
+                Choice::Next => index.is_none_or(|index| index + 1 == days.len()),
+                _ => false,
+            };
+            let next = if selected {
+                SELECTED
+            } else if disabled {
+                Color::srgb(0.08, 0.10, 0.12)
+            } else if *interaction == Interaction::Hovered {
+                Color::srgb(0.16, 0.23, 0.26)
+            } else {
+                PANEL
+            };
+            if color.0 != next {
+                color.0 = next;
+            }
+        }
+        if selection.view != View::History {
+            continue;
+        }
+        let mut value = index.map_or_else(
+            || "No citizen history available.".into(),
+            |index| day_label_with_goods(days[index], index + 1 == days.len(), ""),
+        );
+        if let Some(index) = index {
+            let start = days[index].start_ms;
+            let planning = snapshot
+                .0
+                .planning_history
+                .get(&citizen)
+                .and_then(|history| {
+                    history
+                        .completed
+                        .iter()
+                        .chain(std::iter::once(&history.current))
+                        .find(|day| day.start_ms == start)
+                });
+            let (request, wait, requests) = planning.map_or((0.0, 0.0, 0), |day| {
+                (day.request_ms, day.wait_ms, day.requests)
+            });
+            value.push_str(&format!("\n\nBACKGROUND PLANNING · REAL WALL TIME\nRequest queue + work {:.3} s  |  {} requests\nBlocked at action boundary {:.3} s", request / 1000.0, requests, wait / 1000.0));
+        }
+        let goods = index.map_or_else(Vec::new, |index| {
+            let day = days[index];
+            Good::ALL
+                .into_iter()
+                .filter_map(|good| {
+                    let i = good as usize;
+                    let units = [day.produced[i], day.bought[i], day.sold[i], day.consumed[i]];
+                    units.iter().any(|units| *units != 0).then(|| {
+                        (
+                            good,
+                            format!(
+                                "produced {} · bought {} · sold {} · consumed {}",
+                                crate::quantity_label(good, units[0]),
+                                crate::quantity_label(good, units[1]),
+                                crate::quantity_label(good, units[2]),
+                                crate::quantity_label(good, units[3])
+                            ),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for entity in descendants() {
+            if let Ok(mut readout) = readouts.get_mut(entity) {
+                if readout.0 != value {
+                    readout.0.clone_from(&value);
+                }
+            }
+            if let Ok(mut cache) = goods_panels.get_mut(entity)
+                && cache.0.as_ref() != Some(&goods)
+            {
+                commands.entity(entity).despawn_children().with_children(|panel| {
                 panel.spawn((text("Goods (i)", 14.0, MUTED), Interaction::None, crate::tooltip::Tooltip("Consumed includes recipe inputs, food and water reserved when eating or drinking starts, and equipped clothing.".into())));
                 if goods.is_empty() {
                     panel.spawn(text("No goods produced, traded or consumed yet.", 14.0, TEXT));
@@ -412,14 +452,8 @@ pub fn refresh(
                     });
                 }
             });
-        }
-        if !goods_panels.is_empty() {
-            *goods_cache = Some(goods);
-        }
-    }
-    for mut readout in &mut readouts {
-        if readout.0 != value {
-            readout.0.clone_from(&value);
+                cache.0 = Some(goods.clone());
+            }
         }
     }
 }
@@ -470,19 +504,17 @@ mod tests {
             generation: 0,
             revision: 0,
         }))
-        .insert_resource(citizens::Selection(Some(id)))
-        .insert_resource(Selection {
-            view: View::History,
-            day: Some(123),
-            citizen: Some(id),
-            generation: 0,
-        })
         .init_resource::<InputFocus>()
-        .add_systems(Startup, |mut commands: Commands| {
-            commands.spawn(Node::default()).with_children(|parent| {
-                spawn_tabs(parent);
-                spawn(parent);
-            });
+        .add_systems(Startup, move |mut commands: Commands| {
+            let mut detail = citizens::Detail::new(id);
+            detail.history.day = Some(123);
+            detail.history.view = View::History;
+            commands
+                .spawn((Node::default(), detail))
+                .with_children(|parent| {
+                    spawn_tabs(parent);
+                    spawn(parent);
+                });
         })
         .add_systems(Update, (handle_selection, refresh).chain());
         app.update();
@@ -497,7 +529,12 @@ mod tests {
             .0
             .generation = 1;
         app.update();
-        assert_eq!(app.world().resource::<Selection>().day, None);
-        assert!(app.world().resource::<Selection>().view == View::History);
+        let detail = app
+            .world_mut()
+            .query::<&citizens::Detail>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(detail.history.day, None);
+        assert!(detail.history.view == View::History);
     }
 }

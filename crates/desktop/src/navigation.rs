@@ -1,7 +1,7 @@
 use crate::{
-    DisplaySnapshot, citizens, collectives,
+    DisplaySnapshot,
     floating_ui::{WindowKind, Windows},
-    locations, market, text,
+    text,
 };
 use bevy::prelude::*;
 use learning_lord_simulation::{AgentId, locations::PlaceId, marketplace::Good};
@@ -30,13 +30,6 @@ pub(crate) fn link(parent: &mut ChildSpawnerCommands, label: impl Into<String>, 
         });
 }
 
-type DetailScroll = (
-    Entity,
-    &'static mut ScrollPosition,
-    Option<&'static citizens::DetailScroll>,
-    Option<&'static collectives::ScrollPanel>,
-    Option<&'static locations::ScrollPanel>,
-);
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct Input<'w, 's> {
     links: Query<
@@ -53,30 +46,19 @@ pub(crate) struct Input<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
     roots: Query<'w, 's, &'static crate::floating_ui::FloatingWindow>,
     capture: Option<Res<'w, crate::floating_ui::InputCapture>>,
-    scrolls: Query<'w, 's, DetailScroll>,
 }
-
-type Destinations<'w> = (
-    ResMut<'w, citizens::Selection>,
-    ResMut<'w, collectives::State>,
-    ResMut<'w, locations::State>,
-    ResMut<'w, market::Selection>,
-    ResMut<'w, Windows>,
-);
 
 pub(crate) fn handle(
     input: Input,
     snapshot: Res<DisplaySnapshot>,
     mut generation: Local<u64>,
-    mut roster: Option<ResMut<citizens::RosterState>>,
-    (mut citizens, mut collectives, mut locations, mut market, mut windows): Destinations,
+    mut windows: ResMut<Windows>,
 ) {
     let Input {
         links,
         parents,
         roots,
         capture,
-        mut scrolls,
     } = input;
     if *generation != snapshot.0.generation {
         *generation = snapshot.0.generation;
@@ -97,59 +79,17 @@ pub(crate) fn handle(
             continue;
         }
         let universe = &snapshot.0.universe;
-        let changed = match *target {
-            Target::Citizen(id) => citizens.0 != Some(id),
-            Target::Household(id) => {
-                collectives.tab() != collectives::Tab::Households
-                    || collectives.selected() != Some(id)
-            }
-            Target::Guild(id) => {
-                collectives.tab() != collectives::Tab::Guilds
-                    || collectives.selected_guild() != Some(id)
-            }
-            Target::Location(id) => locations.selected_place() != Some(id),
-            Target::Good(good) => market.carpentry || market.good != Some(good),
-        };
-        let kind = match *target {
-            Target::Citizen(id) if universe.agents().contains_key(&id) => {
-                citizens.0 = Some(id);
-                if let Some(roster) = roster.as_mut() {
-                    roster.detail = true;
-                }
-                WindowKind::Citizens
-            }
+        let destination = match *target {
+            Target::Citizen(id) if universe.agents().contains_key(&id) => WindowKind::Citizen(id),
             Target::Household(id) if universe.households().contains_key(&id) => {
-                collectives.select(id);
-                WindowKind::Collectives
+                WindowKind::Household(id)
             }
-            Target::Guild(id) if universe.guilds().contains_key(&id) => {
-                collectives.select_guild(id);
-                WindowKind::Collectives
-            }
-            Target::Location(id) if universe.map().place(id).is_ok() => {
-                locations.select_place(id);
-                WindowKind::Locations
-            }
-            Target::Good(good) => {
-                market.good = Some(good);
-                market.carpentry = false;
-                market.tab = market::Tab::Overview;
-                WindowKind::Market
-            }
+            Target::Guild(id) if universe.guilds().contains_key(&id) => WindowKind::Guild(id),
+            Target::Location(id) if universe.map().place(id).is_ok() => WindowKind::Location(id),
+            Target::Good(good) => WindowKind::Good(good),
             _ => continue,
         };
-        if changed {
-            for (entity, mut scroll, citizen, collective, location) in &mut scrolls {
-                let detail = citizen.is_some()
-                    || collective.is_some_and(|panel| panel.0)
-                    || location
-                        .is_some_and(|panel| matches!(panel, locations::ScrollPanel::Details));
-                if detail && window_kind(entity, &parents, &roots) == Some(kind) {
-                    scroll.0 = Vec2::ZERO;
-                }
-            }
-        }
-        windows.open(kind);
+        windows.open_link(source, destination);
     }
 }
 
@@ -454,20 +394,7 @@ mod tests {
         );
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .init_resource::<Windows>()
-            .init_resource::<citizens::Selection>()
-            .init_resource::<citizens::RosterState>()
-            .init_resource::<collectives::State>()
-            .init_resource::<locations::State>()
-            .init_resource::<market::Selection>()
-            .add_systems(
-                Update,
-                (
-                    handle,
-                    crate::inspectors::open_windows,
-                    collectives::refresh,
-                )
-                    .chain(),
-            );
+            .add_systems(Update, handle);
         app
     }
 
@@ -478,87 +405,25 @@ mod tests {
     }
 
     #[test]
-    fn typed_links_select_targets_reuse_windows_and_keep_source_open() {
+    fn typed_links_open_the_exact_entity_pane() {
         let mut app = app();
         let universe = &app.world().resource::<DisplaySnapshot>().0.universe;
         let guild = *universe.guilds().keys().next().unwrap();
         let household = *universe.households().keys().next().unwrap();
         let member = universe.households()[&household].members[0];
         let home = universe.households()[&household].home.unwrap();
-        click(&mut app, Target::Citizen(member));
-        assert!(app.world().resource::<citizens::RosterState>().detail);
-        click(&mut app, Target::Household(household));
-        assert_eq!(
-            app.world().resource::<collectives::State>().selected(),
-            Some(household)
-        );
-        click(&mut app, Target::Guild(guild));
-        assert_eq!(
-            app.world()
-                .resource::<collectives::State>()
-                .selected_guild(),
-            Some(guild)
-        );
-        click(&mut app, Target::Good(Good::Wheat));
-        assert_eq!(
-            app.world().resource::<market::Selection>().good,
-            Some(Good::Wheat)
-        );
-        assert_eq!(
-            app.world().resource::<market::Selection>().tab,
-            market::Tab::Overview
-        );
-        click(&mut app, Target::Location(home));
-        assert_eq!(
-            app.world().resource::<locations::State>().selected_place(),
-            Some(home)
-        );
-        for _ in 0..3 {
-            click(&mut app, Target::Household(household));
-        }
-        let windows = app
-            .world_mut()
-            .query::<(&crate::floating_ui::FloatingWindow, &Node)>()
-            .iter(app.world())
-            .map(|(window, node)| (window.0, node.display))
-            .collect::<Vec<_>>();
-        assert_eq!(windows.len(), 4);
-        assert!(windows.iter().all(|(_, display)| *display == Display::Flex));
-        assert_eq!(
-            windows
-                .iter()
-                .filter(|(kind, _)| *kind == WindowKind::Collectives)
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn collective_tab_links_reset_detail_scroll_for_already_selected_entities() {
-        let mut app = app();
-        let universe = &app.world().resource::<DisplaySnapshot>().0.universe;
-        let household = *universe.households().keys().next().unwrap();
-        let guild = *universe.guilds().keys().next().unwrap();
-        click(&mut app, Target::Household(household));
-        for target in [Target::Guild(guild), Target::Household(household)] {
-            let mut scrolls = app
-                .world_mut()
-                .query::<(&collectives::ScrollPanel, &mut ScrollPosition)>();
-            for (panel, mut scroll) in scrolls.iter_mut(app.world_mut()) {
-                if panel.0 {
-                    scroll.0 = Vec2::new(0.0, 100.0);
-                }
-            }
+        for (target, kind) in [
+            (
+                Target::Household(household),
+                WindowKind::Household(household),
+            ),
+            (Target::Guild(guild), WindowKind::Guild(guild)),
+            (Target::Citizen(member), WindowKind::Citizen(member)),
+            (Target::Good(Good::Wheat), WindowKind::Good(Good::Wheat)),
+            (Target::Location(home), WindowKind::Location(home)),
+        ] {
             click(&mut app, target);
-            let mut scrolls = app
-                .world_mut()
-                .query::<(&collectives::ScrollPanel, &ScrollPosition)>();
-            assert!(
-                scrolls
-                    .iter(app.world())
-                    .filter(|(panel, _)| panel.0)
-                    .all(|(_, scroll)| scroll.0 == Vec2::ZERO)
-            );
+            assert!(app.world().resource::<Windows>().is_open(kind));
         }
     }
 
@@ -587,21 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn good_link_leaves_carpentry_even_for_the_previously_selected_good() {
-        let mut app = app();
-        click(&mut app, Target::Good(Good::Wheat));
-        app.world_mut()
-            .resource_mut::<market::Selection>()
-            .carpentry = true;
-        click(&mut app, Target::Good(Good::Wheat));
-        let selection = app.world().resource::<market::Selection>();
-        assert!(!selection.carpentry);
-        assert_eq!(selection.good(), Good::Wheat);
-        assert_eq!(selection.tab, market::Tab::Overview);
-    }
-
-    #[test]
-    fn changing_universes_preserves_good_selection_and_discards_stale_presses() {
+    fn links_from_an_earlier_universe_are_ignored() {
         let mut app = app();
         click(&mut app, Target::Good(Good::Wheat));
         app.world_mut()
@@ -609,9 +460,10 @@ mod tests {
             .0
             .generation += 1;
         click(&mut app, Target::Good(Good::BreadRoll));
-        assert_eq!(
-            app.world().resource::<market::Selection>().good,
-            Some(Good::Wheat)
+        assert!(
+            !app.world()
+                .resource::<Windows>()
+                .is_open(WindowKind::Good(Good::BreadRoll))
         );
     }
 }

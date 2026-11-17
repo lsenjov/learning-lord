@@ -1,28 +1,29 @@
-use crate::{MUTED, PANEL, TEXT, text};
+use crate::{MUTED, PANEL, TEXT, locations, text};
 use bevy::{
     ecs::system::SystemParam,
     prelude::*,
     window::{CursorIcon, SystemCursorIcon},
 };
+use learning_lord_simulation::{AgentId, locations::PlaceId, marketplace::Good};
 use std::collections::HashMap;
 
-const TITLE_HEIGHT: f32 = 36.0;
-const EDGE: f32 = 7.0;
-const MIN_SIZE: Vec2 = Vec2::new(320.0, 240.0);
+const HUD_HEIGHT: f32 = 32.0;
+const TITLE_HEIGHT: f32 = 28.0;
+const RAIL_WIDTH: f32 = 144.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowKind {
+    Map,
     Citizens,
     Collectives,
     Locations,
     Market,
     Saves,
-}
-
-impl WindowKind {
-    pub fn minimum_size(self) -> Vec2 {
-        Vec2::new(420.0, 280.0)
-    }
+    Citizen(AgentId),
+    Household(AgentId),
+    Guild(AgentId),
+    Location(PlaceId),
+    Good(Good),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,24 +33,16 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    pub fn constrain(self, viewport: Vec2) -> Self {
-        self.constrain_minimum(viewport, MIN_SIZE)
-    }
-
-    pub fn constrain_minimum(self, viewport: Vec2, minimum: Vec2) -> Self {
-        let size = self
-            .size
-            .clamp(minimum.min(viewport), viewport.max(Vec2::ONE));
-        Self {
-            position: self
-                .position
-                .clamp(Vec2::ZERO, (viewport - size).max(Vec2::ZERO)),
-            size,
-        }
-    }
-
     fn contains(self, position: Vec2) -> bool {
         Rect::from_corners(self.position, self.position + self.size).contains(position)
+    }
+
+    fn below(self, height: f32) -> Self {
+        let height = height.min(self.size.y);
+        Self {
+            position: self.position + Vec2::Y * height,
+            size: self.size - Vec2::Y * height,
+        }
     }
 }
 
@@ -57,13 +50,16 @@ impl Bounds {
 pub struct FloatingWindow(pub WindowKind);
 
 #[derive(Component)]
-pub(crate) struct Close(WindowKind);
-
-#[derive(Component)]
 pub struct Open(pub WindowKind);
 
 #[derive(Component)]
 pub struct Hud;
+
+#[derive(Component)]
+pub(crate) struct MapTitle;
+
+#[derive(Component)]
+pub(crate) struct PaneTitle(pub WindowKind);
 
 #[derive(Resource, Default)]
 pub struct InputCapture {
@@ -71,106 +67,322 @@ pub struct InputCapture {
     pub hovered: Option<WindowKind>,
 }
 
-#[derive(Clone, Copy)]
-struct Entry {
-    entity: Entity,
-    bounds: Bounds,
-    order: i32,
-    open: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Left,
+    Right,
 }
 
-#[derive(Clone, Copy)]
-struct Gesture {
-    kind: WindowKind,
-    start: Vec2,
-    original: Bounds,
-    edges: BVec4,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Action {
+    Close(WindowKind),
+    Minimize(WindowKind),
+    RestoreManual(WindowKind),
+    RestoreDisplaced(WindowKind),
+    Dismiss(WindowKind),
+    Clear,
 }
+
+#[derive(Component)]
+pub(crate) struct WorkspaceButton(pub Action);
 
 #[derive(Resource, Default)]
 pub struct Windows {
-    entries: HashMap<WindowKind, Entry>,
-    pending: Vec<WindowKind>,
-    order: i32,
-    gesture: Option<Gesture>,
+    left: Option<WindowKind>,
+    right: Option<WindowKind>,
+    manual: Vec<WindowKind>,
+    displaced: Vec<(Slot, WindowKind)>,
+    entries: HashMap<WindowKind, Entity>,
+    viewport: Vec2,
+    requested_focus: Option<WindowKind>,
+    selected_household: Option<AgentId>,
+    focused: Option<WindowKind>,
 }
 
 impl Windows {
-    pub(crate) fn is_open(&self, kind: WindowKind) -> bool {
-        self.entries.get(&kind).is_some_and(|entry| entry.open)
+    pub(crate) fn implicit_map(&self) -> bool {
+        self.left.is_none() && self.right.is_none()
     }
-    pub fn open(&mut self, kind: WindowKind) {
-        if !self.pending.contains(&kind) {
-            self.pending.push(kind);
+
+    pub(crate) fn visible(&self) -> [Option<WindowKind>; 2] {
+        if self.implicit_map() {
+            return [Some(WindowKind::Map), None];
+        }
+        [self.left, self.right]
+    }
+
+    pub(crate) fn is_open(&self, kind: WindowKind) -> bool {
+        self.visible().contains(&Some(kind))
+    }
+
+    fn remove_parked(&mut self, kind: WindowKind) {
+        self.manual.retain(|entry| *entry != kind);
+        self.displaced.retain(|(_, entry)| *entry != kind);
+    }
+
+    fn pop_active(&mut self, kind: WindowKind) -> Option<Slot> {
+        if self.left == Some(kind) {
+            self.left = None;
+            Some(Slot::Left)
+        } else if self.right == Some(kind) {
+            self.right = None;
+            Some(Slot::Right)
+        } else {
+            None
         }
     }
 
-    pub fn register(&mut self, kind: WindowKind, entity: Entity, bounds: Bounds) -> i32 {
-        self.order += 1;
-        self.entries.insert(
-            kind,
-            Entry {
-                entity,
-                bounds,
-                order: self.order,
-                open: true,
-            },
-        );
-        self.order
+    fn place(&mut self, slot: Slot, kind: WindowKind) {
+        let active = match slot {
+            Slot::Left => &mut self.left,
+            Slot::Right => &mut self.right,
+        };
+        if let Some(previous) = active.replace(kind) {
+            self.displaced.push((slot, previous));
+        }
     }
 
-    pub fn requested_focus(&self) -> Option<WindowKind> {
-        self.pending.last().copied()
+    pub fn open(&mut self, kind: WindowKind) {
+        self.requested_focus = Some(kind);
+        if self.left == Some(kind) {
+            return;
+        }
+        self.remove_parked(kind);
+        self.pop_active(kind);
+        if let Some(previous) = self.left.take() {
+            self.place(Slot::Right, previous);
+        }
+        self.left = Some(kind);
     }
 
-    pub fn take_new(&mut self) -> Vec<WindowKind> {
-        let requests = std::mem::take(&mut self.pending);
-        let mut new = Vec::new();
-        for kind in requests {
-            if self.entries.contains_key(&kind) {
-                self.focus(kind);
+    pub fn open_link(&mut self, source: Option<WindowKind>, destination: WindowKind) {
+        if let Some(source) = source.filter(|source| self.is_open(*source)) {
+            self.link(source, destination);
+        } else {
+            self.open(destination);
+        }
+    }
+
+    pub fn link(&mut self, source: WindowKind, destination: WindowKind) {
+        if !self.is_open(source) {
+            self.open(destination);
+            return;
+        }
+        self.requested_focus = Some(destination);
+        if source == destination {
+            return;
+        }
+        for kind in [source, destination] {
+            self.remove_parked(kind);
+            self.pop_active(kind);
+        }
+        self.place(Slot::Left, source);
+        self.place(Slot::Right, destination);
+    }
+
+    fn remove_active(&mut self, kind: WindowKind, minimize: bool) {
+        let Some(slot) = self.pop_active(kind) else {
+            return;
+        };
+        if minimize {
+            self.manual.push(kind);
+        }
+        if let Some((_, previous)) = self.displaced.pop() {
+            self.place(slot, previous);
+        }
+        self.requested_focus = Some(self.left.or(self.right).unwrap_or(WindowKind::Map));
+    }
+
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Close(kind) => self.remove_active(kind, false),
+            Action::Minimize(kind) => self.remove_active(kind, true),
+            Action::RestoreManual(kind) => self.open(kind),
+            Action::RestoreDisplaced(kind) => {
+                if let Some(&(slot, _)) = self.displaced.iter().find(|(_, entry)| *entry == kind) {
+                    self.remove_parked(kind);
+                    self.place(slot, kind);
+                    self.requested_focus = Some(kind);
+                }
+            }
+            Action::Dismiss(kind) => self.displaced.retain(|(_, entry)| *entry != kind),
+            Action::Clear => self.displaced.clear(),
+        }
+    }
+
+    pub(crate) fn manual(&self) -> impl Iterator<Item = WindowKind> + '_ {
+        self.manual.iter().rev().copied()
+    }
+
+    pub(crate) fn displaced(&self) -> impl Iterator<Item = WindowKind> + '_ {
+        self.displaced.iter().rev().map(|(_, kind)| *kind)
+    }
+
+    pub(crate) fn set_viewport(&mut self, viewport: Vec2) {
+        self.viewport = viewport;
+    }
+
+    fn workspace_bounds(&self) -> Bounds {
+        Bounds {
+            position: Vec2::new(0.0, HUD_HEIGHT),
+            size: Vec2::new(
+                self.viewport.x,
+                (self.viewport.y - HUD_HEIGHT * 2.0).max(0.0),
+            ),
+        }
+    }
+
+    fn rail_width(&self, slot: Slot) -> f32 {
+        let present = match slot {
+            Slot::Left => !self.manual.is_empty(),
+            Slot::Right => !self.displaced.is_empty(),
+        };
+        if present {
+            RAIL_WIDTH.min(self.viewport.x / 3.0)
+        } else {
+            0.0
+        }
+    }
+
+    pub(crate) fn pane_bounds(&self, kind: WindowKind) -> Option<Bounds> {
+        if !self.is_open(kind) {
+            return None;
+        }
+        let mut bounds = self.workspace_bounds();
+        let left_rail = self.rail_width(Slot::Left);
+        bounds.position.x += left_rail;
+        bounds.size.x -= left_rail + self.rail_width(Slot::Right);
+        if self.left.is_some() && self.right.is_some() {
+            let left_width = (bounds.size.x / 2.0).floor();
+            if self.right == Some(kind) {
+                bounds.position.x += left_width;
+                bounds.size.x -= left_width;
             } else {
-                new.push(kind);
+                bounds.size.x = left_width;
             }
         }
-        new
+        Some(bounds)
     }
 
-    pub fn sync(
+    pub(crate) fn bounds(&self, kind: WindowKind) -> Option<Bounds> {
+        self.pane_bounds(kind).map(|bounds| {
+            if kind == WindowKind::Map && !self.implicit_map() {
+                bounds.below(TITLE_HEIGHT)
+            } else {
+                bounds
+            }
+        })
+    }
+
+    pub(crate) fn register(&mut self, kind: WindowKind, entity: Entity) {
+        self.entries.insert(kind, entity);
+    }
+
+    pub(crate) fn take_focus(&mut self) -> Option<WindowKind> {
+        let kind = self.requested_focus.take()?;
+        self.focus(kind);
+        Some(kind)
+    }
+
+    pub(crate) fn focused(&self) -> WindowKind {
+        self.focused.unwrap_or(WindowKind::Map)
+    }
+
+    fn focus(&mut self, kind: WindowKind) {
+        self.focused = Some(kind);
+        if let WindowKind::Household(id) = kind {
+            self.selected_household = Some(id);
+        }
+    }
+
+    pub(crate) fn selected_household(&self) -> Option<AgentId> {
+        self.selected_household
+    }
+
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(WindowKind) -> bool) {
+        self.manual.retain(|&kind| keep(kind));
+        self.displaced.retain(|&(_, kind)| keep(kind));
+        for kind in [self.left, self.right].into_iter().flatten() {
+            if !keep(kind) {
+                self.remove_active(kind, false);
+            }
+        }
+        self.requested_focus = self.requested_focus.filter(|&kind| keep(kind));
+        self.selected_household = self
+            .selected_household
+            .filter(|&id| keep(WindowKind::Household(id)));
+    }
+
+    pub(crate) fn tracked(&self, kind: WindowKind) -> bool {
+        self.is_open(kind)
+            || self.manual.contains(&kind)
+            || self.displaced.iter().any(|&(_, entry)| entry == kind)
+    }
+
+    pub(crate) fn take_inactive_entries(&mut self) -> Vec<(WindowKind, Entity)> {
+        let inactive = self
+            .entries
+            .iter()
+            .filter_map(|(&kind, &entity)| (!self.tracked(kind)).then_some((kind, entity)))
+            .collect::<Vec<_>>();
+        for (kind, _) in &inactive {
+            self.entries.remove(kind);
+        }
+        inactive
+    }
+
+    pub(crate) fn missing(&self) -> Vec<WindowKind> {
+        self.visible()
+            .into_iter()
+            .flatten()
+            .filter(|kind| !self.entries.contains_key(kind))
+            .collect()
+    }
+
+    pub(crate) fn sync(
         &self,
-        roots: &mut Query<(&mut Node, &mut GlobalZIndex, &mut Visibility), With<FloatingWindow>>,
+        roots: &mut Query<(&mut Node, &mut Visibility), With<FloatingWindow>>,
+        titles: &mut Query<&mut Node, (With<MapTitle>, Without<FloatingWindow>)>,
     ) {
-        for entry in self.entries.values() {
-            if let Ok((mut node, mut z, mut visibility)) = roots.get_mut(entry.entity) {
-                let next = Node {
-                    left: px(entry.bounds.position.x),
-                    top: px(entry.bounds.position.y),
-                    width: px(entry.bounds.size.x),
-                    height: px(entry.bounds.size.y),
-                    display: if entry.open {
-                        Display::Flex
-                    } else {
-                        Display::None
-                    },
-                    ..node.clone()
-                };
-                node.set_if_neq(next);
-                z.set_if_neq(GlobalZIndex(entry.order));
-                visibility.set_if_neq(if entry.open {
+        for (kind, entity) in &self.entries {
+            if let Ok((mut node, mut visibility)) = roots.get_mut(*entity) {
+                let bounds = self.pane_bounds(*kind);
+                if let Some(bounds) = bounds {
+                    node.set_if_neq(window_node(*kind, bounds));
+                } else {
+                    node.map_unchanged(|node| &mut node.display)
+                        .set_if_neq(Display::None);
+                }
+                visibility.set_if_neq(if bounds.is_some() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
                 });
             }
         }
-    }
-
-    fn focus(&mut self, kind: WindowKind) {
-        self.order += 1;
-        if let Some(entry) = self.entries.get_mut(&kind) {
-            entry.open = true;
-            entry.order = self.order;
+        for node in titles.iter_mut() {
+            let display = if self.implicit_map() {
+                Display::None
+            } else {
+                Display::Flex
+            };
+            node.map_unchanged(|node| &mut node.display)
+                .set_if_neq(display);
         }
+    }
+}
+
+fn window_node(kind: WindowKind, bounds: Bounds) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(bounds.position.x),
+        top: px(bounds.position.y),
+        width: px(bounds.size.x),
+        height: px(bounds.size.y),
+        flex_direction: FlexDirection::Column,
+        border: UiRect::all(px(if kind == WindowKind::Map { 0 } else { 1 })),
+        overflow: Overflow::clip(),
+        ..default()
     }
 }
 
@@ -179,34 +391,32 @@ pub fn spawn_window(
     kind: WindowKind,
     title: &str,
     bounds: Bounds,
+    implicit_map: bool,
     content: impl FnOnce(&mut ChildSpawnerCommands),
 ) -> Entity {
     commands
         .spawn((
             FloatingWindow(kind),
-            Interaction::default(),
-            bevy::ui::FocusPolicy::Block,
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(bounds.position.x),
-                top: px(bounds.position.y),
-                width: px(bounds.size.x),
-                height: px(bounds.size.y),
-
-                flex_direction: FlexDirection::Column,
-                border: UiRect::all(px(1)),
-                overflow: Overflow::clip(),
-                ..default()
-            },
-            BackgroundColor(PANEL),
+            window_node(kind, bounds),
+            BackgroundColor(if kind == WindowKind::Map {
+                Color::NONE
+            } else {
+                PANEL
+            }),
             BorderColor::all(Color::srgb(0.28, 0.36, 0.39)),
             GlobalZIndex(1),
+            Visibility::Inherited,
         ))
         .with_children(|root| {
-            root.spawn((
+            let mut bar = root.spawn((
                 Node {
                     width: percent(100),
                     height: px(TITLE_HEIGHT),
+                    display: if implicit_map {
+                        Display::None
+                    } else {
+                        Display::Flex
+                    },
                     flex_shrink: 0.0,
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::SpaceBetween,
@@ -214,25 +424,36 @@ pub fn spawn_window(
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.14, 0.19, 0.22)),
-            ))
-            .with_children(|bar| {
-                bar.spawn(text(title, 16.0, TEXT));
-                bar.spawn((
-                    Button,
-                    Close(kind),
-                    Node {
-                        width: px(30),
-                        height: px(28),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                ))
-                .with_children(|button| {
-                    button.spawn(text("X", 18.0, MUTED));
+            ));
+            if kind == WindowKind::Map {
+                bar.insert(MapTitle);
+            }
+            bar.with_children(|bar| {
+                bar.spawn(Node {
+                    min_width: px(0),
+                    overflow: Overflow::clip(),
+                    ..default()
+                })
+                .with_child((
+                    text(title, 16.0, TEXT),
+                    TextLayout::no_wrap(),
+                    PaneTitle(kind),
+                ));
+                bar.spawn(Node {
+                    flex_shrink: 0.0,
+                    height: percent(100),
+                    ..default()
+                })
+                .with_children(|buttons| {
+                    action_button(buttons, Action::Minimize(kind), "_");
+                    action_button(buttons, Action::Close(kind), "X");
                 });
             });
+            if kind == WindowKind::Map {
+                return;
+            }
             root.spawn((
+                bevy::ui::FocusPolicy::Block,
                 Node {
                     width: percent(100),
                     flex_grow: 1.0,
@@ -249,10 +470,17 @@ pub fn spawn_window(
                     .spawn(Node {
                         width: percent(100),
                         height: percent(100),
-                        min_width: if matches!(kind, WindowKind::Market | WindowKind::Citizens) {
-                            px(0)
-                        } else {
+                        min_width: if matches!(
+                            kind,
+                            WindowKind::Market
+                                | WindowKind::Locations
+                                | WindowKind::Household(_)
+                                | WindowKind::Guild(_)
+                                | WindowKind::Location(_)
+                        ) {
                             px(720)
+                        } else {
+                            px(0)
                         },
                         min_height: px(0),
                         padding: UiRect::all(px(10)),
@@ -262,107 +490,148 @@ pub fn spawn_window(
                     })
                     .with_children(content);
             });
-            root.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    right: px(1),
-                    bottom: px(1),
-                    width: px(20),
-                    height: px(20),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.19, 0.27, 0.30)),
-            ))
-            .with_children(|grip| {
-                grip.spawn(text("//", 16.0, TEXT));
-            });
         })
         .id()
 }
 
-fn resize_edges(bounds: Bounds, cursor: Vec2) -> BVec4 {
-    let local = cursor - bounds.position;
-    let corner = local.x >= bounds.size.x - 20.0 && local.y >= bounds.size.y - 20.0;
-    BVec4::new(
-        local.x <= EDGE,
-        local.x >= bounds.size.x - EDGE || corner,
-        local.y <= EDGE,
-        local.y >= bounds.size.y - EDGE || corner,
-    )
+fn action_button(parent: &mut ChildSpawnerCommands, action: Action, label: &str) {
+    parent
+        .spawn((
+            Button,
+            WorkspaceButton(action),
+            Node {
+                min_width: px(26),
+                flex_shrink: 0.0,
+                padding: UiRect::horizontal(px(5)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
+        .with_children(|button| {
+            button.spawn(text(label, 14.0, MUTED));
+        });
 }
 
-fn resize_cursor(edges: BVec4) -> SystemCursorIcon {
-    match (edges.x || edges.y, edges.z || edges.w) {
-        (true, true) if edges.x == edges.z => SystemCursorIcon::NwseResize,
-        (true, true) => SystemCursorIcon::NeswResize,
-        (true, false) => SystemCursorIcon::EwResize,
-        (false, true) => SystemCursorIcon::NsResize,
-        _ => SystemCursorIcon::Default,
-    }
-}
-
-fn resize(original: Bounds, delta: Vec2, edges: BVec4, viewport: Vec2, minimum: Vec2) -> Bounds {
-    let mut min = original.position;
-    let mut max = min + original.size;
-    if edges.x {
-        min.x = (min.x + delta.x).clamp(0.0, max.x - minimum.x.min(viewport.x));
-    }
-    if edges.y {
-        max.x = (max.x + delta.x).clamp(min.x + minimum.x.min(viewport.x), viewport.x);
-    }
-    if edges.z {
-        min.y = (min.y + delta.y).clamp(0.0, max.y - minimum.y.min(viewport.y));
-    }
-    if edges.w {
-        max.y = (max.y + delta.y).clamp(min.y + minimum.y.min(viewport.y), viewport.y);
-    }
-    Bounds {
-        position: min,
-        size: max - min,
-    }
-    .constrain_minimum(viewport, minimum)
+pub(crate) fn spawn_rail(
+    commands: &mut Commands,
+    kinds: &[(WindowKind, String)],
+    automatic: bool,
+    scroll: ScrollPosition,
+) -> Entity {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(HUD_HEIGHT),
+                bottom: px(HUD_HEIGHT),
+                left: if automatic { Val::Auto } else { px(0) },
+                right: if automatic { px(0) } else { Val::Auto },
+                width: px(RAIL_WIDTH),
+                max_width: percent(100.0 / 3.0),
+                flex_direction: FlexDirection::Column,
+                overflow: Overflow::scroll_y(),
+                row_gap: px(3),
+                padding: UiRect::all(px(4)),
+                ..default()
+            },
+            BackgroundColor(PANEL),
+            GlobalZIndex(1),
+            scroll,
+            bevy::ui::RelativeCursorPosition::default(),
+        ))
+        .with_children(|rail| {
+            if automatic {
+                action_button(rail, Action::Clear, "Clear");
+            }
+            for (kind, label) in kinds {
+                let kind = *kind;
+                rail.spawn((
+                    Node {
+                        min_height: px(26),
+                        flex_shrink: 0.0,
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.14, 0.19, 0.22)),
+                ))
+                .with_children(|item| {
+                    let action = if automatic {
+                        Action::RestoreDisplaced(kind)
+                    } else {
+                        Action::RestoreManual(kind)
+                    };
+                    item.spawn((
+                        Button,
+                        WorkspaceButton(action),
+                        Node {
+                            flex_grow: 1.0,
+                            min_width: px(0),
+                            padding: UiRect::horizontal(px(5)),
+                            align_items: AlignItems::Center,
+                            overflow: Overflow::clip(),
+                            ..default()
+                        },
+                    ))
+                    .with_children(|button| {
+                        button.spawn((text(label, 14.0, TEXT), TextLayout::no_wrap()));
+                    });
+                    if automatic {
+                        action_button(item, Action::Dismiss(kind), "X");
+                    }
+                });
+            }
+        })
+        .id()
 }
 
 #[derive(SystemParam)]
 pub(crate) struct EditorFocus<'w> {
     focus: Option<ResMut<'w, bevy::input_focus::InputFocus>>,
+    citizen: Option<ResMut<'w, crate::citizens::Selection>>,
+    dev: Option<ResMut<'w, crate::dev_controls::State>>,
     locations: Option<ResMut<'w, crate::locations::State>>,
     caravan: Option<ResMut<'w, crate::caravan_controls::State>>,
-    market: Option<ResMut<'w, crate::market::Selection>>,
 }
 
 impl EditorFocus<'_> {
     pub fn activate(&mut self, kind: WindowKind) {
-        if kind != WindowKind::Locations
-            && let Some(state) = self.locations.as_mut()
-        {
-            crate::locations::stop_editing(state);
+        if let Some(dev) = self.dev.as_mut() {
+            dev.stop_editing();
         }
-        if kind != WindowKind::Market
-            && let Some(state) = self.caravan.as_mut()
+        if let WindowKind::Citizen(id) = kind
+            && let Some(selection) = self.citizen.as_mut()
+            && selection.0 != Some(id)
         {
-            crate::caravan_controls::stop_editing(state);
+            selection.0 = Some(id);
         }
-        if let Some(selection) = self.market.as_mut() {
-            selection.view = match kind {
-                WindowKind::Citizens => crate::market::View::Citizens,
-                WindowKind::Locations => crate::market::View::Locations,
-                WindowKind::Market => crate::market::View::Market,
-                WindowKind::Collectives => crate::market::View::Collectives,
-                WindowKind::Saves => selection.view,
-            };
+        if let Some(state) = self.locations.as_mut() {
+            match kind {
+                WindowKind::Locations => locations::focus_place(state, None),
+                WindowKind::Location(place) => locations::focus_place(state, Some(place)),
+                _ => locations::stop_editing(state),
+            }
+        }
+        if let Some(state) = self.caravan.as_mut() {
+            crate::caravan_controls::focus_pane(state, kind);
+        }
+    }
+
+    pub(crate) fn retain_citizen(&mut self, keep: impl FnOnce(AgentId) -> bool) {
+        if let Some(selection) = self.citizen.as_mut()
+            && selection.0.is_some_and(|id| !keep(id))
+        {
+            selection.0 = None;
         }
     }
 
     fn close(&mut self, kind: WindowKind) {
-        if kind == WindowKind::Locations
+        if matches!(kind, WindowKind::Locations | WindowKind::Location(_))
             && let Some(state) = self.locations.as_mut()
         {
             crate::locations::stop_editing(state);
         }
-        if kind == WindowKind::Market
+        if matches!(kind, WindowKind::Market | WindowKind::Good(_))
             && let Some(state) = self.caravan.as_mut()
         {
             crate::caravan_controls::stop_editing(state);
@@ -390,8 +659,8 @@ pub(crate) struct WindowInput<'w, 's> {
     >,
     parents: Query<'w, 's, &'static ChildOf>,
     roots: Query<'w, 's, &'static FloatingWindow>,
-    buttons: Query<'w, 's, (&'static Interaction, &'static Open), Changed<Interaction>>,
-    close: Query<'w, 's, (&'static Interaction, &'static Close), Changed<Interaction>>,
+    open: Query<'w, 's, (&'static Interaction, &'static Open), Changed<Interaction>>,
+    actions: Query<'w, 's, (&'static Interaction, &'static WorkspaceButton), Changed<Interaction>>,
     hud: Query<
         'w,
         's,
@@ -410,120 +679,82 @@ pub fn interact(
     mut capture: ResMut<InputCapture>,
     input: WindowInput,
     mut editors: EditorFocus,
-    mut roots: Query<(&mut Node, &mut GlobalZIndex, &mut Visibility), With<FloatingWindow>>,
 ) {
     let Ok((window_entity, window, cursor_icon)) = input.primary.single() else {
         return;
     };
     let viewport = Vec2::new(window.width(), window.height());
-    for (interaction, open) in &input.buttons {
+    windows.set_viewport(viewport);
+    let cursor = window.cursor_position();
+    let hud_hit = cursor.is_some_and(|cursor| {
+        cursor.y < HUD_HEIGHT
+            || cursor.y >= viewport.y - HUD_HEIGHT
+            || input.hud.iter().any(|(computed, transform, visibility)| {
+                visibility.get()
+                    && Rect::from_center_size(
+                        transform.translation * computed.inverse_scale_factor(),
+                        computed.size() * computed.inverse_scale_factor(),
+                    )
+                    .contains(cursor)
+            })
+    });
+    let rail_hit = cursor.is_some_and(|position| {
+        position.x < windows.rail_width(Slot::Left)
+            || position.x >= viewport.x - windows.rail_width(Slot::Right)
+    });
+    let hit = cursor
+        .filter(|_| !hud_hit && !rail_hit)
+        .and_then(|position| {
+            windows.visible().into_iter().rev().flatten().find(|&kind| {
+                windows
+                    .pane_bounds(kind)
+                    .is_some_and(|bounds| bounds.contains(position))
+            })
+        });
+    let map_hit = hit == Some(WindowKind::Map)
+        && cursor.is_some_and(|position| {
+            windows
+                .bounds(WindowKind::Map)
+                .is_some_and(|bounds| bounds.contains(position))
+        });
+    capture.blocked = hud_hit || rail_hit || (hit.is_some() && !map_hit);
+    capture.hovered = hit;
+    if input.mouse.just_pressed(MouseButton::Left)
+        && let Some(kind) = hit
+    {
+        editors.activate(kind);
+        windows.focus(kind);
+    }
+    for (interaction, button) in &input.actions {
+        if *interaction == Interaction::Pressed {
+            if let Action::Close(kind) | Action::Minimize(kind) = button.0
+                && (windows.left == Some(kind) || windows.right == Some(kind))
+            {
+                editors.close(kind);
+            }
+            windows.apply(button.0);
+        }
+    }
+    for (interaction, open) in &input.open {
         if *interaction == Interaction::Pressed {
             windows.open(open.0);
         }
     }
-    for (interaction, close) in &input.close {
-        if *interaction == Interaction::Pressed {
-            if let Some(entry) = windows.entries.get_mut(&close.0) {
-                entry.open = false;
-            }
-            editors.close(close.0);
-        }
-    }
-    for (kind, entry) in &mut windows.entries {
-        entry.bounds = entry
-            .bounds
-            .constrain_minimum(viewport, kind.minimum_size());
-    }
-    let cursor = window.cursor_position();
-    let hud_hit = cursor.is_some_and(|cursor| {
-        input.hud.iter().any(|(computed, transform, visibility)| {
+    let pointer = !hud_hit
+        && input.links.iter().any(|(entity, interaction, visibility)| {
             visibility.get()
-                && Rect::from_center_size(
-                    transform.translation * computed.inverse_scale_factor(),
-                    computed.size() * computed.inverse_scale_factor(),
-                )
-                .contains(cursor)
-        })
+                && *interaction != Interaction::None
+                && crate::navigation::window_kind(entity, &input.parents, &input.roots)
+                    == capture.hovered
+        });
+    let icon = CursorIcon::System(if pointer {
+        SystemCursorIcon::Pointer
+    } else {
+        SystemCursorIcon::Default
     });
-    let hit = cursor.and_then(|position| {
-        windows
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.open && entry.bounds.contains(position))
-            .max_by_key(|(_, entry)| entry.order)
-            .map(|(kind, _)| *kind)
-    });
-    capture.blocked = hud_hit || hit.is_some() || windows.gesture.is_some();
-    capture.hovered = if hud_hit { None } else { hit };
-    if input.mouse.just_pressed(MouseButton::Left)
-        && !hud_hit
-        && let (Some(kind), Some(cursor)) = (hit, cursor)
-    {
-        windows.focus(kind);
-        editors.activate(kind);
-        let bounds = windows.entries[&kind].bounds;
-        let local = cursor - bounds.position;
-        let edges = resize_edges(bounds, cursor);
-        if edges.any() || local.y < TITLE_HEIGHT && local.x < bounds.size.x - 44.0 {
-            windows.gesture = Some(Gesture {
-                kind,
-                start: cursor,
-                original: bounds,
-                edges,
-            });
-        }
-    }
-    if !input.mouse.pressed(MouseButton::Left) {
-        windows.gesture = None;
-    }
-    if let (Some(gesture), Some(cursor)) = (windows.gesture, cursor) {
-        let delta = cursor - gesture.start;
-        let bounds = if gesture.edges.any() {
-            resize(
-                gesture.original,
-                delta,
-                gesture.edges,
-                viewport,
-                gesture.kind.minimum_size(),
-            )
-        } else {
-            Bounds {
-                position: gesture.original.position + delta,
-                ..gesture.original
-            }
-            .constrain(viewport)
-        };
-        if let Some(entry) = windows.entries.get_mut(&gesture.kind) {
-            entry.bounds = bounds;
-        }
-    }
-    let edges = windows
-        .gesture
-        .map(|gesture| gesture.edges)
-        .or_else(|| {
-            let kind = capture.hovered?;
-            Some(resize_edges(windows.entries[&kind].bounds, cursor?))
-        })
-        .unwrap_or_default();
-    let icon = CursorIcon::System(
-        if !edges.any()
-            && windows.gesture.is_none()
-            && input.links.iter().any(|(entity, interaction, visibility)| {
-                visibility.get()
-                    && *interaction != Interaction::None
-                    && crate::navigation::window_kind(entity, &input.parents, &input.roots)
-                        == capture.hovered
-            })
-        {
-            SystemCursorIcon::Pointer
-        } else {
-            resize_cursor(edges)
-        },
-    );
     if cursor_icon != Some(&icon) {
         commands.entity(window_entity).insert(icon);
     }
-    windows.sync(&mut roots);
 }
 
 #[cfg(test)]
@@ -531,233 +762,143 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drag_and_resize_stay_inside_viewport() {
-        let viewport = Vec2::new(1280.0, 800.0);
-        let original = Bounds {
-            position: Vec2::new(100.0, 100.0),
-            size: Vec2::new(600.0, 400.0),
-        };
-        assert_eq!(
-            Bounds {
-                position: Vec2::new(-50.0, 900.0),
-                ..original
-            }
-            .constrain(viewport)
-            .position,
-            Vec2::new(0.0, 400.0)
-        );
-        let resized = resize(
-            original,
-            Vec2::splat(1000.0),
-            BVec4::new(true, false, true, false),
-            viewport,
-            MIN_SIZE,
-        );
-        assert_eq!(resized.size, MIN_SIZE);
-        let resized = resize(
-            original,
-            Vec2::splat(1000.0),
-            BVec4::new(false, true, false, true),
-            viewport,
-            MIN_SIZE,
-        );
-        assert_eq!(resized.position + resized.size, viewport);
-    }
-
-    #[test]
-    fn category_windows_shrink_and_corner_grip_matches_resize_cursor() {
-        let original = Bounds {
-            position: Vec2::new(100.0, 100.0),
-            size: Vec2::new(960.0, 600.0),
-        };
-        let cursor = original.position + original.size - Vec2::splat(15.0);
-        let edges = resize_edges(original, cursor);
-        assert_eq!(resize_cursor(edges), SystemCursorIcon::NwseResize);
-        for kind in [
-            WindowKind::Citizens,
-            WindowKind::Locations,
-            WindowKind::Market,
-        ] {
-            let small = resize(
-                original,
-                Vec2::splat(-1000.0),
-                edges,
-                Vec2::new(1280.0, 800.0),
-                kind.minimum_size(),
-            );
-            assert_eq!(small.size, Vec2::new(420.0, 280.0));
-            assert_eq!(small.position, original.position);
-        }
-    }
-
-    #[test]
-    fn reopening_focuses_the_existing_window_and_remembers_bounds() {
+    fn menu_open_replaces_implicit_map_and_shifts_left_to_right() {
         let mut windows = Windows::default();
-        let bounds = Bounds {
-            position: Vec2::new(220.0, 120.0),
-            size: Vec2::new(600.0, 400.0),
-        };
-        windows.register(WindowKind::Market, Entity::PLACEHOLDER, bounds);
-        windows.entries.get_mut(&WindowKind::Market).unwrap().open = false;
-        windows.focus(WindowKind::Market);
-        let entry = windows.entries[&WindowKind::Market];
-        assert!(entry.open);
-        assert_eq!(entry.bounds, bounds);
+        windows.set_viewport(Vec2::new(801.0, 600.0));
+        assert_eq!(windows.visible(), [Some(WindowKind::Map), None]);
+        assert_eq!(windows.bounds(WindowKind::Map).unwrap().size.x, 801.0);
+
+        windows.open(WindowKind::Citizens);
+        assert_eq!(windows.visible(), [Some(WindowKind::Citizens), None]);
         windows.open(WindowKind::Market);
-        assert!(windows.take_new().is_empty());
-    }
-}
-
-#[cfg(test)]
-mod interaction_tests {
-    use super::*;
-
-    fn pointer(app: &mut App, position: Vec2) {
-        let mut query = app
-            .world_mut()
-            .query_filtered::<&mut Window, With<bevy::window::PrimaryWindow>>();
-        query
-            .single_mut(app.world_mut())
-            .unwrap()
-            .set_cursor_position(Some(position));
-    }
-
-    fn frame(app: &mut App) {
-        app.update();
-        app.world_mut()
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .clear();
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Market), Some(WindowKind::Citizens)]
+        );
+        let left = windows.bounds(WindowKind::Market).unwrap();
+        let right = windows.bounds(WindowKind::Citizens).unwrap();
+        assert_eq!(left.size.x, 400.0);
+        assert_eq!(right.position.x, 400.0);
+        assert_eq!(right.size.x, 401.0);
+        assert_eq!(left.position.y, HUD_HEIGHT);
+        assert_eq!(left.size.y, 600.0 - 2.0 * HUD_HEIGHT);
+        windows.open(WindowKind::Locations);
+        assert_eq!(
+            windows.displaced().collect::<Vec<_>>(),
+            [WindowKind::Citizens]
+        );
+        windows.open(WindowKind::Citizens);
+        assert_eq!(
+            windows.displaced().collect::<Vec<_>>(),
+            [WindowKind::Market]
+        );
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Citizens), Some(WindowKind::Locations)]
+        );
     }
 
     #[test]
-    fn input_focus_drag_resize_close_and_reopen_use_the_same_bounds() {
-        let mut app = App::new();
-        app.init_resource::<Windows>()
-            .init_resource::<InputCapture>()
-            .init_resource::<ButtonInput<MouseButton>>()
-            .init_resource::<bevy::input_focus::InputFocus>()
-            .add_systems(Update, interact);
-        app.world_mut().spawn((
-            Window {
-                resolution: (1280, 800).into(),
-                ..default()
-            },
-            bevy::window::PrimaryWindow,
-        ));
-        let lower = app
-            .world_mut()
-            .spawn((
-                FloatingWindow(WindowKind::Citizens),
-                Node::default(),
-                GlobalZIndex(1),
-                Visibility::Inherited,
-            ))
-            .id();
-        let upper = app
-            .world_mut()
-            .spawn((
-                FloatingWindow(WindowKind::Market),
-                Node::default(),
-                GlobalZIndex(2),
-                Visibility::Inherited,
-            ))
-            .id();
-        app.world_mut().resource_mut::<Windows>().register(
-            WindowKind::Citizens,
-            lower,
-            Bounds {
-                position: Vec2::new(100.0, 100.0),
-                size: Vec2::new(500.0, 400.0),
-            },
-        );
-        app.world_mut().resource_mut::<Windows>().register(
-            WindowKind::Market,
-            upper,
-            Bounds {
-                position: Vec2::new(200.0, 180.0),
-                size: Vec2::new(500.0, 400.0),
-            },
-        );
-        pointer(&mut app, Vec2::new(300.0, 300.0));
-        frame(&mut app);
+    fn right_source_moves_left_and_displaced_pane_restores_to_its_slot() {
+        let mut windows = Windows::default();
+        windows.open(WindowKind::Citizens);
+        windows.link(WindowKind::Citizens, WindowKind::Market);
+        windows.link(WindowKind::Market, WindowKind::Locations);
         assert_eq!(
-            app.world().resource::<InputCapture>().hovered,
-            Some(WindowKind::Market)
+            windows.visible(),
+            [Some(WindowKind::Market), Some(WindowKind::Locations)]
         );
-        assert!(app.world().resource::<InputCapture>().blocked);
-        pointer(&mut app, Vec2::new(150.0, 300.0));
-        app.world_mut()
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        frame(&mut app);
-        assert!(
-            app.world().get::<GlobalZIndex>(lower).unwrap().0
-                > app.world().get::<GlobalZIndex>(upper).unwrap().0
-        );
-        app.world_mut()
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .release(MouseButton::Left);
-        frame(&mut app);
-        pointer(&mut app, Vec2::new(150.0, 115.0));
-        app.world_mut()
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        frame(&mut app);
-        pointer(&mut app, Vec2::new(250.0, 165.0));
-        frame(&mut app);
+        windows.apply(Action::RestoreDisplaced(WindowKind::Citizens));
         assert_eq!(
-            app.world().resource::<Windows>().entries[&WindowKind::Citizens]
-                .bounds
-                .position,
-            Vec2::new(200.0, 150.0)
-        );
-        app.world_mut()
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .release(MouseButton::Left);
-        frame(&mut app);
-        pointer(&mut app, Vec2::new(698.0, 548.0));
-        app.world_mut()
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Left);
-        frame(&mut app);
-        pointer(&mut app, Vec2::new(798.0, 648.0));
-        frame(&mut app);
-        let remembered = app.world().resource::<Windows>().entries[&WindowKind::Citizens].bounds;
-        assert_eq!(remembered.size, Vec2::new(600.0, 500.0));
-        app.world_mut()
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .release(MouseButton::Left);
-        frame(&mut app);
-        let close = app
-            .world_mut()
-            .spawn((Close(WindowKind::Citizens), Interaction::Pressed))
-            .id();
-        frame(&mut app);
-        assert_eq!(
-            app.world().get::<Node>(lower).unwrap().display,
-            Display::None
-        );
-        app.world_mut().entity_mut(close).insert(Interaction::None);
-        app.world_mut()
-            .resource_mut::<Windows>()
-            .open(WindowKind::Citizens);
-        assert!(
-            app.world_mut()
-                .resource_mut::<Windows>()
-                .take_new()
-                .is_empty()
-        );
-        frame(&mut app);
-        assert_eq!(
-            app.world().get::<Node>(lower).unwrap().display,
-            Display::Flex
+            windows.visible(),
+            [Some(WindowKind::Citizens), Some(WindowKind::Locations)]
         );
         assert_eq!(
-            app.world().resource::<Windows>().entries[&WindowKind::Citizens].bounds,
-            remembered
+            windows.displaced().collect::<Vec<_>>(),
+            [WindowKind::Market]
         );
-        pointer(&mut app, Vec2::new(1100.0, 750.0));
-        frame(&mut app);
-        assert!(!app.world().resource::<InputCapture>().blocked);
+        windows.link(WindowKind::Locations, WindowKind::Citizens);
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Locations), Some(WindowKind::Citizens)]
+        );
+        windows.link(WindowKind::Citizens, WindowKind::Citizens);
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Locations), Some(WindowKind::Citizens)]
+        );
+    }
+
+    #[test]
+    fn vacancies_restore_latest_automatic_and_manual_restore_uses_menu_order() {
+        let mut windows = Windows::default();
+        windows.open(WindowKind::Citizens);
+        windows.link(WindowKind::Citizens, WindowKind::Market);
+        windows.link(WindowKind::Citizens, WindowKind::Locations);
+        windows.link(WindowKind::Citizens, WindowKind::Collectives);
+        windows.apply(Action::Minimize(WindowKind::Citizens));
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Locations), Some(WindowKind::Collectives)]
+        );
+        assert_eq!(windows.manual().collect::<Vec<_>>(), [WindowKind::Citizens]);
+        windows.apply(Action::Dismiss(WindowKind::Market));
+        windows.apply(Action::Close(WindowKind::Collectives));
+        assert_eq!(windows.visible(), [Some(WindowKind::Locations), None]);
+        windows.apply(Action::RestoreManual(WindowKind::Citizens));
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Citizens), Some(WindowKind::Locations)]
+        );
+        assert!(windows.manual().next().is_none());
+        windows.open(WindowKind::Market);
+        assert_eq!(
+            windows.displaced().collect::<Vec<_>>(),
+            [WindowKind::Locations]
+        );
+        windows.apply(Action::Clear);
+        windows.apply(Action::Close(WindowKind::Citizens));
+        windows.apply(Action::Close(WindowKind::Market));
+        assert_eq!(windows.visible(), [Some(WindowKind::Map), None]);
+    }
+
+    #[test]
+    fn active_rails_reserve_only_their_side_in_the_workspace() {
+        let mut windows = Windows::default();
+        windows.set_viewport(Vec2::new(800.0, 600.0));
+        windows.open(WindowKind::Citizens);
+        windows.link(WindowKind::Citizens, WindowKind::Market);
+        windows.link(WindowKind::Citizens, WindowKind::Locations);
+        let right = windows.bounds(WindowKind::Locations).unwrap();
+        assert_eq!(right.position.x + right.size.x, 800.0 - RAIL_WIDTH);
+        assert_eq!(
+            windows.bounds(WindowKind::Citizens).unwrap().position.x,
+            0.0
+        );
+        windows.apply(Action::Minimize(WindowKind::Citizens));
+        let recovered = windows.bounds(WindowKind::Market).unwrap();
+        assert_eq!(recovered.position.x, RAIL_WIDTH);
+        let right = windows.bounds(WindowKind::Locations).unwrap();
+        assert_eq!(right.position.x + right.size.x, 800.0);
+    }
+
+    #[test]
+    fn implicit_map_becomes_an_explicit_source_for_map_links() {
+        let mut windows = Windows::default();
+        windows.set_viewport(Vec2::new(800.0, 600.0));
+        let full_map = windows.bounds(WindowKind::Map).unwrap();
+        windows.link(WindowKind::Map, WindowKind::Locations);
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Map), Some(WindowKind::Locations)]
+        );
+        let split_map = windows.bounds(WindowKind::Map).unwrap();
+        assert_eq!(split_map.size.x, full_map.size.x / 2.0);
+        assert_eq!(split_map.position.y, full_map.position.y + TITLE_HEIGHT);
+        windows.apply(Action::Close(WindowKind::Locations));
+        assert!(!windows.implicit_map());
+        windows.apply(Action::Close(WindowKind::Map));
+        assert!(windows.implicit_map());
+        assert_eq!(windows.bounds(WindowKind::Map).unwrap(), full_map);
     }
 }

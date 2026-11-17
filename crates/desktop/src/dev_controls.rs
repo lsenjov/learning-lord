@@ -1,5 +1,6 @@
 use crate::{
-    DisplaySnapshot, PANEL, SELECTED, TEXT, collectives,
+    DisplaySnapshot, PANEL, SELECTED, TEXT,
+    floating_ui::Windows,
     simulation::{Command, Mutation, SimulationWorker},
     text,
 };
@@ -51,6 +52,9 @@ impl Default for State {
     }
 }
 impl State {
+    pub(crate) fn stop_editing(&mut self) {
+        self.editing = false;
+    }
     pub(crate) fn pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -121,7 +125,7 @@ pub(crate) fn handle(
     mut state: ResMut<State>,
     snapshot: Res<DisplaySnapshot>,
     worker: Res<SimulationWorker>,
-    selected: Res<collectives::State>,
+    windows: Res<Windows>,
     citizen: Res<crate::citizens::Selection>,
     controls: Res<crate::Controls>,
     mut locations: ResMut<crate::locations::State>,
@@ -152,6 +156,9 @@ pub(crate) fn handle(
     if locations.editing() || caravan.editing() || controls.restart_pending {
         state.editing = false;
     }
+    let selected_household = windows
+        .selected_household()
+        .filter(|id| snapshot.0.universe.households().contains_key(id));
     for (interaction, choice) in &choices {
         if *interaction != Interaction::Pressed {
             continue;
@@ -182,10 +189,7 @@ pub(crate) fn handle(
                     state.status = "Another change is saving. Try again when it finishes.".into();
                     continue;
                 }
-                let Some(household) = selected.selected().filter(|id| {
-                    selected.tab() == collectives::Tab::Households
-                        && snapshot.0.universe.households().contains_key(id)
-                }) else {
+                let Some(household) = selected_household else {
                     state.status = "Select a household in Collectives > Households".into();
                     continue;
                 };
@@ -227,10 +231,7 @@ pub(crate) fn handle(
                     };
                     Mutation::RemoveCitizen(id)
                 } else {
-                    let Some(id) = selected.selected().filter(|id| {
-                        selected.tab() == collectives::Tab::Households
-                            && snapshot.0.universe.households().contains_key(id)
-                    }) else {
+                    let Some(id) = selected_household else {
                         state.status = "Select a household in Collectives > Households".into();
                         continue;
                     };
@@ -250,11 +251,8 @@ pub(crate) fn handle(
             Choice::Member | Choice::Household => {
                 state.editing = false;
                 let household = if matches!(choice, Choice::Member) {
-                    match selected
-                        .selected()
-                        .filter(|id| snapshot.0.universe.households().contains_key(id))
-                    {
-                        Some(id) if selected.tab() == collectives::Tab::Households => Some(id),
+                    match selected_household {
+                        Some(id) => Some(id),
                         _ => {
                             state.status = "Select a household in Collectives first".into();
                             continue;
@@ -368,7 +366,7 @@ mod tests {
         app.insert_resource(DisplaySnapshot(worker.snapshot()))
             .insert_resource(worker)
             .init_resource::<State>()
-            .init_resource::<collectives::State>()
+            .init_resource::<Windows>()
             .init_resource::<crate::citizens::Selection>()
             .init_resource::<crate::Controls>()
             .init_resource::<crate::locations::State>()
@@ -381,6 +379,7 @@ mod tests {
         app
     }
     fn press(app: &mut App, choice: Choice) {
+        app.world_mut().resource_mut::<Windows>().take_focus();
         let entity = app.world_mut().spawn((choice, Interaction::Pressed)).id();
         app.update();
         app.world_mut().despawn(entity);
@@ -449,8 +448,8 @@ mod tests {
             .next()
             .unwrap();
         app.world_mut()
-            .resource_mut::<collectives::State>()
-            .select(household);
+            .resource_mut::<Windows>()
+            .open(crate::floating_ui::WindowKind::Household(household));
         press(&mut app, Choice::LowerLivingTier);
         assert!(!app.world().resource::<State>().pending());
         press(&mut app, Choice::RaiseLivingTier);
@@ -522,8 +521,8 @@ mod tests {
             .next()
             .unwrap();
         app.world_mut()
-            .resource_mut::<collectives::State>()
-            .select(household);
+            .resource_mut::<Windows>()
+            .open(crate::floating_ui::WindowKind::Household(household));
         press(&mut app, Choice::Toggle);
         press(&mut app, Choice::Role);
         app.world_mut().resource_mut::<State>().funds = "invalid".into();
@@ -638,8 +637,8 @@ mod tests {
                 .resource_mut::<crate::citizens::Selection>()
                 .0 = Some(member);
             app.world_mut()
-                .resource_mut::<collectives::State>()
-                .select(family.id);
+                .resource_mut::<Windows>()
+                .open(crate::floating_ui::WindowKind::Household(family.id));
             press(&mut app, Choice::Toggle);
             press(
                 &mut app,

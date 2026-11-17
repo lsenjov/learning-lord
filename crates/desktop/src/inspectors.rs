@@ -1,82 +1,211 @@
 use crate::{
     citizens, collectives,
-    floating_ui::{Bounds, WindowKind, Windows},
+    floating_ui::{self, FloatingWindow, MapTitle, PaneTitle, WindowKind, Windows},
     locations, market,
 };
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
+use learning_lord_simulation::Universe;
+
+impl WindowKind {
+    fn entity_detail(self) -> bool {
+        matches!(
+            self,
+            Self::Citizen(_) | Self::Household(_) | Self::Guild(_) | Self::Location(_)
+        )
+    }
+
+    fn valid(self, universe: &Universe) -> bool {
+        match self {
+            Self::Citizen(id) => universe.agents().contains_key(&id),
+            Self::Household(id) => universe.households().contains_key(&id),
+            Self::Guild(id) => universe.guilds().contains_key(&id),
+            Self::Location(id) => universe.map().place(id).is_ok(),
+            _ => true,
+        }
+    }
+
+    fn title(self, universe: &Universe, collectives: &str) -> String {
+        match self {
+            Self::Map => "Map",
+            Self::Citizens => "Citizens",
+            Self::Collectives => collectives,
+            Self::Locations => "Locations",
+            Self::Market => "Market",
+            Self::Saves => "Load universe",
+            Self::Good(good) => good.name(),
+            Self::Citizen(id) => universe
+                .agents()
+                .get(&id)
+                .map_or("Citizen", |agent| agent.name.as_str()),
+            Self::Household(id) => {
+                return universe.households().get(&id).map_or_else(
+                    || "Household".to_owned(),
+                    |household| format!("{} household", household.name),
+                );
+            }
+            Self::Guild(id) => universe
+                .guilds()
+                .get(&id)
+                .map_or("Guild", |guild| guild.name.as_str()),
+            Self::Location(id) => {
+                return universe
+                    .map()
+                    .place(id)
+                    .map_or_else(|_| "Location".to_owned(), |place| place.name.clone());
+            }
+        }
+        .to_owned()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct InspectorState {
+    generation: Option<u64>,
+    manual: Rail,
+    displaced: Rail,
+    collective_title: &'static str,
+}
+
+#[derive(Default)]
+struct Rail {
+    entries: Vec<(WindowKind, String)>,
+    entity: Option<Entity>,
+}
+
+impl Rail {
+    fn update(
+        &mut self,
+        commands: &mut Commands,
+        entries: Vec<(WindowKind, String)>,
+        automatic: bool,
+        scrolls: &Query<&ScrollPosition>,
+    ) {
+        if self.entries == entries {
+            return;
+        }
+        let mut offset = ScrollPosition::default();
+        if let Some(entity) = self.entity.take() {
+            if let Ok(scroll) = scrolls.get(entity) {
+                offset.0 = scroll.0;
+            }
+            commands.entity(entity).despawn();
+        }
+        if !entries.is_empty() {
+            self.entity = Some(floating_ui::spawn_rail(
+                commands, &entries, automatic, offset,
+            ));
+        }
+        self.entries = entries;
+    }
+}
+
+#[derive(SystemParam)]
+pub(crate) struct PaneNodes<'w, 's> {
+    scrolls: Query<'w, 's, &'static ScrollPosition>,
+    roots: Query<'w, 's, (&'static mut Node, &'static mut Visibility), With<FloatingWindow>>,
+    map_titles: Query<'w, 's, &'static mut Node, (With<MapTitle>, Without<FloatingWindow>)>,
+    titles: Query<'w, 's, (&'static PaneTitle, &'static mut Text)>,
+}
 
 pub fn open_windows(
     mut commands: Commands,
     mut windows: ResMut<Windows>,
     snapshot: Res<crate::DisplaySnapshot>,
-    mut roots: Query<
-        (&mut Node, &mut GlobalZIndex, &mut Visibility),
-        With<crate::floating_ui::FloatingWindow>,
-    >,
-    mut editors: crate::floating_ui::EditorFocus,
+    mut nodes: PaneNodes,
+    collectives: Option<Res<collectives::State>>,
+    mut editors: floating_ui::EditorFocus,
     primary: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut state: Local<InspectorState>,
 ) {
-    if let Some(kind) = windows.requested_focus() {
+    let universe = &snapshot.0.universe;
+    let collective_title = collectives
+        .as_deref()
+        .map_or("Households", collectives::State::title);
+    let title_changed = state.collective_title != collective_title;
+    state.collective_title = collective_title;
+    if snapshot.is_changed() || state.generation.is_none() {
+        let reset = state
+            .generation
+            .is_some_and(|generation| generation != snapshot.0.generation);
+        state.generation = Some(snapshot.0.generation);
+        windows.retain(|kind| !(reset && kind.entity_detail()) && kind.valid(universe));
+        editors.retain_citizen(|id| !reset && WindowKind::Citizen(id).valid(universe));
+    }
+    if snapshot.is_changed() || title_changed {
+        for (title, text) in &mut nodes.titles {
+            let label = title.0.title(universe, collective_title);
+            text.map_unchanged(|text| &mut text.0).set_if_neq(label);
+        }
+    }
+    for (_, entity) in windows.take_inactive_entries() {
+        commands.entity(entity).despawn();
+    }
+    if let Some(kind) = windows.take_focus() {
         editors.activate(kind);
     }
-    for kind in windows.take_new() {
-        let (title, position, size) = match kind {
-            WindowKind::Saves => (
-                "Load universe",
-                Vec2::new(140.0, 90.0),
-                Vec2::new(700.0, 460.0),
-            ),
-            WindowKind::Citizens => ("Citizens", Vec2::new(32.0, 80.0), Vec2::new(960.0, 600.0)),
-            WindowKind::Collectives => (
-                "Collectives",
-                Vec2::new(60.0, 70.0),
-                Vec2::new(960.0, 600.0),
-            ),
-            WindowKind::Locations => (
-                "Locations · inventory & taxes",
-                Vec2::new(100.0, 60.0),
-                Vec2::new(960.0, 600.0),
-            ),
-            WindowKind::Market => (
-                "Market · overview & caravan controls",
-                Vec2::new(80.0, 50.0),
-                Vec2::new(1000.0, 620.0),
-            ),
-        };
-        let bounds = Bounds { position, size };
-        let bounds = primary.single().map_or(bounds, |window| {
-            bounds.constrain_minimum(
-                Vec2::new(window.width(), window.height()),
-                kind.minimum_size(),
-            )
-        });
-        let entity = crate::floating_ui::spawn_window(
+    if let Ok(window) = primary.single() {
+        windows.set_viewport(Vec2::new(window.width(), window.height()));
+    }
+    for kind in windows.missing() {
+        let bounds = windows.pane_bounds(kind).expect("visible pane has bounds");
+        let entity = floating_ui::spawn_window(
             &mut commands,
             kind,
-            title,
+            &kind.title(universe, collective_title),
             bounds,
+            windows.implicit_map(),
             |parent| match kind {
-                WindowKind::Citizens => {
-                    citizens::spawn_roster(parent, snapshot.0.universe.agents().len());
-                    citizens::spawn_details(parent);
-                }
+                WindowKind::Map => (),
+                WindowKind::Citizens => citizens::spawn_roster(parent, universe.agents().len()),
                 WindowKind::Collectives => collectives::spawn(parent),
                 WindowKind::Locations => locations::spawn(parent),
-                WindowKind::Market => market::spawn(parent),
+                WindowKind::Market => market::spawn_overview(parent),
                 WindowKind::Saves => crate::saves::spawn(parent),
+                WindowKind::Citizen(id) => citizens::spawn_details(parent, id),
+                WindowKind::Household(_) | WindowKind::Guild(_) => {
+                    collectives::spawn_entity(parent, kind);
+                }
+                WindowKind::Location(id) => locations::spawn_entity(parent, id),
+                WindowKind::Good(good) => market::spawn_entity(parent, good),
             },
         );
-        let order = windows.register(kind, entity, bounds);
-        commands.entity(entity).insert(GlobalZIndex(order));
+        windows.register(kind, entity);
     }
-    windows.sync(&mut roots);
+    let PaneNodes {
+        roots, map_titles, ..
+    } = &mut nodes;
+    windows.sync(roots, map_titles);
+    if !title_changed
+        && !snapshot.is_changed()
+        && windows
+            .manual()
+            .eq(state.manual.entries.iter().map(|(kind, _)| *kind))
+        && windows
+            .displaced()
+            .eq(state.displaced.entries.iter().map(|(kind, _)| *kind))
+    {
+        return;
+    }
+    let manual = windows
+        .manual()
+        .map(|kind| (kind, kind.title(universe, collective_title)))
+        .collect::<Vec<_>>();
+    let displaced = windows
+        .displaced()
+        .map(|kind| (kind, kind.title(universe, collective_title)))
+        .collect::<Vec<_>>();
+    state
+        .manual
+        .update(&mut commands, manual, false, &nodes.scrolls);
+    state
+        .displaced
+        .update(&mut commands, displaced, true, &nodes.scrolls);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::Snapshot;
-    use crate::{DisplaySnapshot, market_history};
+    use crate::{DisplaySnapshot, simulation::Snapshot};
 
     fn app() -> App {
         let mut app = App::new();
@@ -90,26 +219,10 @@ mod tests {
             revision: 0,
         }))
         .init_resource::<Windows>()
-        .init_resource::<crate::floating_ui::InputCapture>()
+        .init_resource::<floating_ui::InputCapture>()
+        .init_resource::<ButtonInput<MouseButton>>()
         .init_resource::<citizens::Selection>()
-        .init_resource::<citizens::RosterState>()
-        .init_resource::<citizens::PlanDisplay>()
-        .init_resource::<locations::State>()
-        .init_resource::<crate::caravan_controls::State>()
-        .init_resource::<market::Selection>()
-        .init_resource::<market::OrderDisplay>()
-        .init_resource::<market_history::ChartDisplay>()
-        .add_systems(
-            Update,
-            (
-                open_windows,
-                citizens::refresh_plan,
-                market::refresh,
-                locations::refresh,
-                market_history::refresh,
-            )
-                .chain(),
-        );
+        .add_systems(Update, (floating_ui::interact, open_windows).chain());
         app.world_mut().spawn((
             Window {
                 resolution: (800, 600).into(),
@@ -117,216 +230,141 @@ mod tests {
             },
             bevy::window::PrimaryWindow,
         ));
-        app.update();
-        app.update();
         app
     }
 
     #[test]
-    fn saves_window_uses_the_existing_reopenable_floating_window() {
+    fn identical_page_identity_is_reused_through_navigation() {
         let mut app = app();
-        app.world_mut()
-            .resource_mut::<Windows>()
-            .open(WindowKind::Saves);
+        let first = app
+            .world()
+            .resource::<DisplaySnapshot>()
+            .0
+            .universe
+            .agents()
+            .keys()
+            .copied()
+            .next()
+            .unwrap();
+        let detail = WindowKind::Citizen(first);
+        app.world_mut().resource_mut::<Windows>().open(detail);
         app.update();
-        let count = app
-            .world_mut()
-            .query::<&crate::floating_ui::FloatingWindow>()
+        let mut panes = app.world_mut().query::<(Entity, &FloatingWindow)>();
+        let root = panes
             .iter(app.world())
-            .filter(|window| window.0 == WindowKind::Saves)
-            .count();
-        assert_eq!(count, 1);
-        app.world_mut()
-            .resource_mut::<Windows>()
-            .open(WindowKind::Saves);
+            .find(|(_, pane)| pane.0 == detail)
+            .unwrap()
+            .0;
+        {
+            let mut windows = app.world_mut().resource_mut::<Windows>();
+            windows.open(WindowKind::Citizens);
+            windows.link(WindowKind::Citizens, detail);
+        }
         app.update();
         assert_eq!(
-            app.world_mut()
-                .query::<&crate::floating_ui::FloatingWindow>()
+            panes
                 .iter(app.world())
-                .filter(|window| window.0 == WindowKind::Saves)
-                .count(),
-            1
+                .filter(|(_, pane)| pane.0 == detail)
+                .map(|(entity, _)| entity)
+                .collect::<Vec<_>>(),
+            [root]
         );
+        assert_eq!(app.world().resource::<citizens::Selection>().0, Some(first));
+        assert_eq!(app.world().get::<Node>(root).unwrap().left, px(400.0));
     }
 
     #[test]
-    fn opening_market_releases_location_editor_focus() {
-        let mut app = app();
-        app.insert_resource(locations::State::focused_fixture());
-        assert!(app.world().resource::<locations::State>().editing());
-        app.world_mut()
-            .resource_mut::<Windows>()
-            .open(WindowKind::Market);
-        app.update();
-        assert!(!app.world().resource::<locations::State>().editing());
-        assert_eq!(
-            app.world().resource::<market::Selection>().view,
-            market::View::Market
-        );
-    }
-
-    #[test]
-    fn collectives_focus_releases_editors_and_does_not_activate_market_arrows() {
-        let mut app = app();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<bevy::input_focus::InputFocus>()
-            .insert_resource(locations::State::focused_fixture())
-            .add_systems(Update, market::handle_selection);
-        app.world_mut()
-            .resource_mut::<Windows>()
-            .open(WindowKind::Collectives);
-        app.update();
-        assert!(!app.world().resource::<locations::State>().editing());
-        assert_eq!(
-            app.world().resource::<market::Selection>().view,
-            market::View::Collectives
-        );
-        let before = app.world().resource::<market::Selection>().good;
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::ArrowDown);
-        app.update();
-        assert_eq!(app.world().resource::<market::Selection>().good, before);
-        assert!(
-            !app.world()
-                .resource::<Windows>()
-                .is_open(WindowKind::Market)
-        );
-    }
-
-    #[test]
-    fn first_open_after_idle_populates_overviews_and_constrains_bounds() {
+    fn pane_buttons_drive_recovery_and_closed_roots_despawn() {
         let mut app = app();
         {
             let mut windows = app.world_mut().resource_mut::<Windows>();
             windows.open(WindowKind::Citizens);
-            windows.open(WindowKind::Locations);
-            windows.open(WindowKind::Market);
+            windows.link(WindowKind::Citizens, WindowKind::Market);
+            windows.link(WindowKind::Citizens, WindowKind::Locations);
         }
         app.update();
-        for node in app
+        let mut buttons = app
             .world_mut()
-            .query_filtered::<&Node, With<crate::floating_ui::FloatingWindow>>()
+            .query::<(Entity, &floating_ui::WorkspaceButton)>();
+        let close = buttons
             .iter(app.world())
-        {
-            let (Val::Px(left), Val::Px(top), Val::Px(width), Val::Px(height)) =
-                (node.left, node.top, node.width, node.height)
-            else {
-                panic!("pixel window bounds");
-            };
-            assert!(left >= 0.0 && top >= 0.0 && left + width <= 800.0 && top + height <= 600.0);
-        }
-        assert!(
-            app.world_mut()
-                .query_filtered::<&Children, With<citizens::PlanContent>>()
-                .iter(app.world())
-                .all(|children| !children.is_empty())
+            .find(|(_, button)| button.0 == floating_ui::Action::Close(WindowKind::Locations))
+            .unwrap()
+            .0;
+        app.world_mut()
+            .entity_mut(close)
+            .insert(Interaction::Pressed);
+        app.update();
+        let windows = app.world().resource::<Windows>();
+        assert_eq!(
+            windows.visible(),
+            [Some(WindowKind::Citizens), Some(WindowKind::Market)]
         );
+        let mut panes = app.world_mut().query::<&FloatingWindow>();
         assert!(
-            app.world_mut()
-                .query_filtered::<&Children, With<market_history::Plot>>()
+            panes
                 .iter(app.world())
-                .all(|children| !children.is_empty())
-        );
-        assert!(
-            app.world_mut()
-                .query_filtered::<&Children, With<locations::Content>>()
-                .iter(app.world())
-                .all(|children| !children.is_empty())
-        );
-        assert!(
-            app.world_mut()
-                .query::<&Text>()
-                .iter(app.world())
-                .any(|text| text.0 == "LOCATION TAXES")
+                .all(|pane| pane.0 != WindowKind::Locations)
         );
     }
+
     #[test]
-    fn sidebar_selection_and_reopening_keep_exactly_three_category_windows() {
+    fn pointer_capture_distinguishes_map_pane_rails_and_hud() {
         let mut app = app();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<bevy::input_focus::InputFocus>()
-            .add_systems(
-                Update,
-                (citizens::handle_selection, citizens::refresh_cards).chain(),
-            );
-        for kind in [
-            WindowKind::Citizens,
-            WindowKind::Locations,
-            WindowKind::Market,
+        {
+            let mut windows = app.world_mut().resource_mut::<Windows>();
+            windows.link(WindowKind::Map, WindowKind::Market);
+            windows.link(WindowKind::Map, WindowKind::Locations);
+        }
+        app.update();
+        let mut primary = app
+            .world_mut()
+            .query_filtered::<&mut Window, With<bevy::window::PrimaryWindow>>();
+        for (cursor, hovered, blocked) in [
+            (Vec2::new(50.0, 100.0), Some(WindowKind::Map), false),
+            (Vec2::new(50.0, 40.0), Some(WindowKind::Map), true),
+            (Vec2::new(400.0, 100.0), Some(WindowKind::Locations), true),
+            (Vec2::new(750.0, 100.0), None, true),
+            (Vec2::new(50.0, 15.0), None, true),
         ] {
-            app.world_mut().resource_mut::<Windows>().open(kind);
+            primary
+                .single_mut(app.world_mut())
+                .unwrap()
+                .set_cursor_position(Some(cursor));
+            app.update();
+            let capture = app.world().resource::<floating_ui::InputCapture>();
+            assert_eq!(capture.hovered, hovered);
+            assert_eq!(capture.blocked, blocked);
         }
-        app.update();
-        let menu = app
-            .world_mut()
-            .query::<(&Text, &ChildOf)>()
-            .iter(app.world())
-            .find(|(text, _)| text.0 == "Profession v")
-            .unwrap()
-            .1
-            .parent();
-        app.world_mut()
-            .entity_mut(menu)
-            .insert(Interaction::Pressed);
-        app.update();
-        app.world_mut().entity_mut(menu).insert(Interaction::None);
-        let none = app
-            .world_mut()
-            .query::<(&Text, &ChildOf)>()
-            .iter(app.world())
-            .find(|(text, _)| text.0 == "None")
-            .unwrap()
-            .1
-            .parent();
-        app.world_mut()
-            .entity_mut(none)
-            .insert(Interaction::Pressed);
-        app.update();
-        app.world_mut().entity_mut(none).insert(Interaction::None);
-        let ids = citizens::sorted_agents(&app.world().resource::<DisplaySnapshot>().0.universe)
-            .iter()
-            .map(|(id, _)| *id)
-            .collect::<Vec<_>>();
-        let cards = app
-            .world_mut()
-            .query_filtered::<Entity, With<citizens::Card>>()
-            .iter(app.world())
-            .collect::<Vec<_>>();
-        assert_eq!(cards.len(), ids.len());
-        let back = app
-            .world_mut()
-            .query_filtered::<Entity, With<citizens::Back>>()
-            .single(app.world())
+    }
+
+    #[test]
+    fn replacing_universe_prunes_identity_roots_even_when_ids_still_exist() {
+        let mut app = app();
+        let id = app
+            .world()
+            .resource::<DisplaySnapshot>()
+            .0
+            .universe
+            .agents()
+            .keys()
+            .copied()
+            .next()
             .unwrap();
-        for (index, card) in cards.iter().enumerate() {
-            app.world_mut()
-                .entity_mut(back)
-                .insert(Interaction::Pressed);
-            app.update();
-            app.world_mut().entity_mut(back).insert(Interaction::None);
-            app.world_mut()
-                .entity_mut(*card)
-                .insert(Interaction::Pressed);
-            app.update();
-            assert_eq!(
-                app.world().resource::<citizens::Selection>().0,
-                Some(ids[index])
-            );
-            app.world_mut().entity_mut(*card).insert(Interaction::None);
-            app.update();
-            app.world_mut()
-                .resource_mut::<Windows>()
-                .open(WindowKind::Citizens);
-            app.update();
-            assert_eq!(
-                app.world_mut()
-                    .query_filtered::<Entity, With<crate::floating_ui::FloatingWindow>>()
-                    .iter(app.world())
-                    .count(),
-                3
-            );
-        }
+        let detail = WindowKind::Citizen(id);
+        app.world_mut()
+            .resource_mut::<Windows>()
+            .link(WindowKind::Map, detail);
+        app.update();
+        let mut panes = app.world_mut().query::<&FloatingWindow>();
+        assert!(panes.iter(app.world()).any(|pane| pane.0 == detail));
+        app.world_mut()
+            .resource_mut::<DisplaySnapshot>()
+            .0
+            .generation += 1;
+        app.update();
+        assert!(!panes.iter(app.world()).any(|pane| pane.0 == detail));
+        assert_eq!(app.world().resource::<citizens::Selection>().0, None);
+        assert!(app.world().resource::<Windows>().is_open(WindowKind::Map));
     }
 }

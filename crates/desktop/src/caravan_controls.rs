@@ -1,5 +1,5 @@
 use crate::{
-    DisplaySnapshot, MUTED, PANEL, TEXT, market,
+    DisplaySnapshot, MUTED, PANEL, TEXT,
     simulation::{Command, Mutation, SimulationWorker},
     text,
 };
@@ -59,7 +59,7 @@ struct Draft {
     export: String,
     reserve: String,
 }
-#[derive(Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Saved {
     Good(Good),
     Tariffs,
@@ -73,7 +73,8 @@ pub struct State {
     replace_on_input: bool,
     pending: Option<(u64, Saved)>,
     generation: u64,
-    error: Option<String>,
+    errors: std::collections::HashMap<Saved, String>,
+    field_owner: Option<Entity>,
 }
 impl State {
     #[cfg(test)]
@@ -96,13 +97,8 @@ impl State {
             drafts: policy
                 .exports
                 .iter()
-                .map(|item| Draft {
-                    allowed: item.allowed,
-                    imports_allowed: item.imports_allowed,
-                    import: percent(item.import_tariff_basis_points),
-                    export: percent(item.export_tariff_basis_points),
-                    reserve: item.minimum_reserve.to_string(),
-                })
+                .copied()
+                .map(Draft::from_policy)
                 .collect(),
             import: percent(policy.import_tariff_basis_points),
             export: percent(policy.export_tariff_basis_points),
@@ -183,14 +179,25 @@ fn button(
             }
         });
 }
-pub fn spawn(parent: &mut ChildSpawnerCommands) {
+pub(crate) fn spawn_global(parent: &mut ChildSpawnerCommands) {
+    spawn_editor(parent, Saved::Tariffs);
+}
+
+pub(crate) fn spawn_good(parent: &mut ChildSpawnerCommands, good: Good) {
+    spawn_editor(parent, Saved::Good(good));
+}
+
+fn spawn_editor(parent: &mut ChildSpawnerCommands, scope: Saved) {
     parent
-        .spawn(Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: px(6),
-            flex_shrink: 0.0,
-            ..default()
-        })
+        .spawn((
+            scope,
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(6),
+                flex_shrink: 0.0,
+                ..default()
+            },
+        ))
         .with_children(|controls| {
             controls.spawn(text("CARAVAN POLICY", 14.0, MUTED));
             controls
@@ -201,65 +208,92 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                     ..default()
                 })
                 .with_children(|row| {
-                    button(row, Choice::Toggle, "", Some(Readout::Toggle));
-                    button(row, Choice::ToggleImports, "", Some(Readout::ToggleImports));
-                    button(
-                        row,
-                        Choice::Field(FieldKind::Reserve),
-                        "",
-                        Some(Readout::Reserve),
-                    );
-                    button(
-                        row,
-                        Choice::Field(FieldKind::GoodImport),
-                        "",
-                        Some(Readout::GoodImport),
-                    );
-                    button(
-                        row,
-                        Choice::Field(FieldKind::GoodExport),
-                        "",
-                        Some(Readout::GoodExport),
-                    );
-                    button(row, Choice::SaveGood, "Save good", None);
-                });
-            controls
-                .spawn(Node {
-                    column_gap: px(8),
-                    row_gap: px(6),
-                    flex_wrap: FlexWrap::Wrap,
-                    ..default()
-                })
-                .with_children(|row| {
-                    button(
-                        row,
-                        Choice::Field(FieldKind::Import),
-                        "",
-                        Some(Readout::Import),
-                    );
-                    button(
-                        row,
-                        Choice::Field(FieldKind::Export),
-                        "",
-                        Some(Readout::Export),
-                    );
-                    button(row, Choice::SaveTariffs, "Save tariffs", None);
+                    match scope {
+                        Saved::Good(_) => {
+                            button(row, Choice::Toggle, "", Some(Readout::Toggle));
+                            button(row, Choice::ToggleImports, "", Some(Readout::ToggleImports));
+                            for (field, readout) in [
+                                (FieldKind::Reserve, Readout::Reserve),
+                                (FieldKind::GoodImport, Readout::GoodImport),
+                                (FieldKind::GoodExport, Readout::GoodExport),
+                            ] {
+                                button(row, Choice::Field(field), "", Some(readout));
+                            }
+                            button(row, Choice::SaveGood, "Save good", None);
+                        }
+                        Saved::Tariffs => {
+                            button(
+                                row,
+                                Choice::Field(FieldKind::Import),
+                                "",
+                                Some(Readout::Import),
+                            );
+                            button(
+                                row,
+                                Choice::Field(FieldKind::Export),
+                                "",
+                                Some(Readout::Export),
+                            );
+                            button(row, Choice::SaveTariffs, "Save tariffs", None);
+                        }
+                    }
                     button(row, Choice::Reset, "Reset drafts", None);
                 });
             controls.spawn((text("", 13.0, MUTED), Readout::Status));
         });
 }
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct Editors<'w, 's> {
+    parents: Query<'w, 's, &'static ChildOf>,
+    roots: Query<'w, 's, (&'static Saved, Option<&'static InheritedVisibility>)>,
+}
+
+impl Editors<'_, '_> {
+    fn owner(&self, entity: Entity) -> Option<(Entity, Saved)> {
+        self.parents
+            .iter_ancestors(entity)
+            .find_map(|id| self.roots.get(id).ok().map(|(scope, _)| (id, *scope)))
+    }
+}
+
+impl Draft {
+    fn from_policy(policy: ExportPolicy) -> Self {
+        Self {
+            allowed: policy.allowed,
+            imports_allowed: policy.imports_allowed,
+            import: percent(policy.import_tariff_basis_points),
+            export: percent(policy.export_tariff_basis_points),
+            reserve: policy.minimum_reserve.to_string(),
+        }
+    }
+}
+impl State {
+    fn reload_scope(&mut self, universe: &Universe, scope: Saved) {
+        let policy = universe.caravan_policy();
+        match scope {
+            Saved::Good(good) => {
+                self.drafts[good as usize] = Draft::from_policy(policy.exports[good as usize])
+            }
+            Saved::Tariffs => {
+                self.import = percent(policy.import_tariff_basis_points);
+                self.export = percent(policy.export_tariff_basis_points);
+            }
+        }
+    }
+}
+
 pub fn handle(
     mut state: ResMut<State>,
     (snapshot, worker): (Res<DisplaySnapshot>, Res<SimulationWorker>),
-    selection: Res<market::Selection>,
+    editors: Editors,
     (locations, construction): (
         Option<Res<crate::locations::State>>,
         Option<Res<crate::construction::State>>,
     ),
     controls: Option<Res<crate::Controls>>,
     dev: Option<Res<crate::dev_controls::State>>,
-    buttons: Query<(&Interaction, &Choice), Changed<Interaction>>,
+    buttons: Query<(Entity, &Interaction, &Choice), Changed<Interaction>>,
     mut keys: MessageReader<KeyboardInput>,
 ) {
     if state.drafts.is_empty() || state.generation != snapshot.0.generation {
@@ -272,56 +306,51 @@ pub fn handle(
         keys.clear();
         return;
     }
-    if selection.view != market::View::Market || selection.tab != market::Tab::CaravanPolicy {
-        state.field = None;
-        keys.clear();
-        return;
-    }
-    let good = selection.good();
-    if matches!(state.field, Some(Field::Reserve(previous) | Field::GoodImport(previous) | Field::GoodExport(previous)) if previous != good)
+    if let Some(owner) = state.field_owner
+        && !editors
+            .roots
+            .get(owner)
+            .is_ok_and(|(_, visibility)| visibility.is_none_or(|v| v.get()))
     {
-        state.field = None;
+        stop_editing(&mut state);
     }
-    for (interaction, choice) in &buttons {
+    for (entity, interaction, choice) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
+        let Some((owner, scope)) = editors.owner(entity) else {
+            continue;
+        };
         if state.pending() {
             break;
         }
-        if !good.caravan_eligible()
-            && matches!(
-                choice,
-                Choice::Toggle
-                    | Choice::ToggleImports
-                    | Choice::Field(
-                        FieldKind::Reserve | FieldKind::GoodImport | FieldKind::GoodExport
-                    )
-                    | Choice::SaveGood
-            )
+        if matches!(scope, Saved::Good(good) if !good.caravan_eligible())
+            && !matches!(choice, Choice::Reset)
         {
             continue;
         }
-        state.error = None;
+        state.errors.remove(&scope);
         if !matches!(choice, Choice::Field(_)) {
-            state.field = None;
+            stop_editing(&mut state);
         }
-        let mutation = match choice {
-            Choice::ToggleImports => {
+        let mutation = match (scope, choice) {
+            (Saved::Good(good), Choice::ToggleImports) => {
                 state.drafts[good as usize].imports_allowed ^= true;
                 None
             }
-            Choice::Toggle => {
+            (Saved::Good(good), Choice::Toggle) => {
                 state.drafts[good as usize].allowed ^= true;
                 None
             }
-            Choice::Field(kind) => {
-                let field = match kind {
-                    FieldKind::GoodImport => Field::GoodImport(good),
-                    FieldKind::GoodExport => Field::GoodExport(good),
-                    FieldKind::Reserve => Field::Reserve(good),
-                    FieldKind::Import => Field::Import,
-                    FieldKind::Export => Field::Export,
+            (_, Choice::Field(kind)) => {
+                state.field_owner = Some(owner);
+                let field = match (scope, kind) {
+                    (Saved::Good(good), FieldKind::GoodImport) => Field::GoodImport(good),
+                    (Saved::Good(good), FieldKind::GoodExport) => Field::GoodExport(good),
+                    (Saved::Good(good), FieldKind::Reserve) => Field::Reserve(good),
+                    (Saved::Tariffs, FieldKind::Import) => Field::Import,
+                    (Saved::Tariffs, FieldKind::Export) => Field::Export,
+                    _ => continue,
                 };
                 if state.field != Some(field) {
                     state.replace_on_input = true;
@@ -329,11 +358,11 @@ pub fn handle(
                 }
                 None
             }
-            Choice::Reset => {
-                state.load(&snapshot.0.universe, snapshot.0.generation);
+            (_, Choice::Reset) => {
+                state.reload_scope(&snapshot.0.universe, scope);
                 None
             }
-            Choice::SaveGood => {
+            (Saved::Good(good), Choice::SaveGood) => {
                 let draft = &state.drafts[good as usize];
                 match draft
                     .reserve
@@ -360,12 +389,12 @@ pub fn handle(
                         Saved::Good(good),
                     )),
                     Err(error) => {
-                        state.error = Some(error);
+                        state.errors.insert(scope, error);
                         None
                     }
                 }
             }
-            Choice::SaveTariffs => {
+            (Saved::Tariffs, Choice::SaveTariffs) => {
                 match tariff(&state.import)
                     .and_then(|import| tariff(&state.export).map(|export| (import, export)))
                 {
@@ -377,11 +406,12 @@ pub fn handle(
                         Saved::Tariffs,
                     )),
                     Err(error) => {
-                        state.error = Some(error);
+                        state.errors.insert(scope, error);
                         None
                     }
                 }
             }
+            _ => continue,
         };
         if let Some((mutation, saved)) = mutation {
             if dev.as_ref().is_some_and(|editor| editor.pending())
@@ -390,7 +420,10 @@ pub fn handle(
                     .is_some_and(|locations| locations.pending())
                 || construction.as_ref().is_some_and(|editor| editor.pending())
             {
-                state.error = Some("Another change is saving. Try again when it finishes.".into());
+                state.errors.insert(
+                    scope,
+                    "Another change is saving. Try again when it finishes.".into(),
+                );
                 continue;
             }
             match worker.send(Command::Mutate {
@@ -398,7 +431,9 @@ pub fn handle(
                 mutation,
             }) {
                 Ok(()) => state.pending = Some((snapshot.0.mutation_revision, saved)),
-                Err(error) => state.error = Some(error),
+                Err(error) => {
+                    state.errors.insert(scope, error);
+                }
             }
         }
     }
@@ -410,7 +445,7 @@ pub fn handle(
             continue;
         };
         match &key.logical_key {
-            Key::Escape | Key::Enter | Key::Tab => state.field = None,
+            Key::Escape | Key::Enter | Key::Tab => stop_editing(&mut state),
             Key::Backspace => {
                 if state.replace_on_input {
                     state.value_mut(field).clear();
@@ -443,9 +478,9 @@ pub fn handle(
 pub fn refresh(
     mut state: ResMut<State>,
     snapshot: Res<DisplaySnapshot>,
-    selection: Res<market::Selection>,
-    mut readouts: Query<(&Readout, &mut Text)>,
-    mut buttons: Query<(&Choice, &mut BackgroundColor)>,
+    editors: Editors,
+    mut readouts: Query<(Entity, &Readout, &mut Text)>,
+    mut buttons: Query<(Entity, &Choice, &mut BackgroundColor)>,
 ) {
     if state.drafts.is_empty() || state.generation != snapshot.0.generation {
         state.load(&snapshot.0.universe, snapshot.0.generation);
@@ -454,106 +489,114 @@ pub fn refresh(
         && snapshot.0.mutation_revision > revision
     {
         state.pending = None;
-        state.error = snapshot.0.mutation_error.clone();
-        if state.error.is_none() {
-            let policy = snapshot.0.universe.caravan_policy();
-            match saved {
-                Saved::Good(good) => {
-                    let saved = policy.exports[good as usize];
-                    state.drafts[good as usize] = Draft {
-                        allowed: saved.allowed,
-                        imports_allowed: saved.imports_allowed,
-                        import: percent(saved.import_tariff_basis_points),
-                        export: percent(saved.export_tariff_basis_points),
-                        reserve: saved.minimum_reserve.to_string(),
-                    };
-                }
-                Saved::Tariffs => {
-                    state.import = percent(policy.import_tariff_basis_points);
-                    state.export = percent(policy.export_tariff_basis_points);
-                }
-            }
+        if let Some(error) = &snapshot.0.mutation_error {
+            state.errors.insert(saved, error.clone());
+        } else {
+            state.reload_scope(&snapshot.0.universe, saved);
         }
     }
-    let good = selection.good();
-    let draft = &state.drafts[good as usize];
-    for (choice, mut color) in &mut buttons {
-        let disabled = !good.caravan_eligible()
-            && matches!(
-                choice,
-                Choice::Toggle
-                    | Choice::ToggleImports
-                    | Choice::Field(
-                        FieldKind::Reserve | FieldKind::GoodImport | FieldKind::GoodExport
-                    )
-                    | Choice::SaveGood
-            );
+    for (entity, choice, mut color) in &mut buttons {
+        let disabled = matches!(editors.owner(entity),Some((_,Saved::Good(good))) if !good.caravan_eligible())
+            && !matches!(choice, Choice::Reset);
         color.set_if_neq(BackgroundColor(if disabled {
             Color::srgb(0.04, 0.04, 0.04)
         } else {
             PANEL
         }));
     }
-    for (readout, mut label) in &mut readouts {
+    for (entity, readout, mut label) in &mut readouts {
+        let Some((_, scope)) = editors.owner(entity) else {
+            continue;
+        };
         let cursor = |field| if state.field == Some(field) { " |" } else { "" };
-        let next = match readout {
-            Readout::Toggle | Readout::ToggleImports if !good.caravan_eligible() => {
-                "Caravan trade unavailable".into()
-            }
-            Readout::Reserve if !good.caravan_eligible() => "Minimum reserve: unavailable".into(),
-            Readout::ToggleImports => format!(
-                "Imports: {}",
-                if draft.imports_allowed {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            ),
-            Readout::GoodImport => format!(
-                "Good import: {}%{}",
-                draft.import,
-                cursor(Field::GoodImport(good))
-            ),
-            Readout::GoodExport => format!(
-                "Good export: {}%{}",
-                draft.export,
-                cursor(Field::GoodExport(good))
-            ),
-            Readout::Toggle => format!(
-                "Exports: {}",
-                if draft.allowed { "enabled" } else { "disabled" }
-            ),
-            Readout::Reserve => format!(
-                "Minimum reserve: {} {}{}",
-                draft.reserve,
-                if good.units_per_price_unit() == 1000 {
-                    "g"
-                } else {
-                    "items"
-                },
-                cursor(Field::Reserve(good))
-            ),
-            Readout::Import => format!("Global import: {}%{}", state.import, cursor(Field::Import)),
-            Readout::Export => format!("Global export: {}%{}", state.export, cursor(Field::Export)),
-            Readout::Status => state.error.clone().unwrap_or_else(|| {
-                if state.pending() {
+        let next = match (scope, readout) {
+            (_, Readout::Status) => state.errors.get(&scope).cloned().unwrap_or_else(|| {
+                if state.pending.is_some_and(|(_, saved)| saved == scope) {
                     "Saving…".into()
                 } else {
                     String::new()
                 }
             }),
+            (Saved::Tariffs, Readout::Import) => {
+                format!("Global import: {}%{}", state.import, cursor(Field::Import))
+            }
+            (Saved::Tariffs, Readout::Export) => {
+                format!("Global export: {}%{}", state.export, cursor(Field::Export))
+            }
+            (Saved::Good(good), _) => {
+                let draft = &state.drafts[good as usize];
+                match readout {
+                    Readout::Toggle | Readout::ToggleImports if !good.caravan_eligible() => {
+                        "Caravan trade unavailable".into()
+                    }
+                    Readout::Reserve if !good.caravan_eligible() => {
+                        "Minimum reserve: unavailable".into()
+                    }
+                    Readout::ToggleImports => format!(
+                        "Imports: {}",
+                        if draft.imports_allowed {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    ),
+                    Readout::GoodImport => format!(
+                        "Good import: {}%{}",
+                        draft.import,
+                        cursor(Field::GoodImport(good))
+                    ),
+                    Readout::GoodExport => format!(
+                        "Good export: {}%{}",
+                        draft.export,
+                        cursor(Field::GoodExport(good))
+                    ),
+                    Readout::Toggle => format!(
+                        "Exports: {}",
+                        if draft.allowed { "enabled" } else { "disabled" }
+                    ),
+                    Readout::Reserve => format!(
+                        "Minimum reserve: {} {}{}",
+                        draft.reserve,
+                        if good.units_per_price_unit() == 1000 {
+                            "g"
+                        } else {
+                            "items"
+                        },
+                        cursor(Field::Reserve(good))
+                    ),
+                    _ => continue,
+                }
+            }
+
+            _ => continue,
         };
         label.set_if_neq(Text(next));
     }
 }
 
+pub(crate) fn focus_pane(state: &mut State, kind: crate::floating_ui::WindowKind) {
+    use crate::floating_ui::WindowKind;
+    let Some(field) = state.field else { return };
+    let owner = match field {
+        Field::GoodImport(good) | Field::GoodExport(good) | Field::Reserve(good) => {
+            WindowKind::Good(good)
+        }
+        Field::Import | Field::Export => WindowKind::Market,
+    };
+    if owner != kind {
+        stop_editing(state);
+    }
+}
+
 pub(crate) fn stop_editing(state: &mut State) {
+    state.field_owner = None;
     state.field = None;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market;
     use std::time::{Duration, Instant};
 
     fn app() -> App {
@@ -565,14 +608,24 @@ mod tests {
             .init_resource::<market::Selection>()
             .add_message::<KeyboardInput>()
             .add_systems(Update, (handle, refresh).chain());
-        app.world_mut().resource_mut::<market::Selection>().view = market::View::Market;
         app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::CaravanPolicy;
         app.world_mut().resource_mut::<market::Selection>().good = Some(Good::Flour);
         app.update();
         app
     }
     fn press(app: &mut App, choice: Choice) {
-        let entity = app.world_mut().spawn((choice, Interaction::Pressed)).id();
+        let good = app.world().resource::<market::Selection>().good();
+        let scope = match choice {
+            Choice::Field(FieldKind::Import | FieldKind::Export)
+            | Choice::SaveTariffs
+            | Choice::Reset => Saved::Tariffs,
+            _ => Saved::Good(good),
+        };
+        let owner = app.world_mut().spawn(scope).id();
+        let entity = app
+            .world_mut()
+            .spawn((ChildOf(owner), choice, Interaction::Pressed))
+            .id();
         app.update();
         app.world_mut().despawn(entity);
     }
@@ -702,6 +755,81 @@ mod tests {
     }
 
     #[test]
+    fn two_visible_policy_forms_edit_and_reset_only_their_own_good() {
+        let mut app = app();
+        app.world_mut()
+            .commands()
+            .spawn(Node::default())
+            .with_children(|p| {
+                spawn_good(p, Good::Wheat);
+                spawn_good(p, Good::Flour);
+            });
+        let world = app.world_mut();
+        world.flush();
+        let forms: Vec<_> = world
+            .query::<(Entity, &Saved)>()
+            .iter(world)
+            .map(|(e, s)| (e, *s))
+            .collect();
+        let button = |world: &mut World, good, reset| {
+            let owner = forms
+                .iter()
+                .find(|(_, s)| *s == Saved::Good(good))
+                .unwrap()
+                .0;
+            let candidates: Vec<_> = world
+                .query::<(Entity, &Choice)>()
+                .iter(world)
+                .filter_map(|(id, c)| {
+                    (if reset {
+                        matches!(c, Choice::Reset)
+                    } else {
+                        matches!(c, Choice::Field(FieldKind::Reserve))
+                    })
+                    .then_some(id)
+                })
+                .collect();
+            candidates
+                .into_iter()
+                .find(|&id| {
+                    let mut parent = id;
+                    while let Some(p) = world.get::<ChildOf>(parent) {
+                        parent = p.parent();
+                        if parent == owner {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .unwrap()
+        };
+        for (good, value) in [(Good::Wheat, "77"), (Good::Flour, "88")] {
+            let field = button(app.world_mut(), good, false);
+            let owner = forms
+                .iter()
+                .find(|(_, s)| *s == Saved::Good(good))
+                .unwrap()
+                .0;
+            app.world_mut()
+                .entity_mut(owner)
+                .insert(InheritedVisibility::VISIBLE);
+            app.world_mut()
+                .entity_mut(field)
+                .insert(Interaction::Pressed);
+            app.update();
+            type_text(&mut app, value);
+        }
+        let reset = button(app.world_mut(), Good::Flour, true);
+        app.world_mut()
+            .entity_mut(reset)
+            .insert(Interaction::Pressed);
+        app.update();
+        let state = app.world().resource::<State>();
+        assert_eq!(state.drafts[Good::Wheat as usize].reserve, "77");
+        assert_ne!(state.drafts[Good::Flour as usize].reserve, "88");
+    }
+
+    #[test]
     fn signed_percentages_accept_offsets_above_one_hundred() {
         for (input, expected) in [("-25", -2500), ("125.01", 12501), ("-0.01", -1), ("0", 0)] {
             assert_eq!(tariff(input), Ok(expected));
@@ -720,6 +848,10 @@ mod tests {
         app.world_mut().resource_mut::<State>().drafts[Good::Flour as usize].reserve = "123".into();
         app.world_mut().resource_mut::<market::Selection>().good = Some(Good::BreadRoll);
         app.update();
+        focus_pane(
+            &mut app.world_mut().resource_mut::<State>(),
+            crate::floating_ui::WindowKind::Good(Good::BreadRoll),
+        );
         assert!(!app.world().resource::<State>().editing());
         app.world_mut().resource_mut::<State>().drafts[Good::BreadRoll as usize].reserve =
             "7".into();
@@ -762,7 +894,10 @@ mod tests {
         press(&mut app, Choice::Field(FieldKind::Reserve));
         app.world_mut().resource_mut::<State>().drafts[Good::Flour as usize].reserve = "123".into();
         assert!(app.world().resource::<State>().editing());
-        app.world_mut().resource_mut::<market::Selection>().tab = market::Tab::Listings;
+        let owner = app.world().resource::<State>().field_owner.unwrap();
+        app.world_mut()
+            .entity_mut(owner)
+            .insert(InheritedVisibility::HIDDEN);
         app.update();
         assert!(!app.world().resource::<State>().editing());
         assert_eq!(
@@ -839,7 +974,12 @@ mod tests {
         );
         app.world_mut().resource_mut::<State>().import = "100.001".into();
         press(&mut app, Choice::SaveTariffs);
-        assert!(app.world().resource::<State>().error.is_some());
+        assert!(
+            app.world()
+                .resource::<State>()
+                .errors
+                .contains_key(&Saved::Tariffs)
+        );
         assert_eq!(app.world().resource::<State>().import, "100.001");
         app.world_mut().resource_mut::<State>().pending = Some((0, Saved::Tariffs));
         {
@@ -850,7 +990,11 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<State>().import, "100.001");
         assert_eq!(
-            app.world().resource::<State>().error.as_deref(),
+            app.world()
+                .resource::<State>()
+                .errors
+                .get(&Saved::Tariffs)
+                .map(String::as_str),
             Some("Worker rejected change")
         );
         app.world_mut()
@@ -880,8 +1024,8 @@ mod tests {
         assert!(
             app.world()
                 .resource::<State>()
-                .error
-                .as_ref()
+                .errors
+                .get(&Saved::Tariffs)
                 .unwrap()
                 .contains("Another change")
         );

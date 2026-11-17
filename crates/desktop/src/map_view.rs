@@ -1,6 +1,7 @@
 use crate::{
     DisplaySnapshot, TEXT,
     citizens::{self, Selection},
+    floating_ui::{WindowKind, Windows},
     text,
 };
 use bevy::prelude::*;
@@ -8,6 +9,9 @@ use learning_lord_simulation::{
     AgentKind, CitizenAction,
     locations::{Location, MAP_HALF_SIZE_METRES, Position},
 };
+
+#[derive(Component)]
+pub struct MapSurface;
 
 #[derive(Component)]
 pub struct MapLabel(usize);
@@ -64,6 +68,7 @@ impl MapViewport {
 pub fn spawn_background(commands: &mut Commands, sites: usize, citizens: usize) {
     commands
         .spawn((
+            MapSurface,
             Node {
                 position_type: PositionType::Absolute,
                 width: percent(100),
@@ -149,28 +154,45 @@ pub fn spawn_background(commands: &mut Commands, sites: usize, citizens: usize) 
         });
 }
 
+pub fn layout(
+    windows: Res<Windows>,
+    mut viewport: ResMut<MapViewport>,
+    mut surfaces: Query<(&mut Node, &mut Visibility), With<MapSurface>>,
+) {
+    let bounds = windows.bounds(WindowKind::Map);
+    for (mut node, mut visibility) in &mut surfaces {
+        let Some(bounds) = bounds else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        let next = Node {
+            left: px(bounds.position.x),
+            top: px(bounds.position.y),
+            width: px(bounds.size.x),
+            height: px(bounds.size.y),
+            ..node.clone()
+        };
+        node.set_if_neq(next);
+        if viewport.size != bounds.size {
+            viewport.size = bounds.size;
+        }
+    }
+}
+
 pub fn interaction(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     capture: Res<crate::floating_ui::InputCapture>,
-    state: (
-        Res<DisplaySnapshot>,
-        ResMut<Selection>,
-        ResMut<crate::locations::State>,
-        Option<ResMut<citizens::RosterState>>,
-    ),
-    mut floating: ResMut<crate::floating_ui::Windows>,
+    snapshot: Res<DisplaySnapshot>,
+    mut selection: ResMut<Selection>,
+    mut floating: ResMut<Windows>,
     mut viewport: ResMut<MapViewport>,
 ) {
-    let (snapshot, mut selection, mut locations, mut roster) = state;
     let Ok(window) = windows.single() else {
         return;
     };
-    let size = Vec2::new(window.width(), window.height());
-    if viewport.size != size {
-        viewport.size = size;
-    }
     let scroll: f32 = wheel
         .read()
         .map(|event| match event.unit {
@@ -178,17 +200,22 @@ pub fn interaction(
             bevy::input::mouse::MouseScrollUnit::Pixel => event.y * 0.002,
         })
         .sum();
-    let Some(pointer) = window.cursor_position() else {
+    let bounds = floating.bounds(WindowKind::Map);
+    let Some((pointer, bounds)) = window.cursor_position().zip(bounds) else {
         if viewport.drag.is_some() {
             viewport.drag = None;
         }
         return;
     };
-    if capture.blocked {
+    let pointer = pointer - bounds.position;
+    if capture.blocked || !Rect::from_corners(Vec2::ZERO, bounds.size).contains(pointer) {
         if viewport.drag.is_some() {
             viewport.drag = None;
         }
         return;
+    }
+    if viewport.size != bounds.size {
+        viewport.size = bounds.size;
     }
     if scroll != 0.0 {
         viewport.zoom_at(pointer, scroll.exp());
@@ -201,10 +228,7 @@ pub fn interaction(
             citizen_point(&viewport, &agents, *id, citizen.position()).distance(pointer) <= 10.0
         }) {
             selection.0 = Some(*id);
-            if let Some(roster) = roster.as_mut() {
-                roster.detail = true;
-            }
-            floating.open(crate::floating_ui::WindowKind::Citizens);
+            floating.link(WindowKind::Map, WindowKind::Citizen(*id));
             return;
         }
         if let Some(place) = universe
@@ -213,8 +237,7 @@ pub fn interaction(
             .values()
             .find(|place| viewport.project(place.position).distance(pointer) <= 10.0)
         {
-            crate::locations::select_place(&mut locations, place.id);
-            floating.open(crate::floating_ui::WindowKind::Locations);
+            floating.link(WindowKind::Map, WindowKind::Location(place.id));
             return;
         }
         viewport.drag = Some(pointer);
@@ -291,6 +314,8 @@ fn site_label_position(point: Vec2, occupied: &[Rect], bounds: Vec2) -> Vec2 {
 }
 
 pub fn refresh(
+    windows: Option<Res<Windows>>,
+    mut shown: Local<bool>,
     viewport: Option<Res<MapViewport>>,
     snapshot: Res<DisplaySnapshot>,
     selection: Res<Selection>,
@@ -303,12 +328,21 @@ pub fn refresh(
         Option<&mut BackgroundColor>,
     )>,
 ) {
-    if !snapshot.is_changed()
+    if windows
+        .as_ref()
+        .is_some_and(|w| !w.is_open(WindowKind::Map))
+    {
+        *shown = false;
+        return;
+    }
+    if *shown
+        && !snapshot.is_changed()
         && !selection.is_changed()
         && !viewport.as_ref().is_some_and(|view| view.is_changed())
     {
         return;
     }
+    *shown = true;
     let fallback = MapViewport::default();
     let viewport = viewport.as_deref().unwrap_or(&fallback);
     let universe = &snapshot.0.universe;
@@ -506,16 +540,16 @@ mod tests {
         let id = agents[0].0;
         let AgentKind::Citizen(citizen) = &agents[0].1.kind;
         let mut window = Window::default();
+        let mut workspace = Windows::default();
+        workspace.set_viewport(Vec2::new(window.width(), window.height()));
+        let bounds = workspace.bounds(WindowKind::Map).unwrap();
         let viewport = MapViewport {
-            size: Vec2::new(window.width(), window.height()),
+            size: bounds.size,
             ..default()
         };
-        window.set_cursor_position(Some(citizen_point(
-            &viewport,
-            &agents,
-            id,
-            citizen.position(),
-        )));
+        window.set_cursor_position(Some(
+            bounds.position + citizen_point(&viewport, &agents, id, citizen.position()),
+        ));
         let mut app = App::new();
         app.insert_resource(DisplaySnapshot(Snapshot {
             universe,
@@ -530,7 +564,7 @@ mod tests {
         .init_resource::<Selection>()
         .init_resource::<citizens::RosterState>()
         .init_resource::<ButtonInput<MouseButton>>()
-        .init_resource::<crate::floating_ui::Windows>()
+        .insert_resource(workspace)
         .init_resource::<crate::locations::State>()
         .insert_resource(crate::floating_ui::InputCapture {
             blocked: true,
@@ -544,23 +578,19 @@ mod tests {
             .press(MouseButton::Left);
         app.update();
         assert!(
-            app.world_mut()
-                .resource_mut::<crate::floating_ui::Windows>()
-                .take_new()
-                .is_empty()
+            !app.world()
+                .resource::<Windows>()
+                .is_open(WindowKind::Citizen(id))
         );
-        assert!(!app.world().resource::<citizens::RosterState>().detail);
         app.world_mut()
             .resource_mut::<crate::floating_ui::InputCapture>()
             .blocked = false;
         app.update();
         assert_eq!(app.world().resource::<Selection>().0, Some(id));
-        assert!(app.world().resource::<citizens::RosterState>().detail);
-        assert_eq!(
-            app.world_mut()
-                .resource_mut::<crate::floating_ui::Windows>()
-                .take_new(),
-            vec![crate::floating_ui::WindowKind::Citizens]
+        assert!(
+            app.world()
+                .resource::<Windows>()
+                .is_open(WindowKind::Citizen(id))
         );
     }
 

@@ -1,6 +1,7 @@
 use crate::{
-    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, citizens, guild_history, household_history,
-    locations,
+    DisplaySnapshot, MUTED, PANEL, SELECTED, TEXT, citizens,
+    floating_ui::WindowKind,
+    guild_history, household_history, locations,
     navigation::{self, Target},
     text,
 };
@@ -32,30 +33,29 @@ pub(crate) struct State {
     history_record: Option<learning_lord_simulation::household_history::DailyHouseholdHistory>,
 }
 impl State {
-    pub(crate) fn tab(&self) -> Tab {
-        self.tab
-    }
-    pub(crate) fn selected_guild(&self) -> Option<AgentId> {
-        self.selected_guild
-    }
-    pub(crate) fn select_guild(&mut self, id: AgentId) {
-        if self.tab != Tab::Guilds || self.selected_guild != Some(id) {
-            self.tab = Tab::Guilds;
-            self.selected_guild = Some(id);
-            self.guild_history_day = None;
-            self.dirty = true;
+    pub(crate) fn title(&self) -> &'static str {
+        match self.tab {
+            Tab::Households => "Households",
+            Tab::Guilds => "Guilds",
+            Tab::Businesses => "Businesses",
         }
     }
-    pub(crate) fn selected(&self) -> Option<AgentId> {
-        self.selected
+}
+
+#[cfg(test)]
+impl State {
+    fn select_guild(&mut self, id: AgentId) {
+        self.tab = Tab::Guilds;
+        self.selected_guild = Some(id);
+        self.guild_history_day = None;
+        self.dirty = true;
     }
-    pub(crate) fn select(&mut self, id: AgentId) {
-        if self.tab != Tab::Households || self.selected != Some(id) {
-            self.tab = Tab::Households;
-            self.selected = Some(id);
-            self.history_day = None;
-            self.dirty = true;
-        }
+
+    fn select(&mut self, id: AgentId) {
+        self.tab = Tab::Households;
+        self.selected = Some(id);
+        self.history_day = None;
+        self.dirty = true;
     }
 }
 #[derive(Component)]
@@ -92,8 +92,23 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands) {
                 });
             }
         });
+    spawn_content(parent, ());
+}
+
+pub(crate) fn spawn_entity(parent: &mut ChildSpawnerCommands, kind: WindowKind) {
+    spawn_content(parent, (EntityDetails(kind), DetailState::default()));
+}
+
+#[derive(Component)]
+pub(crate) struct EntityDetails(WindowKind);
+
+#[derive(Component, Default)]
+pub(crate) struct DetailState(State);
+
+fn spawn_content(parent: &mut ChildSpawnerCommands, state: impl Bundle) {
     parent.spawn((
         Content,
+        state,
         Node {
             width: percent(100),
             flex_grow: 1.0,
@@ -106,46 +121,65 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands) {
 }
 
 pub(crate) fn handle(
-    mut state: ResMut<State>,
+    mut overview: ResMut<State>,
     choices: Query<(&Interaction, &Choose), Changed<Interaction>>,
-    history_choices: Query<(&Interaction, &household_history::Choice), Changed<Interaction>>,
-    guild_history_choices: Query<(&Interaction, &guild_history::Choice), Changed<Interaction>>,
-    mut scrolls: Query<(&ScrollPanel, &mut ScrollPosition)>,
+    history_choices: Query<
+        (Entity, &Interaction, &household_history::Choice),
+        Changed<Interaction>,
+    >,
+    guild_history_choices: Query<
+        (Entity, &Interaction, &guild_history::Choice),
+        Changed<Interaction>,
+    >,
+    mut scrolls: Query<(Entity, &ScrollPanel, &mut ScrollPosition)>,
+    mut panes: Query<&mut DetailState>,
+    parents: Query<&ChildOf>,
 ) {
-    for (interaction, choice) in &history_choices {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        for (panel, mut position) in &mut scrolls {
-            if panel.0 {
+    let changed = history_choices
+        .iter()
+        .filter_map(|(entity, interaction, choice)| {
+            (*interaction == Interaction::Pressed).then_some((entity, false, *choice))
+        })
+        .chain(
+            guild_history_choices
+                .iter()
+                .filter_map(|(entity, interaction, choice)| {
+                    let choice = match *choice {
+                        guild_history::Choice::View(view) => household_history::Choice::View(view),
+                        guild_history::Choice::Day(day) => household_history::Choice::Day(day),
+                    };
+                    (*interaction == Interaction::Pressed).then_some((entity, true, choice))
+                }),
+        );
+    for (entity, guild, choice) in changed {
+        let pane = parents
+            .iter_ancestors(entity)
+            .find(|&ancestor| panes.contains(ancestor));
+        for (entity, panel, mut position) in &mut scrolls {
+            let owner = parents
+                .iter_ancestors(entity)
+                .find(|&ancestor| panes.contains(ancestor));
+            if panel.0 && owner == pane {
                 position.0 = Vec2::ZERO;
             }
         }
-        match choice {
-            household_history::Choice::View(view) => state.history_view = *view,
-            household_history::Choice::Day(day) => state.history_day = *day,
-        }
-        state.dirty = true;
-    }
-    for (interaction, choice) in &guild_history_choices {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        for (panel, mut position) in &mut scrolls {
-            if panel.0 {
-                position.0 = Vec2::ZERO;
-            }
-        }
-        match choice {
-            guild_history::Choice::View(view) => state.guild_history_view = *view,
-            guild_history::Choice::Day(day) => state.guild_history_day = *day,
+        let mut detail = pane.and_then(|pane| panes.get_mut(pane).ok());
+        let state = detail
+            .as_deref_mut()
+            .map(|pane| &mut pane.0)
+            .unwrap_or(&mut overview);
+        match (guild, choice) {
+            (false, household_history::Choice::View(view)) => state.history_view = view,
+            (false, household_history::Choice::Day(day)) => state.history_day = day,
+            (true, household_history::Choice::View(view)) => state.guild_history_view = view,
+            (true, household_history::Choice::Day(day)) => state.guild_history_day = day,
         }
         state.dirty = true;
     }
     for (interaction, choice) in &choices {
-        if *interaction == Interaction::Pressed && state.tab != choice.0 {
-            state.tab = choice.0;
-            state.dirty = true;
+        if *interaction == Interaction::Pressed && overview.tab != choice.0 {
+            overview.tab = choice.0;
+            overview.dirty = true;
         }
     }
 }
@@ -456,43 +490,50 @@ fn guild_content(
     universe: &Universe,
     state: &State,
     offsets: [Vec2; 2],
+    show_list: bool,
+    show_details: bool,
 ) {
     let selected = state.selected_guild;
-    parent
-        .spawn((
-            Node {
-                width: px(230),
-                flex_shrink: 0.0,
-                min_height: px(0),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(8),
-                overflow: Overflow::scroll_y(),
-                ..default()
-            },
-            ScrollPosition(offsets[0]),
-            RelativeCursorPosition::default(),
-            ScrollPanel(false),
-        ))
-        .with_children(|list| {
-            let mut guilds = universe.guilds().values().collect::<Vec<_>>();
-            guilds.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
-            for guild in guilds {
-                list.spawn((
-                    Node::default(),
-                    BackgroundColor(if selected == Some(guild.id) {
-                        SELECTED
-                    } else {
-                        PANEL
-                    }),
-                ))
-                .with_children(|entry| {
-                    navigation::link(entry, &guild.name, Target::Guild(guild.id))
-                });
-            }
-            if universe.guilds().is_empty() {
-                label(list, "No guilds");
-            }
-        });
+    if show_list {
+        parent
+            .spawn((
+                Node {
+                    width: if show_details { px(230) } else { percent(100) },
+                    flex_shrink: 0.0,
+                    min_height: px(0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollPosition(offsets[0]),
+                RelativeCursorPosition::default(),
+                ScrollPanel(false),
+            ))
+            .with_children(|list| {
+                let mut guilds = universe.guilds().values().collect::<Vec<_>>();
+                guilds.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
+                for guild in guilds {
+                    list.spawn((
+                        Node::default(),
+                        BackgroundColor(if selected == Some(guild.id) {
+                            SELECTED
+                        } else {
+                            PANEL
+                        }),
+                    ))
+                    .with_children(|entry| {
+                        navigation::link(entry, &guild.name, Target::Guild(guild.id))
+                    });
+                }
+                if universe.guilds().is_empty() {
+                    label(list, "No guilds");
+                }
+            });
+    }
+    if !show_details {
+        return;
+    }
     parent
         .spawn((
             Node {
@@ -591,11 +632,74 @@ fn guild_content(
 pub(crate) fn refresh(
     mut commands: Commands,
     snapshot: Res<DisplaySnapshot>,
-    mut state: ResMut<State>,
-    content: Query<(Entity, Option<&Children>), With<Content>>,
+    mut overview: ResMut<State>,
+    mut content: Query<
+        (
+            Entity,
+            Option<&Children>,
+            Option<(&EntityDetails, &mut DetailState)>,
+        ),
+        With<Content>,
+    >,
     mut tabs: Query<(&Choose, &mut BackgroundColor)>,
-    scrolls: Query<(&ScrollPanel, &ScrollPosition)>,
+    scrolls: Query<(Entity, &ScrollPanel, &ScrollPosition)>,
+    parents: Query<&ChildOf>,
     windows: Option<Res<crate::floating_ui::Windows>>,
+) {
+    for (root, children, detail) in &mut content {
+        let (kind, state) = match detail {
+            Some((details, state)) => (details.0, Some(state)),
+            None => (WindowKind::Collectives, None),
+        };
+        if windows
+            .as_ref()
+            .is_some_and(|windows| !windows.is_open(kind))
+        {
+            continue;
+        }
+        let mut detail = state;
+        let state = detail
+            .as_deref_mut()
+            .map(|pane| &mut pane.0)
+            .unwrap_or(&mut overview);
+        let mut offsets = [Vec2::ZERO; 2];
+        for (entity, panel, position) in &scrolls {
+            if parents
+                .iter_ancestors(entity)
+                .any(|ancestor| ancestor == root)
+            {
+                offsets[usize::from(panel.0)] = position.0;
+            }
+        }
+        refresh_pane(
+            &mut commands,
+            &snapshot,
+            root,
+            children.is_some(),
+            state,
+            kind,
+            offsets,
+            windows.is_none(),
+        );
+    }
+    for (tab, mut color) in &mut tabs {
+        color.set_if_neq(BackgroundColor(if tab.0 == overview.tab {
+            SELECTED
+        } else {
+            PANEL
+        }));
+    }
+}
+
+fn refresh_pane(
+    commands: &mut Commands,
+    snapshot: &DisplaySnapshot,
+    entity: Entity,
+    has_children: bool,
+    state: &mut State,
+    kind: WindowKind,
+    offsets: [Vec2; 2],
+    combined: bool,
 ) {
     if state.generation != snapshot.0.generation {
         *state = State {
@@ -604,33 +708,58 @@ pub(crate) fn refresh(
             ..default()
         };
     }
-    if content.is_empty()
-        || windows
-            .as_ref()
-            .is_some_and(|windows| !windows.is_open(crate::floating_ui::WindowKind::Collectives))
-    {
-        return;
-    }
-    if !state.dirty
-        && state.revision == Some(snapshot.0.revision)
-        && content.iter().all(|(_, children)| children.is_some())
-    {
+    if !state.dirty && state.revision == Some(snapshot.0.revision) && has_children {
         return;
     }
     let universe = &snapshot.0.universe;
-    if state
-        .selected
-        .is_none_or(|id| !universe.households().contains_key(&id))
-    {
-        state.selected = universe.households().keys().copied().min_by_key(|id| id.0);
+    match kind {
+        WindowKind::Household(id) => {
+            state.tab = Tab::Households;
+            state.selected = universe.households().contains_key(&id).then_some(id);
+        }
+        WindowKind::Guild(id) => {
+            state.tab = Tab::Guilds;
+            state.selected_guild = universe.guilds().contains_key(&id).then_some(id);
+        }
+        WindowKind::Collectives if combined => {
+            if state
+                .selected
+                .is_none_or(|id| !universe.households().contains_key(&id))
+            {
+                state.selected = universe.households().keys().copied().min_by_key(|id| id.0);
+            }
+            if state
+                .selected_guild
+                .is_none_or(|id| !universe.guilds().contains_key(&id))
+            {
+                state.selected_guild = universe.guilds().keys().copied().min_by_key(|id| id.0);
+            }
+        }
+        _ => {}
     }
-    if state
-        .selected_guild
-        .is_none_or(|id| !universe.guilds().contains_key(&id))
-    {
-        state.selected_guild = universe.guilds().keys().copied().min_by_key(|id| id.0);
-    }
-    let display_key = if state.tab == Tab::Guilds
+    let show_list = kind == WindowKind::Collectives;
+    let show_details = combined || !show_list;
+    let display_key = if !show_details {
+        match state.tab {
+            Tab::Households => format!(
+                "{:?}",
+                universe
+                    .households()
+                    .values()
+                    .map(|household| (household.id, &household.name))
+                    .collect::<Vec<_>>()
+            ),
+            Tab::Guilds => format!(
+                "{:?}",
+                universe
+                    .guilds()
+                    .values()
+                    .map(|guild| (guild.id, &guild.name))
+                    .collect::<Vec<_>>()
+            ),
+            Tab::Businesses => String::new(),
+        }
+    } else if state.tab == Tab::Guilds
         && state.guild_history_view == household_history::View::History
     {
         format!(
@@ -818,46 +947,28 @@ pub(crate) fn refresh(
     state.revision = Some(snapshot.0.revision);
     let changed =
         state.dirty || history_changed || guild_history_changed || state.display_key != display_key;
-    let mut offsets = [Vec2::ZERO; 2];
-    for (panel, position) in &scrolls {
-        offsets[usize::from(panel.0)] = position.0;
-    }
     state.display_key = display_key;
-    for (tab, mut color) in &mut tabs {
-        color.set_if_neq(BackgroundColor(if tab.0 == state.tab {
-            SELECTED
-        } else {
-            PANEL
-        }));
-    }
-    if !changed && content.iter().all(|(_, children)| children.is_some()) {
+    if !changed && has_children {
         return;
     }
     state.dirty = false;
-    state.revision = Some(snapshot.0.revision);
-    for (entity, _) in &content {
-        commands
-            .entity(entity)
-            .despawn_children()
-            .with_children(|parent| {
-                if state.tab == Tab::Guilds {
-                    guild_content(parent, universe, &state, offsets);
-                    return;
-                }
-                if state.tab != Tab::Households {
-                    label(
-                        parent,
-                        match state.tab {
-                            Tab::Guilds => "Guilds are not implemented yet.",
-                            _ => "Businesses are not implemented yet.",
-                        },
-                    );
-                    return;
-                }
+    commands
+        .entity(entity)
+        .despawn_children()
+        .with_children(|parent| {
+            if state.tab == Tab::Guilds {
+                guild_content(parent, universe, state, offsets, show_list, show_details);
+                return;
+            }
+            if state.tab == Tab::Businesses {
+                label(parent, "Businesses are not implemented yet.");
+                return;
+            }
+            if show_list {
                 parent
                     .spawn((
                         Node {
-                            width: px(230),
+                            width: if show_details { px(230) } else { percent(100) },
                             flex_shrink: 0.0,
                             min_height: px(0),
                             flex_direction: FlexDirection::Column,
@@ -893,56 +1004,143 @@ pub(crate) fn refresh(
                             label(list, "No households");
                         }
                     });
-                parent
-                    .spawn((
-                        Node {
-                            flex_grow: 1.0,
-                            flex_basis: px(0),
-                            min_width: px(0),
-                            min_height: px(0),
-                            flex_direction: FlexDirection::Column,
-                            row_gap: px(8),
-                            overflow: Overflow::scroll_y(),
-                            ..default()
-                        },
-                        ScrollPosition(offsets[1]),
-                        RelativeCursorPosition::default(),
-                        ScrollPanel(true),
-                    ))
-                    .with_children(|panel| {
-                        if let Some(id) = state.selected {
-                            household_history::controls(
+            }
+            if !show_details {
+                return;
+            }
+            parent
+                .spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        min_width: px(0),
+                        min_height: px(0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(8),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition(offsets[1]),
+                    RelativeCursorPosition::default(),
+                    ScrollPanel(true),
+                ))
+                .with_children(|panel| {
+                    if let Some(id) = state.selected {
+                        household_history::controls(
+                            panel,
+                            universe,
+                            id,
+                            state.history_view,
+                            state.history_day,
+                        );
+                        if state.history_view == household_history::View::Current {
+                            details(panel, universe, id);
+                        }
+                        if state.history_view == household_history::View::History
+                            && let Some(day) = &state.history_record
+                        {
+                            panel.spawn(text(&universe.households()[&id].name, 18.0, TEXT));
+                            household_history::render(
                                 panel,
                                 universe,
-                                id,
-                                state.history_view,
-                                state.history_day,
+                                day,
+                                state.history_day.is_none(),
                             );
-                            if state.history_view == household_history::View::Current {
-                                details(panel, universe, id);
-                            }
-                            if state.history_view == household_history::View::History
-                                && let Some(day) = &state.history_record
-                            {
-                                panel.spawn(text(&universe.households()[&id].name, 18.0, TEXT));
-                                household_history::render(
-                                    panel,
-                                    universe,
-                                    day,
-                                    state.history_day.is_none(),
-                                );
-                            }
-                        } else {
-                            label(panel, "Select a household");
                         }
-                    });
-            });
-    }
+                    } else {
+                        label(panel, "Select a household");
+                    }
+                });
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn two_household_panes_keep_history_and_scroll_independent() {
+        use crate::{floating_ui::Windows, simulation::Snapshot};
+        let universe = crate::simulation::new_universe().unwrap();
+        let [first, second]: [AgentId; 2] = universe
+            .households()
+            .keys()
+            .copied()
+            .take(2)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let mut app = App::new();
+        app.insert_resource(DisplaySnapshot(Snapshot {
+            universe,
+            error: None,
+            mutation_error: None,
+            mutation_revision: 0,
+            planning_history: Default::default(),
+            generation: 0,
+            revision: 0,
+        }))
+        .init_resource::<State>()
+        .init_resource::<Windows>()
+        .add_systems(
+            Update,
+            (handle, crate::inspectors::open_windows, refresh).chain(),
+        );
+        let mut windows = app.world_mut().resource_mut::<Windows>();
+        windows.open(WindowKind::Household(first));
+        windows.link(WindowKind::Household(first), WindowKind::Household(second));
+        app.update();
+
+        fn in_pane(world: &World, mut entity: Entity, pane: WindowKind) -> bool {
+            while let Some(parent) = world.get::<ChildOf>(entity) {
+                entity = parent.parent();
+                if let Some(details) = world.get::<EntityDetails>(entity) {
+                    return details.0 == pane;
+                }
+            }
+            false
+        }
+        let world = app.world_mut();
+        let first_history = world
+            .query::<(Entity, &household_history::Choice)>()
+            .iter(world)
+            .find(|(entity, choice)| {
+                matches!(
+                    choice,
+                    household_history::Choice::View(household_history::View::History)
+                ) && in_pane(world, *entity, WindowKind::Household(first))
+            })
+            .unwrap()
+            .0;
+        let second_scroll = world
+            .query::<(Entity, &ScrollPanel)>()
+            .iter(world)
+            .find(|(entity, panel)| {
+                panel.0 && in_pane(world, *entity, WindowKind::Household(second))
+            })
+            .unwrap()
+            .0;
+        world
+            .entity_mut(second_scroll)
+            .insert(ScrollPosition(Vec2::new(0.0, 180.0)));
+        world.entity_mut(first_history).insert(Interaction::Pressed);
+        app.update();
+
+        let world = app.world_mut();
+        for (pane, state) in world.query::<(&EntityDetails, &DetailState)>().iter(world) {
+            let (id, view) = if pane.0 == WindowKind::Household(first) {
+                (first, household_history::View::History)
+            } else {
+                (second, household_history::View::Current)
+            };
+            assert_eq!(state.0.selected, Some(id));
+            assert_eq!(state.0.history_view, view);
+        }
+        assert_eq!(
+            world.get::<ScrollPosition>(second_scroll).unwrap().0.y,
+            180.0
+        );
+    }
+
     #[test]
     fn living_tier_tooltip_marks_current_tier_and_shows_assessment_schedule() {
         let universe = crate::simulation::new_universe().unwrap();
