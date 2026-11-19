@@ -1,10 +1,12 @@
-//! Fixed-point condition and elapsed wear. One life millisecond contains another
-//! lifetime's worth of units, retaining fractional object wear without floats.
+//! Fixed-point condition and elapsed wear, including fractional object wear.
 use crate::{SimulationError, marketplace::DAY_MS};
 
-pub const CONDITION_LIFETIME_MS: u64 = 200 * DAY_MS;
-pub const MAX_CONDITION_UNITS: u128 = CONDITION_LIFETIME_MS as u128 * CONDITION_LIFETIME_MS as u128;
-const SCALE: u128 = CONDITION_LIFETIME_MS as u128;
+pub const CONDITION_LIFETIME_MS: u64 = 1_000 * DAY_MS;
+// Keep the stored units for condition and repair damage stable across wear-rate changes.
+const CONDITION_UNIT_SCALE: u128 = 200 * DAY_MS as u128;
+pub const MAX_CONDITION_UNITS: u128 = CONDITION_UNIT_SCALE.pow(2);
+const LIFETIME: u128 = CONDITION_LIFETIME_MS as u128;
+const BASE_WEAR_PER_MS: u128 = MAX_CONDITION_UNITS / LIFETIME;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Condition {
@@ -72,13 +74,29 @@ fn mul_div(a: u128, b: u128, divisor: u128) -> u128 {
     result
 }
 
+// Round the cumulative extra wear so the difference across any interval
+// telescopes over split advances. Split the square to keep products in u128.
+fn cumulative_damage_wear(damage: u128) -> u128 {
+    let capped = damage.min(MAX_CONDITION_UNITS);
+    let whole = capped / CONDITION_UNIT_SCALE;
+    let remainder = capped % CONDITION_UNIT_SCALE;
+    2 * whole.pow(2)
+        + (4 * whole * remainder * CONDITION_UNIT_SCALE + 2 * remainder.pow(2))
+            / MAX_CONDITION_UNITS
+        + 4 * (damage - capped)
+}
+
 /// Object wear while the room's condition changes linearly over this interval.
 pub(crate) fn room_object_wear(start: Condition, elapsed_ms: u64, repaired: u128) -> u128 {
     if elapsed_ms == 0 {
         return 0;
     }
+    let natural = base_wear(elapsed_ms);
+    if repaired == 0 {
+        let damage = start.damage_units();
+        return natural + cumulative_damage_wear(damage + natural) - cumulative_damage_wear(damage);
+    }
     let elapsed = u128::from(elapsed_ms);
-    let natural = elapsed * SCALE;
     let repaired = repaired.min(MAX_CONDITION_UNITS);
     let units = start.condition_units();
     let funded = units + repaired;
@@ -87,21 +105,21 @@ pub(crate) fn room_object_wear(start: Condition, elapsed_ms: u64, repaired: u128
         let reduction = if units == 0 {
             0
         } else {
-            mul_div(mul_div(2 * units, units, SCALE), elapsed, decay)
+            mul_div(mul_div(2 * units, units, LIFETIME), elapsed, decay)
         };
         5 * natural - reduction
     } else if funded - natural > MAX_CONDITION_UNITS {
         let rise = repaired - natural;
         let damage = start.damage_units();
-        natural + mul_div(mul_div(2 * damage, damage, SCALE), elapsed, rise)
+        natural + mul_div(mul_div(2 * damage, damage, LIFETIME), elapsed, rise)
     } else {
         let end = funded - natural;
-        5 * natural - mul_div(2 * (units + end), elapsed, SCALE)
+        5 * natural - mul_div(2 * (units + end), elapsed, LIFETIME)
     }
 }
 
 pub(crate) fn base_wear(elapsed_ms: u64) -> u128 {
-    u128::from(elapsed_ms) * SCALE
+    u128::from(elapsed_ms) * BASE_WEAR_PER_MS
 }
 
 #[cfg(test)]
@@ -109,18 +127,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_and_room_wear_use_two_hundred_day_lifetime() {
+    fn base_and_room_wear_use_one_thousand_day_lifetime() {
         let elapsed = 10 * DAY_MS;
-        assert_eq!(base_wear(elapsed), MAX_CONDITION_UNITS / 20);
+        assert_eq!(base_wear(elapsed), MAX_CONDITION_UNITS / 100);
         let full = Condition::default();
         assert_eq!(
             room_object_wear(full, elapsed, 0),
-            MAX_CONDITION_UNITS * 55 / 1_000
+            MAX_CONDITION_UNITS * 102 / 10_000
         );
         let ruined = Condition::from_units(0).unwrap();
         assert_eq!(
             room_object_wear(ruined, elapsed, 0),
-            MAX_CONDITION_UNITS / 4
+            MAX_CONDITION_UNITS / 20
         );
     }
 
@@ -187,8 +205,8 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            mul_div(2 * MAX_CONDITION_UNITS, MAX_CONDITION_UNITS, SCALE),
-            2 * SCALE.pow(3)
+            mul_div(2 * MAX_CONDITION_UNITS, MAX_CONDITION_UNITS, LIFETIME),
+            2 * MAX_CONDITION_UNITS * BASE_WEAR_PER_MS
         );
         let a = 2 * MAX_CONDITION_UNITS + 1;
         let b = MAX_CONDITION_UNITS - 1;

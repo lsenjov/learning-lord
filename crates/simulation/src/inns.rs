@@ -1299,7 +1299,7 @@ mod tests {
             costs.maintenance_daily,
             (estimate(ConstructionItem::Room(RoomSize::Large))
                 + 2.0 * estimate(ConstructionItem::Bed))
-                / 200.0,
+                / 1_000.0,
         );
         assert_eq!(costs.sessions_per_day, 6.0);
         close(costs.maintenance_floor * 6.0, costs.maintenance_daily);

@@ -529,7 +529,7 @@ mod tests {
                 .unwrap()
                 .condition_units()
                 .abs_diff(before.condition_units())
-                < u128::from(crate::condition::CONDITION_LIFETIME_MS) * 1_000
+                < crate::condition::base_wear(1_000)
         );
         world = world
             .advance(HOUR_MS - world.current_time_ms % HOUR_MS)
@@ -595,7 +595,7 @@ mod tests {
                 a.condition
                     .condition_units()
                     .abs_diff(b.condition.condition_units())
-                    <= u128::from(crate::condition::CONDITION_LIFETIME_MS),
+                    <= crate::condition::base_wear(1),
                 "object condition difference {}",
                 a.condition
                     .condition_units()
@@ -615,7 +615,7 @@ mod tests {
             &mut world,
             place,
             target,
-            MAX_CONDITION_UNITS * 499 / 10_000,
+            MAX_CONDITION_UNITS / 20 - crate::condition::base_wear(HOUR_MS),
         );
         world = world.advance(HOUR_MS / 2).unwrap();
         assert!(world.repair_project(place, target).is_none());

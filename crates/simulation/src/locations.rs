@@ -1178,11 +1178,11 @@ mod space_tests {
         let room = &map.place(home).unwrap().buildings[0].rooms[0];
         assert_eq!(
             room.condition.condition_units(),
-            MAX_CONDITION_UNITS * 95 / 100
+            MAX_CONDITION_UNITS * 99 / 100
         );
         assert_eq!(
             room.objects[0].condition.condition_units(),
-            MAX_CONDITION_UNITS * 945 / 1_000
+            MAX_CONDITION_UNITS * 9_898 / 10_000
         );
         for location in [Location::Forest, Location::River] {
             let site = map.public_place(location);
@@ -1194,7 +1194,7 @@ mod space_tests {
                 if object.degrades_in(location) {
                     assert_eq!(
                         object.condition.condition_units(),
-                        MAX_CONDITION_UNITS * 95 / 100
+                        MAX_CONDITION_UNITS * 99 / 100
                     );
                 }
             }
