@@ -1,0 +1,4 @@
+{:deps {org.clojure/clojure {:mvn/version "1.12.3"}
+        poly/desktop {:local/root "../../bases/desktop"}
+        poly/town {:local/root "../../components/town"}}
+ :aliases {:run {:main-opts ["-m" "learning-lord.desktop.main"]}}}
