@@ -1,8 +1,10 @@
 {:aliases
  {:dev {:extra-paths ["development/src"]
         :extra-deps {org.clojure/clojure {:mvn/version "1.12.3"}
+                     nrepl/nrepl {:mvn/version "1.8.0"}
                      poly/desktop {:local/root "bases/desktop"}
-                     poly/town {:local/root "components/town"}}}
+                     poly/town {:local/root "components/town"}}
+        :main-opts ["-m" "learning-lord.dev"]}
   :test {:extra-paths []}
   :poly {:main-opts ["-m" "polylith.clj.core.poly-cli.core"]
          :jvm-opts ["--enable-native-access=ALL-UNNAMED"]

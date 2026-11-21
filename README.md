@@ -13,7 +13,9 @@ clojure -M:run
 
 ## Development REPL
 
-From the repository root, run `clojure -M:dev`. Inspect the initial town in the REPL.
+From the repository root, run `clojure -M:dev` or `bin/dev.sh`. This opens the Swing window and starts a terminal REPL and an nREPL server in the same JVM. Connect your editor to `127.0.0.1:7000`. Closing the window or sending Ctrl+D leaves nREPL running. Press Ctrl+C in the terminal to stop the development session.
+
+Inspect the initial town from either REPL.
 
 ```clojure
 (require '[learning-lord.town.interface :as town])
