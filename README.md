@@ -23,3 +23,7 @@ Inspect the initial town from either REPL.
 ```
 
 Run the Polylith workspace check from the repository root with `clojure -M:poly check`.
+
+## Formatting
+
+The pre-commit hook uses `~/bin/zprint` to format staged `.clj` and `.cljc` files. Enable it once per clone with `git config --local core.hooksPath .githooks`.
