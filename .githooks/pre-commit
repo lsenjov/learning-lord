@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tmp=$(mktemp -d)
+trap 'rm -rf -- "$tmp"' EXIT
+git diff --cached --raw -z --no-abbrev --no-renames --diff-filter=AMT -- '*.clj' '*.cljc' > "$tmp/staged"
+
+formatter=~/bin/zprint
+paths=()
+while IFS= read -r -d '' metadata && IFS= read -r -d '' path; do
+    read -r _ mode _ object _ <<< "$metadata"
+    case "$mode" in
+        100644|100755) ;;
+        *) continue ;;
+    esac
+
+    if [[ ! -x "$formatter" ]]; then
+        printf 'pre-commit: %s is missing or not executable\n' "$formatter" >&2
+        exit 1
+    fi
+
+    git cat-file blob "$object" > "$tmp/original"
+    formatted="$tmp/formatted-${#paths[@]}"
+    if ! "$formatter" < "$tmp/original" > "$formatted"; then
+        printf 'pre-commit: zprint failed for %q\n' "$path" >&2
+        exit 1
+    fi
+    if cmp -s -- "$tmp/original" "$formatted"; then
+        continue
+    fi
+
+    # A working-tree update is safe only when it preserves all unstaged changes.
+    if ! git --literal-pathspecs diff-files --quiet -- "$path" ||
+       [[ ! -f "$path" || -L "$path" ]] ||
+       ! cmp -s -- "$tmp/original" "$path"; then
+        printf 'pre-commit: %q needs formatting; its working copy differs from the staged file\n' "$path" >&2
+        exit 1
+    fi
+
+    paths+=("$path")
+done < "$tmp/staged"
+
+if (( ${#paths[@]} )); then
+    for i in "${!paths[@]}"; do
+        cat -- "$tmp/formatted-$i" > "${paths[$i]}"
+        printf 'pre-commit: formatted %q\n' "${paths[$i]}" >&2
+    done
+    printf 'pre-commit: review and stage the formatted files, then retry the commit\n' >&2
+    exit 1
+fi
